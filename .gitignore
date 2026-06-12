@@ -1,0 +1,36 @@
+# Runtime state
+/data/
+/events/
+/backups/
+
+# NetSniper telemetry is stored in the NetSniper repository
+/runs/
+
+# Python cache and local tooling
+__pycache__/
+*.py[cod]
+*.db
+*.sqlite
+*.sqlite3
+.venv/
+venv/
+.pytest_cache/
+.coverage
+
+# Local configuration and credentials
+.env
+*.env
+*.conf
+secrets.*
+credentials.*
+
+# Temporary files and patch backups
+*.before-*
+*.bak-*
+*.tmp
+
+# Editors and operating systems
+.DS_Store
+.vscode/
+.idea/
+*.swp

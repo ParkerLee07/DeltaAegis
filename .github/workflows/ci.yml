@@ -1,0 +1,15 @@
+name: DeltaAegis CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Python syntax
+        run: python3 -m py_compile deltaaegis.py
+      - name: Run regression tests
+        run: python3 -m unittest discover -s tests -p 'test*.py' -v
