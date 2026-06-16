@@ -9,7 +9,7 @@ The project is intentionally narrow: it focuses on reliable attack-surface chang
 ## Current Release
 
 ```text
-DeltaAegis v0.2
+DeltaAegis v0.3.5
 ```
 
 ## Features
@@ -110,7 +110,7 @@ NetSniper telemetry remains under:
 
 ## Scope and Limitations
 
-DeltaAegis `v0.2` is a network-state monitoring prototype, not a replacement for an enterprise SIEM. It does not ingest endpoint logs, retain full packets indefinitely, or use machine-learning anomaly detection. Its conclusions are limited to the telemetry provided by its sensors.
+DeltaAegis `v0.3.5` is a network-state monitoring prototype, not a replacement for an enterprise SIEM. It does not ingest endpoint logs, retain full packets indefinitely, or use machine-learning anomaly detection. Its conclusions are limited to the telemetry provided by its sensors.
 
 ## Authorized Use Only
 
