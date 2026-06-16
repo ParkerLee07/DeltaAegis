@@ -26,6 +26,7 @@ from typing import Any, Iterable
 DEFAULT_DB = Path.home() / "DeltaAegis" / "data" / "deltaaegis.db"
 DEFAULT_RUNS = Path.home() / "NetSniper" / "runs"
 DEFAULT_EVENTS = Path.home() / "DeltaAegis" / "events" / "events.jsonl"
+DEFAULT_REPORTS = Path.home() / "DeltaAegis" / "reports"
 QUALITY_RATIO_THRESHOLD = 0.50
 IDENTITY_COVERAGE_THRESHOLD = 0.50
 IDENTITY_DROP_REVIEW_THRESHOLD = 0.25
@@ -856,13 +857,307 @@ def command_latest(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_paths(args: argparse.Namespace) -> int:
-    print("DeltaAegis Telemetry Paths\n────────────────────────────────────────")
-    print(f"Database:           {args.db}")
-    print(f"NetSniper bundles:  {args.runs_dir}")
-    print(f"JSONL events:       {args.events}")
+
+def command_paths(args):
+    print(f"Database: {args.db}")
+    print(f"NetSniper runs: {args.runs_dir}")
+    print(f"JSONL events: {args.events}")
+    print(f"Reports: {args.reports_dir}")
     return 0
 
+def safe_markdown(value):
+    if value is None:
+        return "-"
+    return str(value).replace("|", "\\|").replace("\n", " ").strip() or "-"
+
+
+def severity_explanation(severity):
+    severity = str(severity or "INFO").upper()
+
+    explanations = {
+        "CRITICAL": "Immediate review is recommended. This change may represent a major exposure or high-impact network-state change.",
+        "HIGH": "Prompt review is recommended. This change may expose a sensitive service, asset, or security-relevant condition.",
+        "MEDIUM": "Review is recommended. This change may be expected, but it is important enough to verify.",
+        "LOW": "Low-priority review. This change is useful for awareness and historical tracking.",
+        "INFO": "Informational event. This primarily supports asset history and investigation context.",
+    }
+
+    return explanations.get(
+        severity,
+        "Review this event in the context of the asset and surrounding network changes.",
+    )
+
+
+def recommended_followup(event_type):
+    event_type = str(event_type or "").upper()
+
+    if event_type == "MONITORED_SERVICE_OPENED":
+        return [
+            "Confirm whether the newly opened service is expected.",
+            "Validate the service banner and version.",
+            "Check whether authentication is required.",
+            "Compare the asset against the previous accepted snapshot.",
+        ]
+
+    if event_type == "MONITORED_SERVICE_CLOSED":
+        return [
+            "Confirm whether the service closure was expected.",
+            "Check whether this indicates device hardening, outage, or scan-quality differences.",
+            "Compare against the previous accepted snapshot.",
+        ]
+
+    if event_type == "NETSNIPER_FINDING_ADDED":
+        return [
+            "Validate the finding with TrueAegis or manual review.",
+            "Confirm whether the exposure is intentional.",
+            "Check whether remediation or firewall scoping is required.",
+            "Document the asset owner if known.",
+        ]
+
+    if event_type in {"ASSET_FIRST_OBSERVED", "IP_FIRST_OBSERVED"}:
+        return [
+            "Identify the device owner or purpose.",
+            "Confirm that the asset is authorized on the network.",
+            "Review exposed services on the asset.",
+        ]
+
+    if event_type in {"ASSET_NOT_OBSERVED", "ASSET_REMOVED", "IP_NOT_OBSERVED"}:
+        return [
+            "Confirm whether the asset was intentionally removed or powered off.",
+            "Check whether the missing asset affects expected inventory.",
+            "Review whether the disappearance could be caused by scan quality or network reachability.",
+        ]
+
+    if event_type == "IP_CHANGED":
+        return [
+            "Confirm whether the IP change is expected from DHCP behavior.",
+            "Verify that the MAC-backed identity still maps to the same physical asset.",
+            "Review recent services and findings for the asset.",
+        ]
+
+    return [
+        "Review the event in context.",
+        "Compare against the previous accepted snapshot.",
+        "Document whether the change is expected or unexpected.",
+    ]
+
+
+def fetch_latest_accepted_snapshot(connection):
+    return connection.execute(
+        """
+        SELECT *
+        FROM snapshots
+        WHERE quality_status = 'ACCEPTED'
+        ORDER BY created_at DESC, imported_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+
+
+def report_event_rows(connection, latest_only, since, severity, limit):
+    clauses = []
+    params = []
+
+    if latest_only:
+        latest = fetch_latest_accepted_snapshot(connection)
+        if latest is None:
+            print("No accepted snapshot exists for --latest report.")
+            return []
+        clauses.append("scan_id = ?")
+        params.append(latest["scan_id"])
+
+    if since:
+        clauses.append("created_at >= ?")
+        params.append(since)
+
+    if severity:
+        clauses.append("severity = ?")
+        params.append(str(severity).upper())
+
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+
+    params.append(limit)
+
+    return connection.execute(
+        f"""
+        SELECT
+            event_id,
+            scan_id,
+            baseline_scan_id,
+            created_at,
+            severity,
+            event_type,
+            subject_key,
+            previous_value,
+            current_value,
+            summary
+        FROM delta_events
+        {where}
+        ORDER BY event_id DESC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+
+
+def command_report(args):
+    from collections import Counter
+    from datetime import datetime, timezone
+
+    connection = connect(args.db)
+
+    reports_dir = args.reports_dir
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    events = report_event_rows(
+        connection=connection,
+        latest_only=args.latest,
+        since=args.since,
+        severity=args.severity,
+        limit=args.limit,
+    )
+
+    latest_snapshot = fetch_latest_accepted_snapshot(connection)
+
+    snapshot_count = connection.execute(
+        "SELECT COUNT(*) FROM snapshots"
+    ).fetchone()[0]
+
+    accepted_count = connection.execute(
+        "SELECT COUNT(*) FROM snapshots WHERE quality_status = 'ACCEPTED'"
+    ).fetchone()[0]
+
+    open_alerts = connection.execute(
+        """
+        SELECT alert_id, severity, event_type, subject_key, summary, opened_at
+        FROM alerts
+        WHERE status = 'OPEN'
+        ORDER BY alert_id DESC
+        LIMIT 25
+        """
+    ).fetchall()
+
+    event_type_counts = Counter(row["event_type"] for row in events)
+    severity_counts = Counter(row["severity"] for row in events)
+
+    report_time = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    output_path = args.output or reports_dir / f"deltaaegis-report-{report_time}.md"
+
+    lines = []
+
+    lines.append("# DeltaAegis Investigation Report")
+    lines.append("")
+    lines.append(f"Generated: `{generated_at}`")
+    lines.append("")
+    lines.append("## Executive Summary")
+    lines.append("")
+
+    if latest_snapshot:
+        lines.append(
+            f"The latest accepted snapshot is `{latest_snapshot['scan_id']}` "
+            f"for target `{latest_snapshot['target']}` with "
+            f"`{latest_snapshot['hosts_up']}` observed hosts and "
+            f"`{float(latest_snapshot['identity_coverage']):.0%}` MAC-backed identity coverage."
+        )
+    else:
+        lines.append("No accepted snapshot has been imported yet.")
+
+    lines.append("")
+    lines.append(f"- Snapshots imported: **{snapshot_count}**")
+    lines.append(f"- Accepted snapshots: **{accepted_count}**")
+    lines.append(f"- Events included in this report: **{len(events)}**")
+    lines.append(f"- Open alerts: **{len(open_alerts)}**")
+    lines.append("")
+
+    lines.append("## Report Scope")
+    lines.append("")
+    lines.append(f"- Latest snapshot only: `{args.latest}`")
+    lines.append(f"- Since: `{args.since or 'not specified'}`")
+    lines.append(f"- Severity filter: `{args.severity or 'not specified'}`")
+    lines.append(f"- Event limit: `{args.limit}`")
+    lines.append("")
+
+    lines.append("## Event Breakdown")
+    lines.append("")
+
+    if event_type_counts:
+        lines.append("### By Event Type")
+        lines.append("")
+        for event_type, count in event_type_counts.most_common():
+            lines.append(f"- `{event_type}`: **{count}**")
+        lines.append("")
+
+    if severity_counts:
+        lines.append("### By Severity")
+        lines.append("")
+        for severity_name, count in severity_counts.most_common():
+            lines.append(f"- `{severity_name}`: **{count}**")
+        lines.append("")
+
+    lines.append("## Active Alerts")
+    lines.append("")
+
+    if not open_alerts:
+        lines.append("No open alerts were found.")
+        lines.append("")
+    else:
+        lines.append("| Alert ID | Severity | Type | Subject | Opened | Summary |")
+        lines.append("|---:|---|---|---|---|---|")
+        for alert in open_alerts:
+            lines.append(
+                "| "
+                f"{alert['alert_id']} | "
+                f"{safe_markdown(alert['severity'])} | "
+                f"{safe_markdown(alert['event_type'])} | "
+                f"`{safe_markdown(alert['subject_key'])}` | "
+                f"{safe_markdown(alert['opened_at'])} | "
+                f"{safe_markdown(alert['summary'])} |"
+            )
+        lines.append("")
+
+    lines.append("## Delta Events")
+    lines.append("")
+
+    if not events:
+        lines.append("No delta events matched the selected report scope.")
+        lines.append("")
+    else:
+        for row in events:
+            lines.append(f"### Event {row['event_id']}: `{row['event_type']}`")
+            lines.append("")
+            lines.append(f"- Severity: **{row['severity']}**")
+            lines.append(f"- Subject: `{row['subject_key']}`")
+            lines.append(f"- Snapshot: `{row['scan_id']}`")
+            lines.append(f"- Baseline: `{row['baseline_scan_id'] or '-'}`")
+            lines.append(f"- Created: `{row['created_at']}`")
+            lines.append("")
+            lines.append(str(row["summary"] or "No event summary was recorded."))
+            lines.append("")
+            lines.append("**Why this matters:**")
+            lines.append("")
+            lines.append(severity_explanation(row["severity"]))
+            lines.append("")
+            lines.append("**Recommended follow-up:**")
+            lines.append("")
+            for item in recommended_followup(row["event_type"]):
+                lines.append(f"- {item}")
+            lines.append("")
+
+    lines.append("## Recommended Analyst Workflow")
+    lines.append("")
+    lines.append("1. Review open alerts first.")
+    lines.append("2. Validate new or changed services.")
+    lines.append("3. Confirm whether new assets are authorized.")
+    lines.append("4. Compare questionable changes against the previous accepted snapshot.")
+    lines.append("5. Suppress expected recurring alerts only after verification.")
+    lines.append("")
+
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+
+    print(f"Report written to: {output_path}")
+    return 0
 
 def clear_screen() -> None:
     if sys.stdout.isatty() and os.environ.get("DELTAAEGIS_NO_CLEAR") != "1":
@@ -885,7 +1180,7 @@ def run_interactive_menu(args: argparse.Namespace) -> int:
     try:
         while True:
             clear_screen(); print_banner()
-            print("[1] Ingest new NetSniper bundles\n[2] Show system summary\n[3] List imported snapshots\n[4] Show recent delta events\n[5] Show open alerts\n[6] Show asset history\n[7] Show snapshot health\n[8] Approve reviewed snapshot as baseline\n[9] Show telemetry paths\n[10] Exit\n")
+            print("[1] Ingest new NetSniper bundles\n[2] Show system summary\n[3] List imported snapshots\n[4] Show recent delta events\n[5] Show open alerts\n[6] Show asset history\n[7] Show snapshot health\n[8] Approve reviewed snapshot as baseline\n[9] Generate investigation report\n[10] Show telemetry paths\n[11] Exit\n")
             choice = input("deltaaegis> ").strip()
             print()
             if choice == "1": command_ingest(args)
@@ -909,6 +1204,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
+    parser.add_argument("--reports-dir", type=Path, default=DEFAULT_REPORTS)
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("menu")
     sub.add_parser("ingest")
@@ -922,6 +1218,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("health"); p.add_argument("--limit", type=int, default=20)
     p = sub.add_parser("approve"); p.add_argument("scan_id")
     sub.add_parser("latest")
+
+    p = sub.add_parser("report")
+    p.add_argument("--latest", action="store_true")
+    p.add_argument("--since")
+    p.add_argument("--severity")
+    p.add_argument("--limit", type=int, default=100)
+    p.add_argument("--output", type=Path)
+
     sub.add_parser("paths")
     return parser
 
@@ -941,6 +1245,8 @@ def main() -> int:
         if args.command == "health": return command_health(args)
         if args.command == "approve": return command_approve(args)
         if args.command == "latest": return command_latest(args)
+        if args.command == "report": return command_report(args)
+
         if args.command == "paths": return command_paths(args)
         raise DeltaAegisError(f"unknown command: {args.command}")
     except DeltaAegisError as exc:

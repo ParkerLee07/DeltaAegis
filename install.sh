@@ -43,16 +43,17 @@ mkdir -p \
     "$BASE/data" \
     "$BASE/events" \
     "$BASE/backups" \
+    "$BASE/reports" \
     "$BIN_DIR"
 
 chmod +x "$BASE/deltaaegis.py"
 
 log "Installing deltaaegis launcher"
 
-cat > "$BIN_DIR/deltaaegis" <<EOF
+cat > "$BIN_DIR/deltaaegis" <<LAUNCHER
 #!/usr/bin/env bash
 exec python3 "$BASE/deltaaegis.py" "\$@"
-EOF
+LAUNCHER
 
 chmod +x "$BIN_DIR/deltaaegis"
 
@@ -68,7 +69,7 @@ esac
 
 log "DeltaAegis installation complete"
 
-cat <<EOF
+cat <<EOF2
 
 Installed at:
   $BASE
@@ -80,10 +81,12 @@ Try:
   deltaaegis
   deltaaegis summary
   deltaaegis paths
+  deltaaegis report --limit 25
 
 Runtime data:
   $BASE/data
   $BASE/events
   $BASE/backups
+  $BASE/reports
 
-EOF
+EOF2
