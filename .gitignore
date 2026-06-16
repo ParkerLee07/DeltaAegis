@@ -36,3 +36,4 @@ credentials.*
 *.swp
 reports/*.md
 !reports/.gitkeep
+backups/

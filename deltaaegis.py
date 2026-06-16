@@ -1199,6 +1199,168 @@ def run_interactive_menu(args: argparse.Namespace) -> int:
         print("\nExiting DeltaAegis."); return 0
 
 
+def command_asset_timeline(args):
+    connection = connect(args.db)
+
+    clauses = ["(subject_key = ? OR subject_key LIKE ?)"]
+    params = [args.asset_key, f"%{args.asset_key}%"]
+
+    if args.severity:
+        clauses.append("severity = ?")
+        params.append(args.severity.upper())
+
+    params.append(args.limit)
+
+    rows = connection.execute(
+        f"""
+        SELECT
+            event_id,
+            scan_id,
+            baseline_scan_id,
+            created_at,
+            severity,
+            event_type,
+            subject_key,
+            previous_value,
+            current_value,
+            summary
+        FROM delta_events
+        WHERE {" AND ".join(clauses)}
+        ORDER BY created_at ASC, event_id ASC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+
+    print(f"Asset Timeline: {args.asset_key}")
+    print("=" * (16 + len(args.asset_key)))
+    print()
+
+    if not rows:
+        print("No delta events matched this asset or subject key.")
+        return 0
+
+    for row in rows:
+        print(f"[{row['event_id']}] {row['created_at']}  {row['severity']}  {row['event_type']}")
+        print(f"  Subject:  {row['subject_key']}")
+        print(f"  Snapshot: {row['scan_id']}")
+        print(f"  Baseline: {row['baseline_scan_id'] or '-'}")
+
+        if row["previous_value"]:
+            print(f"  Previous: {row['previous_value']}")
+
+        if row["current_value"]:
+            print(f"  Current:  {row['current_value']}")
+
+        print(f"  Summary:  {row['summary']}")
+        print()
+
+    return 0
+
+
+def command_alert_detail(args):
+    connection = connect(args.db)
+
+    alert = connection.execute(
+        """
+        SELECT *
+        FROM alerts
+        WHERE alert_id = ?
+        """,
+        (args.alert_id,),
+    ).fetchone()
+
+    if alert is None:
+        print(f"No alert found with alert_id={args.alert_id}")
+        return 1
+
+    alert_columns = set(alert.keys())
+
+    print(f"Alert Detail: {args.alert_id}")
+    print("=" * (14 + len(str(args.alert_id))))
+    print()
+
+    for field in [
+        "alert_id",
+        "status",
+        "severity",
+        "event_type",
+        "subject_key",
+        "opened_at",
+        "updated_at",
+        "resolved_at",
+        "suppressed_at",
+        "summary",
+    ]:
+        if field in alert_columns:
+            print(f"{field}: {alert[field]}")
+
+    print()
+
+    related_event = None
+
+    if "event_id" in alert_columns and alert["event_id"] is not None:
+        related_event = connection.execute(
+            """
+            SELECT *
+            FROM delta_events
+            WHERE event_id = ?
+            """,
+            (alert["event_id"],),
+        ).fetchone()
+
+    if related_event is None and {"event_type", "subject_key"}.issubset(alert_columns):
+        related_event = connection.execute(
+            """
+            SELECT *
+            FROM delta_events
+            WHERE event_type = ?
+              AND subject_key = ?
+            ORDER BY event_id DESC
+            LIMIT 1
+            """,
+            (alert["event_type"], alert["subject_key"]),
+        ).fetchone()
+
+    if related_event:
+        print("Related Event")
+        print("-------------")
+
+        for field in [
+            "event_id",
+            "scan_id",
+            "baseline_scan_id",
+            "created_at",
+            "severity",
+            "event_type",
+            "subject_key",
+            "previous_value",
+            "current_value",
+            "summary",
+        ]:
+            if field in related_event.keys():
+                print(f"{field}: {related_event[field]}")
+
+        print()
+
+        print("Why this matters")
+        print("----------------")
+        print(severity_explanation(related_event["severity"]))
+        print()
+
+        print("Recommended follow-up")
+        print("---------------------")
+        for item in recommended_followup(related_event["event_type"]):
+            print(f"- {item}")
+
+        print()
+    else:
+        print("No directly related delta event was found.")
+        print()
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DeltaAegis v0.2 stateful network-state SIEM prototype")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -1218,6 +1380,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("health"); p.add_argument("--limit", type=int, default=20)
     p = sub.add_parser("approve"); p.add_argument("scan_id")
     sub.add_parser("latest")
+
+    p = sub.add_parser("asset-timeline")
+    p.add_argument("asset_key")
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--severity")
+
+    p = sub.add_parser("alert-detail")
+    p.add_argument("alert_id", type=int)
 
     p = sub.add_parser("report")
     p.add_argument("--latest", action="store_true")
@@ -1245,6 +1415,10 @@ def main() -> int:
         if args.command == "health": return command_health(args)
         if args.command == "approve": return command_approve(args)
         if args.command == "latest": return command_latest(args)
+        if args.command == "asset-timeline": return command_asset_timeline(args)
+
+        if args.command == "alert-detail": return command_alert_detail(args)
+
         if args.command == "report": return command_report(args)
 
         if args.command == "paths": return command_paths(args)
