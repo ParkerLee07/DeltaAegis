@@ -224,6 +224,17 @@ CREATE TABLE IF NOT EXISTS alerts (
     first_event_id INTEGER,
     last_event_id INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS alert_notes (
+    note_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    alert_id INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (alert_id) REFERENCES alerts(alert_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_alert_notes_alert_id ON alert_notes(alert_id);
+
 """
 
 
@@ -804,15 +815,81 @@ def command_alerts(args: argparse.Namespace) -> int:
     return 0
 
 
-def set_alert_status(args: argparse.Namespace, status: str) -> int:
+
+def set_alert_status(args, status):
     connection = connect(args.db)
-    cursor = connection.execute("UPDATE alerts SET status = ?, last_seen_at = ? WHERE alert_id = ?", (status, utc_now(), args.alert_id))
-    connection.commit()
+
+    alert = connection.execute(
+        """
+        SELECT alert_id, status, severity, event_type, subject_key, summary
+        FROM alerts
+        WHERE alert_id = ?
+        """,
+        (args.alert_id,),
+    ).fetchone()
+
+    if alert is None:
+        raise DeltaAegisError(f"alert not found: {args.alert_id}")
+
+    now = utc_now()
+
+    if status == "ACKNOWLEDGED":
+        cursor = connection.execute(
+            """
+            UPDATE alerts
+            SET status = ?,
+                last_seen_at = ?
+            WHERE alert_id = ?
+            """,
+            (
+                status,
+                now,
+                args.alert_id,
+            ),
+        )
+    elif status == "SUPPRESSED":
+        cursor = connection.execute(
+            """
+            UPDATE alerts
+            SET status = ?,
+                last_seen_at = ?
+            WHERE alert_id = ?
+            """,
+            (
+                status,
+                now,
+                args.alert_id,
+            ),
+        )
+    else:
+        cursor = connection.execute(
+            """
+            UPDATE alerts
+            SET status = ?,
+                last_seen_at = ?
+            WHERE alert_id = ?
+            """,
+            (
+                status,
+                now,
+                args.alert_id,
+            ),
+        )
+
     if cursor.rowcount != 1:
         raise DeltaAegisError(f"alert not found: {args.alert_id}")
-    print(f"Alert {args.alert_id} marked {status}.")
-    return 0
 
+    reason = getattr(args, "reason", None)
+    add_alert_note(connection, args.alert_id, status, reason)
+
+    connection.commit()
+
+    print(f"Alert {args.alert_id} marked {status}.")
+
+    if reason:
+        print(f"Reason: {reason}")
+
+    return 0
 
 def command_asset(args: argparse.Namespace) -> int:
     connection = connect(args.db)
@@ -1199,6 +1276,79 @@ def run_interactive_menu(args: argparse.Namespace) -> int:
         print("\nExiting DeltaAegis."); return 0
 
 
+
+def add_alert_note(connection, alert_id, action, reason):
+    reason = (reason or "").strip()
+
+    if not reason:
+        reason = "No reason provided."
+
+    connection.execute(
+        """
+        INSERT INTO alert_notes (
+            alert_id,
+            action,
+            reason,
+            created_at
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            alert_id,
+            action.upper(),
+            reason,
+            utc_now(),
+        ),
+    )
+
+
+def command_alert_notes(args):
+    connection = connect(args.db)
+
+    alert = connection.execute(
+        """
+        SELECT alert_id, status, severity, event_type, subject_key, summary
+        FROM alerts
+        WHERE alert_id = ?
+        """,
+        (args.alert_id,),
+    ).fetchone()
+
+    if alert is None:
+        print(f"No alert found with alert_id={args.alert_id}")
+        return 1
+
+    notes = connection.execute(
+        """
+        SELECT note_id, action, reason, created_at
+        FROM alert_notes
+        WHERE alert_id = ?
+        ORDER BY note_id ASC
+        """,
+        (args.alert_id,),
+    ).fetchall()
+
+    print(f"Alert Notes: {args.alert_id}")
+    print("=" * (13 + len(str(args.alert_id))))
+    print()
+    print(f"Status:   {alert['status']}")
+    print(f"Severity: {alert['severity']}")
+    print(f"Type:     {alert['event_type']}")
+    print(f"Subject:  {alert['subject_key']}")
+    print(f"Summary:  {alert['summary']}")
+    print()
+
+    if not notes:
+        print("No review notes have been recorded for this alert.")
+        return 0
+
+    for note in notes:
+        print(f"[{note['note_id']}] {note['created_at']}  {note['action']}")
+        print(f"  Reason: {note['reason']}")
+        print()
+
+    return 0
+
 def command_asset_timeline(args):
     connection = connect(args.db)
 
@@ -1358,6 +1508,29 @@ def command_alert_detail(args):
         print("No directly related delta event was found.")
         print()
 
+
+    notes = connection.execute(
+        """
+        SELECT note_id, action, reason, created_at
+        FROM alert_notes
+        WHERE alert_id = ?
+        ORDER BY note_id ASC
+        """,
+        (args.alert_id,),
+    ).fetchall()
+
+    print("Review Notes")
+    print("------------")
+
+    if not notes:
+        print("No review notes have been recorded for this alert.")
+    else:
+        for note in notes:
+            print(f"[{note['note_id']}] {note['created_at']}  {note['action']}")
+            print(f"  Reason: {note['reason']}")
+
+    print()
+
     return 0
 
 
@@ -1374,8 +1547,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("snapshots"); p.add_argument("--limit", type=int, default=20)
     p = sub.add_parser("events"); p.add_argument("--limit", type=int, default=50); p.add_argument("--severity"); p.add_argument("--event-type")
     p = sub.add_parser("alerts"); p.add_argument("--status", choices=["OPEN", "ACKNOWLEDGED", "RESOLVED", "SUPPRESSED"], default="OPEN"); p.add_argument("--limit", type=int, default=50)
-    p = sub.add_parser("ack"); p.add_argument("alert_id", type=int)
-    p = sub.add_parser("suppress"); p.add_argument("alert_id", type=int)
+    p = sub.add_parser("ack"); p.add_argument("alert_id", type=int); p.add_argument("--reason")
+    p = sub.add_parser("suppress"); p.add_argument("alert_id", type=int); p.add_argument("--reason")
     p = sub.add_parser("asset"); p.add_argument("identifier"); p.add_argument("--limit", type=int, default=20)
     p = sub.add_parser("health"); p.add_argument("--limit", type=int, default=20)
     p = sub.add_parser("approve"); p.add_argument("scan_id")
@@ -1387,6 +1560,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--severity")
 
     p = sub.add_parser("alert-detail")
+    p.add_argument("alert_id", type=int)
+
+    p = sub.add_parser("alert-notes")
     p.add_argument("alert_id", type=int)
 
     p = sub.add_parser("report")
@@ -1418,6 +1594,8 @@ def main() -> int:
         if args.command == "asset-timeline": return command_asset_timeline(args)
 
         if args.command == "alert-detail": return command_alert_detail(args)
+        if args.command == "alert-notes": return command_alert_notes(args)
+
 
         if args.command == "report": return command_report(args)
 
