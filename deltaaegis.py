@@ -1043,6 +1043,89 @@ def recommended_followup(event_type):
 
 
 
+
+def collect_report_alert_notes(connection, alert_ids):
+    alert_ids = [alert_id for alert_id in alert_ids if alert_id is not None]
+
+    if not alert_ids:
+        return {}
+
+    placeholders = ", ".join(["?"] * len(alert_ids))
+
+    rows = connection.execute(
+        f"""
+        SELECT note_id, alert_id, action, reason, created_at
+        FROM alert_notes
+        WHERE alert_id IN ({placeholders})
+        ORDER BY alert_id ASC, note_id ASC
+        """,
+        tuple(alert_ids),
+    ).fetchall()
+
+    notes_by_alert = {}
+
+    for row in rows:
+        notes_by_alert.setdefault(row["alert_id"], []).append(row)
+
+    return notes_by_alert
+
+
+def report_alert_review_rows(connection, subjects, limit):
+    subjects = [str(subject or "").strip() for subject in subjects]
+    subjects = [subject for subject in subjects if subject]
+
+    if not subjects:
+        return []
+
+    unique_subjects = []
+
+    for subject in subjects:
+        if subject not in unique_subjects:
+            unique_subjects.append(subject)
+
+    placeholders = ", ".join(["?"] * len(unique_subjects))
+
+    rows = connection.execute(
+        f"""
+        SELECT
+            a.alert_id,
+            a.status,
+            a.severity,
+            a.event_type,
+            a.subject_key,
+            a.summary,
+            n.note_id,
+            n.action,
+            n.reason,
+            n.created_at
+        FROM alerts a
+        JOIN alert_notes n ON n.alert_id = a.alert_id
+        WHERE a.subject_key IN ({placeholders})
+        ORDER BY n.created_at DESC, n.note_id DESC
+        LIMIT ?
+        """,
+        tuple(unique_subjects) + (limit,),
+    ).fetchall()
+
+    return rows
+
+
+def append_report_alert_notes(lines, notes):
+    lines.append("")
+    lines.append("**Review notes:**")
+    lines.append("")
+
+    if not notes:
+        lines.append("- No review notes have been recorded for this alert.")
+        return
+
+    for note in notes:
+        lines.append(
+            f"- `{safe_markdown(note['created_at'])}` "
+            f"**{safe_markdown(note['action'])}** — "
+            f"{safe_markdown(note['reason'])}"
+        )
+
 def report_annotation_candidates(subject_key):
     raw = str(subject_key or "").strip()
     candidates = []
@@ -1214,6 +1297,16 @@ def command_report(args):
     report_subjects.extend(alert["subject_key"] for alert in open_alerts)
     asset_context = collect_report_asset_context(connection, report_subjects)
 
+    report_alert_notes = collect_report_alert_notes(
+        connection,
+        [alert["alert_id"] for alert in open_alerts],
+    )
+    report_review_rows = report_alert_review_rows(
+        connection,
+        report_subjects,
+        args.limit,
+    )
+
     event_type_counts = Counter(row["event_type"] for row in events)
     severity_counts = Counter(row["severity"] for row in events)
 
@@ -1277,6 +1370,30 @@ def command_report(args):
                 f"{safe_markdown(annotation['role'] or '-')} | "
                 f"{safe_markdown(annotation['criticality'] or '-')} | "
                 f"{safe_markdown(annotation['notes'] or '-')} |"
+            )
+
+        lines.append("")
+
+    lines.append("## Alert Review Notes")
+    lines.append("")
+
+    if not report_review_rows:
+        lines.append("No alert review notes matched the events or open alerts in this report.")
+        lines.append("")
+    else:
+        lines.append("| Alert | Status | Severity | Subject | Action | Reason | Recorded |")
+        lines.append("|---|---|---|---|---|---|---|")
+
+        for row in report_review_rows:
+            lines.append(
+                "| "
+                f"`{row['alert_id']}` | "
+                f"{safe_markdown(row['status'])} | "
+                f"{safe_markdown(row['severity'])} | "
+                f"`{safe_markdown(row['subject_key'])}` | "
+                f"{safe_markdown(row['action'])} | "
+                f"{safe_markdown(row['reason'])} | "
+                f"`{safe_markdown(row['created_at'])}` |"
             )
 
         lines.append("")
