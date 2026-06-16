@@ -1256,25 +1256,84 @@ def print_banner() -> None:
 def run_interactive_menu(args: argparse.Namespace) -> int:
     try:
         while True:
-            clear_screen(); print_banner()
-            print("[1] Ingest new NetSniper bundles\n[2] Show system summary\n[3] List imported snapshots\n[4] Show recent delta events\n[5] Show open alerts\n[6] Show asset history\n[7] Show snapshot health\n[8] Approve reviewed snapshot as baseline\n[9] Generate investigation report\n[10] Show telemetry paths\n[11] Exit\n")
+            clear_screen()
+            print_banner()
+
+            print(
+                "[1] Ingest new NetSniper bundles
+"
+                "[2] Show system summary
+"
+                "[3] List imported snapshots
+"
+                "[4] Show recent delta events
+"
+                "[5] Show open alerts
+"
+                "[6] Show asset history
+"
+                "[7] Show snapshot health
+"
+                "[8] Approve reviewed snapshot as baseline
+"
+                "[9] Generate investigation report
+"
+                "[10] Show telemetry paths
+"
+                "[11] Exit
+"
+            )
+
             choice = input("deltaaegis> ").strip()
             print()
-            if choice == "1": command_ingest(args)
-            elif choice == "2": command_summary(args)
-            elif choice == "3": args.limit = 20; command_snapshots(args)
-            elif choice == "4": args.limit = 20; args.severity = None; args.event_type = None; command_events(args)
-            elif choice == "5": args.status = "OPEN"; args.limit = 20; command_alerts(args)
-            elif choice == "6": args.identifier = input("Asset key or current IP: ").strip(); args.limit = 20; command_asset(args)
-            elif choice == "7": args.limit = 20; command_health(args)
-            elif choice == "8": args.scan_id = input("Reviewed snapshot ID: ").strip(); command_approve(args)
-            elif choice == "9": command_paths(args)
-            elif choice == "10": print("Exiting DeltaAegis."); return 0
-            else: print("Invalid selection.")
-            pause()
-    except (KeyboardInterrupt, EOFError):
-        print("\nExiting DeltaAegis."); return 0
 
+            if choice == "1":
+                command_ingest(args)
+            elif choice == "2":
+                command_summary(args)
+            elif choice == "3":
+                args.limit = 20
+                command_snapshots(args)
+            elif choice == "4":
+                args.limit = 20
+                args.severity = None
+                args.event_type = None
+                command_events(args)
+            elif choice == "5":
+                args.status = "OPEN"
+                args.limit = 20
+                command_alerts(args)
+            elif choice == "6":
+                args.identifier = input("Asset key or current IP: ").strip()
+                args.limit = 20
+                command_asset(args)
+            elif choice == "7":
+                args.limit = 20
+                command_health(args)
+            elif choice == "8":
+                args.scan_id = input("Reviewed snapshot ID: ").strip()
+                command_approve(args)
+            elif choice == "9":
+                args.latest = True
+                args.since = None
+                args.severity = None
+                args.limit = 100
+                args.output = None
+                command_report(args)
+            elif choice == "10":
+                command_paths(args)
+            elif choice == "11":
+                print("Exiting DeltaAegis.")
+                return 0
+            else:
+                print("Invalid selection.")
+
+            pause()
+
+    except (KeyboardInterrupt, EOFError):
+        print("
+Exiting DeltaAegis.")
+        return 0
 
 
 def add_alert_note(connection, alert_id, action, reason):
