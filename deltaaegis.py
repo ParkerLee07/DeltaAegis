@@ -1337,6 +1337,12 @@ def command_report(args):
             lines.append("")
             lines.append(str(row["summary"] or "No event summary was recorded."))
             lines.append("")
+            annotation_match = asset_context.get(str(row["subject_key"]))
+
+            if annotation_match is not None:
+                annotation, matched_key = annotation_match
+                append_report_asset_context(lines, annotation, matched_key)
+
             lines.append("**Why this matters:**")
             lines.append("")
             lines.append(severity_explanation(row["severity"]))
