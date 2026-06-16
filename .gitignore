@@ -34,3 +34,5 @@ credentials.*
 .vscode/
 .idea/
 *.swp
+reports/*.md
+!reports/.gitkeep
