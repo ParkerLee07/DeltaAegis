@@ -1042,6 +1042,79 @@ def recommended_followup(event_type):
     ]
 
 
+
+def report_annotation_candidates(subject_key):
+    raw = str(subject_key or "").strip()
+    candidates = []
+
+    def add(value):
+        value = str(value or "").strip()
+
+        if value and value not in candidates:
+            candidates.append(value)
+
+    add(raw)
+
+    service_match = re.match(r"^(.+):(tcp|udp)/\d+$", raw, re.IGNORECASE)
+
+    if service_match:
+        base = service_match.group(1)
+        add(base)
+
+        if base.startswith("ip:"):
+            add(base[3:])
+
+    if raw.startswith("ip:"):
+        add(raw[3:])
+
+    return candidates
+
+
+def fetch_report_asset_annotation(connection, subject_key):
+    for candidate in report_annotation_candidates(subject_key):
+        annotation = connection.execute(
+            """
+            SELECT asset_key, owner, role, criticality, notes, updated_at
+            FROM asset_annotations
+            WHERE asset_key = ?
+            """,
+            (candidate,),
+        ).fetchone()
+
+        if annotation is not None:
+            return annotation, candidate
+
+    return None
+
+
+def collect_report_asset_context(connection, subjects):
+    context = {}
+
+    for subject in subjects:
+        subject = str(subject or "").strip()
+
+        if not subject or subject in context:
+            continue
+
+        match = fetch_report_asset_annotation(connection, subject)
+
+        if match is not None:
+            context[subject] = match
+
+    return context
+
+
+def append_report_asset_context(lines, annotation, matched_key):
+    lines.append("")
+    lines.append("**Asset context:**")
+    lines.append("")
+    lines.append(f"- Matched annotation: `{safe_markdown(matched_key)}`")
+    lines.append(f"- Owner: **{safe_markdown(annotation['owner'] or '-')}**")
+    lines.append(f"- Role: **{safe_markdown(annotation['role'] or '-')}**")
+    lines.append(f"- Criticality: **{safe_markdown(annotation['criticality'] or '-')}**")
+    lines.append(f"- Notes: {safe_markdown(annotation['notes'] or '-')}")
+    lines.append(f"- Annotation updated: `{safe_markdown(annotation['updated_at'])}`")
+
 def fetch_latest_accepted_snapshot(connection):
     return connection.execute(
         """
@@ -1137,6 +1210,10 @@ def command_report(args):
         """
     ).fetchall()
 
+    report_subjects = [row["subject_key"] for row in events]
+    report_subjects.extend(alert["subject_key"] for alert in open_alerts)
+    asset_context = collect_report_asset_context(connection, report_subjects)
+
     event_type_counts = Counter(row["event_type"] for row in events)
     severity_counts = Counter(row["severity"] for row in events)
 
@@ -1178,6 +1255,31 @@ def command_report(args):
     lines.append(f"- Severity filter: `{args.severity or 'not specified'}`")
     lines.append(f"- Event limit: `{args.limit}`")
     lines.append("")
+
+    lines.append("## Annotated Asset Context")
+    lines.append("")
+
+    if not asset_context:
+        lines.append("No matching asset annotations were found for the events or open alerts in this report.")
+        lines.append("")
+    else:
+        lines.append("| Subject | Matched Annotation | Owner | Role | Criticality | Notes |")
+        lines.append("|---|---|---|---|---|---|")
+
+        for subject in sorted(asset_context):
+            annotation, matched_key = asset_context[subject]
+
+            lines.append(
+                "| "
+                f"`{safe_markdown(subject)}` | "
+                f"`{safe_markdown(matched_key)}` | "
+                f"{safe_markdown(annotation['owner'] or '-')} | "
+                f"{safe_markdown(annotation['role'] or '-')} | "
+                f"{safe_markdown(annotation['criticality'] or '-')} | "
+                f"{safe_markdown(annotation['notes'] or '-')} |"
+            )
+
+        lines.append("")
 
     lines.append("## Event Breakdown")
     lines.append("")
