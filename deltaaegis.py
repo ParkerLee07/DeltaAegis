@@ -235,6 +235,29 @@ CREATE TABLE IF NOT EXISTS alert_notes (
 );
 CREATE INDEX IF NOT EXISTS idx_alert_notes_alert_id ON alert_notes(alert_id);
 
+
+
+CREATE TABLE IF NOT EXISTS asset_annotations (
+    asset_key TEXT PRIMARY KEY,
+    owner TEXT,
+    role TEXT,
+    criticality TEXT,
+    notes TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS asset_annotation_history (
+    annotation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_key TEXT NOT NULL,
+    owner TEXT,
+    role TEXT,
+    criticality TEXT,
+    notes TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_annotation_history_asset_key
+ON asset_annotation_history(asset_key);
 """
 
 
@@ -1260,28 +1283,17 @@ def run_interactive_menu(args: argparse.Namespace) -> int:
             print_banner()
 
             print(
-                "[1] Ingest new NetSniper bundles
-"
-                "[2] Show system summary
-"
-                "[3] List imported snapshots
-"
-                "[4] Show recent delta events
-"
-                "[5] Show open alerts
-"
-                "[6] Show asset history
-"
-                "[7] Show snapshot health
-"
-                "[8] Approve reviewed snapshot as baseline
-"
-                "[9] Generate investigation report
-"
-                "[10] Show telemetry paths
-"
-                "[11] Exit
-"
+                "[1] Ingest new NetSniper bundles\n"
+                "[2] Show system summary\n"
+                "[3] List imported snapshots\n"
+                "[4] Show recent delta events\n"
+                "[5] Show open alerts\n"
+                "[6] Show asset history\n"
+                "[7] Show snapshot health\n"
+                "[8] Approve reviewed snapshot as baseline\n"
+                "[9] Generate investigation report\n"
+                "[10] Show telemetry paths\n"
+                "[11] Exit\n"
             )
 
             choice = input("deltaaegis> ").strip()
@@ -1331,10 +1343,221 @@ def run_interactive_menu(args: argparse.Namespace) -> int:
             pause()
 
     except (KeyboardInterrupt, EOFError):
-        print("
-Exiting DeltaAegis.")
+        print("\nExiting DeltaAegis.")
         return 0
 
+def normalize_optional_text(value):
+    if value is None:
+        return None
+
+    value = str(value).strip()
+
+    if value == "":
+        return None
+
+    return value
+
+
+def command_annotate_asset(args):
+    connection = connect(args.db)
+
+    asset_key = args.asset_key.strip()
+
+    if not asset_key:
+        raise DeltaAegisError("asset key cannot be empty")
+
+    existing = connection.execute(
+        """
+        SELECT asset_key, owner, role, criticality, notes, updated_at
+        FROM asset_annotations
+        WHERE asset_key = ?
+        """,
+        (asset_key,),
+    ).fetchone()
+
+    owner = normalize_optional_text(args.owner)
+    role = normalize_optional_text(args.role)
+    criticality = normalize_optional_text(args.criticality)
+    notes = normalize_optional_text(args.notes)
+
+    if existing:
+        owner = owner if owner is not None else existing["owner"]
+        role = role if role is not None else existing["role"]
+        criticality = criticality if criticality is not None else existing["criticality"]
+        notes = notes if notes is not None else existing["notes"]
+
+    if owner is None and role is None and criticality is None and notes is None:
+        raise DeltaAegisError(
+            "provide at least one annotation field: --owner, --role, --criticality, or --notes"
+        )
+
+    now = utc_now()
+
+    if existing:
+        connection.execute(
+            """
+            UPDATE asset_annotations
+            SET owner = ?,
+                role = ?,
+                criticality = ?,
+                notes = ?,
+                updated_at = ?
+            WHERE asset_key = ?
+            """,
+            (
+                owner,
+                role,
+                criticality,
+                notes,
+                now,
+                asset_key,
+            ),
+        )
+    else:
+        connection.execute(
+            """
+            INSERT INTO asset_annotations (
+                asset_key,
+                owner,
+                role,
+                criticality,
+                notes,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                asset_key,
+                owner,
+                role,
+                criticality,
+                notes,
+                now,
+            ),
+        )
+
+    connection.execute(
+        """
+        INSERT INTO asset_annotation_history (
+            asset_key,
+            owner,
+            role,
+            criticality,
+            notes,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            asset_key,
+            owner,
+            role,
+            criticality,
+            notes,
+            now,
+        ),
+    )
+
+    connection.commit()
+
+    print(f"Asset annotation saved: {asset_key}")
+    print()
+    print(f"Owner:       {owner or '-'}")
+    print(f"Role:        {role or '-'}")
+    print(f"Criticality: {criticality or '-'}")
+    print(f"Notes:       {notes or '-'}")
+    print(f"Updated:     {now}")
+
+    return 0
+
+
+def command_asset_notes(args):
+    connection = connect(args.db)
+
+    asset_key = args.asset_key.strip()
+
+    annotation = connection.execute(
+        """
+        SELECT asset_key, owner, role, criticality, notes, updated_at
+        FROM asset_annotations
+        WHERE asset_key = ?
+        """,
+        (asset_key,),
+    ).fetchone()
+
+    print(f"Asset Notes: {asset_key}")
+    print("=" * (13 + len(asset_key)))
+    print()
+
+    if annotation is None:
+        print("No annotation has been recorded for this asset.")
+    else:
+        print(f"Owner:       {annotation['owner'] or '-'}")
+        print(f"Role:        {annotation['role'] or '-'}")
+        print(f"Criticality: {annotation['criticality'] or '-'}")
+        print(f"Notes:       {annotation['notes'] or '-'}")
+        print(f"Updated:     {annotation['updated_at']}")
+
+    if args.history:
+        print()
+        print("Annotation History")
+        print("------------------")
+
+        rows = connection.execute(
+            """
+            SELECT annotation_id, owner, role, criticality, notes, created_at
+            FROM asset_annotation_history
+            WHERE asset_key = ?
+            ORDER BY annotation_id ASC
+            """,
+            (asset_key,),
+        ).fetchall()
+
+        if not rows:
+            print("No annotation history has been recorded for this asset.")
+        else:
+            for row in rows:
+                print(f"[{row['annotation_id']}] {row['created_at']}")
+                print(f"  Owner:       {row['owner'] or '-'}")
+                print(f"  Role:        {row['role'] or '-'}")
+                print(f"  Criticality: {row['criticality'] or '-'}")
+                print(f"  Notes:       {row['notes'] or '-'}")
+                print()
+
+    return 0
+
+
+def command_asset_annotations(args):
+    connection = connect(args.db)
+
+    rows = connection.execute(
+        """
+        SELECT asset_key, owner, role, criticality, notes, updated_at
+        FROM asset_annotations
+        ORDER BY updated_at DESC, asset_key ASC
+        LIMIT ?
+        """,
+        (args.limit,),
+    ).fetchall()
+
+    if not rows:
+        print("No asset annotations have been recorded.")
+        return 0
+
+    print("Asset Annotations")
+    print("=================")
+    print()
+
+    for row in rows:
+        print(row["asset_key"])
+        print(f"  Owner:       {row['owner'] or '-'}")
+        print(f"  Role:        {row['role'] or '-'}")
+        print(f"  Criticality: {row['criticality'] or '-'}")
+        print(f"  Notes:       {row['notes'] or '-'}")
+        print(f"  Updated:     {row['updated_at']}")
+        print()
+
+    return 0
 
 def add_alert_note(connection, alert_id, action, reason):
     reason = (reason or "").strip()
@@ -1613,6 +1836,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("approve"); p.add_argument("scan_id")
     sub.add_parser("latest")
 
+    p = sub.add_parser("annotate-asset")
+    p.add_argument("asset_key")
+    p.add_argument("--owner")
+    p.add_argument("--role")
+    p.add_argument("--criticality")
+    p.add_argument("--notes")
+
+    p = sub.add_parser("asset-notes")
+    p.add_argument("asset_key")
+    p.add_argument("--history", action="store_true")
+
+    p = sub.add_parser("asset-annotations")
+    p.add_argument("--limit", type=int, default=50)
+
     p = sub.add_parser("asset-timeline")
     p.add_argument("asset_key")
     p.add_argument("--limit", type=int, default=50)
@@ -1650,6 +1887,12 @@ def main() -> int:
         if args.command == "health": return command_health(args)
         if args.command == "approve": return command_approve(args)
         if args.command == "latest": return command_latest(args)
+        if args.command == "annotate-asset": return command_annotate_asset(args)
+
+        if args.command == "asset-notes": return command_asset_notes(args)
+
+        if args.command == "asset-annotations": return command_asset_annotations(args)
+
         if args.command == "asset-timeline": return command_asset_timeline(args)
 
         if args.command == "alert-detail": return command_alert_detail(args)
