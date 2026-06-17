@@ -54,7 +54,7 @@ Role-aware recommended actions are generated from the same context, so reports a
 
 ## Data Sources
 
-DeltaAegis `v0.2` ingests NetSniper immutable run bundles.
+DeltaAegis `v0.8.5` ingests NetSniper immutable run bundles and NetSniper classification intelligence.
 
 - `manifest.json`: telemetry schema, scan profile, fingerprint, target, timestamps, counts, and file pointers.
 - `discovery.xml`: discovery evidence and MAC addresses when available.

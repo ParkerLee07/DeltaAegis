@@ -38,7 +38,7 @@ The project focuses on reliable attack-surface change detection, asset-state tra
 
 ## Current Release
 
-DeltaAegis v0.6.0
+DeltaAegis v0.8.5
 
 ---
 
@@ -422,7 +422,7 @@ Asset annotations are used by investigation reports when an event or alert subje
 
 ## Risk Register
 
-DeltaAegis v0.6.0 adds an explainable risk register for prioritizing review.
+DeltaAegis v0.8.5 adds an explainable risk register for prioritizing review.
 
 The risk register uses existing DeltaAegis data:
 
@@ -667,7 +667,7 @@ deltaaegis report --output reports/investigation-report.md
 
 ## Investigation Dashboard and Asset Inventory
 
-DeltaAegis v0.6.0 expands the read-only dashboard and reporting workflow into a scope-aware investigation console.
+DeltaAegis v0.8.5 expands the read-only dashboard and reporting workflow into a scope-aware investigation console.
 
 ### Asset Inventory CLI
 
@@ -733,7 +733,7 @@ Scoped reports are isolated so events, alerts, assets, and report context from u
 
 ## Scope and Limitations
 
-DeltaAegis v0.6.0 is a network-state monitoring, investigation, risk prioritization, reporting, and dashboard prototype.
+DeltaAegis v0.8.5 is a network-state monitoring, investigation, risk prioritization, reporting, and dashboard prototype.
 
 It is not a replacement for an enterprise SIEM.
 
@@ -778,7 +778,7 @@ See `LICENSE`.
 
 ## Read-Only Dashboard
 
-DeltaAegis v0.6.0 adds a local read-only dashboard for making scan results easier to understand.
+DeltaAegis v0.8.5 adds a local read-only dashboard for making scan results easier to understand.
 
 Start the dashboard:
 
