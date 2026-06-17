@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.6.0 — Investigation Dashboard and Scope-Aware Reporting
+
+- Added `deltaaegis assets` for scope-aware asset inventory review.
+- Added `--scope`, `--state`, `--identity`, and `--limit` filters for asset inventory workflows.
+- Updated `deltaaegis asset` with `--scope` support to avoid cross-subnet ambiguity.
+- Added dashboard asset inventory API support through `/api/assets`.
+- Added dashboard asset detail API support through `/api/asset`.
+- Added an Asset Inventory dashboard table.
+- Added an Asset Detail dashboard panel with lifecycle state, latest observation, services, findings, events, alerts, and annotation context.
+- Added an asset selector dropdown for quickly loading device detail views.
+- Added clickable asset/subject links across Asset Inventory, Risk Subjects, Delta Events, and Alerts.
+- Added collapsible dashboard cards to reduce visual overload during investigations.
+- Expanded Markdown reports with Network Scope Summary, Asset Lifecycle Summary, Asset Inventory, Dashboard/API Usage Notes, and Recommended Next Actions.
+- Added `deltaaegis report --scope` and `--asset-limit`.
+- Fixed report filtering so scoped reports do not mix events or alerts from unrelated network scopes.
+- Added missing risk severity scoring constants used by the expanded risk/reporting path.
+
 ## v0.5.1 — Network Scope Isolation
 
 - Added first-class `network_scope` tracking for imported NetSniper snapshots.

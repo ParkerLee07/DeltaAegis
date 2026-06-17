@@ -10,7 +10,7 @@ The project focuses on reliable attack-surface change detection, asset-state tra
 
 ## Current Release
 
-DeltaAegis v0.5.1
+DeltaAegis v0.6.0
 
 ---
 
@@ -139,7 +139,7 @@ python3 deltaaegis.py
 
 ### Network Scope Isolation
 
-DeltaAegis v0.5.1 separates scan history, baseline selection, lifecycle state, CLI views, and dashboard views by canonical network scope.
+DeltaAegis v0.5.1 introduced canonical network scope isolation across scan history, baseline selection, lifecycle state, CLI views, and dashboard views.
 
 Examples:
 
@@ -394,7 +394,7 @@ Asset annotations are used by investigation reports when an event or alert subje
 
 ## Risk Register
 
-DeltaAegis v0.5.1 adds an explainable risk register for prioritizing review.
+DeltaAegis v0.6.0 adds an explainable risk register for prioritizing review.
 
 The risk register uses existing DeltaAegis data:
 
@@ -637,9 +637,75 @@ deltaaegis report --output reports/investigation-report.md
 
 ---
 
+## Investigation Dashboard and Asset Inventory
+
+DeltaAegis v0.6.0 expands the read-only dashboard and reporting workflow into a scope-aware investigation console.
+
+### Asset Inventory CLI
+
+List assets observed in a specific network scope:
+
+    deltaaegis assets --scope 192.168.4.0/24
+
+Filter by lifecycle state:
+
+    deltaaegis assets --scope 192.168.4.0/24 --state ACTIVE
+
+Filter by identity type:
+
+    deltaaegis assets --scope 192.168.4.0/24 --identity GLOBAL_MAC
+
+Inspect a specific asset without crossing subnet boundaries:
+
+    deltaaegis asset 192.168.4.203 --scope 192.168.4.0/24
+    deltaaegis asset mac:cc:ba:97:64:1e:74 --scope 192.168.4.0/24
+
+### Dashboard Investigation Features
+
+The dashboard now includes:
+
+- Collapsible dashboard cards to reduce visual overload.
+- Scope-aware Asset Inventory table.
+- Asset Detail panel with lifecycle state, latest observation, services, findings, recent events, alerts, and annotation context.
+- Asset selector dropdown for quickly choosing a device.
+- Clickable subjects in Asset Inventory, Top Risk Subjects, Delta Events, and Alerts.
+- Scope-aware asset APIs.
+
+Useful dashboard APIs:
+
+    /api/assets?scope=192.168.4.0/24&limit=25
+    /api/assets?scope=192.168.4.0/24&state=ACTIVE
+    /api/assets?scope=192.168.4.0/24&identity=GLOBAL_MAC
+    /api/asset?scope=192.168.4.0/24&identifier=192.168.4.203
+    /api/asset?scope=192.168.4.0/24&identifier=mac:cc:ba:97:64:1e:74
+
+### Scope-Aware Reports
+
+Generate a report for one subnet scope:
+
+    deltaaegis report --scope 192.168.4.0/24
+
+Control report size:
+
+    deltaaegis report --scope 192.168.4.0/24 --limit 25 --risk-limit 10 --asset-limit 25
+
+Reports now include:
+
+- Network Scope Summary
+- Asset Lifecycle Summary
+- Asset Inventory
+- Top Risk Subjects
+- Active Alerts
+- Delta Events
+- Dashboard and API Usage Notes
+- Recommended Next Actions
+
+Scoped reports are isolated so events, alerts, assets, and report context from unrelated network scopes do not mix.
+
+
 ## Scope and Limitations
 
-DeltaAegis v0.5.1 is a network-state monitoring, investigation, risk prioritization, reporting, and dashboard prototype.
+DeltaAegis v0.6.0 is a network-state monitoring, investigation, risk prioritization, reporting, and dashboard prototype.
 
 It is not a replacement for an enterprise SIEM.
 
@@ -684,7 +750,7 @@ See `LICENSE`.
 
 ## Read-Only Dashboard
 
-DeltaAegis v0.5.1 adds a local read-only dashboard for making scan results easier to understand.
+DeltaAegis v0.6.0 adds a local read-only dashboard for making scan results easier to understand.
 
 Start the dashboard:
 
@@ -727,7 +793,7 @@ Dashboard API endpoints:
 
 Security note:
 
-The v0.5.1 dashboard is intentionally read-only. It does not run scans, modify alerts, change annotations, or perform remediation actions. Keep it bound to `127.0.0.1` unless you are using a trusted network, SSH tunnel, reverse proxy, VPN, or token protection.
+The v0.6.0 dashboard is intentionally read-only. It does not run scans, modify alerts, change annotations, or perform remediation actions. Keep it bound to `127.0.0.1` unless you are using a trusted network, SSH tunnel, reverse proxy, VPN, or token protection.
 
 Token-protected example:
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.5.1: subnet-aware network-state monitoring, investigation, risk prioritization, reporting, and dashboard console.
+"""DeltaAegis v0.6.0: subnet-aware network-state monitoring, investigation, risk prioritization, reporting, and dashboard console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -1233,7 +1233,7 @@ def command_summary(args: argparse.Namespace) -> int:
     event_count = connection.execute("SELECT COUNT(*) FROM delta_events").fetchone()[0]
     open_alerts = connection.execute("SELECT COUNT(*) FROM alerts WHERE status = 'OPEN'").fetchone()[0]
     latest = connection.execute("SELECT scan_id, quality_status, hosts_up, identity_coverage FROM snapshots ORDER BY created_at DESC LIMIT 1").fetchone()
-    print("DeltaAegis v0.5.1 Summary")
+    print("DeltaAegis v0.6.0 Summary")
     print(f"Snapshots imported: {snapshot_count}")
     print(f"Network scopes: {scope_count}")
     print(f"Accepted snapshots: {accepted_count}")
@@ -1390,22 +1390,184 @@ def set_alert_status(args, status):
 
     return 0
 
+def command_assets(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    scope = optional_network_scope(getattr(args, "scope", None))
+
+    clauses = []
+    params = []
+
+    if scope:
+        clauses.append("network_scope = ?")
+        params.append(scope)
+
+    if args.state:
+        clauses.append("state = ?")
+        params.append(args.state.upper())
+
+    if args.identity:
+        clauses.append("identity_class = ?")
+        params.append(args.identity.upper())
+
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+
+    params.append(args.limit)
+
+    rows = connection.execute(
+        f"""
+        SELECT
+            network_scope,
+            asset_key,
+            identity_class,
+            state,
+            missing_count,
+            current_ip,
+            mac_address,
+            vendor,
+            hostname,
+            first_seen_at,
+            last_seen_at
+        FROM asset_lifecycle
+        {where}
+        ORDER BY network_scope ASC, state ASC, current_ip ASC, asset_key ASC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+
+    print("DeltaAegis Asset Inventory")
+    print("==========================")
+
+    if scope:
+        print(f"Network scope: {scope}")
+
+    if args.state:
+        print(f"State filter:  {args.state.upper()}")
+
+    if args.identity:
+        print(f"Identity type:  {args.identity.upper()}")
+
+    print()
+
+    if not rows:
+        print("No assets matched the requested filters.")
+        return 0
+
+    print(
+        f"{'Scope':<18} "
+        f"{'State':<18} "
+        f"{'Identity':<11} "
+        f"{'IP':<15} "
+        f"{'MAC':<17} "
+        f"Asset"
+    )
+    print("-" * 110)
+
+    for row in rows:
+        print(
+            f"{row['network_scope']:<18} "
+            f"{row['state']:<18} "
+            f"{row['identity_class']:<11} "
+            f"{row['current_ip']:<15} "
+            f"{row['mac_address'] or '-':<17} "
+            f"{row['asset_key']}"
+        )
+
+    print()
+    print(f"Displayed {len(rows)} asset(s).")
+
+    return 0
+
 def command_asset(args: argparse.Namespace) -> int:
     connection = connect(args.db)
     identifier = args.identifier.strip().lower()
-    row = connection.execute("SELECT * FROM asset_lifecycle WHERE asset_key = ?", (identifier,)).fetchone()
-    if row is None:
-        row = connection.execute("SELECT * FROM asset_lifecycle WHERE current_ip = ?", (identifier,)).fetchone()
-    if row is None:
+    scope = optional_network_scope(getattr(args, "scope", None))
+
+    clauses = [
+        """
+        (
+            LOWER(asset_key) = ?
+            OR LOWER(current_ip) = ?
+            OR LOWER(COALESCE(mac_address, '')) = ?
+        )
+        """
+    ]
+
+    params = [identifier, identifier, identifier]
+
+    if scope:
+        clauses.append("network_scope = ?")
+        params.append(scope)
+
+    rows = connection.execute(
+        f"""
+        SELECT *
+        FROM asset_lifecycle
+        WHERE {" AND ".join(clauses)}
+        ORDER BY network_scope ASC, asset_key ASC
+        """,
+        tuple(params),
+    ).fetchall()
+
+    if not rows:
+        if scope:
+            raise DeltaAegisError(f"asset not found in scope {scope}: {args.identifier}")
         raise DeltaAegisError(f"asset not found: {args.identifier}")
+
+    if len(rows) > 1 and not scope:
+        print(f"Multiple assets matched {args.identifier!r}. Re-run with --scope.")
+        print()
+        for row in rows:
+            print(f"{row['network_scope']:<18} {row['current_ip']:<15} {row['mac_address'] or '-':<17} {row['asset_key']}")
+        return 1
+
+    row = rows[0]
+
     print("Asset History")
     print("────────────────────────────────────────")
-    for label, key in [("Asset key", "asset_key"), ("Identity class", "identity_class"), ("State", "state"), ("Missing scans", "missing_count"), ("Current IP", "current_ip"), ("MAC address", "mac_address"), ("Vendor", "vendor"), ("Hostname", "hostname"), ("First seen", "first_seen_at"), ("Last seen", "last_seen_at")]:
-        print(f"{label + ':':<18}{row[key] or '-'}")
-    print("\nRecent events")
-    print_event_rows(connection.execute("SELECT event_id, created_at, severity, event_type, subject_key, summary FROM delta_events WHERE subject_key = ? ORDER BY event_id DESC LIMIT ?", (row["asset_key"], args.limit)).fetchall())
-    return 0
 
+    for label, key in [
+        ("Network scope", "network_scope"),
+        ("Asset key", "asset_key"),
+        ("Identity class", "identity_class"),
+        ("State", "state"),
+        ("Missing scans", "missing_count"),
+        ("Current IP", "current_ip"),
+        ("MAC address", "mac_address"),
+        ("Vendor", "vendor"),
+        ("Hostname", "hostname"),
+        ("First seen", "first_seen_at"),
+        ("Last seen", "last_seen_at"),
+    ]:
+        value = row[key]
+        if value is None or value == "":
+            value = "-"
+        print(f"{label + ':':<18}{value}")
+
+    print("\nRecent events")
+
+    print_event_rows(
+        connection.execute(
+            """
+            SELECT
+                e.event_id,
+                e.created_at,
+                e.severity,
+                e.event_type,
+                e.subject_key,
+                e.summary
+            FROM delta_events e
+            JOIN snapshots s ON s.scan_id = e.scan_id
+            WHERE e.subject_key = ?
+              AND s.network_scope = ?
+            ORDER BY e.event_id DESC
+            LIMIT ?
+            """,
+            (row["asset_key"], row["network_scope"], args.limit),
+        ).fetchall()
+    )
+
+    return 0
 
 def command_health(args: argparse.Namespace) -> int:
     rows = connect(args.db).execute("SELECT scan_id, quality_status, quality_reason, manifest_schema_version, scan_profile, profile_fingerprint, hosts_up, hosts_total, identity_coverage, xml_exit_status, nmap_version, discovery_interface FROM snapshots ORDER BY created_at DESC, imported_at DESC LIMIT ?", (args.limit,)).fetchall()
@@ -1713,68 +1875,78 @@ def fetch_latest_accepted_snapshot(connection):
     ).fetchone()
 
 
-def report_event_rows(connection, latest_only, since, severity, limit):
+def report_event_rows(connection, latest_only, since, severity, limit, scope=None):
     clauses = []
     params = []
 
     if latest_only:
-        latest = fetch_latest_accepted_snapshot(connection)
+        if scope:
+            latest = connection.execute(
+                """
+                SELECT scan_id
+                FROM snapshots
+                WHERE quality_status = 'ACCEPTED'
+                  AND network_scope = ?
+                ORDER BY created_at DESC, imported_at DESC
+                LIMIT 1
+                """,
+                (scope,),
+            ).fetchone()
+        else:
+            latest = connection.execute(
+                """
+                SELECT scan_id
+                FROM snapshots
+                WHERE quality_status = 'ACCEPTED'
+                ORDER BY created_at DESC, imported_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+
         if latest is None:
-            print("No accepted snapshot exists for --latest report.")
             return []
-        clauses.append("scan_id = ?")
+
+        clauses.append("e.scan_id = ?")
         params.append(latest["scan_id"])
 
     if since:
-        clauses.append("created_at >= ?")
+        clauses.append("e.created_at >= ?")
         params.append(since)
 
     if severity:
-        clauses.append("severity = ?")
-        params.append(str(severity).upper())
+        clauses.append("e.severity = ?")
+        params.append(severity.upper())
 
-    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    if scope:
+        clauses.append("s.network_scope = ?")
+        params.append(scope)
+
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
 
     params.append(limit)
 
     return connection.execute(
         f"""
         SELECT
-            event_id,
-            scan_id,
-            baseline_scan_id,
-            created_at,
-            severity,
-            event_type,
-            subject_key,
-            previous_value,
-            current_value,
-            summary
-        FROM delta_events
+            e.event_id,
+            e.scan_id,
+            e.baseline_scan_id,
+            e.created_at,
+            e.severity,
+            e.event_type,
+            e.subject_key,
+            e.previous_value,
+            e.current_value,
+            e.summary,
+            s.network_scope
+        FROM delta_events e
+        JOIN snapshots s ON s.scan_id = e.scan_id
         {where}
-        ORDER BY event_id DESC
+        ORDER BY e.event_id DESC
         LIMIT ?
         """,
         tuple(params),
     ).fetchall()
-
-
-
-RISK_SEVERITY_POINTS = {
-    "CRITICAL": 40,
-    "HIGH": 30,
-    "MEDIUM": 15,
-    "LOW": 5,
-    "INFO": 1,
-}
-
-RISK_CRITICALITY_POINTS = {
-    "CRITICAL": 25,
-    "HIGH": 20,
-    "MEDIUM": 10,
-    "LOW": 0,
-}
-
 
 def risk_level(score):
     if score >= 85:
@@ -2158,6 +2330,15 @@ def dashboard_enrich_subject_rows(connection, rows, subject_field="subject_key",
 
     return enriched
 
+RISK_SEVERITY_POINTS = {
+    "INFO": 5,
+    "LOW": 10,
+    "MEDIUM": 25,
+    "HIGH": 45,
+    "CRITICAL": 65,
+}
+
+
 def build_risk_register(connection, limit, subject_filter=None, scope=None):
     subjects = {}
 
@@ -2463,6 +2644,259 @@ def command_asset_risk(args):
 
     return 0
 
+def report_snapshot_count(connection, scope=None, accepted_only=False):
+    sql = "SELECT COUNT(*) FROM snapshots WHERE 1 = 1"
+    params = []
+
+    if accepted_only:
+        sql += " AND quality_status = 'ACCEPTED'"
+
+    if scope:
+        sql += " AND network_scope = ?"
+        params.append(scope)
+
+    return connection.execute(sql, tuple(params)).fetchone()[0]
+
+
+def report_latest_snapshot(connection, scope=None):
+    if scope:
+        return connection.execute(
+            """
+            SELECT *
+            FROM snapshots
+            WHERE quality_status = 'ACCEPTED'
+              AND network_scope = ?
+            ORDER BY created_at DESC, imported_at DESC
+            LIMIT 1
+            """,
+            (scope,),
+        ).fetchone()
+
+    return fetch_latest_accepted_snapshot(connection)
+
+
+def report_open_alert_rows(connection, limit, scope=None):
+    sql = """
+        SELECT DISTINCT
+            a.alert_id,
+            a.severity,
+            a.event_type,
+            a.subject_key,
+            a.summary,
+            a.opened_at
+        FROM alerts a
+        LEFT JOIN delta_events e ON e.event_id = a.last_event_id
+        LEFT JOIN snapshots s ON s.scan_id = e.scan_id
+        WHERE a.status = 'OPEN'
+    """
+
+    params = []
+
+    if scope:
+        sql += " AND s.network_scope = ?"
+        params.append(scope)
+
+    sql += " ORDER BY a.alert_id DESC LIMIT ?"
+    params.append(limit)
+
+    return connection.execute(sql, tuple(params)).fetchall()
+
+
+def report_asset_lifecycle_summary(connection, scope=None):
+    sql = """
+        SELECT
+            state,
+            identity_class,
+            COUNT(*) AS asset_count
+        FROM asset_lifecycle
+        WHERE 1 = 1
+    """
+    params = []
+
+    if scope:
+        sql += " AND network_scope = ?"
+        params.append(scope)
+
+    sql += """
+        GROUP BY state, identity_class
+        ORDER BY state ASC, identity_class ASC
+    """
+
+    return connection.execute(sql, tuple(params)).fetchall()
+
+
+def report_asset_inventory_rows(connection, limit, scope=None):
+    sql = """
+        SELECT
+            network_scope,
+            asset_key,
+            identity_class,
+            state,
+            current_ip,
+            mac_address,
+            hostname,
+            first_seen_at,
+            last_seen_at
+        FROM asset_lifecycle
+        WHERE 1 = 1
+    """
+    params = []
+
+    if scope:
+        sql += " AND network_scope = ?"
+        params.append(scope)
+
+    sql += """
+        ORDER BY network_scope ASC, state ASC, current_ip ASC, asset_key ASC
+        LIMIT ?
+    """
+    params.append(limit)
+
+    return connection.execute(sql, tuple(params)).fetchall()
+
+def append_report_network_scope_summary(lines, connection, scope=None):
+    lines.append("## Network Scope Summary")
+    lines.append("")
+
+    rows = connection.execute(
+        """
+        SELECT
+            network_scope,
+            COUNT(*) AS snapshots,
+            SUM(CASE WHEN quality_status = 'ACCEPTED' THEN 1 ELSE 0 END) AS accepted_snapshots,
+            MAX(created_at) AS latest_scan_at
+        FROM snapshots
+        WHERE (? IS NULL OR network_scope = ?)
+        GROUP BY network_scope
+        ORDER BY network_scope ASC
+        """,
+        (scope, scope),
+    ).fetchall()
+
+    if not rows:
+        lines.append("No network scope data matched this report.")
+        lines.append("")
+        return
+
+    lines.append("| Network Scope | Snapshots | Accepted | Latest Scan |")
+    lines.append("|---|---:|---:|---|")
+
+    for row in rows:
+        lines.append(
+            "| "
+            f"`{safe_markdown(row['network_scope'])}` | "
+            f"{row['snapshots']} | "
+            f"{row['accepted_snapshots'] or 0} | "
+            f"`{safe_markdown(row['latest_scan_at'] or '-')}` |"
+        )
+
+    lines.append("")
+    lines.append("Network scope isolation prevents baselines, lifecycle state, and reports from mixing unrelated subnets.")
+    lines.append("")
+
+
+def append_report_dashboard_usage_section(lines, scope=None):
+    lines.append("## Dashboard and API Usage Notes")
+    lines.append("")
+
+    if scope:
+        lines.append(f"- Dashboard scope view: `deltaaegis dashboard --scope {safe_markdown(scope)}`")
+        lines.append(f"- Asset inventory API: `/api/assets?scope={safe_markdown(scope)}&limit=25`")
+        lines.append(f"- Asset detail API: `/api/asset?scope={safe_markdown(scope)}&identifier=<asset-or-ip>`")
+    else:
+        lines.append("- Dashboard: `deltaaegis dashboard`")
+        lines.append("- Asset inventory API: `/api/assets?limit=25`")
+        lines.append("- Asset detail API: `/api/asset?identifier=<asset-or-ip>`")
+
+    lines.append("- The dashboard remains read-only and is intended for local or trusted-access investigation.")
+    lines.append("- Use the Asset Inventory table, asset selector, or clickable risk/event/alert subjects to open Asset Detail.")
+    lines.append("")
+
+
+def append_report_recommended_next_actions(lines, risk_rows, open_alerts, asset_rows):
+    lines.append("## Recommended Next Actions")
+    lines.append("")
+
+    if open_alerts:
+        lines.append(f"- Review and triage **{len(open_alerts)}** open alert(s), starting with the highest-severity subjects.")
+    else:
+        lines.append("- No open alerts were included in this report.")
+
+    if risk_rows:
+        top = risk_rows[0]
+        lines.append(
+            "- Investigate the highest-risk subject first: "
+            f"`{safe_markdown(top.get('subject_key'))}` "
+            f"with score **{safe_markdown(top.get('score'))}**."
+        )
+    else:
+        lines.append("- No risk subjects were calculated for this report.")
+
+    if asset_rows:
+        lines.append("- Use the asset inventory section to identify unknown hosts, missing identity context, and unannotated important devices.")
+    else:
+        lines.append("- No asset inventory rows were included; verify accepted snapshots and lifecycle data exist for this scope.")
+
+    lines.append("- Add asset annotations for known infrastructure, owners, roles, and criticality to improve future risk prioritization.")
+    lines.append("")
+
+def append_report_asset_lifecycle_section(lines, lifecycle_rows):
+    lines.append("## Asset Lifecycle Summary")
+    lines.append("")
+
+    if not lifecycle_rows:
+        lines.append("No asset lifecycle rows matched this report.")
+        lines.append("")
+        return
+
+    lines.append("| State | Identity Class | Assets |")
+    lines.append("|---|---|---:|")
+
+    for row in lifecycle_rows:
+        lines.append(
+            "| "
+            f"{safe_markdown(row['state'])} | "
+            f"{safe_markdown(row['identity_class'])} | "
+            f"{row['asset_count']} |"
+        )
+
+    lines.append("")
+    lines.append(
+        "Lifecycle state tracks whether assets are active, missing, removed, "
+        "or temporarily absent across accepted scans."
+    )
+    lines.append("")
+
+
+def append_report_asset_inventory_section(lines, asset_rows, limit):
+    lines.append("## Asset Inventory")
+    lines.append("")
+
+    if not asset_rows:
+        lines.append("No assets matched this report.")
+        lines.append("")
+        return
+
+    lines.append(f"Showing up to **{limit}** assets.")
+    lines.append("")
+    lines.append("| Scope | State | Identity | IP Address | MAC Address | Hostname | Asset Key | Last Seen |")
+    lines.append("|---|---|---|---|---|---|---|---|")
+
+    for row in asset_rows:
+        lines.append(
+            "| "
+            f"`{safe_markdown(row['network_scope'])}` | "
+            f"{safe_markdown(row['state'])} | "
+            f"{safe_markdown(row['identity_class'])} | "
+            f"`{safe_markdown(row['current_ip'])}` | "
+            f"`{safe_markdown(row['mac_address'] or '-')}` | "
+            f"{safe_markdown(row['hostname'] or '-')} | "
+            f"`{safe_markdown(row['asset_key'])}` | "
+            f"`{safe_markdown(row['last_seen_at'])}` |"
+        )
+
+    lines.append("")
+
 def append_report_risk_section(lines, risk_rows):
     lines.append("## Top Risk Subjects")
     lines.append("")
@@ -2503,6 +2937,7 @@ def command_report(args):
     from datetime import datetime, timezone
 
     connection = connect(args.db)
+    scope = optional_network_scope(getattr(args, "scope", None))
 
     reports_dir = args.reports_dir
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -2513,27 +2948,24 @@ def command_report(args):
         since=args.since,
         severity=args.severity,
         limit=args.limit,
+        scope=scope,
     )
 
-    latest_snapshot = fetch_latest_accepted_snapshot(connection)
+    latest_snapshot = report_latest_snapshot(connection, scope=scope)
 
-    snapshot_count = connection.execute(
-        "SELECT COUNT(*) FROM snapshots"
-    ).fetchone()[0]
+    snapshot_count = report_snapshot_count(connection, scope=scope)
 
-    accepted_count = connection.execute(
-        "SELECT COUNT(*) FROM snapshots WHERE quality_status = 'ACCEPTED'"
-    ).fetchone()[0]
+    accepted_count = report_snapshot_count(
+        connection,
+        scope=scope,
+        accepted_only=True,
+    )
 
-    open_alerts = connection.execute(
-        """
-        SELECT alert_id, severity, event_type, subject_key, summary, opened_at
-        FROM alerts
-        WHERE status = 'OPEN'
-        ORDER BY alert_id DESC
-        LIMIT 25
-        """
-    ).fetchall()
+    open_alerts = report_open_alert_rows(
+        connection,
+        limit=25,
+        scope=scope,
+    )
 
     report_subjects = [row["subject_key"] for row in events]
     report_subjects.extend(alert["subject_key"] for alert in open_alerts)
@@ -2552,6 +2984,18 @@ def command_report(args):
     report_risk_rows = build_risk_register(
         connection,
         args.risk_limit,
+        scope=scope,
+    )
+
+    report_lifecycle_rows = report_asset_lifecycle_summary(
+        connection,
+        scope=scope,
+    )
+
+    report_asset_rows = report_asset_inventory_rows(
+        connection,
+        limit=args.asset_limit,
+        scope=scope,
     )
 
     event_type_counts = Counter(row["event_type"] for row in events)
@@ -2582,20 +3026,28 @@ def command_report(args):
         lines.append("No accepted snapshot has been imported yet.")
 
     lines.append("")
+    lines.append(f"- Network scope: **`{scope or 'all scopes'}`**")
     lines.append(f"- Snapshots imported: **{snapshot_count}**")
     lines.append(f"- Accepted snapshots: **{accepted_count}**")
     lines.append(f"- Events included in this report: **{len(events)}**")
     lines.append(f"- Open alerts: **{len(open_alerts)}**")
+    lines.append(f"- Assets included: **{len(report_asset_rows)}**")
     lines.append("")
 
     lines.append("## Report Scope")
     lines.append("")
+    lines.append(f"- Network scope: `{scope or 'all scopes'}`")
     lines.append(f"- Latest snapshot only: `{args.latest}`")
     lines.append(f"- Since: `{args.since or 'not specified'}`")
     lines.append(f"- Severity filter: `{args.severity or 'not specified'}`")
     lines.append(f"- Event limit: `{args.limit}`")
+    lines.append(f"- Risk limit: `{args.risk_limit}`")
+    lines.append(f"- Asset inventory limit: `{args.asset_limit}`")
     lines.append("")
 
+    append_report_network_scope_summary(lines, connection, scope=scope)
+    append_report_asset_lifecycle_section(lines, report_lifecycle_rows)
+    append_report_asset_inventory_section(lines, report_asset_rows, args.asset_limit)
     append_report_risk_section(lines, report_risk_rows)
 
     lines.append("## Annotated Asset Context")
@@ -2727,6 +3179,9 @@ def command_report(args):
     lines.append("4. Compare questionable changes against the previous accepted snapshot.")
     lines.append("5. Suppress expected recurring alerts only after verification.")
     lines.append("")
+
+    append_report_dashboard_usage_section(lines, scope=scope)
+    append_report_recommended_next_actions(lines, report_risk_rows, open_alerts, report_asset_rows)
 
     output_path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -3741,6 +4196,247 @@ def dashboard_scan_context_payload(connection, scope=None):
         "delta_scan_pairs": dashboard_delta_scan_pairs(connection, 10, scope=scope),
     }
 
+def dashboard_assets_payload(connection, limit, scope=None, state=None, identity=None):
+    clauses = []
+    params = []
+
+    if scope:
+        clauses.append("network_scope = ?")
+        params.append(scope)
+
+    if state:
+        clauses.append("state = ?")
+        params.append(state.upper())
+
+    if identity:
+        clauses.append("identity_class = ?")
+        params.append(identity.upper())
+
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+
+    params.append(limit)
+
+    rows = dashboard_safe_query(
+        connection,
+        f"""
+        SELECT
+            network_scope,
+            asset_key,
+            identity_class,
+            state,
+            missing_count,
+            current_ip,
+            mac_address,
+            vendor,
+            hostname,
+            first_seen_at,
+            last_seen_at,
+            removed_at
+        FROM asset_lifecycle
+        {where}
+        ORDER BY network_scope ASC, state ASC, current_ip ASC, asset_key ASC
+        LIMIT ?
+        """,
+        tuple(params),
+    )
+
+    return rows
+
+def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20):
+    identifier = str(identifier or "").strip()
+
+    if not identifier:
+        return {
+            "found": False,
+            "error": "missing_identifier",
+            "message": "Provide identifier or asset_key.",
+        }
+
+    normalized = identifier.lower()
+
+    clauses = [
+        """
+        (
+            LOWER(asset_key) = ?
+            OR LOWER(current_ip) = ?
+            OR LOWER(COALESCE(mac_address, '')) = ?
+        )
+        """
+    ]
+
+    params = [normalized, normalized, normalized]
+
+    if scope:
+        clauses.append("network_scope = ?")
+        params.append(scope)
+
+    lifecycle_rows = connection.execute(
+        f"""
+        SELECT *
+        FROM asset_lifecycle
+        WHERE {" AND ".join(clauses)}
+        ORDER BY network_scope ASC, asset_key ASC
+        """,
+        tuple(params),
+    ).fetchall()
+
+    if not lifecycle_rows:
+        return {
+            "found": False,
+            "identifier": identifier,
+            "selected_scope": scope,
+            "message": "No asset matched the requested identifier.",
+        }
+
+    if len(lifecycle_rows) > 1 and not scope:
+        return {
+            "found": False,
+            "ambiguous": True,
+            "identifier": identifier,
+            "selected_scope": scope,
+            "message": "Multiple assets matched. Re-run with a network scope.",
+            "matches": [dict(row) for row in lifecycle_rows],
+        }
+
+    asset = dict(lifecycle_rows[0])
+    asset_key = asset["asset_key"]
+    asset_scope = asset["network_scope"]
+
+    latest_observation = connection.execute(
+        """
+        SELECT
+            ao.*,
+            s.network_scope,
+            s.scan_id,
+            s.created_at AS observed_at
+        FROM asset_observations ao
+        JOIN snapshots s ON s.scan_id = ao.scan_id
+        WHERE ao.asset_key = ?
+          AND s.network_scope = ?
+        ORDER BY s.created_at DESC, s.imported_at DESC
+        LIMIT 1
+        """,
+        (asset_key, asset_scope),
+    ).fetchone()
+
+    latest_observation_dict = dict(latest_observation) if latest_observation else None
+    observation_scan_id = latest_observation["scan_id"] if latest_observation else None
+
+    services = []
+
+    if observation_scan_id:
+        services = dashboard_safe_query(
+            connection,
+            """
+            SELECT
+                protocol,
+                port,
+                state,
+                service_name,
+                product,
+                version
+            FROM service_observations
+            WHERE scan_id = ?
+              AND asset_key = ?
+            ORDER BY protocol ASC, port ASC
+            """,
+            (observation_scan_id, asset_key),
+        )
+
+    findings = []
+
+    if observation_scan_id:
+        findings = dashboard_safe_query(
+            connection,
+            """
+            SELECT
+                finding_id,
+                name,
+                service,
+                port,
+                score,
+                evidence
+            FROM finding_observations
+            WHERE scan_id = ?
+              AND asset_key = ?
+            ORDER BY score DESC, finding_id ASC
+            """,
+            (observation_scan_id, asset_key),
+        )
+
+    events = dashboard_safe_query(
+        connection,
+        """
+        SELECT
+            e.event_id,
+            e.scan_id,
+            e.baseline_scan_id,
+            e.created_at,
+            e.severity,
+            e.event_type,
+            e.subject_key,
+            e.summary
+        FROM delta_events e
+        JOIN snapshots s ON s.scan_id = e.scan_id
+        WHERE e.subject_key = ?
+          AND s.network_scope = ?
+        ORDER BY e.event_id DESC
+        LIMIT ?
+        """,
+        (asset_key, asset_scope, limit),
+    )
+
+    alerts = dashboard_safe_query(
+        connection,
+        """
+        SELECT
+            a.alert_id,
+            a.status,
+            a.severity,
+            a.event_type,
+            a.subject_key,
+            a.summary,
+            a.opened_at,
+            a.last_seen_at
+        FROM alerts a
+        JOIN delta_events e ON e.event_id = a.last_event_id
+        JOIN snapshots s ON s.scan_id = e.scan_id
+        WHERE a.subject_key = ?
+          AND s.network_scope = ?
+        ORDER BY a.alert_id DESC
+        LIMIT ?
+        """,
+        (asset_key, asset_scope, limit),
+    )
+
+    annotation = connection.execute(
+        """
+        SELECT
+            asset_key,
+            owner,
+            role,
+            criticality,
+            notes,
+            updated_at
+        FROM asset_annotations
+        WHERE asset_key = ?
+        """,
+        (asset_key,),
+    ).fetchone()
+
+    return {
+        "found": True,
+        "identifier": identifier,
+        "selected_scope": scope,
+        "asset": asset,
+        "latest_observation": latest_observation_dict,
+        "services": services,
+        "findings": findings,
+        "events": events,
+        "alerts": alerts,
+        "annotation": dict(annotation) if annotation else None,
+    }
+
 def dashboard_events_payload(connection, limit, scope=None):
     where = ""
     params = []
@@ -3956,6 +4652,89 @@ def dashboard_index_html():
       color: #bfdbfe;
     }
 
+    .asset-link {
+      background: none;
+      border: 0;
+      color: #bfdbfe;
+      cursor: pointer;
+      font: inherit;
+      padding: 0;
+      text-align: left;
+    }
+
+    .asset-link:hover {
+      text-decoration: underline;
+    }
+
+    .detail-grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      margin-bottom: 16px;
+    }
+
+    .detail-box {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--panel2);
+      padding: 12px;
+    }
+
+    .detail-box .label {
+      margin-bottom: 4px;
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 12px;
+    }
+
+    .card-header h2 {
+      margin: 0;
+    }
+
+    .card-toggle,
+    .asset-detail-controls button {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel2);
+      color: var(--text);
+      cursor: pointer;
+      padding: 7px 12px;
+      font-size: 12px;
+    }
+
+    .card-toggle:hover,
+    .asset-detail-controls button:hover {
+      border-color: var(--accent);
+      color: #bfdbfe;
+    }
+
+    .card-body.collapsed {
+      display: none;
+    }
+
+    .asset-detail-controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .asset-detail-controls select {
+      min-width: 320px;
+      max-width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel2);
+      color: var(--text);
+      padding: 8px 10px;
+    }
+
     .kv {
       display: grid;
       gap: 8px;
@@ -4165,6 +4944,37 @@ def dashboard_index_html():
       <h2>NetSniper Scan Context</h2>
       <p class="muted">Shows the latest NetSniper scan, the baseline scan used for delta comparison, and identity coverage for MAC/IP tracking.</p>
       <div class="scan-grid" id="scan-context"></div>
+    </section>
+
+    <section class="card">
+      <h2>Asset Inventory</h2>
+      <p class="muted">Current scoped asset lifecycle view. Use the scope selector above to isolate a subnet.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Scope</th>
+            <th>State</th>
+            <th>Identity</th>
+            <th>IP</th>
+            <th>MAC</th>
+            <th>Asset</th>
+            <th>Last Seen</th>
+          </tr>
+        </thead>
+        <tbody id="asset-inventory-body"></tbody>
+      </table>
+    </section>
+
+    <section class="card" id="asset-detail-card">
+      <h2>Asset Detail</h2>
+      <p class="muted">Click an asset in the inventory table to view lifecycle state, observations, events, alerts, services, findings, and annotation context.</p>
+      <div class="asset-detail-controls">
+        <select id="asset-detail-select">
+          <option value="">Select an asset from the current dashboard scope...</option>
+        </select>
+        <button type="button" id="asset-detail-load">Load Asset</button>
+      </div>
+      <div id="asset-detail-body" class="callout">No asset selected.</div>
     </section>
 
     <section class="card">
@@ -4516,55 +5326,374 @@ def dashboard_index_html():
     }
 
 
-    function renderRisk(rows) {
-      document.getElementById("risk").innerHTML = rows.map(row => {
-        const reason = row.reasons && row.reasons.length ? row.reasons[0] : "-";
 
-        return `<tr>
-          <td><span class="pill ${esc(row.level)}">${esc(row.level)}</span></td>
-          <td>${esc(row.score)}</td>
-          <td><code>${esc(row.subject_key)}</code></td>
-          <td><code>${esc(row.ip_address)}</code></td>
+
+
+    function setupCollapsibleCards() {
+      document.querySelectorAll("section.card").forEach((card, index) => {
+        if (card.dataset.collapsibleReady === "true") return;
+
+        const title = card.querySelector("h2");
+        if (!title) return;
+
+        const body = document.createElement("div");
+        body.className = "card-body";
+
+        let node = title.nextSibling;
+        while (node) {
+          const next = node.nextSibling;
+          body.appendChild(node);
+          node = next;
+        }
+
+        const header = document.createElement("div");
+        header.className = "card-header";
+
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "card-toggle";
+
+        card.insertBefore(header, title);
+        header.appendChild(title);
+        header.appendChild(toggle);
+        card.appendChild(body);
+
+        const defaultCollapsed = index >= 4;
+
+        if (defaultCollapsed) {
+          body.classList.add("collapsed");
+          toggle.textContent = "Expand";
+        } else {
+          toggle.textContent = "Collapse";
+        }
+
+        toggle.addEventListener("click", () => {
+          body.classList.toggle("collapsed");
+          toggle.textContent = body.classList.contains("collapsed") ? "Expand" : "Collapse";
+        });
+
+        card.dataset.collapsibleReady = "true";
+      });
+    }
+
+    function detailTable(title, rows, columns) {
+      if (!rows || !rows.length) {
+        return `<h3>${esc(title)}</h3><p class="muted">No ${esc(title).toLowerCase()} recorded.</p>`;
+      }
+
+      const header = columns.map(col => `<th>${esc(col.label)}</th>`).join("");
+
+      const body = rows.map(row => `
+        <tr>
+          ${columns.map(col => `<td>${col.code ? `<code>${esc(row[col.key])}</code>` : esc(row[col.key])}</td>`).join("")}
+        </tr>
+      `).join("");
+
+      return `
+        <h3>${esc(title)}</h3>
+        <table>
+          <thead><tr>${header}</tr></thead>
+          <tbody>${body}</tbody>
+        </table>
+      `;
+    }
+
+
+    function renderAssetSelector(rows) {
+      const select = document.getElementById("asset-detail-select");
+      const button = document.getElementById("asset-detail-load");
+
+      if (!select || !button) return;
+
+      if (!rows || !rows.length) {
+        select.innerHTML = `<option value="">No assets available in this scope</option>`;
+        return;
+      }
+
+      select.innerHTML = `
+        <option value="">Select an asset from the current dashboard scope...</option>
+        ${rows.map(row => `
+          <option value="${esc(row.asset_key)}">
+            ${esc(row.current_ip)} | ${esc(row.mac_address)} | ${esc(row.asset_key)}
+          </option>
+        `).join("")}
+      `;
+
+      if (button.dataset.bound !== "true") {
+        button.addEventListener("click", () => {
+          if (select.value) {
+            loadAssetDetail(select.value);
+          }
+        });
+
+        select.addEventListener("change", () => {
+          if (select.value) {
+            loadAssetDetail(select.value);
+          }
+        });
+
+        button.dataset.bound = "true";
+      }
+    }
+
+    function renderAssetDetail(payload) {
+      const box = document.getElementById("asset-detail-body");
+
+      if (!box) return;
+
+      if (!payload || !payload.found) {
+        if (payload && payload.ambiguous && payload.matches && payload.matches.length) {
+          box.innerHTML = `
+            <p><strong>Multiple assets matched.</strong> Choose a network scope to disambiguate this identifier.</p>
+            ${detailTable("Matches", payload.matches, [
+              {key: "network_scope", label: "Scope", code: true},
+              {key: "current_ip", label: "IP", code: true},
+              {key: "mac_address", label: "MAC", code: true},
+              {key: "asset_key", label: "Asset", code: true}
+            ])}
+          `;
+          return;
+        }
+
+        box.innerHTML = `<p>${esc(payload && payload.message ? payload.message : "No asset selected.")}</p>`;
+        return;
+      }
+
+      const asset = payload.asset || {};
+      const observation = payload.latest_observation || {};
+      const annotation = payload.annotation || {};
+
+      box.innerHTML = `
+        <div class="detail-grid">
+          <div class="detail-box"><div class="label">Asset</div><code>${esc(asset.asset_key)}</code></div>
+          <div class="detail-box"><div class="label">Scope</div><code>${esc(asset.network_scope)}</code></div>
+          <div class="detail-box"><div class="label">Current IP</div><code>${esc(asset.current_ip)}</code></div>
+          <div class="detail-box"><div class="label">MAC</div><code>${esc(asset.mac_address)}</code></div>
+          <div class="detail-box"><div class="label">State</div>${esc(asset.state)}</div>
+          <div class="detail-box"><div class="label">Identity</div>${esc(asset.identity_class)}</div>
+          <div class="detail-box"><div class="label">First Seen</div>${esc(asset.first_seen_at)}</div>
+          <div class="detail-box"><div class="label">Last Seen</div>${esc(asset.last_seen_at)}</div>
+        </div>
+
+        <h3>Latest Observation</h3>
+        <div class="detail-grid">
+          <div class="detail-box"><div class="label">Scan</div><code>${esc(observation.scan_id)}</code></div>
+          <div class="detail-box"><div class="label">Device Type</div>${esc(observation.device_type)}</div>
+          <div class="detail-box"><div class="label">Severity</div>${esc(observation.severity)}</div>
+          <div class="detail-box"><div class="label">Identity Source</div>${esc(observation.identity_source)}</div>
+        </div>
+
+        <h3>Annotation</h3>
+        <div class="detail-grid">
+          <div class="detail-box"><div class="label">Owner</div>${esc(annotation.owner)}</div>
+          <div class="detail-box"><div class="label">Role</div>${esc(annotation.role)}</div>
+          <div class="detail-box"><div class="label">Criticality</div>${esc(annotation.criticality)}</div>
+          <div class="detail-box"><div class="label">Notes</div>${esc(annotation.notes)}</div>
+        </div>
+
+        ${detailTable("Open/Recent Alerts", payload.alerts, [
+          {key: "alert_id", label: "ID"},
+          {key: "status", label: "Status"},
+          {key: "severity", label: "Severity"},
+          {key: "event_type", label: "Type"},
+          {key: "summary", label: "Summary"}
+        ])}
+
+        ${detailTable("Recent Events", payload.events, [
+          {key: "event_id", label: "ID"},
+          {key: "severity", label: "Severity"},
+          {key: "event_type", label: "Type"},
+          {key: "scan_id", label: "Scan", code: true},
+          {key: "summary", label: "Summary"}
+        ])}
+
+        ${detailTable("Services", payload.services, [
+          {key: "protocol", label: "Proto"},
+          {key: "port", label: "Port"},
+          {key: "state", label: "State"},
+          {key: "service_name", label: "Service"},
+          {key: "product", label: "Product"},
+          {key: "version", label: "Version"}
+        ])}
+
+        ${detailTable("Findings", payload.findings, [
+          {key: "finding_id", label: "ID"},
+          {key: "name", label: "Name"},
+          {key: "service", label: "Service"},
+          {key: "port", label: "Port"},
+          {key: "score", label: "Score"},
+          {key: "evidence", label: "Evidence"}
+        ])}
+      `;
+    }
+
+    async function loadAssetDetail(identifier) {
+      const detail = await api(scopedPath(`/api/asset?identifier=${encodeURIComponent(identifier)}`));
+
+      renderAssetDetail(detail);
+
+      const card = document.getElementById("asset-detail-card");
+
+      if (card) {
+        card.scrollIntoView({behavior: "smooth", block: "start"});
+      }
+    }
+
+
+    function subjectToAssetIdentifier(subject) {
+      const value = String(subject || "");
+
+      const macMatch = value.match(/mac:[0-9a-f]{2}(:[0-9a-f]{2}){5}/i);
+      if (macMatch) return macMatch[0].toLowerCase();
+
+      const bareMacMatch = value.match(/[0-9a-f]{2}(:[0-9a-f]{2}){5}/i);
+      if (bareMacMatch) return bareMacMatch[0].toLowerCase();
+
+      const ipMatch = value.match(/\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b/);
+      if (ipMatch) return ipMatch[0];
+
+      return value;
+    }
+
+    function subjectButton(subject) {
+      const identifier = subjectToAssetIdentifier(subject);
+      return `
+        <button class="asset-link" data-asset-identifier="${esc(identifier)}">
+          <code>${esc(subject)}</code>
+        </button>
+      `;
+    }
+
+    function bindSubjectLinks(root) {
+      if (!root) return;
+
+      root.querySelectorAll("[data-asset-identifier]").forEach(button => {
+        if (button.dataset.bound === "true") return;
+
+        button.addEventListener("click", () => {
+          loadAssetDetail(button.dataset.assetIdentifier);
+        });
+
+        button.dataset.bound = "true";
+      });
+    }
+
+    function renderAssets(rows) {
+      const tbody = document.getElementById("asset-inventory-body");
+
+      renderAssetSelector(rows);
+
+      if (!tbody) return;
+
+      if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="7">No assets matched the current dashboard scope.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = rows.map(row => `
+        <tr>
+          <td><code>${esc(row.network_scope)}</code></td>
+          <td>${esc(row.state)}</td>
+          <td>${esc(row.identity_class)}</td>
+          <td><code>${esc(row.current_ip)}</code></td>
           <td><code>${esc(row.mac_address)}</code></td>
-          <td>${identityBadge(row.identity_confidence)}</td>
-          <td>${esc(row.owner)}</td>
-          <td>${esc(row.role)}</td>
-          <td>${esc(reason)}</td>
-        </tr>`;
-      }).join("") || `<tr><td colspan="9" class="muted">No risk subjects found.</td></tr>`;
+          <td>
+            <button class="asset-link" data-asset-identifier="${esc(row.asset_key)}">
+              <code>${esc(row.asset_key)}</code>
+            </button>
+          </td>
+          <td>${esc(row.last_seen_at)}</td>
+        </tr>
+      `).join("");
+
+      tbody.querySelectorAll("[data-asset-identifier]").forEach(button => {
+        button.addEventListener("click", () => {
+          loadAssetDetail(button.dataset.assetIdentifier);
+        });
+      });
+    }
+
+    function renderRisk(rows) {
+      const tbody = document.getElementById("risk-body");
+
+      if (!tbody) return;
+
+      if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="11">No risk subjects calculated for the current dashboard scope.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = rows.map(row => {
+        const reasons = row.reasons || [];
+        const primaryReason = reasons.length ? reasons[0] : "-";
+
+        return `
+          <tr>
+            <td><strong class="${esc(row.level)}">${esc(row.level)}</strong></td>
+            <td>${esc(row.score)}</td>
+            <td>${subjectButton(row.subject_key)}</td>
+            <td><code>${esc(row.ip_address)}</code></td>
+            <td><code>${esc(row.mac_address)}</code></td>
+            <td>${esc(row.owner)}</td>
+            <td>${esc(row.role)}</td>
+            <td>${esc(row.criticality)}</td>
+            <td>${esc(row.open_alerts)}</td>
+            <td>${esc(row.event_count)}</td>
+            <td>${esc(primaryReason)}</td>
+          </tr>
+        `;
+      }).join("");
+
+      bindSubjectLinks(tbody);
     }
 
     function renderEvents(rows) {
-      document.getElementById("events").innerHTML = rows.map(row => `
+      const tbody = document.getElementById("events-body");
+
+      if (!tbody) return;
+
+      if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="7">No recent delta events matched the current dashboard scope.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = rows.map(row => `
         <tr>
           <td>${esc(row.event_id)}</td>
           <td><code>${esc(row.scan_id)}</code></td>
           <td><code>${esc(row.baseline_scan_id)}</code></td>
-          <td><span class="${esc(row.severity)}">${esc(row.severity)}</span></td>
+          <td><strong class="${esc(row.severity)}">${esc(row.severity)}</strong></td>
           <td>${esc(row.event_type)}</td>
-          <td><code>${esc(row.subject_key)}</code></td>
-          <td><code>${esc(row.identity_ip_address)}</code></td>
-          <td><code>${esc(row.identity_mac_address)}</code></td>
-          <td>${identityBadge(row.identity_confidence)}</td>
-          <td>${esc(row.created_at)}</td>
+          <td>${subjectButton(row.subject_key)}</td>
           <td>${esc(row.summary)}</td>
         </tr>
-      `).join("") || `<tr><td colspan="11" class="muted">No events found.</td></tr>`;
+      `).join("");
+
+      bindSubjectLinks(tbody);
     }
 
     function renderAlerts(rows) {
-      document.getElementById("alerts").innerHTML = rows.map(row => `
+      const tbody = document.getElementById("alerts-body");
+
+      if (!tbody) return;
+
+      if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="6">No recent alerts matched the current dashboard scope.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = rows.map(row => `
         <tr>
           <td>${esc(row.alert_id)}</td>
           <td>${esc(row.status)}</td>
-          <td><span class="${esc(row.severity)}">${esc(row.severity)}</span></td>
-          <td><code>${esc(row.subject_key)}</code></td>
-          <td><code>${esc(row.identity_ip_address)}</code></td>
-          <td><code>${esc(row.identity_mac_address)}</code></td>
-          <td>${identityBadge(row.identity_confidence)}</td>
+          <td><strong class="${esc(row.severity)}">${esc(row.severity)}</strong></td>
+          <td>${subjectButton(row.subject_key)}</td>
+          <td>${esc(row.event_type)}</td>
           <td>${esc(row.summary)}</td>
         </tr>
-      `).join("") || `<tr><td colspan="8" class="muted">No alerts found.</td></tr>`;
+      `).join("");
+
+      bindSubjectLinks(tbody);
     }
 
     function renderAnnotations(rows) {
@@ -4633,10 +5762,13 @@ def dashboard_index_html():
 
     async function load() {
       try {
-        const [scopes, summary, scanContext, risk, events, alerts, annotations] = await Promise.all([
+        setupCollapsibleCards();
+
+        const [scopes, summary, scanContext, assets, risk, events, alerts, annotations] = await Promise.all([
           api("/api/scopes"),
           api(scopedPath("/api/summary")),
           api(scopedPath("/api/scan-context")),
+          api(scopedPath("/api/assets?limit=25")),
           api(scopedPath("/api/risk?limit=10")),
           api(scopedPath("/api/events?limit=20")),
           api(scopedPath("/api/alerts?limit=20")),
@@ -4646,6 +5778,7 @@ def dashboard_index_html():
         renderScopes(scopes);
         renderMetrics(summary);
         renderScanContext(scanContext);
+        renderAssets(assets);
         renderRisk(risk);
         renderEvents(events);
         renderAlerts(alerts);
@@ -4753,6 +5886,36 @@ def command_dashboard(args):
                     )
                     return
 
+            state = query.get("state", [""])[0].strip().upper() or None
+            identity = query.get("identity", [""])[0].strip().upper() or None
+
+            allowed_states = {"ACTIVE", "MISSING", "REMOVED", "EPHEMERAL_MISSING"}
+            allowed_identities = {"GLOBAL_MAC", "LOCAL_MAC", "IP_ONLY"}
+
+            if state and state not in allowed_states:
+                dashboard_json_response(
+                    self,
+                    {
+                        "error": "invalid_state",
+                        "state": state,
+                        "allowed": sorted(allowed_states),
+                    },
+                    status=400,
+                )
+                return
+
+            if identity and identity not in allowed_identities:
+                dashboard_json_response(
+                    self,
+                    {
+                        "error": "invalid_identity",
+                        "identity": identity,
+                        "allowed": sorted(allowed_identities),
+                    },
+                    status=400,
+                )
+                return
+
             connection = self.open_connection()
 
             try:
@@ -4762,6 +5925,29 @@ def command_dashboard(args):
                     dashboard_json_response(self, dashboard_summary_payload(connection, scope=scope))
                 elif route == "/api/scan-context":
                     dashboard_json_response(self, dashboard_scan_context_payload(connection, scope=scope))
+                elif route == "/api/assets":
+                    dashboard_json_response(
+                        self,
+                        dashboard_assets_payload(
+                            connection,
+                            limit,
+                            scope=scope,
+                            state=state,
+                            identity=identity,
+                        ),
+                    )
+                elif route == "/api/asset":
+                    identifier = query.get("identifier", query.get("asset_key", [""]))[0].strip()
+
+                    dashboard_json_response(
+                        self,
+                        dashboard_asset_detail_payload(
+                            connection,
+                            identifier,
+                            scope=scope,
+                            limit=limit,
+                        ),
+                    )
                 elif route == "/api/events":
                     dashboard_json_response(self, dashboard_events_payload(connection, limit, scope=scope))
                 elif route == "/api/alerts":
@@ -4811,7 +5997,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.5.1 subnet-aware network-state monitoring, investigation, risk prioritization, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.6.0 subnet-aware network-state monitoring, investigation, risk prioritization, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
@@ -4826,7 +6012,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("alerts"); p.add_argument("--status", choices=["OPEN", "ACKNOWLEDGED", "RESOLVED", "SUPPRESSED"], default="OPEN"); p.add_argument("--limit", type=int, default=50); p.add_argument("--scope")
     p = sub.add_parser("ack"); p.add_argument("alert_id", type=int); p.add_argument("--reason")
     p = sub.add_parser("suppress"); p.add_argument("alert_id", type=int); p.add_argument("--reason")
-    p = sub.add_parser("asset"); p.add_argument("identifier"); p.add_argument("--limit", type=int, default=20)
+    p = sub.add_parser("assets")
+    p.add_argument("--scope")
+    p.add_argument("--state", choices=["ACTIVE", "MISSING", "REMOVED", "EPHEMERAL_MISSING"])
+    p.add_argument("--identity", choices=["GLOBAL_MAC", "LOCAL_MAC", "IP_ONLY"])
+    p.add_argument("--limit", type=int, default=50)
+
+    p = sub.add_parser("asset")
+    p.add_argument("identifier")
+    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--scope")
     p = sub.add_parser("health"); p.add_argument("--limit", type=int, default=20)
     p = sub.add_parser("approve"); p.add_argument("scan_id")
     p = sub.add_parser("latest"); p.add_argument("--scope")
@@ -4879,6 +6074,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--severity")
     p.add_argument("--limit", type=int, default=100)
     p.add_argument("--risk-limit", type=int, default=10)
+    p.add_argument("--asset-limit", type=int, default=25)
+    p.add_argument("--scope")
     p.add_argument("--output", type=Path)
 
     sub.add_parser("paths")
@@ -4897,6 +6094,7 @@ def main() -> int:
         if args.command == "alerts": return command_alerts(args)
         if args.command == "ack": return set_alert_status(args, "ACKNOWLEDGED")
         if args.command == "suppress": return set_alert_status(args, "SUPPRESSED")
+        if args.command == "assets": return command_assets(args)
         if args.command == "asset": return command_asset(args)
         if args.command == "health": return command_health(args)
         if args.command == "approve": return command_approve(args)
