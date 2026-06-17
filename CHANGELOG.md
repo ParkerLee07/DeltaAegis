@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.5.0 — Read-Only Dashboard Foundation
+
+### Added
+
+- Added `dashboard` command.
+- Added local read-only dashboard at `127.0.0.1:8090` by default.
+- Added optional dashboard token protection with `--token`.
+- Added `/healthz` endpoint.
+- Added `/api/summary` endpoint.
+- Added `/api/scan-context` endpoint.
+- Added `/api/risk` endpoint.
+- Added `/api/events` endpoint.
+- Added `/api/alerts` endpoint.
+- Added `/api/annotations` endpoint.
+- Added NetSniper scan context panel showing latest scan, baseline scan, and delta comparison pairs.
+- Added scan freshness status.
+- Added observed asset, IP, MAC, and MAC+IP identity coverage counts.
+- Added dashboard identity confidence labels.
+- Added MAC and IP identity columns to dashboard risk, event, alert, and annotation tables.
+- Added dashboard explanation panel for first-time users.
+- Added risk and identity legend.
+- Added recommended next steps panel.
+
+### Changed
+
+- Expanded DeltaAegis from a CLI/reporting prototype into a local dashboard-backed monitoring console.
+- Improved digestibility for users who did not create the system by explaining scans, baselines, deltas, identity confidence, and risk scoring.
+
+### Security Notes
+
+- Dashboard is read-only in v0.5.0.
+- Dashboard does not run scans, modify alerts, change annotations, or perform remediation.
+- Dashboard binds to `127.0.0.1` by default.
+- Token protection is available with `--token`.
+- Public exposure should only be done behind proper access controls.
+
+### Notes
+
+- NetSniper ingestion compatibility is unchanged.
+- v0.5.0 is the foundation for future hosted dashboard work.
+- Future dashboard updates can add search, asset detail pages, alert detail pages, service deployment, and reverse-proxy guidance.
+
+---
+
 ## v0.4.0 — Risk Register
 
 ### Added
