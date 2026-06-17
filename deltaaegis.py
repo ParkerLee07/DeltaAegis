@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.5.0: delta-first network-state monitoring, investigation, risk prioritization, reporting, and dashboard console.
+"""DeltaAegis v0.5.1: subnet-aware network-state monitoring, investigation, risk prioritization, reporting, and dashboard console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
     scan_id TEXT PRIMARY KEY,
     manifest_path TEXT NOT NULL,
     target TEXT NOT NULL,
+    network_scope TEXT NOT NULL DEFAULT '',
     scanner_version TEXT NOT NULL,
     scan_profile TEXT NOT NULL,
     created_at TEXT NOT NULL,
@@ -195,7 +196,8 @@ CREATE TABLE IF NOT EXISTS delta_events (
 );
 
 CREATE TABLE IF NOT EXISTS asset_lifecycle (
-    asset_key TEXT PRIMARY KEY,
+    network_scope TEXT NOT NULL DEFAULT '',
+    asset_key TEXT NOT NULL,
     identity_class TEXT NOT NULL,
     state TEXT NOT NULL,
     missing_count INTEGER NOT NULL DEFAULT 0,
@@ -207,7 +209,8 @@ CREATE TABLE IF NOT EXISTS asset_lifecycle (
     last_seen_scan_id TEXT NOT NULL,
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
-    removed_at TEXT
+    removed_at TEXT,
+    PRIMARY KEY (network_scope, asset_key)
 );
 
 CREATE TABLE IF NOT EXISTS alerts (
@@ -271,6 +274,107 @@ def ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: 
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
 
+def backfill_snapshot_network_scopes(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        """
+        SELECT scan_id, target, network_scope
+        FROM snapshots
+        WHERE network_scope IS NULL OR network_scope = ''
+        """
+    ).fetchall()
+
+    for row in rows:
+        try:
+            scope = canonical_network_scope(row["target"])
+        except ValueError:
+            scope = str(row["target"] or "").strip()
+
+        connection.execute(
+            "UPDATE snapshots SET network_scope = ? WHERE scan_id = ?",
+            (scope, row["scan_id"]),
+        )
+
+
+def ensure_scoped_asset_lifecycle_schema(connection: sqlite3.Connection) -> None:
+    columns = [row[1] for row in connection.execute("PRAGMA table_info(asset_lifecycle)")]
+    pk_columns = [
+        row[1]
+        for row in connection.execute("PRAGMA table_info(asset_lifecycle)")
+        if int(row[5]) > 0
+    ]
+
+    if "network_scope" in columns and set(pk_columns) == {"network_scope", "asset_key"}:
+        return
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS asset_lifecycle_scoped_migration (
+            network_scope TEXT NOT NULL DEFAULT '',
+            asset_key TEXT NOT NULL,
+            identity_class TEXT NOT NULL,
+            state TEXT NOT NULL,
+            missing_count INTEGER NOT NULL DEFAULT 0,
+            current_ip TEXT NOT NULL,
+            mac_address TEXT,
+            vendor TEXT,
+            hostname TEXT,
+            first_seen_scan_id TEXT NOT NULL,
+            last_seen_scan_id TEXT NOT NULL,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            removed_at TEXT,
+            PRIMARY KEY (network_scope, asset_key)
+        )
+        """
+    )
+
+    has_network_scope = "network_scope" in columns
+    scope_expr = "COALESCE(s.network_scope, '')"
+
+    if has_network_scope:
+        scope_expr = "COALESCE(al.network_scope, s.network_scope, '')"
+
+    connection.execute(
+        f"""
+        INSERT OR IGNORE INTO asset_lifecycle_scoped_migration (
+            network_scope,
+            asset_key,
+            identity_class,
+            state,
+            missing_count,
+            current_ip,
+            mac_address,
+            vendor,
+            hostname,
+            first_seen_scan_id,
+            last_seen_scan_id,
+            first_seen_at,
+            last_seen_at,
+            removed_at
+        )
+        SELECT
+            {scope_expr},
+            al.asset_key,
+            al.identity_class,
+            al.state,
+            al.missing_count,
+            al.current_ip,
+            al.mac_address,
+            al.vendor,
+            al.hostname,
+            al.first_seen_scan_id,
+            al.last_seen_scan_id,
+            al.first_seen_at,
+            al.last_seen_at,
+            al.removed_at
+        FROM asset_lifecycle al
+        LEFT JOIN snapshots s ON s.scan_id = al.last_seen_scan_id
+        """
+    )
+
+    connection.execute("DROP TABLE asset_lifecycle")
+    connection.execute("ALTER TABLE asset_lifecycle_scoped_migration RENAME TO asset_lifecycle")
+
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(db_path)
@@ -285,7 +389,10 @@ def connect(db_path: Path) -> sqlite3.Connection:
     ensure_column(connection, "snapshots", "scan_started_at", "scan_started_at TEXT")
     ensure_column(connection, "snapshots", "scan_completed_at", "scan_completed_at TEXT")
     ensure_column(connection, "snapshots", "neighbors_captured_at", "neighbors_captured_at TEXT")
+    ensure_column(connection, "snapshots", "network_scope", "network_scope TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "asset_observations", "identity_class", "identity_class TEXT NOT NULL DEFAULT 'IP_ONLY'")
+    backfill_snapshot_network_scopes(connection)
+    ensure_scoped_asset_lifecycle_schema(connection)
     connection.commit()
     return connection
 
@@ -320,6 +427,27 @@ def analysis_by_ip(path: Path) -> dict[str, dict[str, Any]]:
     if not isinstance(raw, list):
         raise DeltaAegisError(f"analysis JSON must be a list: {path}")
     return {item["host"]: item for item in raw if isinstance(item, dict) and isinstance(item.get("host"), str)}
+
+
+def canonical_network_scope(target: str) -> str:
+    return str(ipaddress.ip_network(str(target).strip(), strict=False))
+
+
+def optional_network_scope(value: str | None) -> str | None:
+    if value is None:
+        return None
+
+    value = str(value).strip()
+
+    if not value:
+        return None
+
+    return canonical_network_scope(value)
+
+
+def snapshot_network_scope(snapshot_or_target) -> str:
+    target = getattr(snapshot_or_target, "target", snapshot_or_target)
+    return canonical_network_scope(str(target))
 
 
 def parse_target_network(target: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network:
@@ -535,8 +663,19 @@ def snapshot_exists(connection: sqlite3.Connection, scan_id: str) -> bool:
 
 
 def latest_accepted_snapshot(connection: sqlite3.Connection, target: str) -> sqlite3.Row | None:
-    return connection.execute("SELECT * FROM snapshots WHERE target = ? AND quality_status = 'ACCEPTED' ORDER BY created_at DESC, imported_at DESC LIMIT 1", (target,)).fetchone()
+    network_scope = canonical_network_scope(target)
 
+    return connection.execute(
+        """
+        SELECT *
+        FROM snapshots
+        WHERE network_scope = ?
+          AND quality_status = 'ACCEPTED'
+        ORDER BY created_at DESC, imported_at DESC
+        LIMIT 1
+        """,
+        (network_scope,),
+    ).fetchone()
 
 def assess_quality(snapshot: Snapshot, baseline: sqlite3.Row | None) -> tuple[str, str]:
     if snapshot.bundle_status != "COMPLETE":
@@ -559,8 +698,8 @@ def assess_quality(snapshot: Snapshot, baseline: sqlite3.Row | None) -> tuple[st
 
 
 def insert_snapshot(connection: sqlite3.Connection, snapshot: Snapshot, quality_status: str, quality_reason: str) -> None:
-    connection.execute("""INSERT INTO snapshots (scan_id, manifest_path, target, scanner_version, scan_profile, created_at, imported_at, bundle_status, quality_status, quality_reason, xml_exit_status, hosts_up, hosts_down, hosts_total, mac_backed_assets, identity_coverage, is_accepted_baseline, manifest_schema_version, profile_fingerprint, monitored_ports_json, protocols_json, discovery_interface, nmap_version, scan_started_at, scan_completed_at, neighbors_captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (snapshot.scan_id, snapshot.manifest_path, snapshot.target, snapshot.scanner_version, snapshot.scan_profile, snapshot.created_at, utc_now(), snapshot.bundle_status, quality_status, quality_reason, snapshot.xml_exit_status, snapshot.hosts_up, snapshot.hosts_down, snapshot.hosts_total, snapshot.mac_backed_assets, snapshot.identity_coverage, 1 if quality_status == "ACCEPTED" else 0, snapshot.manifest_schema_version, snapshot.profile_fingerprint, json.dumps(snapshot.monitored_ports), json.dumps(snapshot.protocols), snapshot.discovery_interface, snapshot.nmap_version, snapshot.scan_started_at, snapshot.scan_completed_at, snapshot.neighbors_captured_at))
+    connection.execute("""INSERT INTO snapshots (scan_id, manifest_path, target, network_scope, scanner_version, scan_profile, created_at, imported_at, bundle_status, quality_status, quality_reason, xml_exit_status, hosts_up, hosts_down, hosts_total, mac_backed_assets, identity_coverage, is_accepted_baseline, manifest_schema_version, profile_fingerprint, monitored_ports_json, protocols_json, discovery_interface, nmap_version, scan_started_at, scan_completed_at, neighbors_captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (snapshot.scan_id, snapshot.manifest_path, snapshot.target, snapshot_network_scope(snapshot), snapshot.scanner_version, snapshot.scan_profile, snapshot.created_at, utc_now(), snapshot.bundle_status, quality_status, quality_reason, snapshot.xml_exit_status, snapshot.hosts_up, snapshot.hosts_down, snapshot.hosts_total, snapshot.mac_backed_assets, snapshot.identity_coverage, 1 if quality_status == "ACCEPTED" else 0, snapshot.manifest_schema_version, snapshot.profile_fingerprint, json.dumps(snapshot.monitored_ports), json.dumps(snapshot.protocols), snapshot.discovery_interface, snapshot.nmap_version, snapshot.scan_started_at, snapshot.scan_completed_at, snapshot.neighbors_captured_at))
     for asset in snapshot.assets.values():
         connection.execute("""INSERT INTO asset_observations (scan_id, asset_key, identity_class, identity_confidence, identity_source, ip_address, mac_address, vendor, hostname, device_type, severity, score) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (snapshot.scan_id, asset.asset_key, asset.identity_class, asset.identity_confidence, asset.identity_source, asset.ip_address, asset.mac_address, asset.vendor, asset.hostname, asset.device_type, asset.severity, asset.score))
         for service in asset.services:
@@ -583,22 +722,80 @@ def event(event_type: str, severity: str, subject_key: str, summary: str, previo
     return {"event_type": event_type, "severity": severity, "subject_key": subject_key, "summary": summary, "previous_value": previous_value, "current_value": current_value}
 
 
-def reset_lifecycle(connection: sqlite3.Connection, scan_id: str, created_at: str, assets: dict[str, AssetObservation]) -> None:
-    connection.execute("DELETE FROM asset_lifecycle")
-    for asset in assets.values():
-        connection.execute("""INSERT INTO asset_lifecycle (asset_key, identity_class, state, missing_count, current_ip, mac_address, vendor, hostname, first_seen_scan_id, last_seen_scan_id, first_seen_at, last_seen_at, removed_at) VALUES (?, ?, 'ACTIVE', 0, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""", (asset.asset_key, asset.identity_class, asset.ip_address, asset.mac_address, asset.vendor, asset.hostname, scan_id, scan_id, created_at, created_at))
+def reset_lifecycle(
+    connection: sqlite3.Connection,
+    scan_id: str,
+    created_at: str,
+    assets: dict[str, AssetObservation],
+    network_scope: str,
+) -> None:
+    connection.execute(
+        "DELETE FROM asset_lifecycle WHERE network_scope = ?",
+        (network_scope,),
+    )
 
+    for asset in assets.values():
+        connection.execute(
+            """
+            INSERT INTO asset_lifecycle (
+                network_scope,
+                asset_key,
+                identity_class,
+                state,
+                missing_count,
+                current_ip,
+                mac_address,
+                vendor,
+                hostname,
+                first_seen_scan_id,
+                last_seen_scan_id,
+                first_seen_at,
+                last_seen_at,
+                removed_at
+            )
+            VALUES (?, ?, ?, 'ACTIVE', 0, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                network_scope,
+                asset.asset_key,
+                asset.identity_class,
+                asset.ip_address,
+                asset.mac_address,
+                asset.vendor,
+                asset.hostname,
+                scan_id,
+                scan_id,
+                created_at,
+                created_at,
+            ),
+        )
 
 def initialize_lifecycle(connection: sqlite3.Connection, snapshot: Snapshot) -> None:
-    reset_lifecycle(connection, snapshot.scan_id, snapshot.created_at, snapshot.assets)
-
+    reset_lifecycle(
+        connection,
+        snapshot.scan_id,
+        snapshot.created_at,
+        snapshot.assets,
+        snapshot_network_scope(snapshot),
+    )
 
 def lifecycle_events(connection: sqlite3.Connection, snapshot: Snapshot) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
-    existing = {row["asset_key"]: row for row in connection.execute("SELECT * FROM asset_lifecycle")}
+    network_scope = snapshot_network_scope(snapshot)
+
+    existing = {
+        row["asset_key"]: row
+        for row in connection.execute(
+            "SELECT * FROM asset_lifecycle WHERE network_scope = ?",
+            (network_scope,),
+        )
+    }
+
     current_keys = set(snapshot.assets)
+
     for key, asset in snapshot.assets.items():
         row = existing.get(key)
+
         if row is None:
             if asset.identity_class == "GLOBAL_MAC":
                 events.append(event("ASSET_FIRST_OBSERVED", "MEDIUM", key, f"Asset {key} was observed for the first time at {asset.ip_address}."))
@@ -606,8 +803,43 @@ def lifecycle_events(connection: sqlite3.Connection, snapshot: Snapshot) -> list
                 events.append(event("EPHEMERAL_IDENTITY_FIRST_OBSERVED", "INFO", key, f"Locally administered identity {key} was observed at {asset.ip_address}."))
             else:
                 events.append(event("IP_FIRST_OBSERVED", "LOW", key, f"IP address {asset.ip_address} was observed for the first time."))
-            connection.execute("""INSERT INTO asset_lifecycle (asset_key, identity_class, state, missing_count, current_ip, mac_address, vendor, hostname, first_seen_scan_id, last_seen_scan_id, first_seen_at, last_seen_at, removed_at) VALUES (?, ?, 'ACTIVE', 0, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""", (key, asset.identity_class, asset.ip_address, asset.mac_address, asset.vendor, asset.hostname, snapshot.scan_id, snapshot.scan_id, snapshot.created_at, snapshot.created_at))
+
+            connection.execute(
+                """
+                INSERT INTO asset_lifecycle (
+                    network_scope,
+                    asset_key,
+                    identity_class,
+                    state,
+                    missing_count,
+                    current_ip,
+                    mac_address,
+                    vendor,
+                    hostname,
+                    first_seen_scan_id,
+                    last_seen_scan_id,
+                    first_seen_at,
+                    last_seen_at,
+                    removed_at
+                )
+                VALUES (?, ?, ?, 'ACTIVE', 0, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    network_scope,
+                    key,
+                    asset.identity_class,
+                    asset.ip_address,
+                    asset.mac_address,
+                    asset.vendor,
+                    asset.hostname,
+                    snapshot.scan_id,
+                    snapshot.scan_id,
+                    snapshot.created_at,
+                    snapshot.created_at,
+                ),
+            )
             continue
+
         if row["state"] != "ACTIVE":
             if asset.identity_class == "GLOBAL_MAC":
                 events.append(event("ASSET_REAPPEARED", "INFO", key, f"Asset {key} reappeared at {asset.ip_address}."))
@@ -615,32 +847,113 @@ def lifecycle_events(connection: sqlite3.Connection, snapshot: Snapshot) -> list
                 events.append(event("EPHEMERAL_IDENTITY_REAPPEARED", "INFO", key, f"Locally administered identity {key} reappeared at {asset.ip_address}."))
             else:
                 events.append(event("IP_REAPPEARED", "INFO", key, f"IP address {asset.ip_address} reappeared."))
+
         if asset.identity_class == "GLOBAL_MAC" and row["current_ip"] != asset.ip_address:
             events.append(event("IP_CHANGED", "INFO", key, f"Asset {key} changed IP address from {row['current_ip']} to {asset.ip_address}.", row["current_ip"], asset.ip_address))
-        connection.execute("""UPDATE asset_lifecycle SET identity_class = ?, state = 'ACTIVE', missing_count = 0, current_ip = ?, mac_address = ?, vendor = COALESCE(?, vendor), hostname = COALESCE(?, hostname), last_seen_scan_id = ?, last_seen_at = ?, removed_at = NULL WHERE asset_key = ?""", (asset.identity_class, asset.ip_address, asset.mac_address, asset.vendor, asset.hostname, snapshot.scan_id, snapshot.created_at, key))
+
+        connection.execute(
+            """
+            UPDATE asset_lifecycle
+            SET
+                identity_class = ?,
+                state = 'ACTIVE',
+                missing_count = 0,
+                current_ip = ?,
+                mac_address = ?,
+                vendor = COALESCE(?, vendor),
+                hostname = COALESCE(?, hostname),
+                last_seen_scan_id = ?,
+                last_seen_at = ?,
+                removed_at = NULL
+            WHERE network_scope = ?
+              AND asset_key = ?
+            """,
+            (
+                asset.identity_class,
+                asset.ip_address,
+                asset.mac_address,
+                asset.vendor,
+                asset.hostname,
+                snapshot.scan_id,
+                snapshot.created_at,
+                network_scope,
+                key,
+            ),
+        )
+
     for key, row in existing.items():
         if key in current_keys:
             continue
+
         missing_count = int(row["missing_count"]) + 1
+
         if row["identity_class"] == "LOCAL_MAC":
             if row["state"] == "ACTIVE":
                 events.append(event("EPHEMERAL_IDENTITY_NOT_OBSERVED", "INFO", key, f"Locally administered identity {key} was not observed in the current accepted snapshot. Last known IP: {row['current_ip']}."))
-            connection.execute("UPDATE asset_lifecycle SET state = 'EPHEMERAL_MISSING', missing_count = ? WHERE asset_key = ?", (missing_count, key))
+
+            connection.execute(
+                """
+                UPDATE asset_lifecycle
+                SET state = 'EPHEMERAL_MISSING',
+                    missing_count = ?
+                WHERE network_scope = ?
+                  AND asset_key = ?
+                """,
+                (missing_count, network_scope, key),
+            )
+
         elif row["identity_class"] == "GLOBAL_MAC":
             if row["state"] == "ACTIVE":
                 events.append(event("ASSET_NOT_OBSERVED", "LOW", key, f"Previously observed asset {key} was not observed in the current accepted snapshot. Last known IP: {row['current_ip']}."))
-                connection.execute("UPDATE asset_lifecycle SET state = 'MISSING', missing_count = ? WHERE asset_key = ?", (missing_count, key))
+                connection.execute(
+                    """
+                    UPDATE asset_lifecycle
+                    SET state = 'MISSING',
+                        missing_count = ?
+                    WHERE network_scope = ?
+                      AND asset_key = ?
+                    """,
+                    (missing_count, network_scope, key),
+                )
             elif row["state"] != "REMOVED" and missing_count >= REMOVAL_THRESHOLD:
                 events.append(event("ASSET_REMOVED", "MEDIUM", key, f"Asset {key} has not been observed in {REMOVAL_THRESHOLD} consecutive accepted snapshots. Last known IP: {row['current_ip']}."))
-                connection.execute("UPDATE asset_lifecycle SET state = 'REMOVED', missing_count = ?, removed_at = ? WHERE asset_key = ?", (missing_count, snapshot.created_at, key))
+                connection.execute(
+                    """
+                    UPDATE asset_lifecycle
+                    SET state = 'REMOVED',
+                        missing_count = ?,
+                        removed_at = ?
+                    WHERE network_scope = ?
+                      AND asset_key = ?
+                    """,
+                    (missing_count, snapshot.created_at, network_scope, key),
+                )
             elif row["state"] != "REMOVED":
-                connection.execute("UPDATE asset_lifecycle SET missing_count = ? WHERE asset_key = ?", (missing_count, key))
+                connection.execute(
+                    """
+                    UPDATE asset_lifecycle
+                    SET missing_count = ?
+                    WHERE network_scope = ?
+                      AND asset_key = ?
+                    """,
+                    (missing_count, network_scope, key),
+                )
         else:
             if row["state"] == "ACTIVE":
                 events.append(event("IP_NOT_OBSERVED", "LOW", key, f"Previously observed IP address {row['current_ip']} was not observed in the current accepted snapshot."))
-            connection.execute("UPDATE asset_lifecycle SET state = 'MISSING', missing_count = ? WHERE asset_key = ?", (missing_count, key))
-    return events
 
+            connection.execute(
+                """
+                UPDATE asset_lifecycle
+                SET state = 'MISSING',
+                    missing_count = ?
+                WHERE network_scope = ?
+                  AND asset_key = ?
+                """,
+                (missing_count, network_scope, key),
+            )
+
+    return events
 
 def comparison_events(previous: dict[str, AssetObservation], current: dict[str, AssetObservation]) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
@@ -759,16 +1072,51 @@ def command_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
-def query_events(connection: sqlite3.Connection, limit: int, severity: str | None = None, event_type: str | None = None) -> list[sqlite3.Row]:
-    clauses, params = [], []
+def query_events(
+    connection: sqlite3.Connection,
+    limit: int,
+    severity: str | None = None,
+    event_type: str | None = None,
+    scope: str | None = None,
+) -> list[sqlite3.Row]:
+    clauses = []
+    params = []
+
     if severity:
-        clauses.append("severity = ?"); params.append(severity.upper())
+        clauses.append("e.severity = ?")
+        params.append(severity.upper())
+
     if event_type:
-        clauses.append("event_type = ?"); params.append(event_type.upper())
+        clauses.append("e.event_type = ?")
+        params.append(event_type.upper())
+
+    if scope:
+        clauses.append("s.network_scope = ?")
+        params.append(scope)
+
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     params.append(limit)
-    return connection.execute(f"SELECT event_id, created_at, severity, event_type, subject_key, summary FROM delta_events{where} ORDER BY event_id DESC LIMIT ?", tuple(params)).fetchall()
 
+    return connection.execute(
+        f"""
+        SELECT
+            e.event_id,
+            e.created_at,
+            e.severity,
+            e.event_type,
+            e.subject_key,
+            e.summary,
+            e.scan_id,
+            e.baseline_scan_id,
+            s.network_scope
+        FROM delta_events e
+        JOIN snapshots s ON s.scan_id = e.scan_id
+        {where}
+        ORDER BY e.event_id DESC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
 
 def print_event_rows(rows: Iterable[sqlite3.Row]) -> None:
     rows = list(rows)
@@ -780,26 +1128,114 @@ def print_event_rows(rows: Iterable[sqlite3.Row]) -> None:
 
 
 def command_events(args: argparse.Namespace) -> int:
-    print_event_rows(query_events(connect(args.db), args.limit, getattr(args, "severity", None), getattr(args, "event_type", None)))
+    scope = optional_network_scope(getattr(args, "scope", None))
+
+    print_event_rows(
+        query_events(
+            connect(args.db),
+            args.limit,
+            getattr(args, "severity", None),
+            getattr(args, "event_type", None),
+            scope,
+        )
+    )
+
+    return 0
+
+def command_scopes(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+
+    rows = connection.execute(
+        """
+        SELECT
+            network_scope,
+            COUNT(*) AS snapshots,
+            SUM(CASE WHEN quality_status = 'ACCEPTED' THEN 1 ELSE 0 END) AS accepted_snapshots,
+            MAX(created_at) AS latest_scan_at
+        FROM snapshots
+        GROUP BY network_scope
+        ORDER BY latest_scan_at DESC
+        """
+    ).fetchall()
+
+    if not rows:
+        print("No network scopes found.")
+        return 0
+
+    print("DeltaAegis Network Scopes")
+    print("=========================")
+    print()
+
+    for row in rows:
+        print(
+            f"{row['network_scope']:<18} "
+            f"snapshots={row['snapshots']} "
+            f"accepted={row['accepted_snapshots']} "
+            f"latest={row['latest_scan_at']}"
+        )
+
     return 0
 
 
 def command_snapshots(args: argparse.Namespace) -> int:
-    rows = connect(args.db).execute("SELECT scan_id, created_at, manifest_schema_version, target, scan_profile, quality_status, hosts_up, hosts_total, identity_coverage FROM snapshots ORDER BY created_at DESC, imported_at DESC LIMIT ?", (args.limit,)).fetchall()
+    connection = connect(args.db)
+    scope = optional_network_scope(getattr(args, "scope", None))
+
+    where = ""
+    params = []
+
+    if scope:
+        where = "WHERE network_scope = ?"
+        params.append(scope)
+
+    params.append(args.limit)
+
+    rows = connection.execute(
+        f"""
+        SELECT
+            scan_id,
+            created_at,
+            manifest_schema_version,
+            target,
+            network_scope,
+            scan_profile,
+            quality_status,
+            hosts_up,
+            hosts_total,
+            identity_coverage
+        FROM snapshots
+        {where}
+        ORDER BY created_at DESC, imported_at DESC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+
     for row in rows:
-        print(f"{row['scan_id']}  {row['quality_status']:<15}  hosts={row['hosts_up']}/{row['hosts_total']}  mac_identity={float(row['identity_coverage']):.0%}  schema={row['manifest_schema_version']}  profile={row['scan_profile']}  target={row['target']}")
+        print(
+            f"{row['scan_id']} {row['quality_status']:<15} "
+            f"hosts={row['hosts_up']}/{row['hosts_total']} "
+            f"mac_identity={float(row['identity_coverage']):.0%} "
+            f"scope={row['network_scope']} "
+            f"schema={row['manifest_schema_version']} "
+            f"profile={row['scan_profile']} "
+            f"target={row['target']}"
+        )
+
     return 0
 
 
 def command_summary(args: argparse.Namespace) -> int:
     connection = connect(args.db)
     snapshot_count = connection.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+    scope_count = connection.execute("SELECT COUNT(DISTINCT network_scope) FROM snapshots").fetchone()[0]
     accepted_count = connection.execute("SELECT COUNT(*) FROM snapshots WHERE quality_status = 'ACCEPTED'").fetchone()[0]
     event_count = connection.execute("SELECT COUNT(*) FROM delta_events").fetchone()[0]
     open_alerts = connection.execute("SELECT COUNT(*) FROM alerts WHERE status = 'OPEN'").fetchone()[0]
     latest = connection.execute("SELECT scan_id, quality_status, hosts_up, identity_coverage FROM snapshots ORDER BY created_at DESC LIMIT 1").fetchone()
-    print("DeltaAegis v0.5.0 Summary")
+    print("DeltaAegis v0.5.1 Summary")
     print(f"Snapshots imported: {snapshot_count}")
+    print(f"Network scopes: {scope_count}")
     print(f"Accepted snapshots: {accepted_count}")
     print(f"Delta events:       {event_count}")
     print(f"Open alerts:        {open_alerts}")
@@ -818,7 +1254,13 @@ def command_approve(args: argparse.Namespace) -> int:
         return 0
     previous = latest_accepted_snapshot(connection, row["target"])
     assets = load_assets_from_db(connection, args.scan_id)
-    reset_lifecycle(connection, args.scan_id, row["created_at"], assets)
+    reset_lifecycle(
+        connection,
+        args.scan_id,
+        row["created_at"],
+        assets,
+        row["network_scope"],
+    )
     connection.execute("UPDATE snapshots SET quality_status = 'ACCEPTED', quality_reason = ?, is_accepted_baseline = 1 WHERE scan_id = ?", ("Manually approved as the new baseline by the operator.", args.scan_id))
     approval = event("PROFILE_BASELINE_APPROVED", "INFO", f"scan:{args.scan_id}", "Operator approved this reviewed snapshot as the new comparison baseline.")
     store_events(connection, args.scan_id, previous["scan_id"] if previous else None, [approval], args.events)
@@ -829,15 +1271,49 @@ def command_approve(args: argparse.Namespace) -> int:
 
 def command_alerts(args: argparse.Namespace) -> int:
     connection = connect(args.db)
-    rows = connection.execute("SELECT alert_id, status, severity, event_type, subject_key, summary, opened_at FROM alerts WHERE status = ? ORDER BY alert_id DESC LIMIT ?", (args.status.upper(), args.limit)).fetchall()
+    scope = optional_network_scope(getattr(args, "scope", None))
+
+    sql = """
+        SELECT DISTINCT
+            a.alert_id,
+            a.status,
+            a.severity,
+            a.event_type,
+            a.subject_key,
+            a.summary,
+            a.opened_at
+        FROM alerts a
+        LEFT JOIN delta_events e ON e.event_id = a.last_event_id
+        LEFT JOIN snapshots s ON s.scan_id = e.scan_id
+        WHERE a.status = ?
+    """
+
+    params = [args.status.upper()]
+
+    if scope:
+        sql += " AND s.network_scope = ?"
+        params.append(scope)
+
+    sql += " ORDER BY a.alert_id DESC LIMIT ?"
+    params.append(args.limit)
+
+    rows = connection.execute(sql, tuple(params)).fetchall()
+
     if not rows:
-        print(f"No {args.status.upper()} alerts found.")
+        scope_note = f" in scope {scope}" if scope else ""
+        print(f"No {args.status.upper()} alerts found{scope_note}.")
+
     for row in rows:
-        print(f"{row['alert_id']:>5}  {row['status']:<12}  {row['severity']:<6}  {row['event_type']:<30}  {row['subject_key']}")
-        print(f"       {row['summary']}")
+        print(
+            f"{row['alert_id']:>5} "
+            f"{row['status']:<12} "
+            f"{row['severity']:<6} "
+            f"{row['event_type']:<30} "
+            f"{row['subject_key']}"
+        )
+        print(f"      {row['summary']}")
+
     return 0
-
-
 
 def set_alert_status(args, status):
     connection = connect(args.db)
@@ -942,21 +1418,48 @@ def command_health(args: argparse.Namespace) -> int:
 
 
 def command_latest(args: argparse.Namespace) -> int:
-    row = connect(args.db).execute("SELECT * FROM snapshots WHERE quality_status='ACCEPTED' ORDER BY created_at DESC, imported_at DESC LIMIT 1").fetchone()
-    if row is None:
-        print("No accepted DeltaAegis snapshot has been imported yet."); return 0
-    print("Latest Accepted Snapshot\n────────────────────────────────────────")
-    print(f"Snapshot ID:        {row['scan_id']}")
-    print(f"Quality:            {row['quality_status']}")
-    print(f"Hosts observed:     {row['hosts_up']}/{row['hosts_total']}")
-    print(f"MAC identity:       {float(row['identity_coverage']):.0%}")
-    print(f"Manifest schema:    {row['manifest_schema_version']}")
-    print(f"Scanner version:    {row['scanner_version']}")
-    print(f"Scan profile:       {row['scan_profile']}")
-    print(f"Target:             {row['target']}")
+    connection = connect(args.db)
+    scope = optional_network_scope(getattr(args, "scope", None))
+
+    if scope:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM snapshots
+            WHERE quality_status = 'ACCEPTED'
+              AND network_scope = ?
+            ORDER BY created_at DESC, imported_at DESC
+            LIMIT 1
+            """,
+            (scope,),
+        ).fetchone()
+    else:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM snapshots
+            WHERE quality_status = 'ACCEPTED'
+            ORDER BY created_at DESC, imported_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    if not row:
+        if scope:
+            print(f"No accepted snapshot found for scope {scope}.")
+        else:
+            print("No accepted snapshots.")
+        return 1
+
+    print(f"Scan ID: {row['scan_id']}")
+    print(f"Target: {row['target']}")
+    print(f"Network scope: {row['network_scope']}")
+    print(f"Created: {row['created_at']}")
+    print(f"Hosts: {row['hosts_up']}/{row['hosts_total']}")
+    print(f"MAC identity: {float(row['identity_coverage']):.0%}")
+    print(f"Quality: {row['quality_status']}")
+
     return 0
-
-
 
 def command_paths(args):
     print(f"Database: {args.db}")
@@ -1421,12 +1924,19 @@ def subject_identity_candidates(subject_key):
     return candidates, ip_candidates, mac_candidates
 
 
-def fetch_subject_identity(connection, subject_key):
+def fetch_subject_identity(connection, subject_key, scope=None):
     candidates, ip_candidates, mac_candidates = subject_identity_candidates(subject_key)
+
+    lifecycle_scope_clause = ""
+    lifecycle_params = []
+
+    if scope:
+        lifecycle_scope_clause = " AND network_scope = ?"
+        lifecycle_params.append(scope)
 
     for candidate in candidates:
         row = connection.execute(
-            """
+            f"""
             SELECT
                 asset_key,
                 current_ip AS ip_address,
@@ -1434,11 +1944,13 @@ def fetch_subject_identity(connection, subject_key):
                 vendor,
                 hostname,
                 state,
-                last_seen_at
+                last_seen_at,
+                network_scope
             FROM asset_lifecycle
             WHERE asset_key = ?
+            {lifecycle_scope_clause}
             """,
-            (candidate,),
+            (candidate, *lifecycle_params),
         ).fetchone()
 
         if row is not None:
@@ -1446,7 +1958,7 @@ def fetch_subject_identity(connection, subject_key):
 
     for ip_address in ip_candidates:
         row = connection.execute(
-            """
+            f"""
             SELECT
                 asset_key,
                 current_ip AS ip_address,
@@ -1454,11 +1966,13 @@ def fetch_subject_identity(connection, subject_key):
                 vendor,
                 hostname,
                 state,
-                last_seen_at
+                last_seen_at,
+                network_scope
             FROM asset_lifecycle
             WHERE current_ip = ?
+            {lifecycle_scope_clause}
             """,
-            (ip_address,),
+            (ip_address, *lifecycle_params),
         ).fetchone()
 
         if row is not None:
@@ -1466,7 +1980,7 @@ def fetch_subject_identity(connection, subject_key):
 
     for mac_address in mac_candidates:
         row = connection.execute(
-            """
+            f"""
             SELECT
                 asset_key,
                 current_ip AS ip_address,
@@ -1474,19 +1988,28 @@ def fetch_subject_identity(connection, subject_key):
                 vendor,
                 hostname,
                 state,
-                last_seen_at
+                last_seen_at,
+                network_scope
             FROM asset_lifecycle
             WHERE mac_address = ?
+            {lifecycle_scope_clause}
             """,
-            (mac_address,),
+            (mac_address, *lifecycle_params),
         ).fetchone()
 
         if row is not None:
             return dict(row)
 
+    observation_scope_clause = ""
+    observation_params = []
+
+    if scope:
+        observation_scope_clause = " AND s.network_scope = ?"
+        observation_params.append(scope)
+
     for candidate in candidates:
         row = connection.execute(
-            """
+            f"""
             SELECT
                 ao.asset_key,
                 ao.ip_address,
@@ -1494,14 +2017,16 @@ def fetch_subject_identity(connection, subject_key):
                 ao.vendor,
                 ao.hostname,
                 'OBSERVED' AS state,
-                s.created_at AS last_seen_at
+                s.created_at AS last_seen_at,
+                s.network_scope
             FROM asset_observations ao
             JOIN snapshots s ON s.scan_id = ao.scan_id
             WHERE ao.asset_key = ?
+            {observation_scope_clause}
             ORDER BY s.created_at DESC, s.imported_at DESC
             LIMIT 1
             """,
-            (candidate,),
+            (candidate, *observation_params),
         ).fetchone()
 
         if row is not None:
@@ -1509,7 +2034,7 @@ def fetch_subject_identity(connection, subject_key):
 
     for ip_address in ip_candidates:
         row = connection.execute(
-            """
+            f"""
             SELECT
                 ao.asset_key,
                 ao.ip_address,
@@ -1517,14 +2042,16 @@ def fetch_subject_identity(connection, subject_key):
                 ao.vendor,
                 ao.hostname,
                 'OBSERVED' AS state,
-                s.created_at AS last_seen_at
+                s.created_at AS last_seen_at,
+                s.network_scope
             FROM asset_observations ao
             JOIN snapshots s ON s.scan_id = ao.scan_id
             WHERE ao.ip_address = ?
+            {observation_scope_clause}
             ORDER BY s.created_at DESC, s.imported_at DESC
             LIMIT 1
             """,
-            (ip_address,),
+            (ip_address, *observation_params),
         ).fetchone()
 
         if row is not None:
@@ -1532,7 +2059,7 @@ def fetch_subject_identity(connection, subject_key):
 
     for mac_address in mac_candidates:
         row = connection.execute(
-            """
+            f"""
             SELECT
                 ao.asset_key,
                 ao.ip_address,
@@ -1540,14 +2067,16 @@ def fetch_subject_identity(connection, subject_key):
                 ao.vendor,
                 ao.hostname,
                 'OBSERVED' AS state,
-                s.created_at AS last_seen_at
+                s.created_at AS last_seen_at,
+                s.network_scope
             FROM asset_observations ao
             JOIN snapshots s ON s.scan_id = ao.scan_id
             WHERE ao.mac_address = ?
+            {observation_scope_clause}
             ORDER BY s.created_at DESC, s.imported_at DESC
             LIMIT 1
             """,
-            (mac_address,),
+            (mac_address, *observation_params),
         ).fetchone()
 
         if row is not None:
@@ -1564,9 +2093,8 @@ def fetch_subject_identity(connection, subject_key):
         "hostname": None,
         "state": "UNKNOWN",
         "last_seen_at": None,
+        "network_scope": scope,
     }
-
-
 
 def identity_confidence_label(ip_address, mac_address):
     ip_value = str(ip_address or "").strip().lower()
@@ -1586,8 +2114,8 @@ def identity_confidence_label(ip_address, mac_address):
 
     return "Unknown identity: no MAC/IP mapping found"
 
-def apply_identity_to_risk_record(connection, subject_key, record):
-    identity = fetch_subject_identity(connection, subject_key)
+def apply_identity_to_risk_record(connection, subject_key, record, scope=None):
+    identity = fetch_subject_identity(connection, subject_key, scope=scope)
 
     record["identity_asset_key"] = identity.get("asset_key")
     record["ip_address"] = identity.get("ip_address")
@@ -1596,6 +2124,7 @@ def apply_identity_to_risk_record(connection, subject_key, record):
     record["vendor"] = identity.get("vendor")
     record["identity_state"] = identity.get("state")
     record["identity_last_seen_at"] = identity.get("last_seen_at")
+    record["identity_network_scope"] = identity.get("network_scope")
     record["identity_confidence"] = identity_confidence_label(
         record.get("ip_address"),
         record.get("mac_address"),
@@ -1603,19 +2132,23 @@ def apply_identity_to_risk_record(connection, subject_key, record):
 
     return record
 
-
-def dashboard_enrich_subject_rows(connection, rows, subject_field="subject_key"):
+def dashboard_enrich_subject_rows(connection, rows, subject_field="subject_key", scope=None):
     enriched = []
 
     for row in rows:
         item = dict(row)
-        identity = fetch_subject_identity(connection, item.get(subject_field))
+        identity = fetch_subject_identity(
+            connection,
+            item.get(subject_field),
+            scope=scope,
+        )
 
         item["identity_asset_key"] = identity.get("asset_key")
         item["identity_ip_address"] = identity.get("ip_address")
         item["identity_mac_address"] = identity.get("mac_address")
         item["identity_hostname"] = identity.get("hostname")
         item["identity_vendor"] = identity.get("vendor")
+        item["identity_network_scope"] = identity.get("network_scope")
         item["identity_confidence"] = identity_confidence_label(
             item.get("identity_ip_address"),
             item.get("identity_mac_address"),
@@ -1625,7 +2158,7 @@ def dashboard_enrich_subject_rows(connection, rows, subject_field="subject_key")
 
     return enriched
 
-def build_risk_register(connection, limit, subject_filter=None):
+def build_risk_register(connection, limit, subject_filter=None, scope=None):
     subjects = {}
 
     def ensure(subject_key):
@@ -1642,13 +2175,27 @@ def build_risk_register(connection, limit, subject_filter=None):
 
         return subjects[subject_key]
 
+    event_scope_clause = ""
+    event_params = []
+
+    if scope:
+        event_scope_clause = "JOIN snapshots s ON s.scan_id = e.scan_id WHERE s.network_scope = ?"
+        event_params.append(scope)
+
     event_rows = connection.execute(
-        """
-        SELECT subject_key, severity, event_type, created_at, summary
-        FROM delta_events
-        ORDER BY event_id DESC
+        f"""
+        SELECT
+            e.subject_key,
+            e.severity,
+            e.event_type,
+            e.created_at,
+            e.summary
+        FROM delta_events e
+        {event_scope_clause}
+        ORDER BY e.event_id DESC
         LIMIT 500
-        """
+        """,
+        tuple(event_params),
     ).fetchall()
 
     for row in event_rows:
@@ -1671,13 +2218,33 @@ def build_risk_register(connection, limit, subject_filter=None):
             f"{severity} event observed: {event_type}",
         )
 
+    alert_scope_clause = ""
+    alert_params = []
+
+    if scope:
+        alert_scope_clause = """
+        LEFT JOIN delta_events e ON e.event_id = a.last_event_id
+        LEFT JOIN snapshots s ON s.scan_id = e.scan_id
+        WHERE s.network_scope = ?
+        """
+        alert_params.append(scope)
+
     alert_rows = connection.execute(
-        """
-        SELECT alert_id, status, severity, event_type, subject_key, summary, last_seen_at
-        FROM alerts
-        ORDER BY alert_id DESC
+        f"""
+        SELECT
+            a.alert_id,
+            a.status,
+            a.severity,
+            a.event_type,
+            a.subject_key,
+            a.summary,
+            a.last_seen_at
+        FROM alerts a
+        {alert_scope_clause}
+        ORDER BY a.alert_id DESC
         LIMIT 500
-        """
+        """,
+        tuple(alert_params),
     ).fetchall()
 
     for row in alert_rows:
@@ -1714,7 +2281,7 @@ def build_risk_register(connection, limit, subject_filter=None):
             record["latest_alert_at"] = row["last_seen_at"]
 
     for subject_key, record in subjects.items():
-        apply_identity_to_risk_record(connection, subject_key, record)
+        apply_identity_to_risk_record(connection, subject_key, record, scope=scope)
 
         score = 0
 
@@ -1831,19 +2398,28 @@ def print_risk_record(record, detailed=False):
 
 def command_risk(args):
     connection = connect(args.db)
+    scope = optional_network_scope(getattr(args, "scope", None))
 
     rows = build_risk_register(
         connection,
         args.limit,
         subject_filter=args.subject,
+        scope=scope,
     )
 
     print("DeltaAegis Risk Register")
     print("========================")
+
+    if scope:
+        print(f"Network scope: {scope}")
+
     print()
 
     if not rows:
-        print("No risk subjects were found.")
+        if scope:
+            print(f"No risk subjects were found in scope {scope}.")
+        else:
+            print("No risk subjects were found.")
         return 0
 
     for record in rows:
@@ -1851,14 +2427,15 @@ def command_risk(args):
 
     return 0
 
-
 def command_asset_risk(args):
     connection = connect(args.db)
+    scope = optional_network_scope(getattr(args, "scope", None))
 
     rows = build_risk_register(
         connection,
         None,
         subject_filter=args.subject_key,
+        scope=scope,
     )
 
     exact = [
@@ -1870,6 +2447,10 @@ def command_asset_risk(args):
         rows = exact
 
     print(f"Asset Risk: {args.subject_key}")
+
+    if scope:
+        print(f"Network scope: {scope}")
+
     print("=" * (12 + len(args.subject_key)))
     print()
 
@@ -1881,7 +2462,6 @@ def command_asset_risk(args):
         print_risk_record(record, detailed=True)
 
     return 0
-
 
 def append_report_risk_section(lines, risk_rows):
     lines.append("## Top Risk Subjects")
@@ -2770,46 +3350,164 @@ def dashboard_count(connection, table, where=None):
     return int(row["count"])
 
 
-def dashboard_summary_payload(connection):
-    alert_rows = dashboard_safe_query(
-        connection,
+def dashboard_scopes_payload(connection):
+    rows = connection.execute(
         """
-        SELECT status, COUNT(*) AS count
-        FROM alerts
-        GROUP BY status
-        ORDER BY status
-        """,
-    )
+        SELECT
+            s.network_scope,
+            COUNT(*) AS snapshots,
+            SUM(CASE WHEN s.quality_status = 'ACCEPTED' THEN 1 ELSE 0 END) AS accepted_snapshots,
+            MAX(s.created_at) AS latest_scan_at,
+            COALESCE(ev.event_count, 0) AS events,
+            COALESCE(al.open_alerts, 0) AS open_alerts
+        FROM snapshots s
+        LEFT JOIN (
+            SELECT
+                snap.network_scope AS network_scope,
+                COUNT(e.event_id) AS event_count
+            FROM delta_events e
+            JOIN snapshots snap ON snap.scan_id = e.scan_id
+            GROUP BY snap.network_scope
+        ) ev ON ev.network_scope = s.network_scope
+        LEFT JOIN (
+            SELECT
+                snap.network_scope AS network_scope,
+                COUNT(DISTINCT a.alert_id) AS open_alerts
+            FROM alerts a
+            JOIN delta_events e ON e.event_id = a.last_event_id
+            JOIN snapshots snap ON snap.scan_id = e.scan_id
+            WHERE a.status = 'OPEN'
+            GROUP BY snap.network_scope
+        ) al ON al.network_scope = s.network_scope
+        GROUP BY s.network_scope
+        ORDER BY latest_scan_at DESC
+        """
+    ).fetchall()
 
-    event_rows = dashboard_safe_query(
-        connection,
-        """
-        SELECT severity, COUNT(*) AS count
-        FROM delta_events
-        GROUP BY severity
-        ORDER BY count DESC, severity ASC
-        """,
-    )
+    return [dict(row) for row in rows]
+
+def dashboard_summary_payload(connection, scope=None):
+    if scope:
+        snapshot_count = connection.execute(
+            "SELECT COUNT(*) AS count FROM snapshots WHERE network_scope = ?",
+            (scope,),
+        ).fetchone()["count"]
+
+        event_count = connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM delta_events e
+            JOIN snapshots s ON s.scan_id = e.scan_id
+            WHERE s.network_scope = ?
+            """,
+            (scope,),
+        ).fetchone()["count"]
+
+        alert_count = connection.execute(
+            """
+            SELECT COUNT(DISTINCT a.alert_id) AS count
+            FROM alerts a
+            LEFT JOIN delta_events e ON e.event_id = a.last_event_id
+            LEFT JOIN snapshots s ON s.scan_id = e.scan_id
+            WHERE s.network_scope = ?
+            """,
+            (scope,),
+        ).fetchone()["count"]
+
+        open_alert_count = connection.execute(
+            """
+            SELECT COUNT(DISTINCT a.alert_id) AS count
+            FROM alerts a
+            LEFT JOIN delta_events e ON e.event_id = a.last_event_id
+            LEFT JOIN snapshots s ON s.scan_id = e.scan_id
+            WHERE a.status = 'OPEN'
+              AND s.network_scope = ?
+            """,
+            (scope,),
+        ).fetchone()["count"]
+
+        annotation_count = connection.execute(
+            """
+            SELECT COUNT(DISTINCT aa.asset_key) AS count
+            FROM asset_annotations aa
+            JOIN asset_observations ao ON ao.asset_key = aa.asset_key
+            JOIN snapshots s ON s.scan_id = ao.scan_id
+            WHERE s.network_scope = ?
+            """,
+            (scope,),
+        ).fetchone()["count"]
+
+        alert_rows = dashboard_safe_query(
+            connection,
+            """
+            SELECT a.status, COUNT(DISTINCT a.alert_id) AS count
+            FROM alerts a
+            LEFT JOIN delta_events e ON e.event_id = a.last_event_id
+            LEFT JOIN snapshots s ON s.scan_id = e.scan_id
+            WHERE s.network_scope = ?
+            GROUP BY a.status
+            ORDER BY a.status
+            """,
+            (scope,),
+        )
+
+        event_rows = dashboard_safe_query(
+            connection,
+            """
+            SELECT e.severity, COUNT(*) AS count
+            FROM delta_events e
+            JOIN snapshots s ON s.scan_id = e.scan_id
+            WHERE s.network_scope = ?
+            GROUP BY e.severity
+            ORDER BY count DESC, e.severity ASC
+            """,
+            (scope,),
+        )
+    else:
+        snapshot_count = dashboard_count(connection, "snapshots")
+        event_count = dashboard_count(connection, "delta_events")
+        alert_count = dashboard_count(connection, "alerts")
+        open_alert_count = dashboard_count(connection, "alerts", "status = 'OPEN'")
+        annotation_count = dashboard_count(connection, "asset_annotations")
+
+        alert_rows = dashboard_safe_query(
+            connection,
+            """
+            SELECT status, COUNT(*) AS count
+            FROM alerts
+            GROUP BY status
+            ORDER BY status
+            """,
+        )
+
+        event_rows = dashboard_safe_query(
+            connection,
+            """
+            SELECT severity, COUNT(*) AS count
+            FROM delta_events
+            GROUP BY severity
+            ORDER BY count DESC, severity ASC
+            """,
+        )
 
     risk_rows = []
 
     try:
-        risk_rows = build_risk_register(connection, 5)
+        risk_rows = build_risk_register(connection, 5, scope=scope)
     except Exception:
         risk_rows = []
 
     return {
-        "snapshots": dashboard_count(connection, "snapshots"),
-        "events": dashboard_count(connection, "delta_events"),
-        "alerts": dashboard_count(connection, "alerts"),
-        "open_alerts": dashboard_count(connection, "alerts", "status = 'OPEN'"),
-        "asset_annotations": dashboard_count(connection, "asset_annotations"),
+        "selected_scope": scope,
+        "snapshots": int(snapshot_count or 0),
+        "events": int(event_count or 0),
+        "alerts": int(alert_count or 0),
+        "open_alerts": int(open_alert_count or 0),
+        "asset_annotations": int(annotation_count or 0),
         "alert_status_counts": alert_rows,
         "event_severity_counts": event_rows,
         "top_risks": risk_rows,
     }
-
-
 
 def dashboard_table_columns(connection, table_name):
     try:
@@ -2860,25 +3558,34 @@ def dashboard_snapshot_select_columns(connection):
     return selected
 
 
-def dashboard_snapshot_rows(connection, limit=2):
+def dashboard_snapshot_rows(connection, limit=2, scope=None):
     selected = dashboard_snapshot_select_columns(connection)
     order_clause = dashboard_snapshot_order_clause(connection)
+
+    where = ""
+    params = []
+
+    if scope:
+        where = "WHERE network_scope = ?"
+        params.append(scope)
+
+    params.append(limit)
 
     try:
         rows = connection.execute(
             f"""
             SELECT {", ".join(selected)}
             FROM snapshots
+            {where}
             ORDER BY {order_clause}
             LIMIT ?
             """,
-            (limit,),
+            tuple(params),
         ).fetchall()
     except Exception:
         return []
 
     return [dict(row) for row in rows]
-
 
 def dashboard_snapshot_asset_summary(connection, scan_id):
     if not scan_id:
@@ -2981,30 +3688,41 @@ def dashboard_enrich_snapshot(connection, snapshot):
     return item
 
 
-def dashboard_delta_scan_pairs(connection, limit=10):
+def dashboard_delta_scan_pairs(connection, limit=10, scope=None):
+    where = ""
+    params = []
+
+    if scope:
+        where = "WHERE snap.network_scope = ?"
+        params.append(scope)
+
+    params.append(limit)
+
     try:
         rows = connection.execute(
-            """
+            f"""
             SELECT
-                scan_id,
-                baseline_scan_id,
+                e.scan_id,
+                e.baseline_scan_id,
+                snap.network_scope,
                 COUNT(*) AS event_count,
-                MAX(created_at) AS latest_event_at
-            FROM delta_events
-            GROUP BY scan_id, baseline_scan_id
+                MAX(e.created_at) AS latest_event_at
+            FROM delta_events e
+            JOIN snapshots snap ON snap.scan_id = e.scan_id
+            {where}
+            GROUP BY e.scan_id, e.baseline_scan_id, snap.network_scope
             ORDER BY latest_event_at DESC, event_count DESC
             LIMIT ?
             """,
-            (limit,),
+            tuple(params),
         ).fetchall()
     except Exception:
         return []
 
     return [dict(row) for row in rows]
 
-
-def dashboard_scan_context_payload(connection):
-    snapshots = dashboard_snapshot_rows(connection, 2)
+def dashboard_scan_context_payload(connection, scope=None):
+    snapshots = dashboard_snapshot_rows(connection, 2, scope=scope)
 
     latest_scan = dashboard_enrich_snapshot(
         connection,
@@ -3017,81 +3735,130 @@ def dashboard_scan_context_payload(connection):
     )
 
     return {
+        "selected_scope": scope,
         "latest_scan": latest_scan,
         "baseline_scan": baseline_scan,
-        "delta_scan_pairs": dashboard_delta_scan_pairs(connection, 10),
+        "delta_scan_pairs": dashboard_delta_scan_pairs(connection, 10, scope=scope),
     }
 
-def dashboard_events_payload(connection, limit):
+def dashboard_events_payload(connection, limit, scope=None):
+    where = ""
+    params = []
+
+    if scope:
+        where = "WHERE s.network_scope = ?"
+        params.append(scope)
+
+    params.append(limit)
+
     rows = dashboard_safe_query(
         connection,
-        """
+        f"""
         SELECT
-            event_id,
-            scan_id,
-            baseline_scan_id,
-            created_at,
-            severity,
-            event_type,
-            subject_key,
-            summary
-        FROM delta_events
-        ORDER BY event_id DESC
+            e.event_id,
+            e.scan_id,
+            e.baseline_scan_id,
+            s.network_scope,
+            e.created_at,
+            e.severity,
+            e.event_type,
+            e.subject_key,
+            e.summary
+        FROM delta_events e
+        JOIN snapshots s ON s.scan_id = e.scan_id
+        {where}
+        ORDER BY e.event_id DESC
         LIMIT ?
         """,
-        (limit,),
+        tuple(params),
     )
 
-    return dashboard_enrich_subject_rows(connection, rows)
+    return dashboard_enrich_subject_rows(connection, rows, scope=scope)
 
+def dashboard_alerts_payload(connection, limit, scope=None):
+    where = ""
+    params = []
 
-def dashboard_alerts_payload(connection, limit):
+    if scope:
+        where = "WHERE s.network_scope = ?"
+        params.append(scope)
+
+    params.append(limit)
+
     rows = dashboard_safe_query(
         connection,
-        """
+        f"""
         SELECT
-            alert_id,
-            status,
-            severity,
-            event_type,
-            subject_key,
-            summary,
-            opened_at,
-            last_seen_at
-        FROM alerts
-        ORDER BY alert_id DESC
+            a.alert_id,
+            a.status,
+            a.severity,
+            a.event_type,
+            a.subject_key,
+            a.summary,
+            a.opened_at,
+            a.last_seen_at,
+            s.network_scope
+        FROM alerts a
+        LEFT JOIN delta_events e ON e.event_id = a.last_event_id
+        LEFT JOIN snapshots s ON s.scan_id = e.scan_id
+        {where}
+        ORDER BY a.alert_id DESC
         LIMIT ?
         """,
-        (limit,),
+        tuple(params),
     )
 
-    return dashboard_enrich_subject_rows(connection, rows)
+    return dashboard_enrich_subject_rows(connection, rows, scope=scope)
 
+def dashboard_annotations_payload(connection, limit, scope=None):
+    if scope:
+        rows = dashboard_safe_query(
+            connection,
+            """
+            SELECT DISTINCT
+                aa.asset_key,
+                aa.owner,
+                aa.role,
+                aa.criticality,
+                aa.notes,
+                aa.updated_at
+            FROM asset_annotations aa
+            JOIN asset_observations ao ON ao.asset_key = aa.asset_key
+            JOIN snapshots s ON s.scan_id = ao.scan_id
+            WHERE s.network_scope = ?
+            ORDER BY aa.updated_at DESC, aa.asset_key ASC
+            LIMIT ?
+            """,
+            (scope, limit),
+        )
+    else:
+        rows = dashboard_safe_query(
+            connection,
+            """
+            SELECT
+                asset_key,
+                owner,
+                role,
+                criticality,
+                notes,
+                updated_at
+            FROM asset_annotations
+            ORDER BY updated_at DESC, asset_key ASC
+            LIMIT ?
+            """,
+            (limit,),
+        )
 
-def dashboard_annotations_payload(connection, limit):
-    rows = dashboard_safe_query(
+    return dashboard_enrich_subject_rows(
         connection,
-        """
-        SELECT
-            asset_key,
-            owner,
-            role,
-            criticality,
-            notes,
-            updated_at
-        FROM asset_annotations
-        ORDER BY updated_at DESC, asset_key ASC
-        LIMIT ?
-        """,
-        (limit,),
+        rows,
+        subject_field="asset_key",
+        scope=scope,
     )
 
-    return dashboard_enrich_subject_rows(connection, rows, subject_field="asset_key")
-
-
-def dashboard_risk_payload(connection, limit):
+def dashboard_risk_payload(connection, limit, scope=None):
     try:
-        return build_risk_register(connection, limit)
+        return build_risk_register(connection, limit, scope=scope)
     except Exception as exc:
         return [
             {
@@ -3101,7 +3868,6 @@ def dashboard_risk_payload(connection, limit):
                 "reasons": [f"Risk register unavailable: {exc}"],
             }
         ]
-
 
 def dashboard_index_html():
     return """<!doctype html>
@@ -3165,6 +3931,29 @@ def dashboard_index_html():
       display: grid;
       gap: 16px;
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    }
+
+    .scope-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .scope-links a {
+      color: var(--text);
+      text-decoration: none;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 8px 12px;
+      background: var(--panel2);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .scope-links a.active {
+      border-color: var(--accent);
+      color: #bfdbfe;
     }
 
     .kv {
@@ -3364,6 +4153,13 @@ def dashboard_index_html():
     </section>
 
     <section class="grid" id="metrics"></section>
+
+    <section class="card">
+      <h2>Network Scopes</h2>
+      <p class="muted">Choose which subnet scope the dashboard should display. Deltas are only meaningful inside the same network scope.</p>
+      <div id="selected-scope" class="callout">Viewing all network scopes.</div>
+      <div id="scope-links" class="scope-links"></div>
+    </section>
 
     <section class="card">
       <h2>NetSniper Scan Context</h2>
@@ -3614,6 +4410,49 @@ def dashboard_index_html():
     }
 
 
+
+    function selectedScope() {
+      return new URLSearchParams(window.location.search).get("scope") || "";
+    }
+
+    function scopedPath(path) {
+      const scope = selectedScope();
+
+      if (!scope) return path;
+
+      const separator = path.includes("?") ? "&" : "?";
+      return path + separator + "scope=" + encodeURIComponent(scope);
+    }
+
+    function renderScopes(scopes) {
+      const selected = selectedScope();
+      const links = [];
+
+      links.push(`<a class="${selected ? "" : "active"}" href="/">All scopes</a>`);
+
+      for (const scope of scopes) {
+        const name = scope.network_scope || "";
+        const active = selected === name ? "active" : "";
+        links.push(
+          `<a class="${active}" href="/?scope=${encodeURIComponent(name)}">${esc(name)} · ${esc(scope.snapshots)} scans · ${esc(scope.open_alerts)} open alerts</a>`
+        );
+      }
+
+      const scopeLinks = document.getElementById("scope-links");
+      const selectedScopeBox = document.getElementById("selected-scope");
+
+      if (scopeLinks) {
+        scopeLinks.innerHTML = links.join("");
+      }
+
+      if (selectedScopeBox) {
+        selectedScopeBox.innerHTML = selected
+          ? `Viewing scope: <strong>${esc(selected)}</strong>`
+          : "Viewing all network scopes.";
+      }
+    }
+
+
     function scanCard(title, scan) {
       if (!scan) {
         return `<div class="card">
@@ -3794,15 +4633,17 @@ def dashboard_index_html():
 
     async function load() {
       try {
-        const [summary, scanContext, risk, events, alerts, annotations] = await Promise.all([
-          api("/api/summary"),
-          api("/api/scan-context"),
-          api("/api/risk?limit=10"),
-          api("/api/events?limit=20"),
-          api("/api/alerts?limit=20"),
-          api("/api/annotations?limit=20")
+        const [scopes, summary, scanContext, risk, events, alerts, annotations] = await Promise.all([
+          api("/api/scopes"),
+          api(scopedPath("/api/summary")),
+          api(scopedPath("/api/scan-context")),
+          api(scopedPath("/api/risk?limit=10")),
+          api(scopedPath("/api/events?limit=20")),
+          api(scopedPath("/api/alerts?limit=20")),
+          api(scopedPath("/api/annotations?limit=20"))
         ]);
 
+        renderScopes(scopes);
         renderMetrics(summary);
         renderScanContext(scanContext);
         renderRisk(risk);
@@ -3894,21 +4735,41 @@ def command_dashboard(args):
 
             limit = max(1, min(limit, 200))
 
+            raw_scope = query.get("scope", [args.scope or ""])[0]
+            scope = None
+
+            if raw_scope:
+                try:
+                    scope = optional_network_scope(raw_scope)
+                except ValueError:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "error": "invalid_scope",
+                            "scope": raw_scope,
+                            "message": "Scope must be a valid CIDR network, such as 192.168.4.0/24.",
+                        },
+                        status=400,
+                    )
+                    return
+
             connection = self.open_connection()
 
             try:
-                if route == "/api/summary":
-                    dashboard_json_response(self, dashboard_summary_payload(connection))
+                if route == "/api/scopes":
+                    dashboard_json_response(self, dashboard_scopes_payload(connection))
+                elif route == "/api/summary":
+                    dashboard_json_response(self, dashboard_summary_payload(connection, scope=scope))
                 elif route == "/api/scan-context":
-                    dashboard_json_response(self, dashboard_scan_context_payload(connection))
+                    dashboard_json_response(self, dashboard_scan_context_payload(connection, scope=scope))
                 elif route == "/api/events":
-                    dashboard_json_response(self, dashboard_events_payload(connection, limit))
+                    dashboard_json_response(self, dashboard_events_payload(connection, limit, scope=scope))
                 elif route == "/api/alerts":
-                    dashboard_json_response(self, dashboard_alerts_payload(connection, limit))
+                    dashboard_json_response(self, dashboard_alerts_payload(connection, limit, scope=scope))
                 elif route == "/api/risk":
-                    dashboard_json_response(self, dashboard_risk_payload(connection, limit))
+                    dashboard_json_response(self, dashboard_risk_payload(connection, limit, scope=scope))
                 elif route == "/api/annotations":
-                    dashboard_json_response(self, dashboard_annotations_payload(connection, limit))
+                    dashboard_json_response(self, dashboard_annotations_payload(connection, limit, scope=scope))
                 else:
                     dashboard_json_response(
                         self,
@@ -3950,7 +4811,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.5.0 delta-first network-state monitoring, investigation, risk prioritization, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.5.1 subnet-aware network-state monitoring, investigation, risk prioritization, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
@@ -3958,16 +4819,17 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("menu")
     sub.add_parser("ingest")
+    sub.add_parser("scopes")
     p = sub.add_parser("summary")
-    p = sub.add_parser("snapshots"); p.add_argument("--limit", type=int, default=20)
-    p = sub.add_parser("events"); p.add_argument("--limit", type=int, default=50); p.add_argument("--severity"); p.add_argument("--event-type")
-    p = sub.add_parser("alerts"); p.add_argument("--status", choices=["OPEN", "ACKNOWLEDGED", "RESOLVED", "SUPPRESSED"], default="OPEN"); p.add_argument("--limit", type=int, default=50)
+    p = sub.add_parser("snapshots"); p.add_argument("--limit", type=int, default=20); p.add_argument("--scope")
+    p = sub.add_parser("events"); p.add_argument("--limit", type=int, default=50); p.add_argument("--severity"); p.add_argument("--event-type"); p.add_argument("--scope")
+    p = sub.add_parser("alerts"); p.add_argument("--status", choices=["OPEN", "ACKNOWLEDGED", "RESOLVED", "SUPPRESSED"], default="OPEN"); p.add_argument("--limit", type=int, default=50); p.add_argument("--scope")
     p = sub.add_parser("ack"); p.add_argument("alert_id", type=int); p.add_argument("--reason")
     p = sub.add_parser("suppress"); p.add_argument("alert_id", type=int); p.add_argument("--reason")
     p = sub.add_parser("asset"); p.add_argument("identifier"); p.add_argument("--limit", type=int, default=20)
     p = sub.add_parser("health"); p.add_argument("--limit", type=int, default=20)
     p = sub.add_parser("approve"); p.add_argument("scan_id")
-    sub.add_parser("latest")
+    p = sub.add_parser("latest"); p.add_argument("--scope")
 
     p = sub.add_parser("annotate-asset")
     p.add_argument("asset_key")
@@ -3998,15 +4860,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8090)
     p.add_argument("--token")
+    p.add_argument("--scope")
     p.add_argument("--quiet", action="store_true")
 
     p = sub.add_parser("risk")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--subject")
+    p.add_argument("--scope")
     p.add_argument("--details", action="store_true")
 
     p = sub.add_parser("asset-risk")
     p.add_argument("subject_key")
+    p.add_argument("--scope")
 
     p = sub.add_parser("report")
     p.add_argument("--latest", action="store_true")
@@ -4026,6 +4891,7 @@ def main() -> int:
         if args.command in {None, "menu"}: return run_interactive_menu(args)
         if args.command == "ingest": return command_ingest(args)
         if args.command == "summary": return command_summary(args)
+        if args.command == "scopes": return command_scopes(args)
         if args.command == "snapshots": return command_snapshots(args)
         if args.command == "events": return command_events(args)
         if args.command == "alerts": return command_alerts(args)

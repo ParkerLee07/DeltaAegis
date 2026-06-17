@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.5.1 — Network Scope Isolation
+
+- Added first-class `network_scope` tracking for imported NetSniper snapshots.
+- Added automatic backfill for existing snapshots based on canonical CIDR scope.
+- Added `deltaaegis scopes` for viewing known network scopes.
+- Added `--scope` filters for snapshots, latest, events, alerts, risk, and asset-risk workflows.
+- Updated baseline selection so snapshots only compare against accepted baselines from the same network scope.
+- Isolated asset lifecycle state with a `(network_scope, asset_key)` primary key to prevent cross-subnet lifecycle contamination.
+- Added dashboard scope selector support and scope-aware dashboard APIs.
+- Added scope-aware identity enrichment for dashboard events, alerts, risk, and annotations.
+- Preserved support for generic private/local CIDR ranges, including `10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16`-style networks.
+
+
 ## v0.5.0 — Read-Only Dashboard Foundation
 
 ### Added

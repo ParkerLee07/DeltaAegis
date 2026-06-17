@@ -10,7 +10,7 @@ The project focuses on reliable attack-surface change detection, asset-state tra
 
 ## Current Release
 
-DeltaAegis v0.5.0
+DeltaAegis v0.5.1
 
 ---
 
@@ -135,6 +135,34 @@ python3 deltaaegis.py
 ~~~
 
 ---
+
+
+### Network Scope Isolation
+
+DeltaAegis v0.5.1 separates scan history, baseline selection, lifecycle state, CLI views, and dashboard views by canonical network scope.
+
+Examples:
+
+    deltaaegis scopes
+    deltaaegis snapshots --scope 192.168.4.0/24
+    deltaaegis latest --scope 192.168.4.0/24
+    deltaaegis events --scope 192.168.4.0/24
+    deltaaegis alerts --scope 192.168.4.0/24
+    deltaaegis risk --scope 192.168.4.0/24
+    deltaaegis dashboard --scope 192.168.4.0/24
+
+Network scopes are normalized from valid CIDR targets, so targets such as `192.168.4.25/24` are treated as `192.168.4.0/24`. This prevents snapshots from unrelated subnets, such as `192.168.4.0/24` and `192.168.5.0/24`, from being compared as if they were the same environment.
+
+The dashboard also exposes subnet-aware API endpoints:
+
+    /api/scopes
+    /api/summary?scope=192.168.4.0/24
+    /api/scan-context?scope=192.168.4.0/24
+    /api/events?scope=192.168.4.0/24
+    /api/alerts?scope=192.168.4.0/24
+    /api/risk?scope=192.168.4.0/24
+    /api/annotations?scope=192.168.4.0/24
+
 
 ## Usage
 
@@ -366,7 +394,7 @@ Asset annotations are used by investigation reports when an event or alert subje
 
 ## Risk Register
 
-DeltaAegis v0.5.0 adds an explainable risk register for prioritizing review.
+DeltaAegis v0.5.1 adds an explainable risk register for prioritizing review.
 
 The risk register uses existing DeltaAegis data:
 
@@ -611,7 +639,7 @@ deltaaegis report --output reports/investigation-report.md
 
 ## Scope and Limitations
 
-DeltaAegis v0.5.0 is a network-state monitoring, investigation, risk prioritization, reporting, and dashboard prototype.
+DeltaAegis v0.5.1 is a network-state monitoring, investigation, risk prioritization, reporting, and dashboard prototype.
 
 It is not a replacement for an enterprise SIEM.
 
@@ -656,7 +684,7 @@ See `LICENSE`.
 
 ## Read-Only Dashboard
 
-DeltaAegis v0.5.0 adds a local read-only dashboard for making scan results easier to understand.
+DeltaAegis v0.5.1 adds a local read-only dashboard for making scan results easier to understand.
 
 Start the dashboard:
 
