@@ -649,7 +649,7 @@ DeltaAegis does not currently:
 - Store full packet captures indefinitely
 - Perform machine-learning anomaly detection
 - Send email or chat notifications
-- Provide a web dashboard
+- Provide a write-enabled or remotely exposed dashboard by default
 - Automatically discover business owners for assets
 - Replace manual analyst review
 
