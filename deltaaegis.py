@@ -3070,31 +3070,46 @@ def report_asset_lifecycle_summary(connection, scope=None):
 def report_asset_inventory_rows(connection, limit, scope=None):
     sql = """
         SELECT
-            network_scope,
-            asset_key,
-            identity_class,
-            state,
-            current_ip,
-            mac_address,
-            hostname,
-            first_seen_at,
-            last_seen_at
-        FROM asset_lifecycle
+            al.network_scope,
+            al.asset_key,
+            al.identity_class,
+            al.state,
+            al.current_ip,
+            al.mac_address,
+            al.hostname,
+            al.first_seen_at,
+            al.last_seen_at,
+            ao.device_type,
+            ao.device_type_confidence,
+            ao.classification_type,
+            ao.classification_primary_type,
+            ao.classification_confidence,
+            ao.classification_confidence_label,
+            ao.classification_decision,
+            ao.classification_method,
+            ao.classification_evidence_json,
+            ao.classification_contradictions_json,
+            ao.classification_candidates_json
+        FROM asset_lifecycle al
+        LEFT JOIN asset_observations ao
+          ON ao.scan_id = al.last_seen_scan_id
+         AND ao.asset_key = al.asset_key
         WHERE 1 = 1
     """
     params = []
 
     if scope:
-        sql += " AND network_scope = ?"
+        sql += " AND al.network_scope = ?"
         params.append(scope)
 
     sql += """
-        ORDER BY network_scope ASC, state ASC, current_ip ASC, asset_key ASC
+        ORDER BY al.network_scope ASC, al.state ASC, al.current_ip ASC, al.asset_key ASC
         LIMIT ?
     """
     params.append(limit)
 
-    return connection.execute(sql, tuple(params)).fetchall()
+    rows = connection.execute(sql, tuple(params)).fetchall()
+    return dashboard_enrich_classification_rows(rows)
 
 def append_report_network_scope_summary(lines, connection, scope=None):
     lines.append("## Network Scope Summary")
@@ -3221,10 +3236,16 @@ def append_report_asset_inventory_section(lines, asset_rows, limit):
 
     lines.append(f"Showing up to **{limit}** assets.")
     lines.append("")
-    lines.append("| Scope | State | Identity | IP Address | MAC Address | Hostname | Asset Key | Last Seen |")
-    lines.append("|---|---|---|---|---|---|---|---|")
+    lines.append("| Scope | State | Identity | IP Address | MAC Address | Hostname | Classification | Decision | Confidence | Evidence | Contradictions | Asset Key | Last Seen |")
+    lines.append("|---|---|---|---|---|---|---|---|---:|---:|---:|---|---|")
 
     for row in asset_rows:
+        classification = row.get("classification_display_type") or row.get("device_type") or "Unknown"
+        decision = row.get("classification_display_decision") or "unknown"
+        confidence = row.get("classification_display_confidence")
+        evidence_count = row.get("classification_evidence_count", 0)
+        contradiction_count = row.get("classification_contradiction_count", 0)
+
         lines.append(
             "| "
             f"`{safe_markdown(row['network_scope'])}` | "
@@ -3233,6 +3254,11 @@ def append_report_asset_inventory_section(lines, asset_rows, limit):
             f"`{safe_markdown(row['current_ip'])}` | "
             f"`{safe_markdown(row['mac_address'] or '-')}` | "
             f"{safe_markdown(row['hostname'] or '-')} | "
+            f"{safe_markdown(classification)} | "
+            f"{safe_markdown(decision)} | "
+            f"{safe_markdown(confidence)} | "
+            f"{safe_markdown(evidence_count)} | "
+            f"{safe_markdown(contradiction_count)} | "
             f"`{safe_markdown(row['asset_key'])}` | "
             f"`{safe_markdown(row['last_seen_at'])}` |"
         )
@@ -4130,6 +4156,73 @@ def dashboard_safe_query(connection, sql, params=()):
     return [dict(row) for row in rows]
 
 
+def dashboard_json_list(value):
+    if value is None or value == "":
+        return []
+
+    try:
+        decoded = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return []
+
+    return decoded if isinstance(decoded, list) else []
+
+
+def dashboard_enrich_classification_payload(row):
+    if row is None:
+        return None
+
+    item = dict(row)
+
+    evidence = dashboard_json_list(item.get("classification_evidence_json"))
+    contradictions = dashboard_json_list(item.get("classification_contradictions_json"))
+    candidates = dashboard_json_list(item.get("classification_candidates_json"))
+
+    item["classification_evidence"] = evidence
+    item["classification_contradictions"] = contradictions
+    item["classification_candidates"] = candidates
+    item["classification_evidence_count"] = len(evidence)
+    item["classification_contradiction_count"] = len(contradictions)
+    item["classification_candidate_count"] = len(candidates)
+
+    item["classification_display_type"] = (
+        item.get("classification_type")
+        or item.get("classification_primary_type")
+        or item.get("device_type")
+        or "Unknown"
+    )
+
+    item["classification_display_decision"] = (
+        item.get("classification_decision")
+        or "unknown"
+    )
+
+    item["classification_display_confidence"] = (
+        item.get("classification_confidence")
+        if item.get("classification_confidence") is not None
+        else item.get("device_type_confidence")
+    )
+
+    if item["classification_display_confidence"] is None:
+        item["classification_display_confidence"] = 0
+
+    item["classification_has_intelligence"] = bool(
+        item.get("classification_type")
+        or item.get("classification_primary_type")
+        or item.get("classification_method")
+        or item.get("classification_confidence") is not None
+        or evidence
+        or contradictions
+        or candidates
+    )
+
+    return item
+
+
+def dashboard_enrich_classification_rows(rows):
+    return [dashboard_enrich_classification_payload(row) for row in rows]
+
+
 def dashboard_count(connection, table, where=None):
     sql = f"SELECT COUNT(*) AS count FROM {table}"
 
@@ -4543,15 +4636,15 @@ def dashboard_assets_payload(connection, limit, scope=None, state=None, identity
     params = []
 
     if scope:
-        clauses.append("network_scope = ?")
+        clauses.append("al.network_scope = ?")
         params.append(scope)
 
     if state:
-        clauses.append("state = ?")
+        clauses.append("al.state = ?")
         params.append(state.upper())
 
     if identity:
-        clauses.append("identity_class = ?")
+        clauses.append("al.identity_class = ?")
         params.append(identity.upper())
 
     where = "WHERE " + " AND ".join(clauses) if clauses else ""
@@ -4562,27 +4655,41 @@ def dashboard_assets_payload(connection, limit, scope=None, state=None, identity
         connection,
         f"""
         SELECT
-            network_scope,
-            asset_key,
-            identity_class,
-            state,
-            missing_count,
-            current_ip,
-            mac_address,
-            vendor,
-            hostname,
-            first_seen_at,
-            last_seen_at,
-            removed_at
-        FROM asset_lifecycle
+            al.network_scope,
+            al.asset_key,
+            al.identity_class,
+            al.state,
+            al.missing_count,
+            al.current_ip,
+            al.mac_address,
+            al.vendor,
+            al.hostname,
+            al.first_seen_at,
+            al.last_seen_at,
+            al.removed_at,
+            ao.device_type,
+            ao.device_type_confidence,
+            ao.classification_type,
+            ao.classification_primary_type,
+            ao.classification_confidence,
+            ao.classification_confidence_label,
+            ao.classification_decision,
+            ao.classification_method,
+            ao.classification_evidence_json,
+            ao.classification_contradictions_json,
+            ao.classification_candidates_json
+        FROM asset_lifecycle al
+        LEFT JOIN asset_observations ao
+          ON ao.scan_id = al.last_seen_scan_id
+         AND ao.asset_key = al.asset_key
         {where}
-        ORDER BY network_scope ASC, state ASC, current_ip ASC, asset_key ASC
+        ORDER BY al.network_scope ASC, al.state ASC, al.current_ip ASC, al.asset_key ASC
         LIMIT ?
         """,
         tuple(params),
     )
 
-    return rows
+    return dashboard_enrich_classification_rows(rows)
 
 def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20):
     identifier = str(identifier or "").strip()
@@ -4661,7 +4768,11 @@ def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20)
         (asset_key, asset_scope),
     ).fetchone()
 
-    latest_observation_dict = dict(latest_observation) if latest_observation else None
+    latest_observation_dict = (
+        dashboard_enrich_classification_payload(dict(latest_observation))
+        if latest_observation
+        else None
+    )
     observation_scan_id = latest_observation["scan_id"] if latest_observation else None
 
     services = []
@@ -5299,6 +5410,11 @@ def dashboard_index_html():
             <th>Identity</th>
             <th>IP</th>
             <th>MAC</th>
+            <th>Classification</th>
+            <th>Decision</th>
+            <th>Confidence</th>
+            <th>Evidence</th>
+            <th>Contradictions</th>
             <th>Asset</th>
             <th>Last Seen</th>
           </tr>
@@ -5825,6 +5941,31 @@ def dashboard_index_html():
           <div class="detail-box"><div class="label">Identity Source</div>${esc(observation.identity_source)}</div>
         </div>
 
+        <h3>NetSniper Intelligence</h3>
+        <div class="detail-grid">
+          <div class="detail-box"><div class="label">Classification</div>${esc(observation.classification_display_type || observation.device_type || "Unknown")}</div>
+          <div class="detail-box"><div class="label">Decision</div>${esc(observation.classification_display_decision || "unknown")}</div>
+          <div class="detail-box"><div class="label">Confidence</div>${esc(observation.classification_display_confidence)}</div>
+          <div class="detail-box"><div class="label">Confidence Label</div>${esc(observation.classification_confidence_label)}</div>
+          <div class="detail-box"><div class="label">Method</div>${esc(observation.classification_method)}</div>
+          <div class="detail-box"><div class="label">Evidence Count</div>${esc(observation.classification_evidence_count || 0)}</div>
+          <div class="detail-box"><div class="label">Contradictions</div>${esc(observation.classification_contradiction_count || 0)}</div>
+          <div class="detail-box"><div class="label">Candidates</div>${esc(observation.classification_candidate_count || 0)}</div>
+        </div>
+
+        ${detailTable("Classification Evidence", observation.classification_evidence || [], [
+          {key: "candidate", label: "Candidate"},
+          {key: "source", label: "Source"},
+          {key: "value", label: "Value"},
+          {key: "points", label: "Points"},
+          {key: "reason", label: "Reason"}
+        ])}
+
+        ${detailTable("Classification Contradictions", observation.classification_contradictions || [], [
+          {key: "id", label: "ID"},
+          {key: "reason", label: "Reason"}
+        ])}
+
         <h3>Annotation</h3>
         <div class="detail-grid">
           <div class="detail-box"><div class="label">Owner</div>${esc(annotation.owner)}</div>
@@ -5928,7 +6069,7 @@ def dashboard_index_html():
       if (!tbody) return;
 
       if (!rows.length) {
-        tbody.innerHTML = `<tr><td colspan="7">No assets matched the current dashboard scope.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="12">No assets matched the current dashboard scope.</td></tr>`;
         return;
       }
 
@@ -5939,6 +6080,11 @@ def dashboard_index_html():
           <td>${esc(row.identity_class)}</td>
           <td><code>${esc(row.current_ip)}</code></td>
           <td><code>${esc(row.mac_address)}</code></td>
+          <td>${esc(row.classification_display_type || row.device_type || "Unknown")}</td>
+          <td>${esc(row.classification_display_decision || "unknown")}</td>
+          <td>${esc(row.classification_display_confidence)}</td>
+          <td>${esc(row.classification_evidence_count || 0)}</td>
+          <td>${esc(row.classification_contradiction_count || 0)}</td>
           <td>
             <button class="asset-link" data-asset-identifier="${esc(row.asset_key)}">
               <code>${esc(row.asset_key)}</code>

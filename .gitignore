@@ -42,3 +42,7 @@ backups/
 install_deltaaegis_*.sh
 deltaaegis.py.backup-v0.7-*
 *.backup-v0.7-*
+
+# Local versioned patch backups
+deltaaegis.py.backup-v*
+*.backup-v*
