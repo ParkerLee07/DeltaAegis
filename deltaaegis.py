@@ -2681,6 +2681,255 @@ RISK_CRITICALITY_POINTS = {
 }
 
 
+def risk_json_list(value):
+    if value in {None, "", "[]"}:
+        return []
+
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return []
+
+    return parsed if isinstance(parsed, list) else []
+
+
+def risk_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def risk_latest_asset_context(connection, subject_key, scope=None):
+    if not subject_key or str(subject_key).startswith("scan:"):
+        return None
+
+    clauses = ["al.asset_key = ?"]
+    params = [subject_key]
+
+    if scope:
+        clauses.append("al.network_scope = ?")
+        params.append(scope)
+
+    where = " AND ".join(clauses)
+
+    row = connection.execute(
+        f"""
+        SELECT
+            al.network_scope,
+            al.asset_key,
+            al.identity_class,
+            al.state,
+            al.current_ip,
+            al.mac_address,
+            al.vendor,
+            al.hostname,
+            al.last_seen_scan_id,
+            ao.scan_id,
+            ao.device_type,
+            ao.device_type_confidence,
+            ao.classification_type,
+            ao.classification_primary_type,
+            ao.classification_confidence,
+            ao.classification_confidence_label,
+            ao.classification_decision,
+            ao.classification_method,
+            ao.classification_evidence_json,
+            ao.classification_contradictions_json,
+            ao.classification_candidates_json
+        FROM asset_lifecycle al
+        LEFT JOIN asset_observations ao
+          ON ao.scan_id = al.last_seen_scan_id
+         AND ao.asset_key = al.asset_key
+        WHERE {where}
+        ORDER BY al.last_seen_at DESC
+        LIMIT 1
+        """,
+        tuple(params),
+    ).fetchone()
+
+    if not row:
+        return None
+
+    context = dict(row)
+    scan_id = context.get("scan_id") or context.get("last_seen_scan_id")
+    services = []
+
+    if scan_id:
+        services = [
+            dict(item)
+            for item in connection.execute(
+                """
+                SELECT protocol, port, state, service_name, product, version
+                FROM service_observations
+                WHERE scan_id = ?
+                  AND asset_key = ?
+                ORDER BY protocol ASC, port ASC
+                """,
+                (scan_id, subject_key),
+            ).fetchall()
+        ]
+
+    context["services"] = services
+    return context
+
+
+def risk_classification_context(asset_context):
+    if not asset_context:
+        return {
+            "classification": None,
+            "classification_decision": "unknown",
+            "classification_confidence": 0,
+            "classification_risk_points": 0,
+            "classification_risk_reasons": [],
+            "classification_open_ports": [],
+        }
+
+    classification = (
+        asset_context.get("classification_type")
+        or asset_context.get("classification_primary_type")
+        or asset_context.get("device_type")
+        or "Unknown"
+    )
+
+    confidence = risk_int(
+        asset_context.get("classification_confidence")
+        if asset_context.get("classification_confidence") is not None
+        else asset_context.get("device_type_confidence"),
+        0,
+    )
+
+    decision = str(asset_context.get("classification_decision") or "").strip().lower()
+
+    if decision not in {"classified", "possible", "unknown"}:
+        if confidence >= 40:
+            decision = "classified"
+        elif confidence > 0:
+            decision = "possible"
+        else:
+            decision = "unknown"
+
+    services = asset_context.get("services") or []
+    open_ports = sorted(
+        {
+            risk_int(service.get("port"), -1)
+            for service in services
+            if str(service.get("state") or "open").lower() == "open"
+        }
+    )
+    open_ports = [port for port in open_ports if port > 0]
+    port_set = set(open_ports)
+
+    contradictions = risk_json_list(asset_context.get("classification_contradictions_json"))
+    classification_text = str(classification or "Unknown").lower()
+
+    points = 0
+    reasons = []
+
+    def add(amount, reason):
+        nonlocal points
+        points += amount
+        reasons.append(f"{reason}: +{amount}")
+
+    # The scoring is intentionally conservative. Classification context should
+    # nudge risk priority, not override event severity or confirmed alerts.
+    if contradictions:
+        add(20, "Classification-aware role context found contradictory device evidence")
+
+    if "active directory" in classification_text or "domain controller" in classification_text:
+        add(15, "Classification-aware role context identified identity infrastructure")
+        if port_set & {23, 3389, 5985, 5986}:
+            add(10, "Identity infrastructure exposes remote administration service(s)")
+
+    if "container" in classification_text or "kubernetes" in classification_text:
+        exposed = sorted(port_set & {2375, 2376, 5000, 6443, 9000, 9443, 10250, 10255})
+        if exposed:
+            add(
+                15,
+                "Classification-aware role context identified container/orchestration exposure "
+                f"on tcp/{','.join(str(port) for port in exposed)}",
+            )
+
+    if "printer" in classification_text:
+        exposed = sorted(port_set & {631, 9100})
+        if exposed:
+            add(
+                5,
+                "Classification-aware role context identified printer management/printing exposure "
+                f"on tcp/{','.join(str(port) for port in exposed)}",
+            )
+
+        suspicious = sorted(port_set & {23, 445, 3389})
+        if suspicious:
+            add(
+                15,
+                "Printer-class device exposes unusual remote access/file-sharing service(s) "
+                f"on tcp/{','.join(str(port) for port in suspicious)}",
+            )
+
+    if "camera" in classification_text or "nvr" in classification_text:
+        exposed = sorted(port_set & {554, 8554})
+        if exposed:
+            add(
+                5,
+                "Classification-aware role context identified camera/RTSP exposure "
+                f"on tcp/{','.join(str(port) for port in exposed)}",
+            )
+
+        suspicious = sorted(port_set & {23, 445, 3389})
+        if suspicious:
+            add(
+                15,
+                "Camera/NVR-class device exposes unusual remote access/file-sharing service(s) "
+                f"on tcp/{','.join(str(port) for port in suspicious)}",
+            )
+
+    if "database" in classification_text:
+        exposed = sorted(port_set & {1433, 1521, 3306, 5432, 6379, 9200, 9300, 27017})
+        if exposed:
+            add(
+                15,
+                "Classification-aware role context identified database exposure "
+                f"on tcp/{','.join(str(port) for port in exposed)}",
+            )
+
+    is_unknown = classification in {None, "", "Unknown", "Unknown / Ambiguous"}
+
+    if (decision in {"possible", "unknown"} or is_unknown) and open_ports:
+        add(
+            10,
+            "Classification-aware role context found exposed services on weak/unknown asset",
+        )
+
+    if decision == "possible" and confidence > 0:
+        add(5, "Classification-aware role context requires manual verification of weak classification")
+
+    points = min(points, 30)
+
+    return {
+        "classification": classification,
+        "classification_decision": decision,
+        "classification_confidence": confidence,
+        "classification_risk_points": points,
+        "classification_risk_reasons": reasons,
+        "classification_open_ports": open_ports,
+    }
+
+
+def apply_classification_to_risk_record(connection, subject_key, record, scope=None):
+    context = risk_classification_context(
+        risk_latest_asset_context(connection, subject_key, scope=scope)
+    )
+
+    record["classification"] = context["classification"]
+    record["classification_decision"] = context["classification_decision"]
+    record["classification_confidence"] = context["classification_confidence"]
+    record["classification_risk_points"] = context["classification_risk_points"]
+    record["classification_risk_reasons"] = context["classification_risk_reasons"]
+    record["classification_open_ports"] = context["classification_open_ports"]
+
+
+
 def build_risk_register(connection, limit, subject_filter=None, scope=None):
     subjects = {}
 
@@ -2805,6 +3054,7 @@ def build_risk_register(connection, limit, subject_filter=None, scope=None):
 
     for subject_key, record in subjects.items():
         apply_identity_to_risk_record(connection, subject_key, record, scope=scope)
+        apply_classification_to_risk_record(connection, subject_key, record, scope=scope)
 
         score = 0
 
@@ -2868,6 +3118,13 @@ def build_risk_register(connection, limit, subject_filter=None, scope=None):
         else:
             score += 5
             risk_add_reason(record["reasons"], "No asset annotation recorded: +5")
+
+        classification_points = int(record.get("classification_risk_points") or 0)
+
+        if classification_points:
+            score += classification_points
+            for reason in record.get("classification_risk_reasons", []):
+                risk_add_reason(record["reasons"], reason)
 
         record["score"] = min(100, score)
         record["level"] = risk_level(record["score"])
@@ -3385,7 +3642,7 @@ def append_report_risk_section(lines, risk_rows):
         )
 
     lines.append("")
-    lines.append("Risk scores are explainable and are calculated from recent delta events, alert state, repeated activity, asset criticality, and missing asset context.")
+    lines.append("Risk scores are explainable and are calculated from recent delta events, alert state, repeated activity, asset criticality, missing asset context, and classification-aware role context.")
     lines.append("")
 
 def command_report(args):
