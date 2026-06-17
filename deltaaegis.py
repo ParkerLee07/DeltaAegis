@@ -76,6 +76,20 @@ class AssetObservation:
     services: list[Service]
     findings: list[dict[str, Any]]
 
+    # NetSniper v1.4 intelligence fields.
+    # These default values preserve compatibility with older tests and older bundles.
+    device_type_confidence: int | None = None
+    classification_type: str | None = None
+    classification_primary_type: str | None = None
+    classification_confidence: int | None = None
+    classification_confidence_label: str | None = None
+    classification_decision: str | None = None
+    classification_method: str | None = None
+    classification_json: str = "{}"
+    classification_evidence_json: str = "[]"
+    classification_contradictions_json: str = "[]"
+    classification_candidates_json: str = "[]"
+
 
 @dataclass
 class Snapshot:
@@ -144,6 +158,17 @@ CREATE TABLE IF NOT EXISTS asset_observations (
     vendor TEXT,
     hostname TEXT,
     device_type TEXT,
+    device_type_confidence INTEGER,
+    classification_type TEXT,
+    classification_primary_type TEXT,
+    classification_confidence INTEGER,
+    classification_confidence_label TEXT,
+    classification_decision TEXT,
+    classification_method TEXT,
+    classification_json TEXT NOT NULL DEFAULT '{}',
+    classification_evidence_json TEXT NOT NULL DEFAULT '[]',
+    classification_contradictions_json TEXT NOT NULL DEFAULT '[]',
+    classification_candidates_json TEXT NOT NULL DEFAULT '[]',
     severity TEXT,
     score INTEGER,
     PRIMARY KEY (scan_id, asset_key),
@@ -391,6 +416,20 @@ def connect(db_path: Path) -> sqlite3.Connection:
     ensure_column(connection, "snapshots", "neighbors_captured_at", "neighbors_captured_at TEXT")
     ensure_column(connection, "snapshots", "network_scope", "network_scope TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "asset_observations", "identity_class", "identity_class TEXT NOT NULL DEFAULT 'IP_ONLY'")
+
+    # NetSniper v1.4 classification intelligence columns.
+    ensure_column(connection, "asset_observations", "device_type_confidence", "device_type_confidence INTEGER")
+    ensure_column(connection, "asset_observations", "classification_type", "classification_type TEXT")
+    ensure_column(connection, "asset_observations", "classification_primary_type", "classification_primary_type TEXT")
+    ensure_column(connection, "asset_observations", "classification_confidence", "classification_confidence INTEGER")
+    ensure_column(connection, "asset_observations", "classification_confidence_label", "classification_confidence_label TEXT")
+    ensure_column(connection, "asset_observations", "classification_decision", "classification_decision TEXT")
+    ensure_column(connection, "asset_observations", "classification_method", "classification_method TEXT")
+    ensure_column(connection, "asset_observations", "classification_json", "classification_json TEXT NOT NULL DEFAULT '{}'")
+    ensure_column(connection, "asset_observations", "classification_evidence_json", "classification_evidence_json TEXT NOT NULL DEFAULT '[]'")
+    ensure_column(connection, "asset_observations", "classification_contradictions_json", "classification_contradictions_json TEXT NOT NULL DEFAULT '[]'")
+    ensure_column(connection, "asset_observations", "classification_candidates_json", "classification_candidates_json TEXT NOT NULL DEFAULT '[]'")
+
     backfill_snapshot_network_scopes(connection)
     ensure_scoped_asset_lifecycle_schema(connection)
     connection.commit()
@@ -427,6 +466,15 @@ def analysis_by_ip(path: Path) -> dict[str, dict[str, Any]]:
     if not isinstance(raw, list):
         raise DeltaAegisError(f"analysis JSON must be a list: {path}")
     return {item["host"]: item for item in raw if isinstance(item, dict) and isinstance(item.get("host"), str)}
+
+
+def safe_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def canonical_network_scope(target: str) -> str:
@@ -599,8 +647,53 @@ def parse_service_xml(path: Path, analysis: dict[str, dict[str, Any]], target_ne
         findings = interpretation.get("findings", [])
         if not isinstance(findings, list):
             findings = []
+
+        classification = interpretation.get("classification", {})
+        if not isinstance(classification, dict):
+            classification = {}
+
+        classification_evidence = classification.get("evidence", [])
+        if not isinstance(classification_evidence, list):
+            classification_evidence = []
+
+        classification_contradictions = classification.get("contradictions", [])
+        if not isinstance(classification_contradictions, list):
+            classification_contradictions = []
+
+        classification_candidates = classification.get("candidates", classification.get("secondary_candidates", []))
+        if not isinstance(classification_candidates, list):
+            classification_candidates = []
+
         confidence = "HIGH" if source in {"DISCOVERY_XML", "SERVICE_XML"} else "MEDIUM" if source == "NEIGHBOR_TABLE" else "LOW"
-        preliminary.append(AssetObservation("", classify_identity(mac), confidence, source, ipv4, mac, vendor, hostname, interpretation.get("device_type"), interpretation.get("severity"), interpretation.get("score"), sorted(services, key=lambda item: item.key), [item for item in findings if isinstance(item, dict)]))
+
+        preliminary.append(
+            AssetObservation(
+                "",
+                classify_identity(mac),
+                confidence,
+                source,
+                ipv4,
+                mac,
+                vendor,
+                hostname,
+                interpretation.get("device_type"),
+                interpretation.get("severity"),
+                safe_int(interpretation.get("score")),
+                sorted(services, key=lambda item: item.key),
+                [item for item in findings if isinstance(item, dict)],
+                device_type_confidence=safe_int(interpretation.get("device_type_confidence")),
+                classification_type=classification.get("type"),
+                classification_primary_type=classification.get("primary_type", classification.get("type")),
+                classification_confidence=safe_int(classification.get("confidence")),
+                classification_confidence_label=classification.get("confidence_label"),
+                classification_decision=classification.get("decision"),
+                classification_method=classification.get("method"),
+                classification_json=json.dumps(classification, sort_keys=True),
+                classification_evidence_json=json.dumps(classification_evidence, sort_keys=True),
+                classification_contradictions_json=json.dumps(classification_contradictions, sort_keys=True),
+                classification_candidates_json=json.dumps(classification_candidates, sort_keys=True),
+            )
+        )
     mac_counts = Counter(asset.mac_address for asset in preliminary if asset.mac_address)
     assets: dict[str, AssetObservation] = {}
     for asset in preliminary:
@@ -701,7 +794,58 @@ def insert_snapshot(connection: sqlite3.Connection, snapshot: Snapshot, quality_
     connection.execute("""INSERT INTO snapshots (scan_id, manifest_path, target, network_scope, scanner_version, scan_profile, created_at, imported_at, bundle_status, quality_status, quality_reason, xml_exit_status, hosts_up, hosts_down, hosts_total, mac_backed_assets, identity_coverage, is_accepted_baseline, manifest_schema_version, profile_fingerprint, monitored_ports_json, protocols_json, discovery_interface, nmap_version, scan_started_at, scan_completed_at, neighbors_captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (snapshot.scan_id, snapshot.manifest_path, snapshot.target, snapshot_network_scope(snapshot), snapshot.scanner_version, snapshot.scan_profile, snapshot.created_at, utc_now(), snapshot.bundle_status, quality_status, quality_reason, snapshot.xml_exit_status, snapshot.hosts_up, snapshot.hosts_down, snapshot.hosts_total, snapshot.mac_backed_assets, snapshot.identity_coverage, 1 if quality_status == "ACCEPTED" else 0, snapshot.manifest_schema_version, snapshot.profile_fingerprint, json.dumps(snapshot.monitored_ports), json.dumps(snapshot.protocols), snapshot.discovery_interface, snapshot.nmap_version, snapshot.scan_started_at, snapshot.scan_completed_at, snapshot.neighbors_captured_at))
     for asset in snapshot.assets.values():
-        connection.execute("""INSERT INTO asset_observations (scan_id, asset_key, identity_class, identity_confidence, identity_source, ip_address, mac_address, vendor, hostname, device_type, severity, score) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (snapshot.scan_id, asset.asset_key, asset.identity_class, asset.identity_confidence, asset.identity_source, asset.ip_address, asset.mac_address, asset.vendor, asset.hostname, asset.device_type, asset.severity, asset.score))
+        connection.execute(
+            """INSERT INTO asset_observations (
+                scan_id,
+                asset_key,
+                identity_class,
+                identity_confidence,
+                identity_source,
+                ip_address,
+                mac_address,
+                vendor,
+                hostname,
+                device_type,
+                device_type_confidence,
+                classification_type,
+                classification_primary_type,
+                classification_confidence,
+                classification_confidence_label,
+                classification_decision,
+                classification_method,
+                classification_json,
+                classification_evidence_json,
+                classification_contradictions_json,
+                classification_candidates_json,
+                severity,
+                score
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                snapshot.scan_id,
+                asset.asset_key,
+                asset.identity_class,
+                asset.identity_confidence,
+                asset.identity_source,
+                asset.ip_address,
+                asset.mac_address,
+                asset.vendor,
+                asset.hostname,
+                asset.device_type,
+                asset.device_type_confidence,
+                asset.classification_type,
+                asset.classification_primary_type,
+                asset.classification_confidence,
+                asset.classification_confidence_label,
+                asset.classification_decision,
+                asset.classification_method,
+                asset.classification_json,
+                asset.classification_evidence_json,
+                asset.classification_contradictions_json,
+                asset.classification_candidates_json,
+                asset.severity,
+                asset.score,
+            ),
+        )
         for service in asset.services:
             connection.execute("""INSERT INTO service_observations (scan_id, asset_key, protocol, port, state, service_name, product, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", (snapshot.scan_id, asset.asset_key, service.protocol, service.port, service.state, service.service_name, service.product, service.version))
         for finding in asset.findings:
@@ -714,7 +858,32 @@ def load_assets_from_db(connection: sqlite3.Connection, scan_id: str) -> dict[st
     for row in rows:
         services = [Service(item["protocol"], item["port"], item["state"], item["service_name"], item["product"], item["version"]) for item in connection.execute("SELECT * FROM service_observations WHERE scan_id = ? AND asset_key = ? ORDER BY protocol, port", (scan_id, row["asset_key"]))]
         findings = [dict(item) for item in connection.execute("SELECT * FROM finding_observations WHERE scan_id = ? AND asset_key = ?", (scan_id, row["asset_key"]))]
-        assets[row["asset_key"]] = AssetObservation(row["asset_key"], row["identity_class"], row["identity_confidence"], row["identity_source"], row["ip_address"], row["mac_address"], row["vendor"], row["hostname"], row["device_type"], row["severity"], row["score"], services, findings)
+        assets[row["asset_key"]] = AssetObservation(
+            row["asset_key"],
+            row["identity_class"],
+            row["identity_confidence"],
+            row["identity_source"],
+            row["ip_address"],
+            row["mac_address"],
+            row["vendor"],
+            row["hostname"],
+            row["device_type"],
+            row["severity"],
+            row["score"],
+            services,
+            findings,
+            device_type_confidence=row["device_type_confidence"],
+            classification_type=row["classification_type"],
+            classification_primary_type=row["classification_primary_type"],
+            classification_confidence=row["classification_confidence"],
+            classification_confidence_label=row["classification_confidence_label"],
+            classification_decision=row["classification_decision"],
+            classification_method=row["classification_method"],
+            classification_json=row["classification_json"],
+            classification_evidence_json=row["classification_evidence_json"],
+            classification_contradictions_json=row["classification_contradictions_json"],
+            classification_candidates_json=row["classification_candidates_json"],
+        )
     return assets
 
 
@@ -955,6 +1124,169 @@ def lifecycle_events(connection: sqlite3.Connection, snapshot: Snapshot) -> list
 
     return events
 
+
+def _decode_json_list(value: str | None) -> list[Any]:
+    if not value:
+        return []
+    try:
+        decoded = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return decoded if isinstance(decoded, list) else []
+
+
+def _classification_type(asset: AssetObservation) -> str:
+    return str(asset.classification_type or asset.classification_primary_type or "").strip()
+
+
+def _classification_decision(asset: AssetObservation) -> str:
+    decision = str(asset.classification_decision or "").strip().lower()
+    if decision:
+        return decision
+
+    # Backward compatibility for early NetSniper v1.4-dev bundles that stored
+    # classification confidence/type but did not yet include classification.decision.
+    confidence = _classification_confidence(asset)
+
+    if confidence >= 40:
+        return "classified"
+    if confidence > 0:
+        return "possible"
+    return "unknown"
+
+
+def _classification_confidence(asset: AssetObservation) -> int:
+    return int(asset.classification_confidence or asset.device_type_confidence or 0)
+
+
+def _has_classification_intelligence(asset: AssetObservation) -> bool:
+    # Important: this must check raw stored NetSniper v1.4 fields only.
+    # Do not call _classification_decision() here, because that helper infers
+    # a decision for backward compatibility. Older pre-v1.4 snapshots should
+    # not be treated as classification-aware baselines.
+    return bool(
+        asset.classification_type
+        or asset.classification_primary_type
+        or asset.classification_decision
+        or asset.classification_method
+        or asset.classification_confidence is not None
+        or asset.device_type_confidence is not None
+        or asset.classification_json not in {None, "", "{}"}
+        or asset.classification_evidence_json not in {None, "", "[]"}
+        or asset.classification_contradictions_json not in {None, "", "[]"}
+        or asset.classification_candidates_json not in {None, "", "[]"}
+    )
+
+
+def _classification_snapshot(asset: AssetObservation) -> dict[str, Any]:
+    evidence = _decode_json_list(asset.classification_evidence_json)
+    contradictions = _decode_json_list(asset.classification_contradictions_json)
+    candidates = _decode_json_list(asset.classification_candidates_json)
+
+    return {
+        "ip_address": asset.ip_address,
+        "device_type": asset.device_type,
+        "device_type_confidence": asset.device_type_confidence,
+        "classification_type": _classification_type(asset) or None,
+        "classification_primary_type": asset.classification_primary_type,
+        "classification_confidence": _classification_confidence(asset),
+        "classification_confidence_label": asset.classification_confidence_label,
+        "classification_decision": _classification_decision(asset) or None,
+        "classification_method": asset.classification_method,
+        "evidence_count": len(evidence),
+        "contradiction_count": len(contradictions),
+        "candidate_count": len(candidates),
+    }
+
+
+def classification_delta_events(previous: dict[str, AssetObservation], current: dict[str, AssetObservation]) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+
+    for key, new_asset in sorted(current.items()):
+        old_asset = previous.get(key)
+        if old_asset is None:
+            continue
+
+        # Avoid flooding when the baseline was produced before NetSniper v1.4.
+        if not _has_classification_intelligence(old_asset) or not _has_classification_intelligence(new_asset):
+            continue
+
+        old_type = _classification_type(old_asset)
+        new_type = _classification_type(new_asset)
+        old_decision = _classification_decision(old_asset)
+        new_decision = _classification_decision(new_asset)
+        old_confidence = _classification_confidence(old_asset)
+        new_confidence = _classification_confidence(new_asset)
+
+        previous_value = _classification_snapshot(old_asset)
+        current_value = _classification_snapshot(new_asset)
+
+        if old_type != new_type and (old_decision != "unknown" or new_decision != "unknown"):
+            severity = "MEDIUM" if new_decision == "classified" else "LOW"
+            events.append(event(
+                "DEVICE_CLASSIFICATION_CHANGED",
+                severity,
+                key,
+                (
+                    f"NetSniper classification for {key} changed from "
+                    f"{old_type or 'Unknown'} ({old_confidence}) to "
+                    f"{new_type or 'Unknown'} ({new_confidence})."
+                ),
+                previous_value,
+                current_value,
+            ))
+
+        confidence_delta = abs(new_confidence - old_confidence)
+        decision_changed = old_decision != new_decision
+
+        if old_type == new_type and (decision_changed or confidence_delta >= 20):
+            severity = "MEDIUM" if decision_changed and new_decision == "classified" else "INFO"
+            events.append(event(
+                "DEVICE_CLASSIFICATION_CONFIDENCE_CHANGED",
+                severity,
+                key,
+                (
+                    f"NetSniper classification confidence for {key} changed from "
+                    f"{old_confidence} ({old_decision or 'unknown'}) to "
+                    f"{new_confidence} ({new_decision or 'unknown'}) for "
+                    f"{new_type or 'Unknown'}."
+                ),
+                previous_value,
+                current_value,
+            ))
+
+        if new_decision == "possible" and old_decision != "possible":
+            severity = "MEDIUM" if old_decision == "classified" else "LOW"
+            events.append(event(
+                "DEVICE_CLASSIFICATION_WEAK",
+                severity,
+                key,
+                (
+                    f"NetSniper classification for {key} is now weak/possible: "
+                    f"{new_type or 'Unknown'} at confidence {new_confidence}."
+                ),
+                previous_value,
+                current_value,
+            ))
+
+        old_contradictions = _decode_json_list(old_asset.classification_contradictions_json)
+        new_contradictions = _decode_json_list(new_asset.classification_contradictions_json)
+
+        if new_contradictions and new_contradictions != old_contradictions:
+            events.append(event(
+                "DEVICE_CLASSIFICATION_CONTRADICTION",
+                "MEDIUM",
+                key,
+                (
+                    f"NetSniper reported classification contradiction(s) for {key}: "
+                    f"{len(new_contradictions)} contradiction(s) present."
+                ),
+                previous_value,
+                current_value,
+            ))
+
+    return events
+
 def comparison_events(previous: dict[str, AssetObservation], current: dict[str, AssetObservation]) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     for key in sorted(set(previous) & set(current)):
@@ -1043,6 +1375,7 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
         else:
             previous_assets = load_assets_from_db(connection, baseline["scan_id"])
             events.extend(comparison_events(previous_assets, snapshot.assets))
+            events.extend(classification_delta_events(previous_assets, snapshot.assets))
             events.extend(lifecycle_events(connection, snapshot))
     else:
         etype = "SNAPSHOT_PROFILE_CHANGED" if "profile fingerprint changed" in quality_reason.lower() else "SNAPSHOT_REVIEW_REQUIRED"
