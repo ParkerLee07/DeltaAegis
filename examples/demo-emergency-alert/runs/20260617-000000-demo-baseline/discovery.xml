@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<nmaprun scanner="nmap" args="nmap -sn 192.0.2.0/24" startstr="2026-06-17T00:00:00+00:00">
+  <host>
+    <status state="up" reason="arp-response" reason_ttl="0"/>
+    <address addr="192.0.2.10" addrtype="ipv4"/>
+    <address addr="02:42:ac:10:00:10" addrtype="mac" vendor="DeltaAegis Demo"/>
+    <hostnames>
+      <hostname name="demo-admin-appliance" type="PTR"/>
+    </hostnames>
+  </host>
+  <runstats>
+    <finished time="1780000000" timestr="2026-06-17T00:00:00+00:00" elapsed="1.00" summary="Nmap done" exit="success"/>
+    <hosts up="1" down="253" total="254"/>
+  </runstats>
+</nmaprun>

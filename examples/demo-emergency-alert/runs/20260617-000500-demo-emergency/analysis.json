@@ -1,0 +1,50 @@
+[
+  {
+    "host": "192.0.2.10",
+    "device_type": "Demo Compromised Administrative Appliance",
+    "severity": "CRITICAL",
+    "score": 95,
+    "findings": [
+      {
+        "finding_id": "EMERGENCY_PUBLIC_RDP_EXPOSURE",
+        "name": "Emergency: remote desktop service newly exposed",
+        "service": "ms-wbt-server",
+        "port": 3389,
+        "score": 95,
+        "evidence": "RDP appeared on a previously SSH/HTTPS-only administrative appliance."
+      },
+      {
+        "finding_id": "EMERGENCY_SMB_EXPOSURE_ON_ADMIN_ASSET",
+        "name": "Emergency: SMB service newly exposed on administrative appliance",
+        "service": "microsoft-ds",
+        "port": 445,
+        "score": 90,
+        "evidence": "SMB appeared on an appliance baseline that did not previously expose file sharing."
+      },
+      {
+        "finding_id": "EMERGENCY_ADMIN_PANEL_EXPOSED",
+        "name": "Emergency: administrative panel exposed on alternate web port",
+        "service": "http-alt",
+        "port": 9000,
+        "score": 88,
+        "evidence": "An administrative console appeared on tcp/9000."
+      },
+      {
+        "finding_id": "EMERGENCY_ALT_TLS_ADMIN_PORT_EXPOSED",
+        "name": "Emergency: alternate TLS administrative port exposed",
+        "service": "https-alt",
+        "port": 9443,
+        "score": 85,
+        "evidence": "A secondary administrative TLS listener appeared on tcp/9443."
+      },
+      {
+        "finding_id": "EMERGENCY_UNEXPECTED_HTTP_ALT",
+        "name": "Emergency: unexpected HTTP alternate service",
+        "service": "http-proxy",
+        "port": 8080,
+        "score": 80,
+        "evidence": "A new HTTP alternate service appeared on tcp/8080."
+      }
+    ]
+  }
+]

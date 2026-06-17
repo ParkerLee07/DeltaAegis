@@ -2339,6 +2339,15 @@ RISK_SEVERITY_POINTS = {
 }
 
 
+RISK_CRITICALITY_POINTS = {
+    "LOW": 5,
+    "MEDIUM": 10,
+    "HIGH": 20,
+    "CRITICAL": 35,
+    "MISSION_CRITICAL": 45,
+}
+
+
 def build_risk_register(connection, limit, subject_filter=None, scope=None):
     subjects = {}
 

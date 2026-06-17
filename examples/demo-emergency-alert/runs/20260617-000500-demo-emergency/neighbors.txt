@@ -1,0 +1,1 @@
+192.0.2.10 dev demo0 lladdr 02:42:ac:10:00:10 REACHABLE

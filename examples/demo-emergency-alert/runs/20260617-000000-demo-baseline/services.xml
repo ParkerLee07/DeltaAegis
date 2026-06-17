@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<nmaprun scanner="nmap" args="nmap -sV -F 192.0.2.0/24" startstr="2026-06-17T00:00:00+00:00">
+  <host>
+    <status state="up" reason="syn-ack" reason_ttl="64"/>
+    <address addr="192.0.2.10" addrtype="ipv4"/>
+    <address addr="02:42:ac:10:00:10" addrtype="mac" vendor="DeltaAegis Demo"/>
+    <hostnames>
+      <hostname name="demo-admin-appliance" type="PTR"/>
+    </hostnames>
+    <ports>
+
+    <port protocol="tcp" portid="22">
+      <state state="open" reason="syn-ack" reason_ttl="64"/>
+      <service name="ssh" product="OpenSSH" version="9.2"/>
+    </port>
+
+
+    <port protocol="tcp" portid="443">
+      <state state="open" reason="syn-ack" reason_ttl="64"/>
+      <service name="https" product="nginx" version="1.24.0"/>
+    </port>
+
+    </ports>
+  </host>
+  <runstats>
+    <finished time="1780000000" timestr="2026-06-17T00:00:00+00:00" elapsed="3.50" summary="Nmap done" exit="success"/>
+    <hosts up="1" down="253" total="254"/>
+  </runstats>
+</nmaprun>

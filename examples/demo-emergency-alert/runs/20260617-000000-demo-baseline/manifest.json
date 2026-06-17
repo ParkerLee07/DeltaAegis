@@ -1,0 +1,43 @@
+{
+  "schema_version": "netsniper-run-v2",
+  "scan_id": "demo-emergency-baseline-001",
+  "target": "192.0.2.0/24",
+  "scanner_version": "NetSniper demo-telemetry",
+  "scan_profile": "demo-emergency-alert",
+  "profile_fingerprint": "demo-emergency-alert-profile-v1",
+  "profile": {
+    "name": "demo-emergency-alert",
+    "fingerprint": "demo-emergency-alert-profile-v1",
+    "monitored_ports": [
+      22,
+      80,
+      443,
+      445,
+      3389,
+      8080,
+      9000,
+      9443
+    ],
+    "protocols": [
+      "tcp"
+    ]
+  },
+  "status": "COMPLETE",
+  "created_at": "2026-06-17T00:00:00+00:00",
+  "timestamps": {
+    "service_started_at": "2026-06-17T00:00:00+00:00",
+    "service_completed_at": "2026-06-17T00:00:00+00:00",
+    "neighbors_captured_at": "2026-06-17T00:00:00+00:00",
+    "archived_at": "2026-06-17T00:00:00+00:00"
+  },
+  "telemetry": {
+    "discovery_interface": "demo0",
+    "nmap_version": "Nmap 7.95-demo"
+  },
+  "files": {
+    "services_xml": "services.xml",
+    "discovery_xml": "discovery.xml",
+    "analysis_json": "analysis.json",
+    "neighbors": "neighbors.txt"
+  }
+}

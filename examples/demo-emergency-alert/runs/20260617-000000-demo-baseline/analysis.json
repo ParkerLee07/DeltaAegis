@@ -1,0 +1,18 @@
+[
+  {
+    "host": "192.0.2.10",
+    "device_type": "Demo Linux/Web Appliance",
+    "severity": "LOW",
+    "score": 15,
+    "findings": [
+      {
+        "finding_id": "BASELINE_WEB_AND_SSH_ONLY",
+        "name": "Expected SSH and HTTPS management footprint",
+        "service": "ssh/https",
+        "port": 443,
+        "score": 15,
+        "evidence": "Demo baseline: only SSH and HTTPS are exposed."
+      }
+    ]
+  }
+]
