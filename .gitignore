@@ -37,3 +37,8 @@ credentials.*
 reports/*.md
 !reports/.gitkeep
 backups/
+
+# Local patch/install scratch files
+install_deltaaegis_*.sh
+deltaaegis.py.backup-v0.7-*
+*.backup-v0.7-*
