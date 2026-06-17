@@ -1,5 +1,57 @@
 # DeltaAegis Architecture
 
+<!-- DELTAAEGIS_V085_ARCHITECTURE_START -->
+
+## v0.8.5 Intelligence Pipeline
+
+DeltaAegis v0.8.5 extends the original snapshot comparison model with NetSniper classification intelligence and role-aware investigation context.
+
+### Current pipeline
+
+    NetSniper scan
+      -> immutable telemetry bundle
+      -> DeltaAegis ingestion
+      -> accepted snapshot storage
+      -> asset lifecycle update
+      -> classification intelligence storage
+      -> snapshot comparison and delta events
+      -> classification delta events
+      -> alert/risk register
+      -> dashboard and Markdown report
+
+### Classification intelligence model
+
+NetSniper classification data is stored with each asset observation when available. DeltaAegis tracks:
+
+- classification type
+- primary type
+- confidence
+- confidence label
+- decision
+- method
+- evidence
+- contradictions
+- candidate roles
+
+This model allows DeltaAegis to distinguish between confirmed, possible, unknown, contradictory, and weak classifications.
+
+### Risk and recommendation layer
+
+DeltaAegis v0.8.5 uses classification intelligence as conservative context in the risk register. The goal is not to blindly trust classification output. The goal is to make risk explanations more useful by accounting for likely asset role.
+
+Examples:
+
+- printer exposure on `tcp/631` or `tcp/9100`
+- camera/NVR exposure on `tcp/554`
+- container or orchestration exposure on management ports
+- database listener exposure
+- domain-controller or identity-infrastructure candidates
+- unknown assets with exposed services
+
+Role-aware recommended actions are generated from the same context, so reports and dashboard guidance explain what an operator should verify next.
+<!-- DELTAAEGIS_V085_ARCHITECTURE_END -->
+
+
 ## Data Sources
 
 DeltaAegis `v0.2` ingests NetSniper immutable run bundles.

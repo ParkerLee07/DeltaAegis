@@ -1,5 +1,71 @@
 # Changelog
 
+<!-- DELTAAEGIS_V085_CHANGELOG_START -->
+
+## v0.8.5 - 2026-06-17
+
+### Added
+
+- Classification-aware risk context in the risk register.
+- Conservative role-aware risk points for suspected printers, cameras/NVRs, web servers, domain controllers, databases, container infrastructure, and unknown assets.
+- Explainable classification risk reasons merged into normal risk explanations.
+- Role-aware recommended actions for risk subjects.
+- Dashboard recommendation guidance that includes role-aware follow-up items.
+- Markdown report section for Role-Aware Recommended Actions.
+- Recommendation wording polish that distinguishes truly unknown assets from suspected roles with low confidence.
+- Validation script: `tools/validate_v0_8_5_role_aware_risk.sh`.
+- Validation script: `tools/validate_v0_8_5_role_aware_recommendations.sh`.
+- Validation script: `tools/validate_v0_8_5_recommendation_polish.sh`.
+
+### Changed
+
+- Risk scoring now considers classification-aware role context while preserving existing event severity, alert state, repeated activity, asset criticality, and annotation logic.
+- Reports now explain that risk scores include classification-aware role context.
+- Recommendations now use clearer suspected-role language for low-confidence classifications.
+
+### Notes
+
+- DeltaAegis v0.8.5 does not automatically trust NetSniper classifications. It uses classification data as explainable context and keeps confidence, evidence, and uncertainty visible.
+
+## v0.8.0 - 2026-06-17
+
+### Added
+
+- Dashboard asset inventory classification columns.
+- Asset detail NetSniper Intelligence panel.
+- Dashboard NetSniper Intelligence Summary cards.
+- Classification review queue.
+- Markdown report NetSniper Intelligence Summary section.
+- Report top classifications and classification review queue.
+- Validation script: `tools/validate_v0_8_visibility.sh`.
+- Validation script: `tools/validate_v0_8_intelligence_summary.sh`.
+- Validation script: `tools/validate_v0_8_report_intelligence_summary.sh`.
+
+### Changed
+
+- Dashboard and reports now expose NetSniper classification intelligence to operators instead of only storing it in the database.
+
+## v0.7.0 - 2026-06-17
+
+### Added
+
+- NetSniper v1.4 classification intelligence ingestion.
+- Classification fields in `asset_observations`.
+- Classification storage for type, primary type, confidence, confidence label, decision, method, evidence, contradictions, and candidates.
+- Classification delta events:
+  - `DEVICE_CLASSIFICATION_CHANGED`
+  - `DEVICE_CLASSIFICATION_CONFIDENCE_CHANGED`
+  - `DEVICE_CLASSIFICATION_WEAK`
+  - `DEVICE_CLASSIFICATION_CONTRADICTION`
+- Baseline-noise protections so pre-v1.4 snapshots do not create false classification events.
+- Validation scripts for classification storage, events, and baseline-noise behavior.
+
+### Changed
+
+- DeltaAegis can now remember and compare NetSniper classification intelligence across accepted snapshots.
+<!-- DELTAAEGIS_V085_CHANGELOG_END -->
+
+
 ## v0.6.0 — Investigation Dashboard and Scope-Aware Reporting
 
 - Added `deltaaegis assets` for scope-aware asset inventory review.
