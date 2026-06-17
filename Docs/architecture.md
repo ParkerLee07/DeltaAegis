@@ -1,7 +1,6 @@
 # DeltaAegis Architecture
 
 <!-- DELTAAEGIS_V085_ARCHITECTURE_START -->
-
 ## v0.8.5 Intelligence Pipeline
 
 DeltaAegis v0.8.5 extends the original snapshot comparison model with NetSniper classification intelligence and role-aware investigation context.
@@ -50,7 +49,6 @@ Examples:
 
 Role-aware recommended actions are generated from the same context, so reports and dashboard guidance explain what an operator should verify next.
 <!-- DELTAAEGIS_V085_ARCHITECTURE_END -->
-
 
 ## Data Sources
 

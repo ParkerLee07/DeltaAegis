@@ -1,7 +1,6 @@
 # DeltaAegis
 
 <!-- DELTAAEGIS_V085_README_START -->
-
 ## DeltaAegis v0.8.5 Current Capabilities
 
 DeltaAegis v0.8.5 is a snapshot-based network-state monitoring and investigation console that uses NetSniper telemetry to track assets, compare accepted scans, surface meaningful changes, and prioritize follow-up work.
@@ -14,7 +13,7 @@ DeltaAegis v0.8.5 is a snapshot-based network-state monitoring and investigation
 - **Report intelligence summaries** — generated Markdown investigation reports now include a NetSniper Intelligence Summary, top classifications, classification review queue, and role-aware recommended actions.
 - **Classification-aware risk context** — risk scoring now includes conservative, explainable role-aware context for suspected printers, cameras/NVRs, web servers, domain controllers, databases, container infrastructure, and unknown assets.
 - **Role-aware recommended actions** — DeltaAegis recommends different follow-up actions depending on suspected asset role, exposed services, confidence level, and whether the role is confirmed, possible, or unknown.
-- **Recommendation wording polish** — suspected roles are no longer described as generic unknown assets. For example, a low-confidence printer candidate is treated as a suspected printer role that needs validation.
+- **Recommendation wording polish** — suspected roles are no longer described as generic unknown assets.
 
 ### Current investigation flow
 
@@ -24,9 +23,8 @@ DeltaAegis v0.8.5 is a snapshot-based network-state monitoring and investigation
 4. Dashboard views show asset state, service deltas, alerts, risk subjects, classification intelligence, and recommended next actions.
 5. Reports summarize network scope, asset lifecycle, classification intelligence, top risks, role-aware recommendations, events, alerts, and next steps.
 
-DeltaAegis remains intentionally conservative. It does not claim classifications are perfect; it exposes confidence, evidence, contradictions, and review targets so operators can validate uncertain assets.
+DeltaAegis remains intentionally conservative. It exposes confidence, evidence, contradictions, and review targets so operators can validate uncertain assets.
 <!-- DELTAAEGIS_V085_README_END -->
-
 
 **Self-hosted, delta-first network-state monitoring and investigation console.**
 
@@ -164,7 +162,6 @@ python3 deltaaegis.py
 
 ---
 
-
 ### Network Scope Isolation
 
 DeltaAegis v0.5.1 introduced canonical network scope isolation across scan history, baseline selection, lifecycle state, CLI views, and dashboard views.
@@ -190,7 +187,6 @@ The dashboard also exposes subnet-aware API endpoints:
     /api/alerts?scope=192.168.4.0/24
     /api/risk?scope=192.168.4.0/24
     /api/annotations?scope=192.168.4.0/24
-
 
 ## Usage
 
@@ -271,7 +267,6 @@ Show configured telemetry paths:
 ~~~bash
 deltaaegis paths
 ~~~
-
 
 Show the explainable risk register:
 
@@ -418,7 +413,6 @@ deltaaegis asset-annotations --limit 10
 Asset annotations are used by investigation reports when an event or alert subject matches a saved annotation.
 
 ---
-
 
 ## Risk Register
 
@@ -730,7 +724,6 @@ Reports now include:
 
 Scoped reports are isolated so events, alerts, assets, and report context from unrelated network scopes do not mix.
 
-
 ## Scope and Limitations
 
 DeltaAegis v0.8.5 is a network-state monitoring, investigation, risk prioritization, reporting, and dashboard prototype.
@@ -774,7 +767,6 @@ DeltaAegis ingests those bundles and tracks how the monitored network changes ov
 MIT License.
 
 See `LICENSE`.
-
 
 ## Read-Only Dashboard
 

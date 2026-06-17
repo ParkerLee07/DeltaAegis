@@ -23,6 +23,7 @@ from pathlib import Path
 checks = {
     "README.md": [
         "DeltaAegis v0.8.5 Current Capabilities",
+        "DeltaAegis v0.8.5",
         "NetSniper classification intelligence ingestion",
         "Dashboard intelligence visibility",
         "Classification-aware risk context",
@@ -58,7 +59,20 @@ for filename, phrases in checks.items():
     if missing:
         raise SystemExit(f"[-] {filename} missing expected phrase(s): {missing}")
 
-print("[+] PASS: DeltaAegis v0.8.5 documentation content is present.")
+readme = Path("README.md").read_text(encoding="utf-8")
+arch = Path("Docs/architecture.md").read_text(encoding="utf-8")
+validator = Path("tools/validate_v0_8_5_docs.sh").read_text(encoding="utf-8")
+
+if "DeltaAegis v0.6.0" in readme:
+    raise SystemExit("[-] README.md still contains stale DeltaAegis v0.6.0 reference.")
+
+if "DeltaAegis `v0.2` ingests" in arch or "DeltaAegis v0.2 ingests" in arch:
+    raise SystemExit("[-] Docs/architecture.md still contains stale v0.2 ingestion reference.")
+
+if validator.count("\n") < 20:
+    raise SystemExit("[-] Docs validator appears malformed or one-lined.")
+
+print("[+] PASS: DeltaAegis v0.8.5 documentation content is present and formatted.")
 PY
 
 echo

@@ -1,7 +1,6 @@
 # Changelog
 
 <!-- DELTAAEGIS_V085_CHANGELOG_START -->
-
 ## v0.8.5 - 2026-06-17
 
 ### Added
@@ -16,10 +15,11 @@
 - Validation script: `tools/validate_v0_8_5_role_aware_risk.sh`.
 - Validation script: `tools/validate_v0_8_5_role_aware_recommendations.sh`.
 - Validation script: `tools/validate_v0_8_5_recommendation_polish.sh`.
+- Validation script: `tools/validate_v0_8_5_docs.sh`.
 
 ### Changed
 
-- Risk scoring now considers classification-aware role context while preserving existing event severity, alert state, repeated activity, asset criticality, and annotation logic.
+- Risk scoring now considers classification-aware role context while preserving event severity, alert state, repeated activity, asset criticality, and annotation logic.
 - Reports now explain that risk scores include classification-aware role context.
 - Recommendations now use clearer suspected-role language for low-confidence classifications.
 
@@ -58,7 +58,6 @@
   - `DEVICE_CLASSIFICATION_WEAK`
   - `DEVICE_CLASSIFICATION_CONTRADICTION`
 - Baseline-noise protections so pre-v1.4 snapshots do not create false classification events.
-- Validation scripts for classification storage, events, and baseline-noise behavior.
 
 ### Changed
 
@@ -94,7 +93,6 @@
 - Added dashboard scope selector support and scope-aware dashboard APIs.
 - Added scope-aware identity enrichment for dashboard events, alerts, risk, and annotations.
 - Preserved support for generic private/local CIDR ranges, including `10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16`-style networks.
-
 
 ## v0.5.0 — Read-Only Dashboard Foundation
 
