@@ -2930,6 +2930,79 @@ def apply_classification_to_risk_record(connection, subject_key, record, scope=N
 
 
 
+def risk_role_recommended_actions(record):
+    classification = str(record.get("classification") or "Unknown").strip()
+    classification_text = classification.lower()
+    decision = str(record.get("classification_decision") or "unknown").lower()
+    confidence = risk_int(record.get("classification_confidence"), 0)
+    open_ports = set(record.get("classification_open_ports") or [])
+    subject_key = record.get("subject_key") or "this asset"
+
+    actions = []
+
+    def add(action):
+        if action and action not in actions:
+            actions.append(action)
+
+    if any(
+        "contradictory" in str(reason).lower()
+        for reason in record.get("classification_risk_reasons", [])
+    ):
+        add("Resolve contradictory device evidence before treating the asset role as confirmed.")
+
+    if decision == "possible":
+        add("Verify the weak NetSniper classification with banner review, hostname/vendor context, or manual asset annotation.")
+
+    if decision == "unknown" or classification in {"", "Unknown", "Unknown / Ambiguous"}:
+        if open_ports:
+            add("Identify the unknown asset before closing the investigation; exposed services are present but the role is not established.")
+        else:
+            add("Annotate the unknown asset if it is expected infrastructure, otherwise monitor for future service changes.")
+
+    if "active directory" in classification_text or "domain controller" in classification_text:
+        add("Confirm this is an authorized domain controller and verify ownership, patch level, and backup/restore coverage.")
+        if open_ports & {3389, 5985, 5986, 23}:
+            add("Review remote administration exposure on the domain-controller candidate and restrict access to management networks.")
+        if open_ports & {445, 139}:
+            add("Validate SMB exposure, signing posture, and administrative share access on the identity-infrastructure candidate.")
+
+    if "container" in classification_text or "kubernetes" in classification_text:
+        if open_ports & {2375, 2376, 5000, 6443, 9000, 9443, 10250, 10255}:
+            add("Review exposed container or orchestration management services for authentication, TLS, and network restriction.")
+        add("Confirm whether this asset should be treated as infrastructure and annotate its owner and environment.")
+
+    if "printer" in classification_text:
+        if open_ports & {631, 9100}:
+            add("Verify printer management/printing exposure is expected and restrict it to trusted print clients where possible.")
+        if open_ports & {23, 80, 443, 445, 3389}:
+            add("Review printer administrative interfaces and disable unusual remote access or file-sharing services if not required.")
+        add("Annotate printer location, owner, and business criticality to reduce future review noise.")
+
+    if "camera" in classification_text or "nvr" in classification_text:
+        if open_ports & {554, 8554}:
+            add("Verify RTSP/camera exposure requires authentication and is limited to approved monitoring systems.")
+        if open_ports & {23, 80, 443, 445, 3389}:
+            add("Review camera/NVR administrative services for default credentials, patching, and management-network restriction.")
+        add("Confirm camera/NVR placement and expected monitoring role before suppressing future alerts.")
+
+    if "database" in classification_text:
+        if open_ports & {1433, 1521, 3306, 5432, 6379, 9200, 9300, 27017}:
+            add("Validate database listener exposure, authentication requirements, TLS posture, and backup ownership.")
+        add("Confirm whether the database should be reachable from this network scope.")
+
+    if "web server" in classification_text or classification_text == "web":
+        if open_ports & {80, 443, 8000, 8080, 8443, 8888}:
+            add("Review the web interface for expected ownership, authentication, TLS, and whether it is a management portal.")
+        if confidence < 40:
+            add("Treat the web-server label as tentative until service banners or manual review confirm the asset role.")
+
+    if not actions:
+        add(f"Review {subject_key} using event history, service inventory, and asset annotations before changing alert status.")
+
+    return actions[:5]
+
+
+
 def build_risk_register(connection, limit, subject_filter=None, scope=None):
     subjects = {}
 
@@ -3128,6 +3201,7 @@ def build_risk_register(connection, limit, subject_filter=None, scope=None):
 
         record["score"] = min(100, score)
         record["level"] = risk_level(record["score"])
+        record["recommended_actions"] = risk_role_recommended_actions(record)
 
     rows = sorted(
         subjects.values(),
@@ -3610,6 +3684,50 @@ def append_report_asset_inventory_section(lines, asset_rows, limit):
 
     lines.append("")
 
+def append_report_role_aware_recommendations_section(lines, risk_rows):
+    lines.append("## Role-Aware Recommended Actions")
+    lines.append("")
+
+    rows = [
+        record for record in risk_rows
+        if record.get("recommended_actions")
+    ]
+
+    if not rows:
+        lines.append("No role-aware recommended actions were generated for this report.")
+        lines.append("")
+        return
+
+    lines.append(
+        "These actions use NetSniper classification context to make follow-up guidance "
+        "more specific to the suspected asset role."
+    )
+    lines.append("")
+
+    for record in rows[:10]:
+        lines.append(
+            f"### `{safe_markdown(record.get('subject_key'))}` "
+            f"— {safe_markdown(record.get('classification') or 'Unknown')} "
+            f"({safe_markdown(record.get('classification_decision') or 'unknown')}, "
+            f"confidence {safe_markdown(record.get('classification_confidence') or 0)})"
+        )
+        lines.append("")
+        lines.append(
+            f"- Risk level: **{safe_markdown(record.get('level'))}** "
+            f"with score **{safe_markdown(record.get('score'))}**."
+        )
+
+        points = int(record.get("classification_risk_points") or 0)
+
+        if points:
+            lines.append(f"- Classification-aware risk contribution: **+{points}**.")
+
+        for action in record.get("recommended_actions") or []:
+            lines.append(f"- Recommended action: {safe_markdown(action)}")
+
+        lines.append("")
+
+
 def append_report_risk_section(lines, risk_rows):
     lines.append("## Top Risk Subjects")
     lines.append("")
@@ -3768,6 +3886,7 @@ def command_report(args):
     append_report_classification_summary_section(lines, report_classification_summary)
     append_report_asset_inventory_section(lines, report_asset_rows, args.asset_limit)
     append_report_risk_section(lines, report_risk_rows)
+    append_report_role_aware_recommendations_section(lines, report_risk_rows)
 
     lines.append("## Annotated Asset Context")
     lines.append("")
@@ -6837,6 +6956,13 @@ def dashboard_index_html():
       } else {
         steps.push("Keep asset owner, role, and criticality annotations updated as the network changes.");
       }
+
+      risks
+        .filter(row => Array.isArray(row.recommended_actions) && row.recommended_actions.length)
+        .slice(0, 3)
+        .forEach(row => {
+          steps.push(`Role-aware follow-up for ${esc(row.subject_key)}: ${esc(row.recommended_actions[0])}`);
+        });
 
       steps.push("Generate a Markdown investigation report after reviewing risk subjects and alerts.");
 
