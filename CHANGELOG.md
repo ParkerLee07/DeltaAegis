@@ -1,24 +1,103 @@
 # Changelog
 
-## [v0.2] - 2026-06-12
+All notable changes to DeltaAegis are documented here.
+
+---
+
+## v0.3.5 — Report Alert Review Notes
 
 ### Added
-- `netsniper-run-v2` ingestion with exact scan-profile compatibility checks.
-- Identity classes: `GLOBAL_MAC`, `LOCAL_MAC`, and `IP_ONLY`.
-- Ephemeral identity events for locally administered MAC addresses.
-- Three-accepted-scan threshold before stable assets become removed.
-- `ASSET_REAPPEARED` and stable-MAC `IP_CHANGED` events.
-- Stateful operator-facing alerts with `OPEN`, `ACKNOWLEDGED`, `RESOLVED`, and `SUPPRESSED` states.
-- Interactive CLI screens for alerts, asset history, snapshot health, and baseline approval.
+
+- Added alert review-note integration to Markdown investigation reports.
+- Added report-level `Alert Review Notes` section.
+- Reports now summarize alert action, status, severity, subject, reason, and timestamp when review notes match report subjects.
+- Connected alert review workflow to generated investigation artifacts.
 
 ### Fixed
-- Excluded unusable subnet network and broadcast addresses from asset storage.
-- Prevented profile changes from generating misleading service-opened or service-closed deltas.
 
-## [v0.1] - 2026-06-12
+- Removed a misplaced per-alert review-note call that could trigger an `UnboundLocalError` during report generation.
+
+---
+
+## v0.3.4 — Report Asset Context
 
 ### Added
-- Initial SQLite-backed NetSniper bundle ingestion.
-- Historical snapshot storage.
-- IP-level observation and monitored-service delta events.
-- Append-only JSONL event export.
+
+- Added asset annotation integration to Markdown investigation reports.
+- Added `Annotated Asset Context` section to reports.
+- Reports now show owner, role, criticality, and notes for matching annotated subjects.
+- Added per-event asset context blocks for matching delta events.
+
+### Fixed
+
+- Fixed missing per-event report asset-context insertion after initial v0.3.4 implementation.
+
+---
+
+## v0.3.3 — Asset Owner Notes
+
+### Added
+
+- Added `asset_annotations` table.
+- Added `asset_annotation_history` table.
+- Added `annotate-asset` command.
+- Added `asset-notes` command.
+- Added `asset-annotations` command.
+- Added owner, role, criticality, notes, updated timestamp, and annotation history support.
+
+---
+
+## v0.3.2 — Alert Review Notes
+
+### Added
+
+- Added `alert_notes` table.
+- Added `ack <alert-id> --reason "..."`.
+- Added `suppress <alert-id> --reason "..."`.
+- Added `alert-notes <alert-id>` command.
+- Added alert review-note display inside `alert-detail`.
+
+---
+
+## v0.3.1 — Investigation Detail Commands
+
+### Added
+
+- Added `asset-timeline <subject-key>` command.
+- Added `alert-detail <alert-id>` command.
+- Added deeper event and alert investigation workflow.
+- Added alert-detail follow-up guidance and related-event display.
+
+---
+
+## v0.3.0 — Investigation Reports
+
+### Added
+
+- Added Markdown investigation report generation.
+- Added `report` command.
+- Added report output path support.
+- Added event, severity, alert, and recommendation sections.
+
+---
+
+## v0.2.0 — Stateful Delta Engine
+
+### Added
+
+- Added SQLite-backed state tracking.
+- Added imported snapshot history.
+- Added delta event generation.
+- Added alert lifecycle support.
+- Added snapshot health review.
+- Added baseline approval workflow.
+
+---
+
+## v0.1.0 — Initial Prototype
+
+### Added
+
+- Initial DeltaAegis prototype.
+- NetSniper telemetry ingestion.
+- Basic event and snapshot inspection.
