@@ -4223,6 +4223,133 @@ def dashboard_enrich_classification_rows(rows):
     return [dashboard_enrich_classification_payload(row) for row in rows]
 
 
+def dashboard_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def dashboard_classification_summary_payload(connection, scope=None, limit=10):
+    assets = dashboard_assets_payload(
+        connection,
+        limit=10000,
+        scope=scope,
+    )
+
+    total_assets = len(assets)
+    classified_assets = 0
+    possible_assets = 0
+    unknown_assets = 0
+    evidence_backed_assets = 0
+    contradiction_assets = 0
+    high_confidence_assets = 0
+
+    type_counts = {}
+    review_rows = []
+
+    for asset in assets:
+        decision = str(asset.get("classification_display_decision") or "unknown").lower()
+        classification = str(asset.get("classification_display_type") or "Unknown").strip()
+        confidence = dashboard_int(asset.get("classification_display_confidence"), 0)
+        evidence_count = dashboard_int(asset.get("classification_evidence_count"), 0)
+        contradiction_count = dashboard_int(asset.get("classification_contradiction_count"), 0)
+
+        is_unknown_type = classification in {"", "Unknown", "Unknown / Ambiguous"}
+
+        if decision == "classified":
+            classified_assets += 1
+        elif decision == "possible":
+            possible_assets += 1
+        else:
+            unknown_assets += 1
+
+        if evidence_count > 0:
+            evidence_backed_assets += 1
+
+        if contradiction_count > 0:
+            contradiction_assets += 1
+
+        if confidence >= 80:
+            high_confidence_assets += 1
+
+        if not is_unknown_type:
+            type_counts[classification] = type_counts.get(classification, 0) + 1
+
+        review_reason = None
+        review_priority = 99
+
+        if contradiction_count > 0:
+            review_reason = "Classification contradiction present"
+            review_priority = 1
+        elif decision == "possible":
+            review_reason = "Weak/possible classification"
+            review_priority = 2
+        elif decision == "unknown" or confidence == 0 or is_unknown_type:
+            review_reason = "Unknown or ambiguous classification"
+            review_priority = 3
+        elif confidence < 40:
+            review_reason = "Low classification confidence"
+            review_priority = 4
+
+        if review_reason:
+            review_rows.append(
+                {
+                    "asset_key": asset.get("asset_key"),
+                    "network_scope": asset.get("network_scope"),
+                    "ip_address": asset.get("current_ip"),
+                    "mac_address": asset.get("mac_address"),
+                    "classification": classification or "Unknown",
+                    "decision": decision,
+                    "confidence": confidence,
+                    "evidence_count": evidence_count,
+                    "contradiction_count": contradiction_count,
+                    "reason": review_reason,
+                    "priority": review_priority,
+                }
+            )
+
+    top_classifications = [
+        {
+            "classification": classification,
+            "count": count,
+        }
+        for classification, count in sorted(
+            type_counts.items(),
+            key=lambda item: (-item[1], item[0].lower()),
+        )[:limit]
+    ]
+
+    review_queue = sorted(
+        review_rows,
+        key=lambda row: (
+            row["priority"],
+            row["confidence"],
+            row["classification"].lower(),
+            str(row.get("ip_address") or ""),
+            str(row.get("asset_key") or ""),
+        ),
+    )[:limit]
+
+    classified_percent = 0
+
+    if total_assets:
+        classified_percent = round((classified_assets / total_assets) * 100, 1)
+
+    return {
+        "total_assets": total_assets,
+        "classified_assets": classified_assets,
+        "possible_assets": possible_assets,
+        "unknown_assets": unknown_assets,
+        "evidence_backed_assets": evidence_backed_assets,
+        "contradiction_assets": contradiction_assets,
+        "high_confidence_assets": high_confidence_assets,
+        "classified_percent": classified_percent,
+        "top_classifications": top_classifications,
+        "review_queue": review_queue,
+    }
+
+
 def dashboard_count(connection, table, where=None):
     sql = f"SELECT COUNT(*) AS count FROM {table}"
 
@@ -4396,6 +4523,10 @@ def dashboard_summary_payload(connection, scope=None):
         "asset_annotations": int(annotation_count or 0),
         "alert_status_counts": alert_rows,
         "event_severity_counts": event_rows,
+        "classification_summary": dashboard_classification_summary_payload(
+            connection,
+            scope=scope,
+        ),
         "top_risks": risk_rows,
     }
 
@@ -6199,6 +6330,121 @@ def dashboard_index_html():
       `).join("") || `<tr><td colspan="8" class="muted">No annotations found.</td></tr>`;
     }
 
+    function renderClassificationSummary(summary) {
+      const intel = (summary && summary.classification_summary) || {};
+
+      let section = document.getElementById("classification-summary-section");
+
+      if (!section) {
+        const assetBody = document.getElementById("asset-inventory-body");
+        const assetSection = assetBody ? assetBody.closest("section") : null;
+
+        section = document.createElement("section");
+        section.id = "classification-summary-section";
+
+        if (assetSection && assetSection.parentNode) {
+          assetSection.parentNode.insertBefore(section, assetSection);
+        } else {
+          document.body.appendChild(section);
+        }
+      }
+
+      const topClassifications = intel.top_classifications || [];
+      const reviewQueue = intel.review_queue || [];
+
+      const topRows = topClassifications.length
+        ? topClassifications.map(row => `
+            <tr>
+              <td>${esc(row.classification)}</td>
+              <td>${esc(row.count)}</td>
+            </tr>
+          `).join("")
+        : `<tr><td colspan="2">No classification summary is available yet.</td></tr>`;
+
+      const reviewRows = reviewQueue.length
+        ? reviewQueue.map(row => `
+            <tr>
+              <td>${subjectButton(row.asset_key)}</td>
+              <td><code>${esc(row.ip_address)}</code></td>
+              <td>${esc(row.classification)}</td>
+              <td>${esc(row.decision)}</td>
+              <td>${esc(row.confidence)}</td>
+              <td>${esc(row.evidence_count)}</td>
+              <td>${esc(row.contradiction_count)}</td>
+              <td>${esc(row.reason)}</td>
+            </tr>
+          `).join("")
+        : `<tr><td colspan="8">No weak, unknown, or contradictory classifications require review.</td></tr>`;
+
+      section.innerHTML = `
+        <h2>NetSniper Intelligence Summary</h2>
+        <p class="muted">Classification overview for the current dashboard scope, based on the latest asset observations.</p>
+
+        <div class="cards">
+          <div class="card">
+            <div class="label">Classified Assets</div>
+            <strong>${esc(intel.classified_assets || 0)}</strong>
+          </div>
+          <div class="card">
+            <div class="label">Possible / Weak</div>
+            <strong>${esc(intel.possible_assets || 0)}</strong>
+          </div>
+          <div class="card">
+            <div class="label">Unknown Assets</div>
+            <strong>${esc(intel.unknown_assets || 0)}</strong>
+          </div>
+          <div class="card">
+            <div class="label">Evidence-backed</div>
+            <strong>${esc(intel.evidence_backed_assets || 0)}</strong>
+          </div>
+          <div class="card">
+            <div class="label">Contradictions</div>
+            <strong>${esc(intel.contradiction_assets || 0)}</strong>
+          </div>
+          <div class="card">
+            <div class="label">Classified %</div>
+            <strong>${esc(intel.classified_percent || 0)}%</strong>
+          </div>
+        </div>
+
+        <div class="grid two-col">
+          <div>
+            <h3>Top Classifications</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>Classification</th>
+                  <th>Assets</th>
+                </tr>
+              </thead>
+              <tbody>${topRows}</tbody>
+            </table>
+          </div>
+
+          <div>
+            <h3>Classification Review Queue</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>Asset</th>
+                  <th>IP</th>
+                  <th>Classification</th>
+                  <th>Decision</th>
+                  <th>Confidence</th>
+                  <th>Evidence</th>
+                  <th>Contradictions</th>
+                  <th>Reason</th>
+                </tr>
+              </thead>
+              <tbody>${reviewRows}</tbody>
+            </table>
+          </div>
+        </div>
+      `;
+
+      bindSubjectLinks(section);
+    }
+
     function renderRecommendations(summary, scanContext, riskRows) {
       const steps = [];
       const latest = scanContext && scanContext.latest_scan ? scanContext.latest_scan : null;
@@ -6271,6 +6517,7 @@ def dashboard_index_html():
         renderEvents(events);
         renderAlerts(alerts);
         renderAnnotations(annotations);
+        renderClassificationSummary(summary);
         renderRecommendations(summary, scanContext, risk);
       } catch (error) {
         const box = document.getElementById("error");
