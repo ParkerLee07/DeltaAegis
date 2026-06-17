@@ -52,9 +52,9 @@ All notable changes to DeltaAegis are documented here.
 ### Added
 
 - Added `alert_notes` table.
-- Added `ack <alert-id> --reason "..."`.
-- Added `suppress <alert-id> --reason "..."`.
-- Added `alert-notes <alert-id>` command.
+- Added `ack ALERT_ID --reason "..."`.
+- Added `suppress ALERT_ID --reason "..."`.
+- Added `alert-notes ALERT_ID` command.
 - Added alert review-note display inside `alert-detail`.
 
 ---
@@ -63,8 +63,8 @@ All notable changes to DeltaAegis are documented here.
 
 ### Added
 
-- Added `asset-timeline <subject-key>` command.
-- Added `alert-detail <alert-id>` command.
+- Added `asset-timeline SUBJECT_KEY` command.
+- Added `alert-detail ALERT_ID` command.
 - Added deeper event and alert investigation workflow.
 - Added alert-detail follow-up guidance and related-event display.
 

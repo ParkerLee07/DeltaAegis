@@ -218,7 +218,7 @@ If a NetSniper scan profile changes, DeltaAegis can quarantine the snapshot for 
 Approve a reviewed snapshot as a new baseline:
 
 ~~~bash
-deltaaegis approve <scan-id>
+deltaaegis approve SCAN_ID
 ~~~
 
 Example:
@@ -240,7 +240,7 @@ deltaaegis asset 192.168.4.32
 Show timeline for a specific subject key:
 
 ~~~bash
-deltaaegis asset-timeline '<subject-key>'
+deltaaegis asset-timeline 'SUBJECT_KEY'
 ~~~
 
 Examples:
@@ -254,7 +254,7 @@ deltaaegis asset-timeline 'mac:aa:bb:cc:dd:ee:ff'
 Filter an asset timeline by severity:
 
 ~~~bash
-deltaaegis asset-timeline '<subject-key>' --severity HIGH
+deltaaegis asset-timeline 'SUBJECT_KEY' --severity HIGH
 ~~~
 
 ---
@@ -264,25 +264,25 @@ deltaaegis asset-timeline '<subject-key>' --severity HIGH
 Acknowledge an alert:
 
 ~~~bash
-deltaaegis ack <alert-id> --reason "Reviewed and confirmed expected behavior"
+deltaaegis ack ALERT_ID --reason "Reviewed and confirmed expected behavior"
 ~~~
 
 Suppress an alert:
 
 ~~~bash
-deltaaegis suppress <alert-id> --reason "Known recurring lab service"
+deltaaegis suppress ALERT_ID --reason "Known recurring lab service"
 ~~~
 
 Show detailed alert context:
 
 ~~~bash
-deltaaegis alert-detail <alert-id>
+deltaaegis alert-detail ALERT_ID
 ~~~
 
 Show review notes for an alert:
 
 ~~~bash
-deltaaegis alert-notes <alert-id>
+deltaaegis alert-notes ALERT_ID
 ~~~
 
 Alert review notes preserve analyst decisions over time. This makes it easier to understand why an alert was acknowledged or suppressed.
@@ -296,7 +296,7 @@ DeltaAegis supports lightweight asset annotations for owner, role, criticality, 
 Annotate an asset:
 
 ~~~bash
-deltaaegis annotate-asset '<asset-key>' \
+deltaaegis annotate-asset 'ASSET_KEY' \
   --owner "IT" \
   --role "Printer" \
   --criticality "LOW" \
@@ -306,13 +306,13 @@ deltaaegis annotate-asset '<asset-key>' \
 Show notes for one asset:
 
 ~~~bash
-deltaaegis asset-notes '<asset-key>'
+deltaaegis asset-notes 'ASSET_KEY'
 ~~~
 
 Show annotation history for one asset:
 
 ~~~bash
-deltaaegis asset-notes '<asset-key>' --history
+deltaaegis asset-notes 'ASSET_KEY' --history
 ~~~
 
 List saved asset annotations:
@@ -480,13 +480,13 @@ deltaaegis alerts --status OPEN --limit 20
 Investigate an event subject:
 
 ~~~bash
-deltaaegis asset-timeline '<subject-key>'
+deltaaegis asset-timeline 'SUBJECT_KEY'
 ~~~
 
 Annotate a known asset:
 
 ~~~bash
-deltaaegis annotate-asset '<subject-key>' \
+deltaaegis annotate-asset 'SUBJECT_KEY' \
   --owner "IT" \
   --role "Internal service" \
   --criticality "MEDIUM" \
@@ -496,8 +496,8 @@ deltaaegis annotate-asset '<subject-key>' \
 Review an alert:
 
 ~~~bash
-deltaaegis alert-detail <alert-id>
-deltaaegis ack <alert-id> --reason "Reviewed and confirmed expected service exposure"
+deltaaegis alert-detail ALERT_ID
+deltaaegis ack ALERT_ID --reason "Reviewed and confirmed expected service exposure"
 ~~~
 
 Generate a report:
