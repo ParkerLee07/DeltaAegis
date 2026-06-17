@@ -2931,13 +2931,22 @@ def apply_classification_to_risk_record(connection, subject_key, record, scope=N
 
 
 def risk_role_recommended_actions(record):
-    classification = str(record.get("classification") or "Unknown").strip()
+    classification = str(record.get("classification") or "Unknown").strip() or "Unknown"
     classification_text = classification.lower()
     decision = str(record.get("classification_decision") or "unknown").lower()
     confidence = risk_int(record.get("classification_confidence"), 0)
     open_ports = set(record.get("classification_open_ports") or [])
     subject_key = record.get("subject_key") or "this asset"
 
+    unknown_labels = {
+        "",
+        "unknown",
+        "unknown / ambiguous",
+        "unknown/ambiguous",
+        "ambiguous",
+    }
+
+    is_unknown_role = classification_text in unknown_labels
     actions = []
 
     def add(action):
@@ -2950,14 +2959,18 @@ def risk_role_recommended_actions(record):
     ):
         add("Resolve contradictory device evidence before treating the asset role as confirmed.")
 
-    if decision == "possible":
-        add("Verify the weak NetSniper classification with banner review, hostname/vendor context, or manual asset annotation.")
-
-    if decision == "unknown" or classification in {"", "Unknown", "Unknown / Ambiguous"}:
+    if is_unknown_role:
         if open_ports:
-            add("Identify the unknown asset before closing the investigation; exposed services are present but the role is not established.")
+            add("Identify this unknown asset before closing the investigation; exposed services are present but the role is not established.")
         else:
-            add("Annotate the unknown asset if it is expected infrastructure, otherwise monitor for future service changes.")
+            add("Annotate this unknown asset if it is expected infrastructure, otherwise monitor for future service changes.")
+    else:
+        if decision == "classified" and confidence >= 40:
+            add(f"Confirm the {classification} role is expected for this network scope and annotate ownership if it is known.")
+        elif decision == "possible":
+            add(f"Verify the suspected {classification} role with banner review, hostname/vendor context, or manual asset annotation.")
+        else:
+            add(f"Treat the {classification} role as suspected, not confirmed; validate it with service evidence, vendor context, or manual asset annotation.")
 
     if "active directory" in classification_text or "domain controller" in classification_text:
         add("Confirm this is an authorized domain controller and verify ownership, patch level, and backup/restore coverage.")
@@ -3000,7 +3013,6 @@ def risk_role_recommended_actions(record):
         add(f"Review {subject_key} using event history, service inventory, and asset annotations before changing alert status.")
 
     return actions[:5]
-
 
 
 def build_risk_register(connection, limit, subject_filter=None, scope=None):
