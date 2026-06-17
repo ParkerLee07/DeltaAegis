@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.4.0: delta-first network-state monitoring, investigation, and risk prioritization console.
+"""DeltaAegis v0.4.1: delta-first network-state monitoring, investigation, risk prioritization, and reporting console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -798,7 +798,7 @@ def command_summary(args: argparse.Namespace) -> int:
     event_count = connection.execute("SELECT COUNT(*) FROM delta_events").fetchone()[0]
     open_alerts = connection.execute("SELECT COUNT(*) FROM alerts WHERE status = 'OPEN'").fetchone()[0]
     latest = connection.execute("SELECT scan_id, quality_status, hosts_up, identity_coverage FROM snapshots ORDER BY created_at DESC LIMIT 1").fetchone()
-    print("DeltaAegis v0.4.0 Summary")
+    print("DeltaAegis v0.4.1 Summary")
     print(f"Snapshots imported: {snapshot_count}")
     print(f"Accepted snapshots: {accepted_count}")
     print(f"Delta events:       {event_count}")
@@ -1615,6 +1615,40 @@ def command_asset_risk(args):
 
     return 0
 
+
+def append_report_risk_section(lines, risk_rows):
+    lines.append("## Top Risk Subjects")
+    lines.append("")
+
+    if not risk_rows:
+        lines.append("No risk subjects were calculated for this report.")
+        lines.append("")
+        return
+
+    lines.append("| Level | Score | Subject | Owner | Role | Criticality | Open Alerts | Events | Primary Reason |")
+    lines.append("|---|---:|---|---|---|---|---:|---:|---|")
+
+    for record in risk_rows:
+        reasons = record.get("reasons") or []
+        primary_reason = reasons[0] if reasons else "-"
+
+        lines.append(
+            "| "
+            f"{safe_markdown(record['level'])} | "
+            f"{record['score']} | "
+            f"`{safe_markdown(record['subject_key'])}` | "
+            f"{safe_markdown(record.get('owner') or '-')} | "
+            f"{safe_markdown(record.get('role') or '-')} | "
+            f"{safe_markdown(record.get('criticality') or '-')} | "
+            f"{record.get('open_alerts', 0)} | "
+            f"{record.get('event_count', 0)} | "
+            f"{safe_markdown(primary_reason)} |"
+        )
+
+    lines.append("")
+    lines.append("Risk scores are explainable and are calculated from recent delta events, alert state, repeated activity, asset criticality, and missing asset context.")
+    lines.append("")
+
 def command_report(args):
     from collections import Counter
     from datetime import datetime, timezone
@@ -1666,6 +1700,11 @@ def command_report(args):
         args.limit,
     )
 
+    report_risk_rows = build_risk_register(
+        connection,
+        args.risk_limit,
+    )
+
     event_type_counts = Counter(row["event_type"] for row in events)
     severity_counts = Counter(row["severity"] for row in events)
 
@@ -1707,6 +1746,8 @@ def command_report(args):
     lines.append(f"- Severity filter: `{args.severity or 'not specified'}`")
     lines.append(f"- Event limit: `{args.limit}`")
     lines.append("")
+
+    append_report_risk_section(lines, report_risk_rows)
 
     lines.append("## Annotated Asset Context")
     lines.append("")
@@ -2401,7 +2442,7 @@ def command_alert_detail(args):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.4.0 delta-first network-state monitoring, investigation, and risk prioritization console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.4.1 delta-first network-state monitoring, investigation, risk prioritization, and reporting console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
@@ -2458,6 +2499,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--since")
     p.add_argument("--severity")
     p.add_argument("--limit", type=int, default=100)
+    p.add_argument("--risk-limit", type=int, default=10)
     p.add_argument("--output", type=Path)
 
     sub.add_parser("paths")
