@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.4.0 — Risk Register
+
+### Added
+
+- Added explainable risk scoring helpers.
+- Added `risk` command.
+- Added `risk --details` command.
+- Added `risk --subject SUBJECT_KEY` filter.
+- Added `asset-risk SUBJECT_KEY` command.
+- Added risk levels based on score thresholds.
+- Added scoring based on event severity, open alerts, acknowledged alerts, repeated recent activity, asset criticality, and missing annotations.
+- Added visible scoring reasons so risk output remains explainable instead of opaque.
+
+### Changed
+
+- Updated DeltaAegis version language from v0.3.5 to v0.4.0.
+- Expanded DeltaAegis scope from investigation reporting into risk prioritization.
+
+### Notes
+
+- v0.4.0 does not change NetSniper ingestion compatibility.
+- v0.4.0 does not add the hosted dashboard yet.
+- Risk register integration into reports is planned for v0.4.1.
+
+---
+
 All notable changes to DeltaAegis are documented here.
 
 ---
