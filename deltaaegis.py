@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.4.1: delta-first network-state monitoring, investigation, risk prioritization, and reporting console.
+"""DeltaAegis v0.5.0: delta-first network-state monitoring, investigation, risk prioritization, reporting, and dashboard console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -798,7 +798,7 @@ def command_summary(args: argparse.Namespace) -> int:
     event_count = connection.execute("SELECT COUNT(*) FROM delta_events").fetchone()[0]
     open_alerts = connection.execute("SELECT COUNT(*) FROM alerts WHERE status = 'OPEN'").fetchone()[0]
     latest = connection.execute("SELECT scan_id, quality_status, hosts_up, identity_coverage FROM snapshots ORDER BY created_at DESC LIMIT 1").fetchone()
-    print("DeltaAegis v0.4.1 Summary")
+    print("DeltaAegis v0.5.0 Summary")
     print(f"Snapshots imported: {snapshot_count}")
     print(f"Accepted snapshots: {accepted_count}")
     print(f"Delta events:       {event_count}")
@@ -1299,6 +1299,14 @@ def risk_add_reason(reasons, reason):
 def risk_subject_record(subject_key):
     return {
         "subject_key": subject_key,
+        "identity_asset_key": None,
+        "ip_address": None,
+        "mac_address": None,
+        "hostname": None,
+        "vendor": None,
+        "identity_state": None,
+        "identity_last_seen_at": None,
+        "identity_confidence": None,
         "score": 0,
         "level": "INFO",
         "event_count": 0,
@@ -1361,6 +1369,261 @@ def fetch_risk_annotation(connection, subject_key):
 
     return annotation, subject_key
 
+
+
+def subject_identity_candidates(subject_key):
+    raw = str(subject_key or "").strip()
+    candidates = []
+    ip_candidates = []
+    mac_candidates = []
+
+    def add_candidate(value):
+        value = str(value or "").strip()
+
+        if value and value not in candidates:
+            candidates.append(value)
+
+    def add_ip(value):
+        value = str(value or "").strip()
+
+        if not value:
+            return
+
+        try:
+            ipaddress.ip_address(value)
+        except ValueError:
+            return
+
+        if value not in ip_candidates:
+            ip_candidates.append(value)
+
+    def add_mac(value):
+        value = normalize_mac(value)
+
+        if value and value not in mac_candidates:
+            mac_candidates.append(value)
+
+    if "report_annotation_candidates" in globals():
+        for candidate in report_annotation_candidates(raw):
+            add_candidate(candidate)
+    else:
+        add_candidate(raw)
+
+    for candidate in list(candidates):
+        if candidate.startswith("ip:"):
+            add_ip(candidate[3:])
+        elif candidate.startswith("mac:"):
+            add_mac(candidate[4:])
+        else:
+            add_ip(candidate)
+            add_mac(candidate)
+
+    return candidates, ip_candidates, mac_candidates
+
+
+def fetch_subject_identity(connection, subject_key):
+    candidates, ip_candidates, mac_candidates = subject_identity_candidates(subject_key)
+
+    for candidate in candidates:
+        row = connection.execute(
+            """
+            SELECT
+                asset_key,
+                current_ip AS ip_address,
+                mac_address,
+                vendor,
+                hostname,
+                state,
+                last_seen_at
+            FROM asset_lifecycle
+            WHERE asset_key = ?
+            """,
+            (candidate,),
+        ).fetchone()
+
+        if row is not None:
+            return dict(row)
+
+    for ip_address in ip_candidates:
+        row = connection.execute(
+            """
+            SELECT
+                asset_key,
+                current_ip AS ip_address,
+                mac_address,
+                vendor,
+                hostname,
+                state,
+                last_seen_at
+            FROM asset_lifecycle
+            WHERE current_ip = ?
+            """,
+            (ip_address,),
+        ).fetchone()
+
+        if row is not None:
+            return dict(row)
+
+    for mac_address in mac_candidates:
+        row = connection.execute(
+            """
+            SELECT
+                asset_key,
+                current_ip AS ip_address,
+                mac_address,
+                vendor,
+                hostname,
+                state,
+                last_seen_at
+            FROM asset_lifecycle
+            WHERE mac_address = ?
+            """,
+            (mac_address,),
+        ).fetchone()
+
+        if row is not None:
+            return dict(row)
+
+    for candidate in candidates:
+        row = connection.execute(
+            """
+            SELECT
+                ao.asset_key,
+                ao.ip_address,
+                ao.mac_address,
+                ao.vendor,
+                ao.hostname,
+                'OBSERVED' AS state,
+                s.created_at AS last_seen_at
+            FROM asset_observations ao
+            JOIN snapshots s ON s.scan_id = ao.scan_id
+            WHERE ao.asset_key = ?
+            ORDER BY s.created_at DESC, s.imported_at DESC
+            LIMIT 1
+            """,
+            (candidate,),
+        ).fetchone()
+
+        if row is not None:
+            return dict(row)
+
+    for ip_address in ip_candidates:
+        row = connection.execute(
+            """
+            SELECT
+                ao.asset_key,
+                ao.ip_address,
+                ao.mac_address,
+                ao.vendor,
+                ao.hostname,
+                'OBSERVED' AS state,
+                s.created_at AS last_seen_at
+            FROM asset_observations ao
+            JOIN snapshots s ON s.scan_id = ao.scan_id
+            WHERE ao.ip_address = ?
+            ORDER BY s.created_at DESC, s.imported_at DESC
+            LIMIT 1
+            """,
+            (ip_address,),
+        ).fetchone()
+
+        if row is not None:
+            return dict(row)
+
+    for mac_address in mac_candidates:
+        row = connection.execute(
+            """
+            SELECT
+                ao.asset_key,
+                ao.ip_address,
+                ao.mac_address,
+                ao.vendor,
+                ao.hostname,
+                'OBSERVED' AS state,
+                s.created_at AS last_seen_at
+            FROM asset_observations ao
+            JOIN snapshots s ON s.scan_id = ao.scan_id
+            WHERE ao.mac_address = ?
+            ORDER BY s.created_at DESC, s.imported_at DESC
+            LIMIT 1
+            """,
+            (mac_address,),
+        ).fetchone()
+
+        if row is not None:
+            return dict(row)
+
+    fallback_ip = ip_candidates[0] if ip_candidates else None
+    fallback_mac = mac_candidates[0] if mac_candidates else None
+
+    return {
+        "asset_key": candidates[0] if candidates else str(subject_key or ""),
+        "ip_address": fallback_ip,
+        "mac_address": fallback_mac,
+        "vendor": None,
+        "hostname": None,
+        "state": "UNKNOWN",
+        "last_seen_at": None,
+    }
+
+
+
+def identity_confidence_label(ip_address, mac_address):
+    ip_value = str(ip_address or "").strip().lower()
+    mac_value = str(mac_address or "").strip().lower()
+
+    ip_present = bool(ip_value and ip_value != "unknown" and ip_value != "-")
+    mac_present = bool(mac_value and mac_value != "unknown" and mac_value != "-")
+
+    if ip_present and mac_present:
+        return "Strong identity: MAC + IP observed"
+
+    if ip_present:
+        return "Partial identity: IP only"
+
+    if mac_present:
+        return "Partial identity: MAC only"
+
+    return "Unknown identity: no MAC/IP mapping found"
+
+def apply_identity_to_risk_record(connection, subject_key, record):
+    identity = fetch_subject_identity(connection, subject_key)
+
+    record["identity_asset_key"] = identity.get("asset_key")
+    record["ip_address"] = identity.get("ip_address")
+    record["mac_address"] = identity.get("mac_address")
+    record["hostname"] = identity.get("hostname")
+    record["vendor"] = identity.get("vendor")
+    record["identity_state"] = identity.get("state")
+    record["identity_last_seen_at"] = identity.get("last_seen_at")
+    record["identity_confidence"] = identity_confidence_label(
+        record.get("ip_address"),
+        record.get("mac_address"),
+    )
+
+    return record
+
+
+def dashboard_enrich_subject_rows(connection, rows, subject_field="subject_key"):
+    enriched = []
+
+    for row in rows:
+        item = dict(row)
+        identity = fetch_subject_identity(connection, item.get(subject_field))
+
+        item["identity_asset_key"] = identity.get("asset_key")
+        item["identity_ip_address"] = identity.get("ip_address")
+        item["identity_mac_address"] = identity.get("mac_address")
+        item["identity_hostname"] = identity.get("hostname")
+        item["identity_vendor"] = identity.get("vendor")
+        item["identity_confidence"] = identity_confidence_label(
+            item.get("identity_ip_address"),
+            item.get("identity_mac_address"),
+        )
+
+        enriched.append(item)
+
+    return enriched
 
 def build_risk_register(connection, limit, subject_filter=None):
     subjects = {}
@@ -1451,6 +1714,8 @@ def build_risk_register(connection, limit, subject_filter=None):
             record["latest_alert_at"] = row["last_seen_at"]
 
     for subject_key, record in subjects.items():
+        apply_identity_to_risk_record(connection, subject_key, record)
+
         score = 0
 
         max_severity = record["max_event_severity"]
@@ -1536,6 +1801,8 @@ def build_risk_register(connection, limit, subject_filter=None):
 
 def print_risk_record(record, detailed=False):
     print(f"{record['level']:<8} {record['score']:>3}  {record['subject_key']}")
+    print(f"  IP address:  {record.get('ip_address') or 'unknown'}")
+    print(f"  MAC address: {record.get('mac_address') or 'unknown'}")
     print(f"  Owner:       {record['owner'] or '-'}")
     print(f"  Role:        {record['role'] or '-'}")
     print(f"  Criticality: {record['criticality'] or '-'}")
@@ -1625,8 +1892,8 @@ def append_report_risk_section(lines, risk_rows):
         lines.append("")
         return
 
-    lines.append("| Level | Score | Subject | Owner | Role | Criticality | Open Alerts | Events | Primary Reason |")
-    lines.append("|---|---:|---|---|---|---|---:|---:|---|")
+    lines.append("| Level | Score | Subject | IP Address | MAC Address | Owner | Role | Criticality | Open Alerts | Events | Primary Reason |")
+    lines.append("|---|---:|---|---|---|---|---|---|---:|---:|---|")
 
     for record in risk_rows:
         reasons = record.get("reasons") or []
@@ -1637,6 +1904,8 @@ def append_report_risk_section(lines, risk_rows):
             f"{safe_markdown(record['level'])} | "
             f"{record['score']} | "
             f"`{safe_markdown(record['subject_key'])}` | "
+            f"`{safe_markdown(record.get('ip_address') or 'unknown')}` | "
+            f"`{safe_markdown(record.get('mac_address') or 'unknown')}` | "
             f"{safe_markdown(record.get('owner') or '-')} | "
             f"{safe_markdown(record.get('role') or '-')} | "
             f"{safe_markdown(record.get('criticality') or '-')} | "
@@ -2441,8 +2710,1247 @@ def command_alert_detail(args):
     return 0
 
 
+
+def dashboard_json_response(handler, payload, status=200):
+    body = json.dumps(payload, indent=2, default=str).encode("utf-8")
+
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def dashboard_html_response(handler, body, status=200):
+    body = body.encode("utf-8")
+
+    handler.send_response(status)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def dashboard_text_response(handler, body, status=200):
+    body = str(body).encode("utf-8")
+
+    handler.send_response(status)
+    handler.send_header("Content-Type", "text/plain; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def dashboard_safe_query(connection, sql, params=()):
+    try:
+        rows = connection.execute(sql, params).fetchall()
+    except Exception:
+        return []
+
+    return [dict(row) for row in rows]
+
+
+def dashboard_count(connection, table, where=None):
+    sql = f"SELECT COUNT(*) AS count FROM {table}"
+
+    if where:
+        sql += f" WHERE {where}"
+
+    try:
+        row = connection.execute(sql).fetchone()
+    except Exception:
+        return 0
+
+    if row is None:
+        return 0
+
+    return int(row["count"])
+
+
+def dashboard_summary_payload(connection):
+    alert_rows = dashboard_safe_query(
+        connection,
+        """
+        SELECT status, COUNT(*) AS count
+        FROM alerts
+        GROUP BY status
+        ORDER BY status
+        """,
+    )
+
+    event_rows = dashboard_safe_query(
+        connection,
+        """
+        SELECT severity, COUNT(*) AS count
+        FROM delta_events
+        GROUP BY severity
+        ORDER BY count DESC, severity ASC
+        """,
+    )
+
+    risk_rows = []
+
+    try:
+        risk_rows = build_risk_register(connection, 5)
+    except Exception:
+        risk_rows = []
+
+    return {
+        "snapshots": dashboard_count(connection, "snapshots"),
+        "events": dashboard_count(connection, "delta_events"),
+        "alerts": dashboard_count(connection, "alerts"),
+        "open_alerts": dashboard_count(connection, "alerts", "status = 'OPEN'"),
+        "asset_annotations": dashboard_count(connection, "asset_annotations"),
+        "alert_status_counts": alert_rows,
+        "event_severity_counts": event_rows,
+        "top_risks": risk_rows,
+    }
+
+
+
+def dashboard_table_columns(connection, table_name):
+    try:
+        rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    except Exception:
+        return set()
+
+    return {row["name"] for row in rows}
+
+
+def dashboard_snapshot_order_clause(connection):
+    columns = dashboard_table_columns(connection, "snapshots")
+    order_columns = [
+        column for column in ["created_at", "imported_at", "scan_id"]
+        if column in columns
+    ]
+
+    if not order_columns:
+        return "rowid DESC"
+
+    return ", ".join(f"{column} DESC" for column in order_columns)
+
+
+def dashboard_snapshot_select_columns(connection):
+    columns = dashboard_table_columns(connection, "snapshots")
+
+    preferred = [
+        "scan_id",
+        "created_at",
+        "imported_at",
+        "source_path",
+        "source_file",
+        "bundle_path",
+        "manifest_path",
+        "scanner_version",
+        "telemetry_contract",
+        "schema_version",
+    ]
+
+    selected = [column for column in preferred if column in columns]
+
+    if "scan_id" not in selected and "scan_id" in columns:
+        selected.insert(0, "scan_id")
+
+    if not selected:
+        selected = ["rowid"]
+
+    return selected
+
+
+def dashboard_snapshot_rows(connection, limit=2):
+    selected = dashboard_snapshot_select_columns(connection)
+    order_clause = dashboard_snapshot_order_clause(connection)
+
+    try:
+        rows = connection.execute(
+            f"""
+            SELECT {", ".join(selected)}
+            FROM snapshots
+            ORDER BY {order_clause}
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    except Exception:
+        return []
+
+    return [dict(row) for row in rows]
+
+
+def dashboard_snapshot_asset_summary(connection, scan_id):
+    if not scan_id:
+        return {
+            "observed_assets": 0,
+            "observed_ips": 0,
+            "observed_macs": 0,
+            "assets_with_ip_and_mac": 0,
+        }
+
+    columns = dashboard_table_columns(connection, "asset_observations")
+
+    if not columns:
+        return {
+            "observed_assets": 0,
+            "observed_ips": 0,
+            "observed_macs": 0,
+            "assets_with_ip_and_mac": 0,
+        }
+
+    try:
+        observed_assets = connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM asset_observations
+            WHERE scan_id = ?
+            """,
+            (scan_id,),
+        ).fetchone()["count"]
+    except Exception:
+        observed_assets = 0
+
+    observed_ips = 0
+    observed_macs = 0
+    assets_with_ip_and_mac = 0
+
+    if "ip_address" in columns:
+        try:
+            observed_ips = connection.execute(
+                """
+                SELECT COUNT(DISTINCT ip_address) AS count
+                FROM asset_observations
+                WHERE scan_id = ?
+                  AND ip_address IS NOT NULL
+                  AND ip_address != ''
+                """,
+                (scan_id,),
+            ).fetchone()["count"]
+        except Exception:
+            observed_ips = 0
+
+    if "mac_address" in columns:
+        try:
+            observed_macs = connection.execute(
+                """
+                SELECT COUNT(DISTINCT mac_address) AS count
+                FROM asset_observations
+                WHERE scan_id = ?
+                  AND mac_address IS NOT NULL
+                  AND mac_address != ''
+                """,
+                (scan_id,),
+            ).fetchone()["count"]
+        except Exception:
+            observed_macs = 0
+
+    if "ip_address" in columns and "mac_address" in columns:
+        try:
+            assets_with_ip_and_mac = connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM asset_observations
+                WHERE scan_id = ?
+                  AND ip_address IS NOT NULL
+                  AND ip_address != ''
+                  AND mac_address IS NOT NULL
+                  AND mac_address != ''
+                """,
+                (scan_id,),
+            ).fetchone()["count"]
+        except Exception:
+            assets_with_ip_and_mac = 0
+
+    return {
+        "observed_assets": int(observed_assets or 0),
+        "observed_ips": int(observed_ips or 0),
+        "observed_macs": int(observed_macs or 0),
+        "assets_with_ip_and_mac": int(assets_with_ip_and_mac or 0),
+    }
+
+
+def dashboard_enrich_snapshot(connection, snapshot):
+    if snapshot is None:
+        return None
+
+    item = dict(snapshot)
+    scan_id = item.get("scan_id")
+    item["asset_summary"] = dashboard_snapshot_asset_summary(connection, scan_id)
+
+    return item
+
+
+def dashboard_delta_scan_pairs(connection, limit=10):
+    try:
+        rows = connection.execute(
+            """
+            SELECT
+                scan_id,
+                baseline_scan_id,
+                COUNT(*) AS event_count,
+                MAX(created_at) AS latest_event_at
+            FROM delta_events
+            GROUP BY scan_id, baseline_scan_id
+            ORDER BY latest_event_at DESC, event_count DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    except Exception:
+        return []
+
+    return [dict(row) for row in rows]
+
+
+def dashboard_scan_context_payload(connection):
+    snapshots = dashboard_snapshot_rows(connection, 2)
+
+    latest_scan = dashboard_enrich_snapshot(
+        connection,
+        snapshots[0] if len(snapshots) >= 1 else None,
+    )
+
+    baseline_scan = dashboard_enrich_snapshot(
+        connection,
+        snapshots[1] if len(snapshots) >= 2 else None,
+    )
+
+    return {
+        "latest_scan": latest_scan,
+        "baseline_scan": baseline_scan,
+        "delta_scan_pairs": dashboard_delta_scan_pairs(connection, 10),
+    }
+
+def dashboard_events_payload(connection, limit):
+    rows = dashboard_safe_query(
+        connection,
+        """
+        SELECT
+            event_id,
+            scan_id,
+            baseline_scan_id,
+            created_at,
+            severity,
+            event_type,
+            subject_key,
+            summary
+        FROM delta_events
+        ORDER BY event_id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+
+    return dashboard_enrich_subject_rows(connection, rows)
+
+
+def dashboard_alerts_payload(connection, limit):
+    rows = dashboard_safe_query(
+        connection,
+        """
+        SELECT
+            alert_id,
+            status,
+            severity,
+            event_type,
+            subject_key,
+            summary,
+            opened_at,
+            last_seen_at
+        FROM alerts
+        ORDER BY alert_id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+
+    return dashboard_enrich_subject_rows(connection, rows)
+
+
+def dashboard_annotations_payload(connection, limit):
+    rows = dashboard_safe_query(
+        connection,
+        """
+        SELECT
+            asset_key,
+            owner,
+            role,
+            criticality,
+            notes,
+            updated_at
+        FROM asset_annotations
+        ORDER BY updated_at DESC, asset_key ASC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+
+    return dashboard_enrich_subject_rows(connection, rows, subject_field="asset_key")
+
+
+def dashboard_risk_payload(connection, limit):
+    try:
+        return build_risk_register(connection, limit)
+    except Exception as exc:
+        return [
+            {
+                "subject_key": "risk-error",
+                "score": 0,
+                "level": "INFO",
+                "reasons": [f"Risk register unavailable: {exc}"],
+            }
+        ]
+
+
+def dashboard_index_html():
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>DeltaAegis Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #121a2e;
+      --panel2: #18233c;
+      --text: #e7eefc;
+      --muted: #94a3b8;
+      --line: #26344f;
+      --accent: #60a5fa;
+      --high: #f97316;
+      --critical: #ef4444;
+      --medium: #eab308;
+      --low: #22c55e;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    header {
+      padding: 24px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(135deg, #0f172a, #111827);
+    }
+
+    header h1 {
+      margin: 0;
+      font-size: 28px;
+      letter-spacing: 0.02em;
+    }
+
+    header p {
+      margin: 8px 0 0;
+      color: var(--muted);
+    }
+
+    main {
+      padding: 24px;
+      display: grid;
+      gap: 20px;
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    }
+
+    .scan-grid {
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    }
+
+    .kv {
+      display: grid;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .kv div {
+      display: grid;
+      grid-template-columns: 130px 1fr;
+      gap: 10px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 6px;
+    }
+
+    .kv span:first-child {
+      color: var(--muted);
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px;
+      box-shadow: 0 12px 30px rgba(0,0,0,0.25);
+    }
+
+    .metric {
+      font-size: 32px;
+      font-weight: 700;
+      margin-top: 8px;
+    }
+
+    .label {
+      color: var(--muted);
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 20px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+    }
+
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 10px;
+      text-align: left;
+      vertical-align: top;
+      font-size: 14px;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      background: var(--panel2);
+    }
+
+    code {
+      color: #bfdbfe;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: var(--panel2);
+      border: 1px solid var(--line);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .CRITICAL { color: var(--critical); }
+    .HIGH { color: var(--high); }
+    .MEDIUM { color: var(--medium); }
+    .LOW { color: var(--low); }
+    .INFO { color: var(--muted); }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .error {
+      color: #fecaca;
+      background: #450a0a;
+      border: 1px solid #7f1d1d;
+      padding: 12px;
+      border-radius: 10px;
+      display: none;
+    }
+
+    .explain {
+      background: linear-gradient(135deg, rgba(96,165,250,0.12), rgba(34,197,94,0.08));
+    }
+
+    .callout {
+      border-left: 4px solid var(--accent);
+      padding: 10px 12px;
+      background: rgba(96,165,250,0.08);
+      border-radius: 8px;
+      color: var(--text);
+      margin-top: 10px;
+    }
+
+    .legend-grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    }
+
+    .legend-list {
+      margin: 0;
+      padding-left: 20px;
+      color: var(--muted);
+    }
+
+    .legend-list li {
+      margin: 6px 0;
+    }
+
+    .steps {
+      margin: 0;
+      padding-left: 22px;
+    }
+
+    .steps li {
+      margin: 8px 0;
+    }
+
+    .status {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .status-current {
+      color: #bbf7d0;
+      background: rgba(34,197,94,0.12);
+      border-color: rgba(34,197,94,0.35);
+    }
+
+    .status-stale {
+      color: #fed7aa;
+      background: rgba(249,115,22,0.12);
+      border-color: rgba(249,115,22,0.35);
+    }
+
+    .status-unknown {
+      color: #cbd5e1;
+      background: rgba(148,163,184,0.12);
+      border-color: rgba(148,163,184,0.35);
+    }
+
+    .identity-strong {
+      color: #bbf7d0;
+    }
+
+    .identity-partial {
+      color: #fde68a;
+    }
+
+    .identity-unknown {
+      color: #fecaca;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>DeltaAegis Dashboard</h1>
+    <p>Read-only local dashboard for network deltas, alerts, annotations, and risk prioritization.</p>
+  </header>
+
+  <main>
+    <div id="error" class="error"></div>
+
+    <section class="card explain">
+      <h2>What am I looking at?</h2>
+      <p>
+        DeltaAegis compares NetSniper scans over time. The latest scan represents the current observed network state.
+        The baseline scan is the previous known state used for comparison.
+      </p>
+      <div class="callout">
+        A <strong>delta</strong> means something changed between scans, such as a new asset, missing asset,
+        opened service, closed service, or new NetSniper finding.
+      </div>
+    </section>
+
+    <section class="grid" id="metrics"></section>
+
+    <section class="card">
+      <h2>NetSniper Scan Context</h2>
+      <p class="muted">Shows the latest NetSniper scan, the baseline scan used for delta comparison, and identity coverage for MAC/IP tracking.</p>
+      <div class="scan-grid" id="scan-context"></div>
+    </section>
+
+    <section class="card">
+      <h2>Top Risk Subjects</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Level</th>
+            <th>Score</th>
+            <th>Subject</th>
+            <th>IP</th>
+            <th>MAC</th>
+            <th>Identity</th>
+            <th>Owner</th>
+            <th>Role</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody id="risk"></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Recent Delta Events</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Scan</th>
+            <th>Baseline</th>
+            <th>Severity</th>
+            <th>Type</th>
+            <th>Subject</th>
+            <th>IP</th>
+            <th>MAC</th>
+            <th>Identity</th>
+            <th>Created</th>
+            <th>Summary</th>
+          </tr>
+        </thead>
+        <tbody id="events"></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Recent Alerts</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Status</th>
+            <th>Severity</th>
+            <th>Subject</th>
+            <th>IP</th>
+            <th>MAC</th>
+            <th>Identity</th>
+            <th>Summary</th>
+          </tr>
+        </thead>
+        <tbody id="alerts"></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Asset Annotations</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Asset</th>
+            <th>IP</th>
+            <th>MAC</th>
+            <th>Identity</th>
+            <th>Owner</th>
+            <th>Role</th>
+            <th>Criticality</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody id="annotations"></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Risk and Identity Legend</h2>
+      <div class="legend-grid">
+        <div>
+          <div class="label">Risk score</div>
+          <ul class="legend-list">
+            <li><strong class="CRITICAL">85–100 Critical</strong> — review immediately.</li>
+            <li><strong class="HIGH">65–84 High</strong> — prioritize after critical items.</li>
+            <li><strong class="MEDIUM">35–64 Medium</strong> — review when higher-risk items are understood.</li>
+            <li><strong class="LOW">15–34 Low</strong> — track but usually not urgent.</li>
+            <li><strong class="INFO">0–14 Info</strong> — informational or context-only.</li>
+          </ul>
+        </div>
+        <div>
+          <div class="label">Identity confidence</div>
+          <ul class="legend-list">
+            <li><strong class="identity-strong">Strong identity</strong> — MAC and IP were both observed.</li>
+            <li><strong class="identity-partial">Partial identity</strong> — only MAC or only IP was observed.</li>
+            <li><strong class="identity-unknown">Unknown identity</strong> — no MAC/IP mapping was found.</li>
+          </ul>
+        </div>
+        <div>
+          <div class="label">How risk is calculated</div>
+          <ul class="legend-list">
+            <li>Event severity</li>
+            <li>Open or acknowledged alerts</li>
+            <li>Repeated recent activity</li>
+            <li>Asset criticality</li>
+            <li>Missing owner or asset context</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Recommended Next Steps</h2>
+      <ol class="steps" id="recommendations"></ol>
+    </section>
+  </main>
+
+  <script>
+    function esc(value) {
+      if (value === null || value === undefined || value === "") return "-";
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    async function api(path) {
+      const response = await fetch(path, {cache: "no-store"});
+
+      if (!response.ok) {
+        throw new Error(path + " returned HTTP " + response.status);
+      }
+
+      return await response.json();
+    }
+
+
+    function identityClass(value) {
+      const text = String(value || "").toLowerCase();
+
+      if (text.includes("strong")) return "identity-strong";
+      if (text.includes("partial")) return "identity-partial";
+      return "identity-unknown";
+    }
+
+    function identityBadge(value) {
+      const label = value || "Unknown identity";
+      return `<span class="${identityClass(label)}">${esc(label)}</span>`;
+    }
+
+    function parseScanTime(value) {
+      if (!value) return null;
+
+      let parsed = Date.parse(value);
+
+      if (Number.isNaN(parsed) && String(value).indexOf(" ") > -1) {
+        parsed = Date.parse(String(value).replace(" ", "T"));
+      }
+
+      if (Number.isNaN(parsed)) return null;
+
+      return new Date(parsed);
+    }
+
+    function scanTimestamp(scan) {
+      if (!scan) return null;
+      return scan.created_at || scan.imported_at || scan.last_seen_at || null;
+    }
+
+    function scanFreshness(scan) {
+      const timestamp = scanTimestamp(scan);
+      const parsed = parseScanTime(timestamp);
+
+      if (!parsed) {
+        return {
+          label: "Unknown",
+          detail: "No scan timestamp was found.",
+          className: "status-unknown",
+          stale: false
+        };
+      }
+
+      const ageMs = Date.now() - parsed.getTime();
+      const ageHours = ageMs / (1000 * 60 * 60);
+      const ageDays = ageHours / 24;
+
+      let ageLabel = "";
+
+      if (ageHours < 1) {
+        ageLabel = Math.max(0, Math.round(ageMs / (1000 * 60))) + " minutes old";
+      } else if (ageHours < 48) {
+        ageLabel = Math.round(ageHours) + " hours old";
+      } else {
+        ageLabel = Math.round(ageDays) + " days old";
+      }
+
+      if (ageHours > 24) {
+        return {
+          label: "Stale",
+          detail: ageLabel + " — run a new NetSniper scan before relying on this view.",
+          className: "status-stale",
+          stale: true
+        };
+      }
+
+      return {
+        label: "Current",
+        detail: ageLabel,
+        className: "status-current",
+        stale: false
+      };
+    }
+
+    function identityCoverage(summary) {
+      summary = summary || {};
+      const total = Number(summary.observed_assets || 0);
+      const both = Number(summary.assets_with_ip_and_mac || 0);
+
+      if (!total) return "No observed assets";
+
+      const percent = Math.round((both / total) * 100);
+      return `${percent}% strong identity coverage`;
+    }
+
+
+    function metric(label, value) {
+      return `<div class="card"><div class="label">${esc(label)}</div><div class="metric">${esc(value)}</div></div>`;
+    }
+
+    function renderMetrics(summary) {
+      document.getElementById("metrics").innerHTML = [
+        metric("Snapshots", summary.snapshots),
+        metric("Events", summary.events),
+        metric("Alerts", summary.alerts),
+        metric("Open Alerts", summary.open_alerts),
+        metric("Annotations", summary.asset_annotations)
+      ].join("");
+    }
+
+
+    function scanCard(title, scan) {
+      if (!scan) {
+        return `<div class="card">
+          <div class="label">${esc(title)}</div>
+          <p class="muted">No scan data found.</p>
+        </div>`;
+      }
+
+      const summary = scan.asset_summary || {};
+      const freshness = scanFreshness(scan);
+
+      return `<div class="card">
+        <div class="label">${esc(title)}</div>
+        <div class="kv">
+          <div><span>Status</span><span class="status ${freshness.className}">${esc(freshness.label)}</span></div>
+          <div><span>Scan age</span><span>${esc(freshness.detail)}</span></div>
+          <div><span>Scan ID</span><code>${esc(scan.scan_id)}</code></div>
+          <div><span>Created</span><span>${esc(scan.created_at)}</span></div>
+          <div><span>Imported</span><span>${esc(scan.imported_at)}</span></div>
+          <div><span>Scanner</span><span>${esc(scan.scanner_version)}</span></div>
+          <div><span>Contract</span><span>${esc(scan.telemetry_contract)}</span></div>
+          <div><span>Observed Assets</span><span>${esc(summary.observed_assets)}</span></div>
+          <div><span>Observed IPs</span><span>${esc(summary.observed_ips)}</span></div>
+          <div><span>Observed MACs</span><span>${esc(summary.observed_macs)}</span></div>
+          <div><span>IP + MAC Assets</span><span>${esc(summary.assets_with_ip_and_mac)}</span></div>
+          <div><span>Identity Coverage</span><span>${esc(identityCoverage(summary))}</span></div>
+          <div><span>Source</span><code>${esc(scan.source_path || scan.source_file || scan.bundle_path || scan.manifest_path)}</code></div>
+        </div>
+      </div>`;
+    }
+
+    function renderScanContext(context) {
+      const pairs = context.delta_scan_pairs || [];
+      const pairRows = pairs.map(pair => `
+        <tr>
+          <td><code>${esc(pair.scan_id)}</code></td>
+          <td><code>${esc(pair.baseline_scan_id)}</code></td>
+          <td>${esc(pair.event_count)}</td>
+          <td>${esc(pair.latest_event_at)}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="4" class="muted">No delta scan pairs found.</td></tr>`;
+
+      document.getElementById("scan-context").innerHTML = `
+        ${scanCard("Latest NetSniper Scan", context.latest_scan)}
+        ${scanCard("Baseline Scan", context.baseline_scan)}
+        <div class="card">
+          <div class="label">Delta Comparisons</div>
+          <table>
+            <thead>
+              <tr>
+                <th>Scan</th>
+                <th>Baseline</th>
+                <th>Events</th>
+                <th>Latest Event</th>
+              </tr>
+            </thead>
+            <tbody>${pairRows}</tbody>
+          </table>
+        </div>
+      `;
+    }
+
+
+    function renderRisk(rows) {
+      document.getElementById("risk").innerHTML = rows.map(row => {
+        const reason = row.reasons && row.reasons.length ? row.reasons[0] : "-";
+
+        return `<tr>
+          <td><span class="pill ${esc(row.level)}">${esc(row.level)}</span></td>
+          <td>${esc(row.score)}</td>
+          <td><code>${esc(row.subject_key)}</code></td>
+          <td><code>${esc(row.ip_address)}</code></td>
+          <td><code>${esc(row.mac_address)}</code></td>
+          <td>${identityBadge(row.identity_confidence)}</td>
+          <td>${esc(row.owner)}</td>
+          <td>${esc(row.role)}</td>
+          <td>${esc(reason)}</td>
+        </tr>`;
+      }).join("") || `<tr><td colspan="9" class="muted">No risk subjects found.</td></tr>`;
+    }
+
+    function renderEvents(rows) {
+      document.getElementById("events").innerHTML = rows.map(row => `
+        <tr>
+          <td>${esc(row.event_id)}</td>
+          <td><code>${esc(row.scan_id)}</code></td>
+          <td><code>${esc(row.baseline_scan_id)}</code></td>
+          <td><span class="${esc(row.severity)}">${esc(row.severity)}</span></td>
+          <td>${esc(row.event_type)}</td>
+          <td><code>${esc(row.subject_key)}</code></td>
+          <td><code>${esc(row.identity_ip_address)}</code></td>
+          <td><code>${esc(row.identity_mac_address)}</code></td>
+          <td>${identityBadge(row.identity_confidence)}</td>
+          <td>${esc(row.created_at)}</td>
+          <td>${esc(row.summary)}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="11" class="muted">No events found.</td></tr>`;
+    }
+
+    function renderAlerts(rows) {
+      document.getElementById("alerts").innerHTML = rows.map(row => `
+        <tr>
+          <td>${esc(row.alert_id)}</td>
+          <td>${esc(row.status)}</td>
+          <td><span class="${esc(row.severity)}">${esc(row.severity)}</span></td>
+          <td><code>${esc(row.subject_key)}</code></td>
+          <td><code>${esc(row.identity_ip_address)}</code></td>
+          <td><code>${esc(row.identity_mac_address)}</code></td>
+          <td>${identityBadge(row.identity_confidence)}</td>
+          <td>${esc(row.summary)}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="8" class="muted">No alerts found.</td></tr>`;
+    }
+
+    function renderAnnotations(rows) {
+      document.getElementById("annotations").innerHTML = rows.map(row => `
+        <tr>
+          <td><code>${esc(row.asset_key)}</code></td>
+          <td><code>${esc(row.identity_ip_address)}</code></td>
+          <td><code>${esc(row.identity_mac_address)}</code></td>
+          <td>${identityBadge(row.identity_confidence)}</td>
+          <td>${esc(row.owner)}</td>
+          <td>${esc(row.role)}</td>
+          <td>${esc(row.criticality)}</td>
+          <td>${esc(row.notes)}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="8" class="muted">No annotations found.</td></tr>`;
+    }
+
+    function renderRecommendations(summary, scanContext, riskRows) {
+      const steps = [];
+      const latest = scanContext && scanContext.latest_scan ? scanContext.latest_scan : null;
+      const latestFreshness = scanFreshness(latest);
+      const risks = riskRows || [];
+      const topRisk = risks.length ? risks[0] : null;
+      const highRiskCount = risks.filter(row => ["CRITICAL", "HIGH"].includes(String(row.level || "").toUpperCase())).length;
+
+      if (!latest) {
+        steps.push("Import a NetSniper telemetry bundle so DeltaAegis has scan data to compare.");
+      } else if (latestFreshness.stale) {
+        steps.push("Run a fresh NetSniper scan before making decisions from this dashboard.");
+      }
+
+      if (topRisk && ["CRITICAL", "HIGH"].includes(String(topRisk.level || "").toUpperCase())) {
+        steps.push(`Review the top ${esc(topRisk.level)} risk subject first: ${esc(topRisk.subject_key)}.`);
+      } else if (topRisk) {
+        steps.push(`Review the highest current risk subject: ${esc(topRisk.subject_key)}.`);
+      }
+
+      if (highRiskCount > 1) {
+        steps.push(`Triage the ${highRiskCount} high-priority risk subjects before lower-risk changes.`);
+      }
+
+      if (summary && Number(summary.open_alerts || 0) > 0) {
+        steps.push(`Review ${esc(summary.open_alerts)} open alert(s), then acknowledge or suppress them with a clear reason.`);
+      }
+
+      const latestSummary = latest && latest.asset_summary ? latest.asset_summary : {};
+      const observed = Number(latestSummary.observed_assets || 0);
+      const strong = Number(latestSummary.assets_with_ip_and_mac || 0);
+
+      if (observed && strong < observed) {
+        steps.push("Check partial or unknown identities because some assets do not have both MAC and IP evidence.");
+      }
+
+      if (summary && Number(summary.asset_annotations || 0) === 0) {
+        steps.push("Add owner, role, and criticality annotations for important assets.");
+      } else {
+        steps.push("Keep asset owner, role, and criticality annotations updated as the network changes.");
+      }
+
+      steps.push("Generate a Markdown investigation report after reviewing risk subjects and alerts.");
+
+      document.getElementById("recommendations").innerHTML = steps
+        .map(step => `<li>${step}</li>`)
+        .join("");
+    }
+
+    async function load() {
+      try {
+        const [summary, scanContext, risk, events, alerts, annotations] = await Promise.all([
+          api("/api/summary"),
+          api("/api/scan-context"),
+          api("/api/risk?limit=10"),
+          api("/api/events?limit=20"),
+          api("/api/alerts?limit=20"),
+          api("/api/annotations?limit=20")
+        ]);
+
+        renderMetrics(summary);
+        renderScanContext(scanContext);
+        renderRisk(risk);
+        renderEvents(events);
+        renderAlerts(alerts);
+        renderAnnotations(annotations);
+        renderRecommendations(summary, scanContext, risk);
+      } catch (error) {
+        const box = document.getElementById("error");
+        box.style.display = "block";
+        box.textContent = error.message;
+      }
+    }
+
+    load();
+    setInterval(load, 30000);
+  </script>
+</body>
+</html>
+"""
+
+
+def command_dashboard(args):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, urlparse
+
+    db_path = args.db
+    token = args.token
+
+    class DeltaAegisDashboardHandler(BaseHTTPRequestHandler):
+        server_version = "DeltaAegisDashboard/0.5.0"
+
+        def log_message(self, fmt, *handler_args):
+            if not args.quiet:
+                super().log_message(fmt, *handler_args)
+
+        def authorized(self):
+            if not token:
+                return True
+
+            supplied = self.headers.get("X-DeltaAegis-Token", "")
+
+            if supplied == token:
+                return True
+
+            parsed = urlparse(self.path)
+            query = parse_qs(parsed.query)
+
+            return query.get("token", [""])[0] == token
+
+        def require_auth(self):
+            if self.authorized():
+                return True
+
+            dashboard_json_response(
+                self,
+                {
+                    "error": "unauthorized",
+                    "message": "Provide X-DeltaAegis-Token header or ?token=TOKEN.",
+                },
+                status=401,
+            )
+
+            return False
+
+        def open_connection(self):
+            return connect(db_path)
+
+        def do_GET(self):
+            parsed = urlparse(self.path)
+            route = parsed.path
+            query = parse_qs(parsed.query)
+
+            if route == "/healthz":
+                dashboard_text_response(self, "ok")
+                return
+
+            if route == "/":
+                dashboard_html_response(self, dashboard_index_html())
+                return
+
+            if not self.require_auth():
+                return
+
+            try:
+                limit = int(query.get("limit", ["20"])[0])
+            except ValueError:
+                limit = 20
+
+            limit = max(1, min(limit, 200))
+
+            connection = self.open_connection()
+
+            try:
+                if route == "/api/summary":
+                    dashboard_json_response(self, dashboard_summary_payload(connection))
+                elif route == "/api/scan-context":
+                    dashboard_json_response(self, dashboard_scan_context_payload(connection))
+                elif route == "/api/events":
+                    dashboard_json_response(self, dashboard_events_payload(connection, limit))
+                elif route == "/api/alerts":
+                    dashboard_json_response(self, dashboard_alerts_payload(connection, limit))
+                elif route == "/api/risk":
+                    dashboard_json_response(self, dashboard_risk_payload(connection, limit))
+                elif route == "/api/annotations":
+                    dashboard_json_response(self, dashboard_annotations_payload(connection, limit))
+                else:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "error": "not_found",
+                            "path": route,
+                        },
+                        status=404,
+                    )
+            finally:
+                connection.close()
+
+    server_address = (args.host, args.port)
+    server = ThreadingHTTPServer(server_address, DeltaAegisDashboardHandler)
+
+    print("DeltaAegis dashboard starting")
+    print("============================")
+    print(f"URL:      http://{args.host}:{args.port}")
+    print(f"Database: {db_path}")
+    print("Mode:     read-only")
+
+    if token:
+        print("Auth:     token required")
+        print("Header:   X-DeltaAegis-Token")
+    else:
+        print("Auth:     disabled")
+        print("Warning:  bind to 127.0.0.1 unless you are using a trusted network")
+
+    print()
+    print("Press Ctrl+C to stop.")
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopping dashboard.")
+    finally:
+        server.server_close()
+
+    return 0
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.4.1 delta-first network-state monitoring, investigation, risk prioritization, and reporting console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.5.0 delta-first network-state monitoring, investigation, risk prioritization, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
@@ -2485,6 +3993,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("alert-notes")
     p.add_argument("alert_id", type=int)
+
+    p = sub.add_parser("dashboard")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8090)
+    p.add_argument("--token")
+    p.add_argument("--quiet", action="store_true")
 
     p = sub.add_parser("risk")
     p.add_argument("--limit", type=int, default=20)
@@ -2532,6 +4046,8 @@ def main() -> int:
         if args.command == "alert-detail": return command_alert_detail(args)
         if args.command == "alert-notes": return command_alert_notes(args)
 
+
+        if args.command == "dashboard": return command_dashboard(args)
 
         if args.command == "risk": return command_risk(args)
 
