@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.3.5: delta-first network-state monitoring and investigation console.
+"""DeltaAegis v0.4.0: delta-first network-state monitoring, investigation, and risk prioritization console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -798,7 +798,7 @@ def command_summary(args: argparse.Namespace) -> int:
     event_count = connection.execute("SELECT COUNT(*) FROM delta_events").fetchone()[0]
     open_alerts = connection.execute("SELECT COUNT(*) FROM alerts WHERE status = 'OPEN'").fetchone()[0]
     latest = connection.execute("SELECT scan_id, quality_status, hosts_up, identity_coverage FROM snapshots ORDER BY created_at DESC LIMIT 1").fetchone()
-    print("DeltaAegis v0.3.5 Summary")
+    print("DeltaAegis v0.4.0 Summary")
     print(f"Snapshots imported: {snapshot_count}")
     print(f"Accepted snapshots: {accepted_count}")
     print(f"Delta events:       {event_count}")
@@ -1255,6 +1255,365 @@ def report_event_rows(connection, latest_only, since, severity, limit):
         tuple(params),
     ).fetchall()
 
+
+
+RISK_SEVERITY_POINTS = {
+    "CRITICAL": 40,
+    "HIGH": 30,
+    "MEDIUM": 15,
+    "LOW": 5,
+    "INFO": 1,
+}
+
+RISK_CRITICALITY_POINTS = {
+    "CRITICAL": 25,
+    "HIGH": 20,
+    "MEDIUM": 10,
+    "LOW": 0,
+}
+
+
+def risk_level(score):
+    if score >= 85:
+        return "CRITICAL"
+
+    if score >= 65:
+        return "HIGH"
+
+    if score >= 35:
+        return "MEDIUM"
+
+    if score >= 15:
+        return "LOW"
+
+    return "INFO"
+
+
+def risk_add_reason(reasons, reason):
+    reason = str(reason or "").strip()
+
+    if reason and reason not in reasons:
+        reasons.append(reason)
+
+
+def risk_subject_record(subject_key):
+    return {
+        "subject_key": subject_key,
+        "score": 0,
+        "level": "INFO",
+        "event_count": 0,
+        "open_alerts": 0,
+        "acknowledged_alerts": 0,
+        "suppressed_alerts": 0,
+        "resolved_alerts": 0,
+        "max_event_severity": "INFO",
+        "latest_event_at": None,
+        "latest_alert_at": None,
+        "owner": None,
+        "role": None,
+        "criticality": None,
+        "notes": None,
+        "annotation_key": None,
+        "reasons": [],
+    }
+
+
+def severity_rank(severity):
+    order = {
+        "INFO": 0,
+        "LOW": 1,
+        "MEDIUM": 2,
+        "HIGH": 3,
+        "CRITICAL": 4,
+    }
+
+    return order.get(str(severity or "").upper(), 0)
+
+
+def set_max_severity(record, severity):
+    severity = str(severity or "INFO").upper()
+
+    if severity_rank(severity) > severity_rank(record["max_event_severity"]):
+        record["max_event_severity"] = severity
+
+
+def fetch_risk_annotation(connection, subject_key):
+    if "fetch_report_asset_annotation" in globals():
+        match = fetch_report_asset_annotation(connection, subject_key)
+
+        if match is not None:
+            return match
+
+    try:
+        annotation = connection.execute(
+            """
+            SELECT asset_key, owner, role, criticality, notes, updated_at
+            FROM asset_annotations
+            WHERE asset_key = ?
+            """,
+            (subject_key,),
+        ).fetchone()
+    except Exception:
+        return None
+
+    if annotation is None:
+        return None
+
+    return annotation, subject_key
+
+
+def build_risk_register(connection, limit, subject_filter=None):
+    subjects = {}
+
+    def ensure(subject_key):
+        subject_key = str(subject_key or "").strip()
+
+        if not subject_key:
+            return None
+
+        if subject_filter and subject_filter not in subject_key:
+            return None
+
+        if subject_key not in subjects:
+            subjects[subject_key] = risk_subject_record(subject_key)
+
+        return subjects[subject_key]
+
+    event_rows = connection.execute(
+        """
+        SELECT subject_key, severity, event_type, created_at, summary
+        FROM delta_events
+        ORDER BY event_id DESC
+        LIMIT 500
+        """
+    ).fetchall()
+
+    for row in event_rows:
+        record = ensure(row["subject_key"])
+
+        if record is None:
+            continue
+
+        severity = str(row["severity"] or "INFO").upper()
+        event_type = str(row["event_type"] or "UNKNOWN")
+
+        record["event_count"] += 1
+        set_max_severity(record, severity)
+
+        if record["latest_event_at"] is None:
+            record["latest_event_at"] = row["created_at"]
+
+        risk_add_reason(
+            record["reasons"],
+            f"{severity} event observed: {event_type}",
+        )
+
+    alert_rows = connection.execute(
+        """
+        SELECT alert_id, status, severity, event_type, subject_key, summary, last_seen_at
+        FROM alerts
+        ORDER BY alert_id DESC
+        LIMIT 500
+        """
+    ).fetchall()
+
+    for row in alert_rows:
+        record = ensure(row["subject_key"])
+
+        if record is None:
+            continue
+
+        status = str(row["status"] or "OPEN").upper()
+        severity = str(row["severity"] or "INFO").upper()
+
+        if status == "OPEN":
+            record["open_alerts"] += 1
+            risk_add_reason(
+                record["reasons"],
+                f"Open {severity} alert present",
+            )
+        elif status == "ACKNOWLEDGED":
+            record["acknowledged_alerts"] += 1
+            risk_add_reason(
+                record["reasons"],
+                f"Acknowledged {severity} alert has review history",
+            )
+        elif status == "SUPPRESSED":
+            record["suppressed_alerts"] += 1
+            risk_add_reason(
+                record["reasons"],
+                f"Suppressed {severity} alert exists",
+            )
+        elif status == "RESOLVED":
+            record["resolved_alerts"] += 1
+
+        if record["latest_alert_at"] is None:
+            record["latest_alert_at"] = row["last_seen_at"]
+
+    for subject_key, record in subjects.items():
+        score = 0
+
+        max_severity = record["max_event_severity"]
+        severity_points = RISK_SEVERITY_POINTS.get(max_severity, 0)
+
+        if severity_points:
+            score += severity_points
+            risk_add_reason(
+                record["reasons"],
+                f"Highest event severity {max_severity}: +{severity_points}",
+            )
+
+        if record["open_alerts"]:
+            points = min(50, record["open_alerts"] * 25)
+            score += points
+            risk_add_reason(
+                record["reasons"],
+                f"{record['open_alerts']} open alert(s): +{points}",
+            )
+
+        if record["acknowledged_alerts"]:
+            points = min(15, record["acknowledged_alerts"] * 5)
+            score += points
+            risk_add_reason(
+                record["reasons"],
+                f"{record['acknowledged_alerts']} acknowledged alert(s): +{points}",
+            )
+
+        if record["event_count"] >= 5:
+            score += 10
+            risk_add_reason(record["reasons"], "Repeated recent activity: +10")
+        elif record["event_count"] >= 2:
+            score += 5
+            risk_add_reason(record["reasons"], "Multiple recent events: +5")
+
+        annotation_match = fetch_risk_annotation(connection, subject_key)
+
+        if annotation_match is not None:
+            annotation, matched_key = annotation_match
+
+            record["annotation_key"] = matched_key
+            record["owner"] = annotation["owner"]
+            record["role"] = annotation["role"]
+            record["criticality"] = annotation["criticality"]
+            record["notes"] = annotation["notes"]
+
+            criticality = str(annotation["criticality"] or "").upper()
+            criticality_points = RISK_CRITICALITY_POINTS.get(criticality, 0)
+
+            if criticality_points:
+                score += criticality_points
+                risk_add_reason(
+                    record["reasons"],
+                    f"Asset criticality {criticality}: +{criticality_points}",
+                )
+
+            if not annotation["owner"]:
+                score += 5
+                risk_add_reason(record["reasons"], "Annotated asset has no owner: +5")
+        else:
+            score += 5
+            risk_add_reason(record["reasons"], "No asset annotation recorded: +5")
+
+        record["score"] = min(100, score)
+        record["level"] = risk_level(record["score"])
+
+    rows = sorted(
+        subjects.values(),
+        key=lambda row: (
+            row["score"],
+            row["open_alerts"],
+            row["event_count"],
+            row["subject_key"],
+        ),
+        reverse=True,
+    )
+
+    if limit is not None:
+        rows = rows[:limit]
+
+    return rows
+
+
+def print_risk_record(record, detailed=False):
+    print(f"{record['level']:<8} {record['score']:>3}  {record['subject_key']}")
+    print(f"  Owner:       {record['owner'] or '-'}")
+    print(f"  Role:        {record['role'] or '-'}")
+    print(f"  Criticality: {record['criticality'] or '-'}")
+    print(f"  Open alerts: {record['open_alerts']}")
+    print(f"  Events:      {record['event_count']}")
+    print(f"  Latest event:{' ' if record['latest_event_at'] else ''}{record['latest_event_at'] or '-'}")
+
+    if record["annotation_key"]:
+        print(f"  Annotation:  {record['annotation_key']}")
+
+    if record["notes"]:
+        print(f"  Notes:       {record['notes']}")
+
+    if detailed:
+        print("  Reasons:")
+
+        for reason in record["reasons"]:
+            print(f"    - {reason}")
+
+    else:
+        if record["reasons"]:
+            print(f"  Reason:      {record['reasons'][0]}")
+
+    print()
+
+
+def command_risk(args):
+    connection = connect(args.db)
+
+    rows = build_risk_register(
+        connection,
+        args.limit,
+        subject_filter=args.subject,
+    )
+
+    print("DeltaAegis Risk Register")
+    print("========================")
+    print()
+
+    if not rows:
+        print("No risk subjects were found.")
+        return 0
+
+    for record in rows:
+        print_risk_record(record, detailed=args.details)
+
+    return 0
+
+
+def command_asset_risk(args):
+    connection = connect(args.db)
+
+    rows = build_risk_register(
+        connection,
+        None,
+        subject_filter=args.subject_key,
+    )
+
+    exact = [
+        row for row in rows
+        if row["subject_key"] == args.subject_key
+    ]
+
+    if exact:
+        rows = exact
+
+    print(f"Asset Risk: {args.subject_key}")
+    print("=" * (12 + len(args.subject_key)))
+    print()
+
+    if not rows:
+        print("No risk data matched this subject key.")
+        return 1
+
+    for record in rows:
+        print_risk_record(record, detailed=True)
+
+    return 0
 
 def command_report(args):
     from collections import Counter
@@ -2042,7 +2401,7 @@ def command_alert_detail(args):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.3.5 delta-first network-state monitoring and investigation console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.4.0 delta-first network-state monitoring, investigation, and risk prioritization console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
@@ -2086,6 +2445,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("alert-notes")
     p.add_argument("alert_id", type=int)
 
+    p = sub.add_parser("risk")
+    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--subject")
+    p.add_argument("--details", action="store_true")
+
+    p = sub.add_parser("asset-risk")
+    p.add_argument("subject_key")
+
     p = sub.add_parser("report")
     p.add_argument("--latest", action="store_true")
     p.add_argument("--since")
@@ -2123,6 +2490,10 @@ def main() -> int:
         if args.command == "alert-detail": return command_alert_detail(args)
         if args.command == "alert-notes": return command_alert_notes(args)
 
+
+        if args.command == "risk": return command_risk(args)
+
+        if args.command == "asset-risk": return command_asset_risk(args)
 
         if args.command == "report": return command_report(args)
 
