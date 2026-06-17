@@ -3225,6 +3225,94 @@ def append_report_asset_lifecycle_section(lines, lifecycle_rows):
     lines.append("")
 
 
+def append_report_classification_summary_section(lines, classification_summary):
+    lines.append("## NetSniper Intelligence Summary")
+    lines.append("")
+
+    if not classification_summary:
+        lines.append("No NetSniper classification summary was available for this report.")
+        lines.append("")
+        return
+
+    lines.append(
+        "This section summarizes NetSniper's evidence-based device classification "
+        "for the selected network scope."
+    )
+    lines.append("")
+
+    summary_rows = [
+        ("Total assets", classification_summary.get("total_assets", 0)),
+        ("Classified assets", classification_summary.get("classified_assets", 0)),
+        ("Possible / weak classifications", classification_summary.get("possible_assets", 0)),
+        ("Unknown assets", classification_summary.get("unknown_assets", 0)),
+        ("Evidence-backed assets", classification_summary.get("evidence_backed_assets", 0)),
+        ("Classification contradictions", classification_summary.get("contradiction_assets", 0)),
+        ("High-confidence assets", classification_summary.get("high_confidence_assets", 0)),
+        ("Classified percentage", f"{classification_summary.get('classified_percent', 0)}%"),
+    ]
+
+    lines.append("| Metric | Value |")
+    lines.append("|---|---:|")
+
+    for label, value in summary_rows:
+        lines.append(f"| {safe_markdown(label)} | {safe_markdown(value)} |")
+
+    lines.append("")
+
+    top_classifications = classification_summary.get("top_classifications") or []
+
+    lines.append("### Top Classifications")
+    lines.append("")
+
+    if not top_classifications:
+        lines.append("No classified device categories were available.")
+        lines.append("")
+    else:
+        lines.append("| Classification | Assets |")
+        lines.append("|---|---:|")
+
+        for row in top_classifications:
+            lines.append(
+                "| "
+                f"{safe_markdown(row.get('classification'))} | "
+                f"{safe_markdown(row.get('count'))} |"
+            )
+
+        lines.append("")
+
+    review_queue = classification_summary.get("review_queue") or []
+
+    lines.append("### Classification Review Queue")
+    lines.append("")
+
+    if not review_queue:
+        lines.append("No weak, unknown, or contradictory classifications require review.")
+        lines.append("")
+    else:
+        lines.append("| Priority Reason | Asset | IP Address | Classification | Decision | Confidence | Evidence | Contradictions |")
+        lines.append("|---|---|---|---|---|---:|---:|---:|")
+
+        for row in review_queue:
+            lines.append(
+                "| "
+                f"{safe_markdown(row.get('reason'))} | "
+                f"`{safe_markdown(row.get('asset_key'))}` | "
+                f"`{safe_markdown(row.get('ip_address'))}` | "
+                f"{safe_markdown(row.get('classification'))} | "
+                f"{safe_markdown(row.get('decision'))} | "
+                f"{safe_markdown(row.get('confidence'))} | "
+                f"{safe_markdown(row.get('evidence_count'))} | "
+                f"{safe_markdown(row.get('contradiction_count'))} |"
+            )
+
+        lines.append("")
+
+    lines.append(
+        "Use weak, unknown, or contradictory classifications as review targets. "
+        "They usually require vendor confirmation, service validation, or asset annotation."
+    )
+    lines.append("")
+
 def append_report_asset_inventory_section(lines, asset_rows, limit):
     lines.append("## Asset Inventory")
     lines.append("")
@@ -3366,6 +3454,11 @@ def command_report(args):
         scope=scope,
     )
 
+    report_classification_summary = dashboard_classification_summary_payload(
+        connection,
+        scope=scope,
+    )
+
     event_type_counts = Counter(row["event_type"] for row in events)
     severity_counts = Counter(row["severity"] for row in events)
 
@@ -3415,6 +3508,7 @@ def command_report(args):
 
     append_report_network_scope_summary(lines, connection, scope=scope)
     append_report_asset_lifecycle_section(lines, report_lifecycle_rows)
+    append_report_classification_summary_section(lines, report_classification_summary)
     append_report_asset_inventory_section(lines, report_asset_rows, args.asset_limit)
     append_report_risk_section(lines, report_risk_rows)
 
