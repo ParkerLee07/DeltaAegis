@@ -7221,7 +7221,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.6.0 subnet-aware network-state monitoring, investigation, risk prioritization, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.8.5 classification-aware network-state monitoring, investigation, risk prioritization, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)

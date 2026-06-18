@@ -813,7 +813,7 @@ Dashboard API endpoints:
 
 Security note:
 
-The v0.6.0 dashboard is intentionally read-only. It does not run scans, modify alerts, change annotations, or perform remediation actions. Keep it bound to `127.0.0.1` unless you are using a trusted network, SSH tunnel, reverse proxy, VPN, or token protection.
+The DeltaAegis dashboard is intentionally read-only. It does not run scans, modify alerts, change annotations, or perform remediation actions. Keep it bound to `127.0.0.1` unless you are using a trusted network, SSH tunnel, reverse proxy, VPN, or token protection.
 
 Token-protected example:
 
