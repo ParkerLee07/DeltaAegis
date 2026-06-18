@@ -23,7 +23,7 @@ DeltaAegis v0.8.5 added stronger classification-aware intelligence, but dashboar
 <!-- DELTAAEGIS_V085_README_START -->
 ## DeltaAegis v0.8.6 Current Capabilities
 
-DeltaAegis v0.8.5 is a snapshot-based network-state monitoring and investigation console that uses NetSniper telemetry to track assets, compare accepted scans, surface meaningful changes, and prioritize follow-up work.
+DeltaAegis v0.8.6 is a snapshot-based network-state monitoring and investigation console that uses NetSniper telemetry to track assets, compare accepted scans, surface meaningful changes, and prioritize follow-up work.
 
 ### What v0.8.5 adds
 
