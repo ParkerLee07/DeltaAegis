@@ -1566,7 +1566,7 @@ def command_summary(args: argparse.Namespace) -> int:
     event_count = connection.execute("SELECT COUNT(*) FROM delta_events").fetchone()[0]
     open_alerts = connection.execute("SELECT COUNT(*) FROM alerts WHERE status = 'OPEN'").fetchone()[0]
     latest = connection.execute("SELECT scan_id, quality_status, hosts_up, identity_coverage FROM snapshots ORDER BY created_at DESC LIMIT 1").fetchone()
-    print("DeltaAegis v0.6.0 Summary")
+    print("DeltaAegis v0.8.5 Summary")
     print(f"Snapshots imported: {snapshot_count}")
     print(f"Network scopes: {scope_count}")
     print(f"Accepted snapshots: {accepted_count}")
