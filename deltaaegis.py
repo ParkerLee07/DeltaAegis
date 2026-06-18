@@ -6052,19 +6052,9 @@ def dashboard_index_html():
       <h2>Top Risk Subjects</h2>
       <table>
         <thead>
-          <tr>
-            <th>Level</th>
-            <th>Score</th>
-            <th>Subject</th>
-            <th>IP</th>
-            <th>MAC</th>
-            <th>Identity</th>
-            <th>Owner</th>
-            <th>Role</th>
-            <th>Reason</th>
-          </tr>
+          <tr><th>Level</th><th>Score</th><th>Subject</th><th>IP</th><th>MAC</th><th>Identity</th><th>Owner</th><th>Role</th><th>Open Alerts</th><th>Events</th><th>Primary Reason</th></tr>
         </thead>
-        <tbody id="risk"></tbody>
+        <tbody id="risk-body"></tbody>
       </table>
     </section>
 
@@ -6072,21 +6062,9 @@ def dashboard_index_html():
       <h2>Recent Delta Events</h2>
       <table>
         <thead>
-          <tr>
-            <th>ID</th>
-            <th>Scan</th>
-            <th>Baseline</th>
-            <th>Severity</th>
-            <th>Type</th>
-            <th>Subject</th>
-            <th>IP</th>
-            <th>MAC</th>
-            <th>Identity</th>
-            <th>Created</th>
-            <th>Summary</th>
-          </tr>
+          <tr><th>ID</th><th>Scan</th><th>Baseline</th><th>Severity</th><th>Type</th><th>Subject</th><th>IP</th><th>MAC</th><th>Identity</th><th>Created</th><th>Summary</th></tr>
         </thead>
-        <tbody id="events"></tbody>
+        <tbody id="events-body"></tbody>
       </table>
     </section>
 
@@ -6094,18 +6072,9 @@ def dashboard_index_html():
       <h2>Recent Alerts</h2>
       <table>
         <thead>
-          <tr>
-            <th>ID</th>
-            <th>Status</th>
-            <th>Severity</th>
-            <th>Subject</th>
-            <th>IP</th>
-            <th>MAC</th>
-            <th>Identity</th>
-            <th>Summary</th>
-          </tr>
+          <tr><th>ID</th><th>Status</th><th>Severity</th><th>Subject</th><th>Type</th><th>IP</th><th>MAC</th><th>Identity</th><th>Summary</th></tr>
         </thead>
-        <tbody id="alerts"></tbody>
+        <tbody id="alerts-body"></tbody>
       </table>
     </section>
 
@@ -6715,87 +6684,88 @@ def dashboard_index_html():
     }
 
     function renderRisk(rows) {
-      const tbody = document.getElementById("risk-body");
+  const tbody = document.getElementById("risk-body");
 
-      if (!tbody) return;
+  if (!tbody) return;
 
-      if (!rows.length) {
-        tbody.innerHTML = `<tr><td colspan="11">No risk subjects calculated for the current dashboard scope.</td></tr>`;
-        return;
-      }
+  if (!rows || !rows.length) {
+    tbody.innerHTML = `<tr><td colspan="11">No risk subjects calculated for the current dashboard scope.</td></tr>`;
+    return;
+  }
 
-      tbody.innerHTML = rows.map(row => {
-        const reasons = row.reasons || [];
-        const primaryReason = reasons.length ? reasons[0] : "-";
+  tbody.innerHTML = rows.map(row => {
+    const reasons = Array.isArray(row.reasons) ? row.reasons : [];
+    const primaryReason = reasons.length ? reasons[0] : "-";
 
-        return `
-          <tr>
-            <td><strong class="${esc(row.level)}">${esc(row.level)}</strong></td>
-            <td>${esc(row.score)}</td>
-            <td>${subjectButton(row.subject_key)}</td>
-            <td><code>${esc(row.ip_address)}</code></td>
-            <td><code>${esc(row.mac_address)}</code></td>
-            <td>${esc(row.owner)}</td>
-            <td>${esc(row.role)}</td>
-            <td>${esc(row.criticality)}</td>
-            <td>${esc(row.open_alerts)}</td>
-            <td>${esc(row.event_count)}</td>
-            <td>${esc(primaryReason)}</td>
-          </tr>
-        `;
-      }).join("");
-
-      bindSubjectLinks(tbody);
-    }
+    return `
+      <tr>
+        <td class="severity-${esc(row.level || "").toLowerCase()}">${esc(row.level || "-")}</td>
+        <td>${esc(row.score ?? "-")}</td>
+        <td>${esc(row.subject_key || "-")}</td>
+        <td>${esc(row.ip_address || row.ip || "-")}</td>
+        <td>${esc(row.mac_address || row.mac || "-")}</td>
+        <td>${esc(row.identity_confidence || row.identity_state || "-")}</td>
+        <td>${esc(row.owner || "-")}</td>
+        <td>${esc(row.role || row.classification || "-")}</td>
+        <td>${esc(row.open_alerts ?? 0)}</td>
+        <td>${esc(row.event_count ?? 0)}</td>
+        <td>${esc(primaryReason)}</td>
+      </tr>
+    `;
+  }).join("");
+}
 
     function renderEvents(rows) {
-      const tbody = document.getElementById("events-body");
+  const tbody = document.getElementById("events-body");
 
-      if (!tbody) return;
+  if (!tbody) return;
 
-      if (!rows.length) {
-        tbody.innerHTML = `<tr><td colspan="7">No recent delta events matched the current dashboard scope.</td></tr>`;
-        return;
-      }
+  if (!rows || !rows.length) {
+    tbody.innerHTML = `<tr><td colspan="11">No recent delta events matched the current dashboard scope.</td></tr>`;
+    return;
+  }
 
-      tbody.innerHTML = rows.map(row => `
-        <tr>
-          <td>${esc(row.event_id)}</td>
-          <td><code>${esc(row.scan_id)}</code></td>
-          <td><code>${esc(row.baseline_scan_id)}</code></td>
-          <td><strong class="${esc(row.severity)}">${esc(row.severity)}</strong></td>
-          <td>${esc(row.event_type)}</td>
-          <td>${subjectButton(row.subject_key)}</td>
-          <td>${esc(row.summary)}</td>
-        </tr>
-      `).join("");
-
-      bindSubjectLinks(tbody);
-    }
+  tbody.innerHTML = rows.map(row => `
+    <tr>
+      <td>${esc(row.event_id || row.id || "-")}</td>
+      <td>${esc(row.scan_id || "-")}</td>
+      <td>${esc(row.baseline_scan_id || "-")}</td>
+      <td class="severity-${esc(row.severity || "").toLowerCase()}">${esc(row.severity || "-")}</td>
+      <td>${esc(row.event_type || row.type || "-")}</td>
+      <td>${esc(row.subject_key || "-")}</td>
+      <td>${esc(row.ip_address || row.ip || "-")}</td>
+      <td>${esc(row.mac_address || row.mac || "-")}</td>
+      <td>${esc(row.identity_confidence || row.identity_state || "-")}</td>
+      <td>${esc(row.created_at || "-")}</td>
+      <td>${esc(row.summary || "-")}</td>
+    </tr>
+  `).join("");
+}
 
     function renderAlerts(rows) {
-      const tbody = document.getElementById("alerts-body");
+  const tbody = document.getElementById("alerts-body");
 
-      if (!tbody) return;
+  if (!tbody) return;
 
-      if (!rows.length) {
-        tbody.innerHTML = `<tr><td colspan="6">No recent alerts matched the current dashboard scope.</td></tr>`;
-        return;
-      }
+  if (!rows || !rows.length) {
+    tbody.innerHTML = `<tr><td colspan="9">No recent alerts matched the current dashboard scope.</td></tr>`;
+    return;
+  }
 
-      tbody.innerHTML = rows.map(row => `
-        <tr>
-          <td>${esc(row.alert_id)}</td>
-          <td>${esc(row.status)}</td>
-          <td><strong class="${esc(row.severity)}">${esc(row.severity)}</strong></td>
-          <td>${subjectButton(row.subject_key)}</td>
-          <td>${esc(row.event_type)}</td>
-          <td>${esc(row.summary)}</td>
-        </tr>
-      `).join("");
-
-      bindSubjectLinks(tbody);
-    }
+  tbody.innerHTML = rows.map(row => `
+    <tr>
+      <td>${esc(row.alert_id || row.id || "-")}</td>
+      <td>${esc(row.status || "-")}</td>
+      <td class="severity-${esc(row.severity || "").toLowerCase()}">${esc(row.severity || "-")}</td>
+      <td>${esc(row.subject_key || "-")}</td>
+      <td>${esc(row.event_type || row.type || "-")}</td>
+      <td>${esc(row.ip_address || row.ip || "-")}</td>
+      <td>${esc(row.mac_address || row.mac || "-")}</td>
+      <td>${esc(row.identity_confidence || row.identity_state || "-")}</td>
+      <td>${esc(row.summary || "-")}</td>
+    </tr>
+  `).join("");
+}
 
     function renderAnnotations(rows) {
       document.getElementById("annotations").innerHTML = rows.map(row => `
