@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.6.0: subnet-aware network-state monitoring, investigation, risk prioritization, reporting, and dashboard console.
+"""DeltaAegis v0.8.5: classification-aware network-state monitoring, investigation, risk prioritization, reporting, and dashboard console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
