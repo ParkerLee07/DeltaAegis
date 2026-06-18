@@ -1,5 +1,30 @@
 # Changelog
 
+<!-- DELTAAEGIS_V086_CHANGELOG_START -->
+## v0.8.6 - 2026-06-18
+
+### Fixed
+
+- Fixed dashboard risk, event, and alert tables rendering as empty even when backend data existed.
+- Fixed Top Risk Subjects column alignment.
+- Fixed Recent Delta Events column alignment.
+- Fixed Recent Alerts column alignment.
+- Added a Type column to Recent Alerts so alert event types are not displayed under IP or MAC fields.
+- Restored dashboard severity and risk-level color styling for CRITICAL, HIGH, MEDIUM, LOW, and INFO values.
+
+### Added
+
+- Dashboard table rendering validator.
+- Dashboard column alignment validator.
+- Dashboard severity color validator.
+
+### Notes
+
+- This is a dashboard polish and reliability release following the v0.8.5 classification-aware risk milestone.
+- No database migration is required.
+<!-- DELTAAEGIS_V086_CHANGELOG_END -->
+
+
 <!-- DELTAAEGIS_V085_CHANGELOG_START -->
 ## v0.8.5 - 2026-06-17
 

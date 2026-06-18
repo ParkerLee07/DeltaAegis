@@ -22,8 +22,8 @@ from pathlib import Path
 
 checks = {
     "README.md": [
-        "DeltaAegis v0.8.5 Current Capabilities",
-        "DeltaAegis v0.8.5",
+        "DeltaAegis v0.8.6 Current Capabilities",
+        "DeltaAegis v0.8.6",
         "NetSniper classification intelligence ingestion",
         "Dashboard intelligence visibility",
         "Classification-aware risk context",

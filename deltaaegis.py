@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.8.5: classification-aware network-state monitoring, investigation, risk prioritization, reporting, and dashboard console.
+"""DeltaAegis v0.8.6: classification-aware network-state monitoring, investigation, risk prioritization, reporting, and dashboard console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -1566,7 +1566,7 @@ def command_summary(args: argparse.Namespace) -> int:
     event_count = connection.execute("SELECT COUNT(*) FROM delta_events").fetchone()[0]
     open_alerts = connection.execute("SELECT COUNT(*) FROM alerts WHERE status = 'OPEN'").fetchone()[0]
     latest = connection.execute("SELECT scan_id, quality_status, hosts_up, identity_coverage FROM snapshots ORDER BY created_at DESC LIMIT 1").fetchone()
-    print("DeltaAegis v0.8.5 Summary")
+    print("DeltaAegis v0.8.6 Summary")
     print(f"Snapshots imported: {snapshot_count}")
     print(f"Network scopes: {scope_count}")
     print(f"Accepted snapshots: {accepted_count}")
@@ -5974,6 +5974,44 @@ def dashboard_index_html():
     .identity-unknown {
       color: #fecaca;
     }
+  
+    /* Severity and risk-level coloring used by dashboard tables. */
+    .severity-critical,
+    td.severity-critical {
+      color: #ff4d4d;
+      font-weight: 800;
+    }
+
+    .severity-high,
+    td.severity-high {
+      color: #ff9f1c;
+      font-weight: 800;
+    }
+
+    .severity-medium,
+    td.severity-medium {
+      color: #ffe45e;
+      font-weight: 800;
+    }
+
+    .severity-low,
+    td.severity-low {
+      color: #4ade80;
+      font-weight: 800;
+    }
+
+    .severity-info,
+    td.severity-info {
+      color: #93c5fd;
+      font-weight: 800;
+    }
+
+    .severity-unknown,
+    td.severity-unknown {
+      color: #cbd5e1;
+      font-weight: 700;
+    }
+
   </style>
 </head>
 <body>
@@ -7191,7 +7229,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.8.5 classification-aware network-state monitoring, investigation, risk prioritization, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.8.6 classification-aware network-state monitoring, investigation, risk prioritization, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
