@@ -8547,6 +8547,8 @@ def dashboard_index_html():
       const v17TopTypes = v17Intel.top_device_types || [];
       const v17ReviewQueue = v17Intel.review_queue || [];
       const v17ConfidenceBands = v17Intel.confidence_band_counts || [];
+      let v17Block = "";
+      v17Block = "";
 
       const topRows = topClassifications.length
         ? topClassifications.map(row => `
@@ -8611,7 +8613,7 @@ def dashboard_index_html():
           `).join("")
         : `<tr><td colspan="5">No NetSniper v1.7 review queue items are available.</td></tr>`;
 
-      const v17Block = v17Intel.available ? `
+      v17Block = v17Intel.available ? `
         <h3>NetSniper v1.7 Bundle Intelligence</h3>
         <p class="muted">Run-level quality summary imported from NetSniper v1.7 manifest-addressable artifacts. Latest scan: <code>${esc(v17Intel.scan_id || "-")}</code>.</p>
 

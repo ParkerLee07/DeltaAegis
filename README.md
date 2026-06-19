@@ -14,13 +14,12 @@ Markdown reports, and a local dashboard.
 
 ## Current Release
 
-**DeltaAegis v0.12.1 — README Metadata Cleanup**
+**DeltaAegis v0.12.2 — Dashboard Runtime Hotfix**
 
-v0.12.1 is a documentation and metadata cleanup release for the v0.12 line. It refreshes the
-README so GitHub shows the current DeltaAegis workflow instead of older v0.8, v0.9, v0.10, or
-v0.11-era content.
+v0.12.2 fixes a dashboard JavaScript runtime error where the Intelligence tab could attempt to
+access the lexical declaration `v17Block` before initialization.
 
-No runtime behavior changed from v0.12.0.
+No database schema, ingestion behavior, or NetSniper intelligence behavior changed from v0.12.0.
 
 Current feature baseline: **DeltaAegis v0.12.0 — Intelligence Drilldown**.
 

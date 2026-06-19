@@ -4,6 +4,20 @@
 
 
 
+
+## v0.12.2 — Dashboard Runtime Hotfix
+
+### Fixed
+
+- Fixed a dashboard JavaScript runtime error where the Intelligence tab could attempt to access
+  `v17Block` before initialization.
+- Restored reliable loading of the NetSniper v1.7 Intelligence dashboard section.
+
+### Validation
+
+- Verified dashboard intelligence panel validation.
+- Verified README current-release metadata validation.
+- Verified v0.12.1 README cleanup validation.
 ## v0.12.1 — README Metadata Cleanup
 
 ### Changed
