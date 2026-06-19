@@ -5490,6 +5490,165 @@ def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20)
         (asset_key,),
     ).fetchone()
 
+    annotation_dict = dict(annotation) if annotation else None
+
+    alert_ids = [
+        item.get("alert_id")
+        for item in alerts
+        if isinstance(item, dict) and item.get("alert_id") is not None
+    ]
+
+    alert_notes = []
+
+    if alert_ids:
+        placeholders = ",".join("?" for _ in alert_ids)
+
+        alert_notes = dashboard_safe_query(
+            connection,
+            f"""
+            SELECT
+                note_id,
+                alert_id,
+                action,
+                reason,
+                created_at
+            FROM alert_notes
+            WHERE alert_id IN ({placeholders})
+            ORDER BY created_at DESC, note_id DESC
+            LIMIT ?
+            """,
+            tuple(alert_ids + [limit]),
+        )
+
+    observation = latest_observation_dict or {}
+    classification_type = (
+        observation.get("classification_display_type")
+        or observation.get("device_type")
+        or "Unknown / Ambiguous"
+    )
+    classification_decision = str(
+        observation.get("classification_display_decision") or "unknown"
+    ).lower()
+    classification_confidence = dashboard_int(
+        observation.get("classification_display_confidence"),
+        0,
+    )
+    evidence_count = dashboard_int(
+        observation.get("classification_evidence_count"),
+        0,
+    )
+    contradiction_count = dashboard_int(
+        observation.get("classification_contradiction_count"),
+        0,
+    )
+
+    alert_statuses = {
+        str(item.get("status") or "").upper()
+        for item in alerts
+        if isinstance(item, dict)
+    }
+
+    if "OPEN" in alert_statuses:
+        investigation_status = "NEW"
+    elif "ACKNOWLEDGED" in alert_statuses:
+        investigation_status = "REVIEWING"
+    elif alert_statuses and alert_statuses <= {"SUPPRESSED"}:
+        investigation_status = "FALSE_POSITIVE"
+    elif alert_statuses and alert_statuses <= {"RESOLVED"}:
+        investigation_status = "RESOLVED"
+    elif annotation_dict:
+        investigation_status = "EXPECTED"
+    elif events:
+        investigation_status = "MONITORING"
+    else:
+        investigation_status = "NEW"
+
+    recommended_steps = []
+
+    if alerts:
+        recommended_steps.append(
+            "Review open or recent alerts tied to this asset before closing the investigation."
+        )
+
+    if contradiction_count:
+        recommended_steps.append(
+            "Review NetSniper classification contradictions and verify the asset role manually."
+        )
+
+    if (
+        classification_decision in {"possible", "weak", "unknown"}
+        or classification_confidence < 40
+    ):
+        recommended_steps.append(
+            "Verify the suspected asset role with service evidence, vendor context, or manual annotation."
+        )
+
+    if not annotation_dict:
+        recommended_steps.append(
+            "Add an asset annotation for owner, role, criticality, and notes if this asset is expected."
+        )
+
+    if services:
+        recommended_steps.append(
+            "Confirm exposed services are expected for this asset role and network scope."
+        )
+
+    if not recommended_steps:
+        recommended_steps.append(
+            "Continue monitoring this asset for future service, classification, or alert changes."
+        )
+
+    timeline = []
+
+    for item in events:
+        timeline.append(
+            {
+                "kind": "event",
+                "id": item.get("event_id"),
+                "created_at": item.get("created_at"),
+                "severity": item.get("severity"),
+                "type": item.get("event_type"),
+                "summary": item.get("summary"),
+            }
+        )
+
+    for item in alerts:
+        timeline.append(
+            {
+                "kind": "alert",
+                "id": item.get("alert_id"),
+                "created_at": item.get("opened_at") or item.get("last_seen_at"),
+                "severity": item.get("severity"),
+                "type": item.get("event_type"),
+                "summary": item.get("summary"),
+            }
+        )
+
+    timeline.sort(
+        key=lambda item: str(item.get("created_at") or ""),
+        reverse=True,
+    )
+
+    investigation = {
+        "status": investigation_status,
+        "recommended_next_steps": recommended_steps,
+        "timeline": timeline[:limit],
+        "alert_notes": alert_notes,
+        "review_context": {
+            "classification_type": classification_type,
+            "classification_decision": classification_decision,
+            "classification_confidence": classification_confidence,
+            "classification_evidence_count": evidence_count,
+            "classification_contradiction_count": contradiction_count,
+            "service_count": len(services),
+            "finding_count": len(findings),
+            "event_count": len(events),
+            "alert_count": len(alerts),
+            "alert_note_count": len(alert_notes),
+            "has_annotation": bool(annotation_dict),
+        },
+    }
+
     return {
         "found": True,
         "identifier": identifier,
@@ -5500,7 +5659,8 @@ def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20)
         "findings": findings,
         "events": events,
         "alerts": alerts,
-        "annotation": dict(annotation) if annotation else None,
+        "annotation": annotation_dict,
+        "investigation": investigation,
     }
 
 def dashboard_events_payload(connection, limit, scope=None):
@@ -6540,6 +6700,11 @@ def dashboard_index_html():
       const asset = payload.asset || {};
       const observation = payload.latest_observation || {};
       const annotation = payload.annotation || {};
+      const investigation = payload.investigation || {};
+      const reviewContext = investigation.review_context || {};
+      const recommendedSteps = (investigation.recommended_next_steps || [])
+        .map(item => `<li>${esc(item)}</li>`)
+        .join("");
 
       box.innerHTML = `
         <div class="detail-grid">
@@ -6593,6 +6758,38 @@ def dashboard_index_html():
           <div class="detail-box"><div class="label">Criticality</div>${esc(annotation.criticality)}</div>
           <div class="detail-box"><div class="label">Notes</div>${esc(annotation.notes)}</div>
         </div>
+
+        <h3>Investigation Summary</h3>
+        <div class="detail-grid">
+          <div class="detail-box"><div class="label">Status</div>${esc(investigation.status || "NEW")}</div>
+          <div class="detail-box"><div class="label">Classification</div>${esc(reviewContext.classification_type || "Unknown / Ambiguous")}</div>
+          <div class="detail-box"><div class="label">Decision</div>${esc(reviewContext.classification_decision || "unknown")}</div>
+          <div class="detail-box"><div class="label">Confidence</div>${esc(reviewContext.classification_confidence || 0)}</div>
+          <div class="detail-box"><div class="label">Alerts</div>${esc(reviewContext.alert_count || 0)}</div>
+          <div class="detail-box"><div class="label">Notes</div>${esc(reviewContext.alert_note_count || 0)}</div>
+        </div>
+
+        <h4>Recommended Next Steps</h4>
+        <ul class="muted">
+          ${recommendedSteps || "<li>Continue monitoring this asset for future changes.</li>"}
+        </ul>
+
+        ${detailTable("Investigation Timeline", investigation.timeline || [], [
+          {key: "kind", label: "Kind"},
+          {key: "id", label: "ID"},
+          {key: "created_at", label: "Time"},
+          {key: "severity", label: "Severity"},
+          {key: "type", label: "Type"},
+          {key: "summary", label: "Summary"}
+        ])}
+
+        ${detailTable("Alert Review Notes", investigation.alert_notes || [], [
+          {key: "note_id", label: "Note"},
+          {key: "alert_id", label: "Alert"},
+          {key: "action", label: "Action"},
+          {key: "reason", label: "Reason"},
+          {key: "created_at", label: "Time"}
+        ])}
 
         ${detailTable("Open/Recent Alerts", payload.alerts, [
           {key: "alert_id", label: "ID"},
