@@ -1,5 +1,30 @@
 # Changelog
 
+
+## v0.11.0 — Intelligence Review Dashboard
+
+### Added
+
+- Added SQLite storage for NetSniper v1.7 intelligence summary artifacts.
+- Added manifest-aware ingestion for NetSniper v1.7 analysis.enriched.json, classification_quality.json, and classification_quality.md.
+- Added the intelligence CLI command for reviewing the latest imported NetSniper intelligence summary.
+- Added dashboard payload support for NetSniper v1.7 run-level intelligence summaries.
+- Added dashboard Intelligence-tab visibility for host counts, classification counts, false-confidence candidates, unknown exposed-service hosts, top device types, confidence bands, and review queue samples.
+- Added v0.11 validation scripts:
+  - tools/validate_v0_11_intelligence_artifacts.sh
+  - tools/validate_v0_11_dashboard_intelligence.sh
+  - tools/validate_v0_11_release.sh
+
+### Validation
+
+- Verified ingestion against NetSniper v1.7 bundle 20260619-134116.
+- Verified expected summary values:
+  - 82 hosts
+  - 13 classified
+  - 33 possible/review
+  - 36 unknown
+  - 0 false-confidence candidates
+  - 0 unknown exposed-service hosts
 ## v0.10.0 - 2026-06-19
 
 ### Added
