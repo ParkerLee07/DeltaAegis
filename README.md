@@ -8,11 +8,14 @@ DeltaAegis ingests finalized NetSniper telemetry bundles, stores normalized hist
 
 ## Current Release
 
+Current release: **DeltaAegis v0.11.0 — Intelligence Review Dashboard**
+
 DeltaAegis v0.10.0 — NetSniper v1.6 Intelligence Integration
 
 DeltaAegis v0.10.0 integrates NetSniper v1.6 classification intelligence into storage and risk prioritization. It preserves the v0.9 investigation workflow while adding first-class calibrated classification fields, SIEM action policy handling, and conservative role-aware risk behavior for weak, review-only, confirmed, and contradictory classifications.
 
 ---
+
 
 ## What v0.10.0 Adds
 
@@ -446,3 +449,39 @@ DeltaAegis is designed to work with NetSniper telemetry. NetSniper performs netw
 ## License
 
 MIT License. See LICENSE.
+
+## DeltaAegis v0.11.0 — Intelligence Review Dashboard
+
+DeltaAegis v0.11.0 adds first-class visibility for NetSniper v1.7 device-intelligence artifacts.
+
+### New in v0.11.0
+
+- Ingests NetSniper v1.7 manifest-addressable intelligence artifacts:
+  - analysis.enriched.json
+  - classification_quality.json
+  - classification_quality.md
+- Stores NetSniper v1.7 run-level intelligence summaries in SQLite.
+- Adds the intelligence CLI command for reviewing the latest imported NetSniper intelligence summary.
+- Adds dashboard visibility for:
+  - host count
+  - classified hosts
+  - possible/review hosts
+  - unknown hosts
+  - false-confidence candidates
+  - unknown exposed-service hosts
+  - top device types
+  - confidence bands
+  - review queue samples
+
+### Intelligence CLI
+
+Run:
+
+    python3 deltaaegis.py intelligence
+
+Example output includes the latest NetSniper v1.7 scan ID, classification counts, confidence bands, top device types, and review queue sample.
+
+### Dashboard Intelligence
+
+The local dashboard now includes a NetSniper v1.7 Bundle Intelligence section inside the Intelligence tab. This is read-only and designed to help identify weak classifications, unknown assets, and classification quality issues before deeper investigation.
+
