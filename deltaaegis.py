@@ -2856,6 +2856,14 @@ def risk_latest_asset_context(connection, subject_key, scope=None):
             ao.classification_confidence_label,
             ao.classification_decision,
             ao.classification_method,
+              ao.classification_confidence_band,
+              ao.classification_calibrated_decision,
+              ao.classification_siem_action,
+              ao.classification_calibration_reason,
+              ao.classification_validation_state,
+              ao.classification_contradiction_count,
+              ao.classification_validator_summary_json,
+              ao.classification_validators_json,
             ao.classification_evidence_json,
             ao.classification_contradictions_json,
             ao.classification_candidates_json
@@ -2922,6 +2930,14 @@ def risk_classification_context(asset_context):
     )
 
     decision = str(asset_context.get("classification_decision") or "").strip().lower()
+    confidence_band = str(asset_context.get("classification_confidence_band") or "").strip().lower()
+    calibrated_decision = str(asset_context.get("classification_calibrated_decision") or "").strip().lower()
+    siem_action = str(asset_context.get("classification_siem_action") or "").strip().lower()
+    validation_state = str(asset_context.get("classification_validation_state") or "").strip().lower()
+
+
+    if calibrated_decision in {"classified", "possible", "unknown"}:
+        decision = calibrated_decision
 
     if decision not in {"classified", "possible", "unknown"}:
         if confidence >= 40:
@@ -2943,6 +2959,12 @@ def risk_classification_context(asset_context):
     port_set = set(open_ports)
 
     contradictions = risk_json_list(asset_context.get("classification_contradictions_json"))
+    contradiction_count = risk_int(
+        asset_context.get("classification_contradiction_count"),
+        len(contradictions),
+    )
+    if contradiction_count < len(contradictions):
+        contradiction_count = len(contradictions)
     classification_text = str(classification or "Unknown").lower()
 
     points = 0
@@ -2953,9 +2975,40 @@ def risk_classification_context(asset_context):
         points += amount
         reasons.append(f"{reason}: +{amount}")
 
-    # The scoring is intentionally conservative. Classification context should
+    # NetSniper v1.6 SIEM action policy. Low-confidence labels should not
+    # inflate asset risk unless review or contradiction handling requires it.
+    if siem_action == "display_only":
+        return {
+            "classification": classification,
+            "classification_decision": decision,
+            "classification_confidence": confidence,
+            "classification_confidence_band": confidence_band or None,
+            "classification_calibrated_decision": calibrated_decision or None,
+            "classification_siem_action": siem_action,
+            "classification_validation_state": validation_state or None,
+            "classification_risk_points": 0,
+            "classification_risk_reasons": [],
+            "classification_open_ports": open_ports,
+        }
+
+    if siem_action == "review_queue":
+        if confidence > 0 or open_ports:
+            add(5, "NetSniper v1.6 marked classification for review queue")
+        return {
+            "classification": classification,
+            "classification_decision": decision,
+            "classification_confidence": confidence,
+            "classification_confidence_band": confidence_band or None,
+            "classification_calibrated_decision": calibrated_decision or None,
+            "classification_siem_action": siem_action,
+            "classification_validation_state": validation_state or None,
+            "classification_risk_points": min(points, 5),
+            "classification_risk_reasons": reasons,
+            "classification_open_ports": open_ports,
+        }
+
     # nudge risk priority, not override event severity or confirmed alerts.
-    if contradictions:
+    if contradiction_count or siem_action == "contradiction_review":
         add(20, "Classification-aware role context found contradictory device evidence")
 
     if "active directory" in classification_text or "domain controller" in classification_text:
@@ -3032,6 +3085,10 @@ def risk_classification_context(asset_context):
         "classification": classification,
         "classification_decision": decision,
         "classification_confidence": confidence,
+        "classification_confidence_band": confidence_band or None,
+        "classification_calibrated_decision": calibrated_decision or None,
+        "classification_siem_action": siem_action or None,
+        "classification_validation_state": validation_state or None,
         "classification_risk_points": points,
         "classification_risk_reasons": reasons,
         "classification_open_ports": open_ports,
@@ -3046,6 +3103,10 @@ def apply_classification_to_risk_record(connection, subject_key, record, scope=N
     record["classification"] = context["classification"]
     record["classification_decision"] = context["classification_decision"]
     record["classification_confidence"] = context["classification_confidence"]
+    record["classification_confidence_band"] = context.get("classification_confidence_band")
+    record["classification_calibrated_decision"] = context.get("classification_calibrated_decision")
+    record["classification_siem_action"] = context.get("classification_siem_action")
+    record["classification_validation_state"] = context.get("classification_validation_state")
     record["classification_risk_points"] = context["classification_risk_points"]
     record["classification_risk_reasons"] = context["classification_risk_reasons"]
     record["classification_open_ports"] = context["classification_open_ports"]
