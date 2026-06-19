@@ -8,13 +8,25 @@ DeltaAegis ingests finalized NetSniper telemetry bundles, stores normalized hist
 
 ## Current Release
 
-DeltaAegis v0.9.0 — Investigation Workflow and Dashboard Tabs
+DeltaAegis v0.10.0 — NetSniper v1.6 Intelligence Integration
 
-DeltaAegis v0.9.0 turns the dashboard into a cleaner investigation workflow console. It adds persistent asset investigation status, dashboard-side status updates, clickable investigation rows, inferred NEEDS_OWNER review status, asset detail context, and a tabbed dashboard layout.
+DeltaAegis v0.10.0 integrates NetSniper v1.6 classification intelligence into storage and risk prioritization. It preserves the v0.9 investigation workflow while adding first-class calibrated classification fields, SIEM action policy handling, and conservative role-aware risk behavior for weak, review-only, confirmed, and contradictory classifications.
 
 ---
 
-## What v0.9.0 Adds
+## What v0.10.0 Adds
+
+- First-class storage for NetSniper v1.6 classification fields.
+- Stored calibrated confidence band, calibrated decision, SIEM action, calibration reason, validation state, contradiction count, validator summary, and validator details.
+- Risk scoring now respects NetSniper v1.6 `siem_action`.
+- `display_only` classifications no longer inflate asset risk.
+- `review_queue` classifications add only a small manual-review nudge.
+- `alert_eligible`, `risk_context`, and `contradiction_review` remain available for stronger role-aware risk context.
+- v0.10 storage validation through `tools/validate_v0_10_netsniper_v1_6_storage.sh`.
+- v0.10 risk policy validation through `tools/validate_v0_10_netsniper_v1_6_risk_policy.sh`.
+- v0.10 release validation through `tools/validate_v0_10_release.sh`.
+
+The v0.9 investigation workflow remains included:
 
 - Asset investigation detail payloads with services, findings, events, alerts, annotations, classification evidence, and recommended next steps.
 - Clickable risk, event, and alert subjects that open the asset investigation panel.
@@ -24,7 +36,7 @@ DeltaAegis v0.9.0 turns the dashboard into a cleaner investigation workflow cons
 - Dashboard-side investigation status controls through POST /api/investigate-asset.
 - Tabbed dashboard layout for Overview, Investigations, Risk, Assets, Intelligence, Events, and Alerts.
 - Dashboard tab validation to prevent broken tab initialization or collapsed-card regressions.
-- v0.9 release gate through tools/validate_v0_9_release.sh.
+- v0.9 investigation workflow validation remains available through the v0.9 workflow validators.
 
 ---
 
@@ -373,7 +385,19 @@ Core tables include:
 
 ## Validation
 
-Run the v0.9 release gate:
+Run the v0.10 release gate:
+
+```bash
+./tools/validate_v0_10_release.sh
+```
+
+
+```bash
+./tools/validate_v0_10_netsniper_v1_6_storage.sh
+./tools/validate_v0_10_netsniper_v1_6_risk_policy.sh
+./tools/validate_v0_9_release.sh
+```
+
 
     ./tools/validate_v0_9_release.sh
 

@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.10.0 - 2026-06-19
+
+### Added
+- Added first-class storage for NetSniper v1.6 classification fields, including confidence band, calibrated decision, SIEM action, calibration reason, validation state, contradiction count, validator summary, and validator details.
+- Added `tools/validate_v0_10_netsniper_v1_6_storage.sh` to validate v1.6 classification persistence and snapshot output.
+- Added `tools/validate_v0_10_netsniper_v1_6_risk_policy.sh` to validate calibrated classification risk behavior.
+
+### Changed
+- Updated classification-aware risk scoring to respect NetSniper v1.6 `siem_action` values.
+- `display_only` classifications no longer inflate asset risk.
+- `review_queue` classifications now add only a small manual-review risk nudge.
+- `alert_eligible` and `risk_context` classifications retain normal role-aware risk context.
+- `contradiction_review` classifications remain visible as meaningful risk context.
+
+### Validation
+- Verified Python syntax with `python3 -m py_compile deltaaegis.py`.
+- Verified v0.10 classification storage validation.
+- Verified v0.10 classification risk policy validation.
+- Verified existing v0.8.5 role-aware risk regression validation.
+
 ## v0.9.0 - 2026-06-19
 
 ### Added
