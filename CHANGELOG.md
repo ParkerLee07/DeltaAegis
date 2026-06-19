@@ -3,6 +3,21 @@
 
 
 
+
+## v0.12.1 — README Metadata Cleanup
+
+### Changed
+
+- Refreshed README.md for the current v0.12 project state.
+- Removed stale README positioning from older v0.8, v0.9, v0.10, and v0.11-era content.
+- Added README current-release validation with formatting sanity checks.
+- Kept v0.12.0 Intelligence Drilldown as the current feature baseline.
+
+### Validation
+
+- Verified README current-release metadata.
+- Verified README formatting sanity checks.
+- Verified v0.12 intelligence drilldown validators still pass.
 ## v0.12.0 — Intelligence Drilldown
 
 ### Added
