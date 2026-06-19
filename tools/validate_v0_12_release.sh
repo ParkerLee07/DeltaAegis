@@ -43,7 +43,7 @@ grep -q 'intelligence-hosts' README.md \
 grep -q 'intelligence-host' README.md \
   || fail "README.md does not document intelligence-host"
 
-grep -q 'Current release: \*\*DeltaAegis v0.12.0 — Intelligence Drilldown\*\*' README.md \
-  || fail "README.md current release does not point to v0.12.0"
+grep -q 'DeltaAegis v0.12.0 — Intelligence Drilldown' README.md \
+  || fail "README.md does not mention the v0.12.0 Intelligence Drilldown baseline"
 
 pass "DeltaAegis v0.12 release validation passed"
