@@ -69,6 +69,7 @@ if not isinstance(investigation, dict):
 allowed_statuses = {
     "NEW",
     "REVIEWING",
+    "NEEDS_OWNER",
     "EXPECTED",
     "FALSE_POSITIVE",
     "MONITORING",
@@ -77,6 +78,49 @@ allowed_statuses = {
 
 if investigation.get("status") not in allowed_statuses:
     raise SystemExit(f"[-] Unexpected investigation status: {investigation.get('status')}")
+
+needs_owner_checked = False
+
+for candidate in assets:
+    candidate_identifier = candidate.get("asset_key") or candidate.get("current_ip")
+    candidate_scope = candidate.get("network_scope")
+
+    if not candidate_identifier:
+        continue
+
+    candidate_detail = da.dashboard_asset_detail_payload(
+        conn,
+        candidate_identifier,
+        scope=candidate_scope,
+    )
+
+    if not candidate_detail.get("found"):
+        continue
+
+    if candidate_detail.get("alerts"):
+        continue
+
+    has_activity = any(
+        candidate_detail.get(key)
+        for key in ["events", "services", "findings"]
+    )
+
+    if not candidate_detail.get("annotation") and has_activity:
+        candidate_status = (
+            candidate_detail.get("investigation") or {}
+        ).get("status")
+
+        if candidate_status != "NEEDS_OWNER":
+            raise SystemExit(
+                "[-] Unannotated active asset should produce NEEDS_OWNER, "
+                f"got {candidate_status}"
+            )
+
+        needs_owner_checked = True
+        break
+
+if not needs_owner_checked:
+    print("[*] No unannotated active asset was available for NEEDS_OWNER runtime check.")
 
 steps = investigation.get("recommended_next_steps")
 

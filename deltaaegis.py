@@ -5556,6 +5556,8 @@ def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20)
         investigation_status = "FALSE_POSITIVE"
     elif alert_statuses and alert_statuses <= {"RESOLVED"}:
         investigation_status = "RESOLVED"
+    elif not annotation_dict and (alerts or events or services or findings):
+        investigation_status = "NEEDS_OWNER"
     elif annotation_dict:
         investigation_status = "EXPECTED"
     elif events:
