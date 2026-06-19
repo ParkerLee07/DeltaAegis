@@ -98,7 +98,7 @@ DeltaAegis helps answer:
 
 ## Investigation Status Workflow
 
-DeltaAegis v0.9.0 supports persistent asset investigation status.
+Introduced in v0.9.0, DeltaAegis supports persistent asset investigation status.
 
 Supported statuses:
 
@@ -165,7 +165,7 @@ Dashboard API examples:
     /api/investigate-asset
     /healthz
 
-Security note: keep the dashboard bound to 127.0.0.1 unless it is protected by trusted network controls, an SSH tunnel, VPN, reverse proxy, or token protection. The dashboard allows investigation status updates but does not run arbitrary shell commands, perform remediation, or launch scans in v0.9.0.
+Security note: keep the dashboard bound to 127.0.0.1 unless it is protected by trusted network controls, an SSH tunnel, VPN, reverse proxy, or token protection. The dashboard allows investigation status updates but does not run arbitrary shell commands, perform remediation, or launch scans by itself.
 
 ---
 
@@ -422,7 +422,7 @@ DeltaAegis does not currently:
 - perform machine-learning anomaly detection
 - send email or chat notifications
 - automatically discover business owners for assets
-- run NetSniper scans from the dashboard in v0.9.0
+- launch NetSniper scan jobs from the dashboard through a controlled scan runner
 - replace manual analyst review
 
 Its conclusions are limited to NetSniper telemetry, stored historical snapshots, analyst annotations, and local DeltaAegis state.
