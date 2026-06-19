@@ -8193,6 +8193,135 @@ def dashboard_index_html():
     }
 
 
+
+    function objectDetailRows(obj) {
+      if (!obj) return [];
+
+      return Object.keys(obj).sort().map(key => {
+        const value = obj[key];
+
+        return {
+          key,
+          value: Array.isArray(value)
+            ? (value.length ? value.join(", ") : "-")
+            : value
+        };
+      });
+    }
+
+    function renderIntelligenceHostDetail(payload) {
+      const box = document.getElementById("intelligence-host-detail");
+
+      if (!box) return;
+
+      if (!payload || !payload.found) {
+        box.innerHTML = `<p class="muted">${esc((payload && payload.message) || "Select a NetSniper v1.7 review queue host to inspect its evidence.")}</p>`;
+        return;
+      }
+
+      const classification = payload.classification || {};
+      const observedRows = objectDetailRows(payload.observed || {});
+      const observedSummaryRows = objectDetailRows(payload.observed_summary || {});
+
+      box.innerHTML = `
+        <div class="detail-grid">
+          <div class="detail-box"><div class="label">Host</div><code>${esc(payload.host_id || "-")}</code></div>
+          <div class="detail-box"><div class="label">IP</div><code>${esc(payload.ip || "-")}</code></div>
+          <div class="detail-box"><div class="label">MAC</div><code>${esc(payload.mac || "-")}</code></div>
+          <div class="detail-box"><div class="label">Hostname</div>${esc(payload.hostname || "-")}</div>
+          <div class="detail-box"><div class="label">Primary Type</div>${esc(classification.primary_type || "Unknown")}</div>
+          <div class="detail-box"><div class="label">Category</div>${esc(classification.category || "-")}</div>
+          <div class="detail-box"><div class="label">Confidence</div>${esc(classification.confidence || 0)} (${esc(classification.confidence_band || "-")})</div>
+          <div class="detail-box"><div class="label">Decision</div>${esc(classification.decision || "-")}</div>
+          <div class="detail-box"><div class="label">SIEM Action</div>${esc(classification.siem_action || "-")}</div>
+          <div class="detail-box"><div class="label">Severity / Score</div>${esc(payload.severity || "-")} / ${esc(payload.score || 0)}</div>
+        </div>
+
+        <h4>Explanation</h4>
+        <p class="muted">${esc(classification.explanation || "No explanation recorded.")}</p>
+
+        ${detailTable("Observed Summary", observedSummaryRows, [
+          {key: "key", label: "Metric"},
+          {key: "value", label: "Value"}
+        ])}
+
+        ${detailTable("Observed Hints", observedRows, [
+          {key: "key", label: "Hint Type"},
+          {key: "value", label: "Values"}
+        ])}
+
+        ${detailTable("Evidence", payload.evidence || [], [
+          {key: "id", label: "ID"},
+          {key: "source", label: "Source"},
+          {key: "value", label: "Value"},
+          {key: "matched_value", label: "Matched"},
+          {key: "points", label: "Points"},
+          {key: "reliability", label: "Reliability"},
+          {key: "reason", label: "Reason"}
+        ])}
+
+        ${detailTable("Contradictions", payload.contradictions || [], [
+          {key: "id", label: "ID"},
+          {key: "reason", label: "Reason"}
+        ])}
+
+        ${detailTable("Secondary Candidates", payload.secondary_candidates || [], [
+          {key: "primary_type", label: "Candidate"},
+          {key: "confidence", label: "Confidence"},
+          {key: "confidence_band", label: "Band"},
+          {key: "reason", label: "Reason"}
+        ])}
+
+        ${detailTable("Findings", payload.findings || [], [
+          {key: "id", label: "ID"},
+          {key: "name", label: "Name"},
+          {key: "service", label: "Service"},
+          {key: "port", label: "Port"},
+          {key: "score", label: "Score"},
+          {key: "evidence", label: "Evidence"}
+        ])}
+      `;
+    }
+
+    async function loadIntelligenceHostDetail(identity) {
+      const box = document.getElementById("intelligence-host-detail");
+
+      if (box) {
+        box.innerHTML = `<p class="muted">Loading NetSniper v1.7 host evidence for <code>${esc(identity)}</code>...</p>`;
+      }
+
+      try {
+        const payload = await api(`/api/intelligence-host?identity=${encodeURIComponent(identity)}`);
+        renderIntelligenceHostDetail(payload);
+      } catch (error) {
+        renderIntelligenceHostDetail({
+          found: false,
+          message: `Failed to load NetSniper v1.7 host evidence: ${error.message || error}`
+        });
+      }
+    }
+
+    function bindIntelligenceHostLinks(root) {
+      const scope = root || document;
+
+      scope.querySelectorAll("[data-intelligence-host]").forEach(button => {
+        if (button.dataset.boundIntelligenceHost === "1") return;
+
+        button.dataset.boundIntelligenceHost = "1";
+
+        button.addEventListener("click", event => {
+          event.preventDefault();
+
+          const identity = button.dataset.intelligenceHost;
+
+          if (identity) {
+            loadIntelligenceHostDetail(identity);
+          }
+        });
+      });
+    }
+
+
     async function loadAssetDetail(identifier) {
       activateDashboardTab("investigations");
 
@@ -8465,7 +8594,15 @@ def dashboard_index_html():
       const v17ReviewRows = v17ReviewQueue.length
         ? v17ReviewQueue.map(row => `
             <tr>
-              <td><code>${esc(row.identity || row.ip || row.host_id || "-")}</code></td>
+              <td>
+                <button
+                  type="button"
+                  class="link-button"
+                  data-intelligence-host="${esc(row.identity || row.ip || row.host_id || "")}"
+                >
+                  <code>${esc(row.identity || row.ip || row.host_id || "-")}</code>
+                </button>
+              </td>
               <td>${esc(row.primary_type || row.classification || "Unknown")}</td>
               <td>${esc(row.confidence || 0)}</td>
               <td>${esc(row.decision || "unknown")}</td>
@@ -8548,6 +8685,11 @@ def dashboard_index_html():
           </thead>
           <tbody>${v17ReviewRows}</tbody>
         </table>
+
+        <h3>v1.7 Host Evidence Drilldown</h3>
+        <div id="intelligence-host-detail" class="detail-box">
+          <p class="muted">Select a NetSniper v1.7 review queue host to inspect its evidence, observed hints, findings, contradictions, and secondary candidates.</p>
+        </div>
       ` : `
         <h3>NetSniper v1.7 Bundle Intelligence</h3>
         <p class="muted">${esc(v17Intel.message || "No NetSniper v1.7 intelligence summary has been imported yet.")}</p>
@@ -8620,6 +8762,7 @@ def dashboard_index_html():
       `;
 
       bindSubjectLinks(section);
+      bindIntelligenceHostLinks(section);
     }
 
     function renderRecommendations(summary, scanContext, riskRows) {
