@@ -6092,6 +6092,46 @@ def dashboard_index_html():
       color: #bfdbfe;
     }
 
+    .dashboard-tabs {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(18, 26, 46, 0.96);
+      backdrop-filter: blur(8px);
+    }
+
+    .tab-button {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel2);
+      color: var(--muted);
+      cursor: pointer;
+      padding: 9px 14px;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .tab-button:hover {
+      border-color: var(--accent);
+      color: #bfdbfe;
+    }
+
+    .tab-button.active {
+      border-color: var(--accent);
+      background: #1d4ed8;
+      color: #eff6ff;
+    }
+
+    [data-tab-panel][hidden] {
+      display: none !important;
+    }
+
     .asset-link {
       background: none;
       border: 0;
@@ -6136,7 +6176,6 @@ def dashboard_index_html():
       margin: 0;
     }
 
-    .card-toggle,
     .asset-detail-controls button {
       border: 1px solid var(--line);
       border-radius: 999px;
@@ -6147,7 +6186,6 @@ def dashboard_index_html():
       font-size: 12px;
     }
 
-    .card-toggle:hover,
     .asset-detail-controls button:hover {
       border-color: var(--accent);
       color: #bfdbfe;
@@ -6391,13 +6429,23 @@ def dashboard_index_html():
 <body>
   <header>
     <h1>DeltaAegis Dashboard</h1>
-    <p>Read-only local dashboard for network deltas, alerts, annotations, and risk prioritization.</p>
+    <p>Local investigation dashboard for network deltas, alerts, annotations, risk prioritization, and asset review workflow.</p>
   </header>
 
   <main>
     <div id="error" class="error"></div>
 
-    <section class="card explain">
+    <nav class="dashboard-tabs" aria-label="DeltaAegis dashboard sections">
+      <button type="button" class="tab-button" data-tab-target="overview">Overview</button>
+      <button type="button" class="tab-button" data-tab-target="investigations">Investigations</button>
+      <button type="button" class="tab-button" data-tab-target="risk">Risk</button>
+      <button type="button" class="tab-button" data-tab-target="assets">Assets</button>
+      <button type="button" class="tab-button" data-tab-target="intelligence">Intelligence</button>
+      <button type="button" class="tab-button" data-tab-target="events">Events</button>
+      <button type="button" class="tab-button" data-tab-target="alerts">Alerts</button>
+    </nav>
+
+    <section class="card explain" data-tab-panel="overview">
       <h2>What am I looking at?</h2>
       <p>
         DeltaAegis compares NetSniper scans over time. The latest scan represents the current observed network state.
@@ -6409,22 +6457,22 @@ def dashboard_index_html():
       </div>
     </section>
 
-    <section class="grid" id="metrics"></section>
+    <section class="grid" id="metrics" data-tab-panel="overview"></section>
 
-    <section class="card">
+    <section class="card" data-tab-panel="overview">
       <h2>Network Scopes</h2>
       <p class="muted">Choose which subnet scope the dashboard should display. Deltas are only meaningful inside the same network scope.</p>
       <div id="selected-scope" class="callout">Viewing all network scopes.</div>
       <div id="scope-links" class="scope-links"></div>
     </section>
 
-    <section class="card">
+    <section class="card" data-tab-panel="overview">
       <h2>NetSniper Scan Context</h2>
       <p class="muted">Shows the latest NetSniper scan, the baseline scan used for delta comparison, and identity coverage for MAC/IP tracking.</p>
       <div class="scan-grid" id="scan-context"></div>
     </section>
 
-    <section class="card">
+    <section class="card" data-tab-panel="assets">
       <h2>Asset Inventory</h2>
       <p class="muted">Current scoped asset lifecycle view. Use the scope selector above to isolate a subnet.</p>
       <table>
@@ -6448,7 +6496,7 @@ def dashboard_index_html():
       </table>
     </section>
 
-    <section class="card" id="asset-detail-card">
+    <section class="card" id="asset-detail-card" data-tab-panel="investigations">
       <h2>Asset Detail</h2>
       <p class="muted">Click an asset in the inventory table to view lifecycle state, observations, events, alerts, services, findings, and annotation context.</p>
       <div class="asset-detail-controls">
@@ -6460,7 +6508,7 @@ def dashboard_index_html():
       <div id="asset-detail-body" class="callout">No asset selected.</div>
     </section>
 
-    <section class="card">
+    <section class="card" data-tab-panel="risk">
       <h2>Top Risk Subjects</h2>
       <table>
         <thead>
@@ -6470,7 +6518,7 @@ def dashboard_index_html():
       </table>
     </section>
 
-    <section class="card">
+    <section class="card" data-tab-panel="events">
       <h2>Recent Delta Events</h2>
       <table>
         <thead>
@@ -6480,7 +6528,7 @@ def dashboard_index_html():
       </table>
     </section>
 
-    <section class="card">
+    <section class="card" data-tab-panel="alerts">
       <h2>Recent Alerts</h2>
       <table>
         <thead>
@@ -6490,7 +6538,7 @@ def dashboard_index_html():
       </table>
     </section>
 
-    <section class="card">
+    <section class="card" data-tab-panel="assets">
       <h2>Asset Annotations</h2>
       <table>
         <thead>
@@ -6509,7 +6557,7 @@ def dashboard_index_html():
       </table>
     </section>
 
-    <section class="card">
+    <section class="card" data-tab-panel="overview">
       <h2>Risk and Identity Legend</h2>
       <div class="legend-grid">
         <div>
@@ -6543,7 +6591,7 @@ def dashboard_index_html():
       </div>
     </section>
 
-    <section class="card">
+    <section class="card" data-tab-panel="overview">
       <h2>Recommended Next Steps</h2>
       <ol class="steps" id="recommendations"></ol>
     </section>
@@ -6557,6 +6605,73 @@ def dashboard_index_html():
         .replaceAll("<", "&lt;")
         .replaceAll(">", "&gt;");
     }
+
+    const DASHBOARD_TABS = [
+      "overview",
+      "investigations",
+      "risk",
+      "assets",
+      "intelligence",
+      "events",
+      "alerts"
+    ];
+
+    let activeDashboardTab = null;
+
+    function applyDashboardTabState() {
+      const selected = DASHBOARD_TABS.includes(activeDashboardTab)
+        ? activeDashboardTab
+        : "overview";
+
+      document.querySelectorAll("[data-tab-target]").forEach(button => {
+        const isActive = button.dataset.tabTarget === selected;
+        button.classList.toggle("active", isActive);
+        button.setAttribute("aria-selected", isActive ? "true" : "false");
+      });
+
+      document.querySelectorAll("[data-tab-panel]").forEach(panel => {
+        panel.hidden = panel.dataset.tabPanel !== selected;
+      });
+    }
+
+    function activateDashboardTab(tabName) {
+      activeDashboardTab = DASHBOARD_TABS.includes(tabName) ? tabName : "overview";
+
+      try {
+        window.localStorage.setItem("deltaaegis-dashboard-tab", activeDashboardTab);
+      } catch (error) {
+        // localStorage may be unavailable in hardened browser profiles.
+      }
+
+      applyDashboardTabState();
+    }
+
+    function setupDashboardTabs() {
+      document.querySelectorAll("[data-tab-target]").forEach(button => {
+        if (button.dataset.bound === "true") return;
+
+        button.addEventListener("click", () => {
+          activateDashboardTab(button.dataset.tabTarget);
+        });
+
+        button.dataset.bound = "true";
+      });
+
+      if (!activeDashboardTab) {
+        let saved = "overview";
+
+        try {
+          saved = window.localStorage.getItem("deltaaegis-dashboard-tab") || "overview";
+        } catch (error) {
+          saved = "overview";
+        }
+
+        activateDashboardTab(saved);
+      } else {
+        applyDashboardTabState();
+      }
+    }
+
 
     async function api(path) {
       const response = await fetch(path, {cache: "no-store"});
@@ -6781,7 +6896,7 @@ def dashboard_index_html():
 
 
 
-    function setupCollapsibleCards() {
+    function setupCollapsibleCards_DISABLED_BY_TABS() {
       document.querySelectorAll("section.card").forEach((card, index) => {
         if (card.dataset.collapsibleReady === "true") return;
 
@@ -7156,6 +7271,8 @@ def dashboard_index_html():
 
 
     async function loadAssetDetail(identifier) {
+      activateDashboardTab("investigations");
+
       const detail = await api(scopedPath(`/api/asset?identifier=${encodeURIComponent(identifier)}`));
 
       renderAssetDetail(detail);
@@ -7370,6 +7487,8 @@ def dashboard_index_html():
         }
       }
 
+      section.dataset.tabPanel = "intelligence";
+
       const topClassifications = intel.top_classifications || [];
       const reviewQueue = intel.review_queue || [];
 
@@ -7524,7 +7643,7 @@ def dashboard_index_html():
 
     async function load() {
       try {
-        setupCollapsibleCards();
+        setupDashboardTabs();
 
         const [scopes, summary, scanContext, assets, risk, events, alerts, annotations] = await Promise.all([
           api("/api/scopes"),
@@ -7547,6 +7666,7 @@ def dashboard_index_html():
         renderAnnotations(annotations);
         renderClassificationSummary(summary);
         renderRecommendations(summary, scanContext, risk);
+        applyDashboardTabState();
       } catch (error) {
         const box = document.getElementById("error");
         box.style.display = "block";

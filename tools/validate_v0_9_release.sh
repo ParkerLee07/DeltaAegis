@@ -21,6 +21,7 @@ echo "[*] Running v0.9 investigation workflow validators..."
 ./tools/validate_v0_9_clickable_investigation_rows.sh
 ./tools/validate_v0_9_persistent_investigation_status.sh
 ./tools/validate_v0_9_dashboard_investigation_controls.sh
+./tools/validate_v0_9_dashboard_tabs.sh
 
 echo "[*] Validating v0.9 release metadata..."
 
