@@ -336,6 +336,41 @@ def utc_now() -> str:
 
 
 
+
+def ensure_netsniper_intelligence_host_schema(connection: sqlite3.Connection) -> None:
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS netsniper_intelligence_hosts (
+            scan_id TEXT NOT NULL,
+            host_id TEXT NOT NULL,
+            ip TEXT,
+            mac TEXT,
+            hostname TEXT,
+            device_type TEXT,
+            device_type_confidence INTEGER NOT NULL DEFAULT 0,
+            severity TEXT,
+            score INTEGER NOT NULL DEFAULT 0,
+            primary_type TEXT,
+            category TEXT,
+            confidence INTEGER NOT NULL DEFAULT 0,
+            confidence_band TEXT,
+            decision TEXT,
+            siem_action TEXT,
+            evidence_count INTEGER NOT NULL DEFAULT 0,
+            contradiction_count INTEGER NOT NULL DEFAULT 0,
+            secondary_candidate_count INTEGER NOT NULL DEFAULT 0,
+            explanation TEXT,
+            observed_summary_json TEXT NOT NULL DEFAULT '{}',
+            observed_json TEXT NOT NULL DEFAULT '{}',
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            contradictions_json TEXT NOT NULL DEFAULT '[]',
+            secondary_candidates_json TEXT NOT NULL DEFAULT '[]',
+            findings_json TEXT NOT NULL DEFAULT '[]',
+            raw_host_json TEXT NOT NULL DEFAULT '{}',
+            imported_at TEXT NOT NULL,
+            PRIMARY KEY (scan_id, host_id)
+        )
+    """)
+
 def ensure_netsniper_intelligence_schema(connection: sqlite3.Connection) -> None:
     connection.execute("""
         CREATE TABLE IF NOT EXISTS netsniper_intelligence_summaries (
@@ -967,6 +1002,381 @@ def store_netsniper_intelligence_summary(
             utc_now(),
         ),
     )
+
+
+
+def _classification_v1_7_for_host(host: dict[str, Any]) -> dict[str, Any]:
+    classification = host.get("classification_v1_7")
+    if isinstance(classification, dict):
+        return classification
+
+    classification = host.get("classification")
+    if isinstance(classification, dict):
+        return classification
+
+    return {}
+
+
+def _observed_v1_7_for_host(host: dict[str, Any]) -> dict[str, Any]:
+    observed = host.get("classification_observed_v1_7")
+    if isinstance(observed, dict):
+        return observed
+    return {}
+
+
+def _list_len(value: Any) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
+def store_netsniper_intelligence_hosts(
+    connection: sqlite3.Connection,
+    snapshot: Snapshot,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+) -> None:
+    ensure_netsniper_intelligence_host_schema(connection)
+
+    analysis_enriched_path = manifest_file_path(manifest_path, manifest, "analysis_enriched_json")
+    enriched = load_json_file(analysis_enriched_path, {})
+
+    if not isinstance(enriched, dict):
+        return
+
+    hosts = enriched.get("hosts")
+    if not isinstance(hosts, list):
+        return
+
+    imported_at = utc_now()
+
+    for host in hosts:
+        if not isinstance(host, dict):
+            continue
+
+        host_id = str(
+            host.get("host_id")
+            or host.get("host")
+            or host.get("ip")
+            or host.get("ip_address")
+            or ""
+        ).strip()
+
+        if not host_id:
+            continue
+
+        classification = _classification_v1_7_for_host(host)
+        observed = _observed_v1_7_for_host(host)
+
+        evidence = classification.get("evidence")
+        contradictions = classification.get("contradictions")
+        secondary_candidates = classification.get("secondary_candidates")
+        findings = host.get("findings")
+
+        connection.execute(
+            """
+            INSERT INTO netsniper_intelligence_hosts (
+                scan_id,
+                host_id,
+                ip,
+                mac,
+                hostname,
+                device_type,
+                device_type_confidence,
+                severity,
+                score,
+                primary_type,
+                category,
+                confidence,
+                confidence_band,
+                decision,
+                siem_action,
+                evidence_count,
+                contradiction_count,
+                secondary_candidate_count,
+                explanation,
+                observed_summary_json,
+                observed_json,
+                evidence_json,
+                contradictions_json,
+                secondary_candidates_json,
+                findings_json,
+                raw_host_json,
+                imported_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scan_id, host_id) DO UPDATE SET
+                ip=excluded.ip,
+                mac=excluded.mac,
+                hostname=excluded.hostname,
+                device_type=excluded.device_type,
+                device_type_confidence=excluded.device_type_confidence,
+                severity=excluded.severity,
+                score=excluded.score,
+                primary_type=excluded.primary_type,
+                category=excluded.category,
+                confidence=excluded.confidence,
+                confidence_band=excluded.confidence_band,
+                decision=excluded.decision,
+                siem_action=excluded.siem_action,
+                evidence_count=excluded.evidence_count,
+                contradiction_count=excluded.contradiction_count,
+                secondary_candidate_count=excluded.secondary_candidate_count,
+                explanation=excluded.explanation,
+                observed_summary_json=excluded.observed_summary_json,
+                observed_json=excluded.observed_json,
+                evidence_json=excluded.evidence_json,
+                contradictions_json=excluded.contradictions_json,
+                secondary_candidates_json=excluded.secondary_candidates_json,
+                findings_json=excluded.findings_json,
+                raw_host_json=excluded.raw_host_json,
+                imported_at=excluded.imported_at
+            """,
+            (
+                snapshot.scan_id,
+                host_id,
+                host.get("ip") or host.get("ip_address") or host.get("host"),
+                host.get("mac") or host.get("mac_address"),
+                host.get("hostname"),
+                host.get("device_type"),
+                safe_int(host.get("device_type_confidence")) or 0,
+                host.get("severity"),
+                safe_int(host.get("score")) or 0,
+                classification.get("primary_type") or classification.get("type"),
+                classification.get("category"),
+                safe_int(classification.get("confidence")) or 0,
+                classification.get("confidence_band") or classification.get("confidence_label"),
+                classification.get("decision"),
+                classification.get("siem_action"),
+                _list_len(evidence),
+                _list_len(contradictions),
+                _list_len(secondary_candidates),
+                classification.get("explanation"),
+                json.dumps(classification.get("observed_summary") or {}, sort_keys=True),
+                json.dumps(observed, sort_keys=True),
+                json.dumps(evidence if isinstance(evidence, list) else [], sort_keys=True),
+                json.dumps(contradictions if isinstance(contradictions, list) else [], sort_keys=True),
+                json.dumps(secondary_candidates if isinstance(secondary_candidates, list) else [], sort_keys=True),
+                json.dumps(findings if isinstance(findings, list) else [], sort_keys=True),
+                json.dumps(host, sort_keys=True),
+                imported_at,
+            ),
+        )
+
+
+def latest_netsniper_intelligence_scan_id(connection: sqlite3.Connection) -> str | None:
+    ensure_netsniper_intelligence_schema(connection)
+    row = latest_netsniper_intelligence_summary(connection)
+    if row is None:
+        return None
+    return str(row["scan_id"])
+
+
+def list_netsniper_intelligence_hosts(
+    connection: sqlite3.Connection,
+    limit: int = 25,
+    siem_action: str | None = None,
+    decision: str | None = None,
+    confidence_band: str | None = None,
+) -> list[sqlite3.Row]:
+    ensure_netsniper_intelligence_host_schema(connection)
+
+    scan_id = latest_netsniper_intelligence_scan_id(connection)
+    if scan_id is None:
+        return []
+
+    clauses = ["scan_id = ?"]
+    params: list[Any] = [scan_id]
+
+    if siem_action:
+        clauses.append("siem_action = ?")
+        params.append(siem_action)
+
+    if decision:
+        clauses.append("decision = ?")
+        params.append(decision)
+
+    if confidence_band:
+        clauses.append("confidence_band = ?")
+        params.append(confidence_band)
+
+    params.append(max(1, int(limit)))
+
+    return connection.execute(
+        f"""
+        SELECT *
+        FROM netsniper_intelligence_hosts
+        WHERE {' AND '.join(clauses)}
+        ORDER BY
+            CASE
+                WHEN siem_action = 'review_queue' THEN 0
+                WHEN decision = 'possible' THEN 1
+                ELSE 2
+            END,
+            contradiction_count DESC,
+            confidence ASC,
+            host_id ASC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+
+
+def get_netsniper_intelligence_host(
+    connection: sqlite3.Connection,
+    identity: str,
+) -> sqlite3.Row | None:
+    ensure_netsniper_intelligence_host_schema(connection)
+
+    scan_id = latest_netsniper_intelligence_scan_id(connection)
+    if scan_id is None:
+        return None
+
+    return connection.execute(
+        """
+        SELECT *
+        FROM netsniper_intelligence_hosts
+        WHERE scan_id = ?
+          AND (
+              host_id = ?
+              OR ip = ?
+              OR mac = ?
+              OR hostname = ?
+          )
+        LIMIT 1
+        """,
+        (scan_id, identity, identity, identity, identity),
+    ).fetchone()
+
+
+def print_netsniper_intelligence_hosts(rows: list[sqlite3.Row]) -> None:
+    if not rows:
+        print("No NetSniper v1.7 intelligence host drilldown rows are available.")
+        return
+
+    print("Host Intelligence Review Queue")
+    print()
+    print(f"{'Host':<18} {'Type':<38} {'Conf':<5} {'Band':<10} {'Decision':<10} {'Action':<14} {'Ev':<3} {'Cx':<3}")
+    print("-" * 112)
+
+    for row in rows:
+        print(
+            f"{str(row['host_id'] or '-'):<18} "
+            f"{str(row['primary_type'] or 'Unknown')[:38]:<38} "
+            f"{int(row['confidence'] or 0):<5} "
+            f"{str(row['confidence_band'] or '-'):<10} "
+            f"{str(row['decision'] or '-'):<10} "
+            f"{str(row['siem_action'] or '-'):<14} "
+            f"{int(row['evidence_count'] or 0):<3} "
+            f"{int(row['contradiction_count'] or 0):<3}"
+        )
+
+
+def print_netsniper_intelligence_host_detail(row: sqlite3.Row | None) -> None:
+    if row is None:
+        print("No matching NetSniper v1.7 intelligence host was found.")
+        return
+
+    evidence = _decode_json_list(row["evidence_json"])
+    contradictions = _decode_json_list(row["contradictions_json"])
+    secondary_candidates = _decode_json_list(row["secondary_candidates_json"])
+    observed = _decode_json_dict(row["observed_json"])
+    observed_summary = _decode_json_dict(row["observed_summary_json"])
+    findings = _decode_json_list(row["findings_json"])
+
+    print(f"Host:             {row['host_id']}")
+    print(f"IP:               {row['ip'] or '-'}")
+    print(f"MAC:              {row['mac'] or '-'}")
+    print(f"Hostname:         {row['hostname'] or '-'}")
+    print(f"Device Type:      {row['device_type'] or '-'}")
+    print(f"Primary Type:     {row['primary_type'] or 'Unknown'}")
+    print(f"Category:         {row['category'] or '-'}")
+    print(f"Confidence:       {row['confidence']} ({row['confidence_band'] or '-'})")
+    print(f"Decision:         {row['decision'] or '-'}")
+    print(f"SIEM Action:      {row['siem_action'] or '-'}")
+    print(f"Severity / Score: {row['severity'] or '-'} / {row['score']}")
+    print(f"Explanation:      {row['explanation'] or '-'}")
+
+    print()
+    print("Observed summary:")
+    if observed_summary:
+        for key, value in observed_summary.items():
+            print(f"  {key}: {value}")
+    else:
+        print("  None recorded.")
+
+    print()
+    print("Observed hints:")
+    if observed:
+        for key, value in observed.items():
+            if isinstance(value, list):
+                joined = ", ".join(str(item) for item in value) if value else "-"
+                print(f"  {key}: {joined}")
+            else:
+                print(f"  {key}: {value}")
+    else:
+        print("  None recorded.")
+
+    print()
+    print("Evidence:")
+    if evidence:
+        for item in evidence:
+            if not isinstance(item, dict):
+                continue
+            print(
+                f"  - {item.get('id', '-')}: "
+                f"{item.get('source', '-')}={item.get('value', '-')} "
+                f"points={item.get('points', 0)} reliability={item.get('reliability', '-')}"
+            )
+            reason = item.get("reason")
+            if reason:
+                print(f"    reason: {reason}")
+    else:
+        print("  None recorded.")
+
+    print()
+    print("Contradictions:")
+    if contradictions:
+        for item in contradictions:
+            print(f"  - {item}")
+    else:
+        print("  None recorded.")
+
+    print()
+    print("Secondary candidates:")
+    if secondary_candidates:
+        for item in secondary_candidates:
+            print(f"  - {item}")
+    else:
+        print("  None recorded.")
+
+    print()
+    print("Findings:")
+    if findings:
+        for item in findings:
+            if isinstance(item, dict):
+                print(f"  - {item.get('id', '-')}: {item.get('name', '-')} on port {item.get('port', '-')}")
+            else:
+                print(f"  - {item}")
+    else:
+        print("  None recorded.")
+
+
+def command_intelligence_hosts(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    rows = list_netsniper_intelligence_hosts(
+        connection,
+        limit=args.limit,
+        siem_action=args.action,
+        decision=args.decision,
+        confidence_band=args.band,
+    )
+    print_netsniper_intelligence_hosts(rows)
+    return 0
+
+
+def command_intelligence_host(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    row = get_netsniper_intelligence_host(connection, args.identity)
+    print_netsniper_intelligence_host_detail(row)
+    return 0
 
 
 def latest_netsniper_intelligence_summary(connection: sqlite3.Connection) -> sqlite3.Row | None:
@@ -1720,6 +2130,7 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
     if not isinstance(manifest_data, dict):
         manifest_data = {}
     store_netsniper_intelligence_summary(connection, snapshot, manifest_path, manifest_data)
+    store_netsniper_intelligence_hosts(connection, snapshot, manifest_path, manifest_data)
     events: list[dict[str, Any]] = []
     if quality_status == "ACCEPTED":
         if baseline is None:
@@ -5953,6 +6364,66 @@ def dashboard_assets_payload(connection, limit, scope=None, state=None, identity
 
     return dashboard_enrich_classification_rows(rows)
 
+
+def dashboard_netsniper_intelligence_host_payload(connection, identity):
+    identity = str(identity or "").strip()
+
+    if not identity:
+        return {
+            "found": False,
+            "error": "missing_identity",
+            "message": "Provide identity, host ID, IP, MAC, or hostname.",
+        }
+
+    row = get_netsniper_intelligence_host(connection, identity)
+
+    if row is None:
+        return {
+            "found": False,
+            "identity": identity,
+            "message": "No matching NetSniper v1.7 intelligence host was found.",
+        }
+
+    evidence = _decode_json_list(row["evidence_json"])
+    contradictions = _decode_json_list(row["contradictions_json"])
+    secondary_candidates = _decode_json_list(row["secondary_candidates_json"])
+    observed = _decode_json_dict(row["observed_json"])
+    observed_summary = _decode_json_dict(row["observed_summary_json"])
+    findings = _decode_json_list(row["findings_json"])
+
+    return {
+        "found": True,
+        "identity": identity,
+        "scan_id": row["scan_id"],
+        "host_id": row["host_id"],
+        "ip": row["ip"],
+        "mac": row["mac"],
+        "hostname": row["hostname"],
+        "device_type": row["device_type"],
+        "device_type_confidence": int(row["device_type_confidence"] or 0),
+        "severity": row["severity"],
+        "score": int(row["score"] or 0),
+        "classification": {
+            "primary_type": row["primary_type"],
+            "category": row["category"],
+            "confidence": int(row["confidence"] or 0),
+            "confidence_band": row["confidence_band"],
+            "decision": row["decision"],
+            "siem_action": row["siem_action"],
+            "evidence_count": int(row["evidence_count"] or 0),
+            "contradiction_count": int(row["contradiction_count"] or 0),
+            "secondary_candidate_count": int(row["secondary_candidate_count"] or 0),
+            "explanation": row["explanation"],
+        },
+        "observed_summary": observed_summary,
+        "observed": observed,
+        "evidence": evidence,
+        "contradictions": contradictions,
+        "secondary_candidates": secondary_candidates,
+        "findings": findings,
+    }
+
+
 def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20):
     identifier = str(identifier or "").strip()
 
@@ -7722,6 +8193,135 @@ def dashboard_index_html():
     }
 
 
+
+    function objectDetailRows(obj) {
+      if (!obj) return [];
+
+      return Object.keys(obj).sort().map(key => {
+        const value = obj[key];
+
+        return {
+          key,
+          value: Array.isArray(value)
+            ? (value.length ? value.join(", ") : "-")
+            : value
+        };
+      });
+    }
+
+    function renderIntelligenceHostDetail(payload) {
+      const box = document.getElementById("intelligence-host-detail");
+
+      if (!box) return;
+
+      if (!payload || !payload.found) {
+        box.innerHTML = `<p class="muted">${esc((payload && payload.message) || "Select a NetSniper v1.7 review queue host to inspect its evidence.")}</p>`;
+        return;
+      }
+
+      const classification = payload.classification || {};
+      const observedRows = objectDetailRows(payload.observed || {});
+      const observedSummaryRows = objectDetailRows(payload.observed_summary || {});
+
+      box.innerHTML = `
+        <div class="detail-grid">
+          <div class="detail-box"><div class="label">Host</div><code>${esc(payload.host_id || "-")}</code></div>
+          <div class="detail-box"><div class="label">IP</div><code>${esc(payload.ip || "-")}</code></div>
+          <div class="detail-box"><div class="label">MAC</div><code>${esc(payload.mac || "-")}</code></div>
+          <div class="detail-box"><div class="label">Hostname</div>${esc(payload.hostname || "-")}</div>
+          <div class="detail-box"><div class="label">Primary Type</div>${esc(classification.primary_type || "Unknown")}</div>
+          <div class="detail-box"><div class="label">Category</div>${esc(classification.category || "-")}</div>
+          <div class="detail-box"><div class="label">Confidence</div>${esc(classification.confidence || 0)} (${esc(classification.confidence_band || "-")})</div>
+          <div class="detail-box"><div class="label">Decision</div>${esc(classification.decision || "-")}</div>
+          <div class="detail-box"><div class="label">SIEM Action</div>${esc(classification.siem_action || "-")}</div>
+          <div class="detail-box"><div class="label">Severity / Score</div>${esc(payload.severity || "-")} / ${esc(payload.score || 0)}</div>
+        </div>
+
+        <h4>Explanation</h4>
+        <p class="muted">${esc(classification.explanation || "No explanation recorded.")}</p>
+
+        ${detailTable("Observed Summary", observedSummaryRows, [
+          {key: "key", label: "Metric"},
+          {key: "value", label: "Value"}
+        ])}
+
+        ${detailTable("Observed Hints", observedRows, [
+          {key: "key", label: "Hint Type"},
+          {key: "value", label: "Values"}
+        ])}
+
+        ${detailTable("Evidence", payload.evidence || [], [
+          {key: "id", label: "ID"},
+          {key: "source", label: "Source"},
+          {key: "value", label: "Value"},
+          {key: "matched_value", label: "Matched"},
+          {key: "points", label: "Points"},
+          {key: "reliability", label: "Reliability"},
+          {key: "reason", label: "Reason"}
+        ])}
+
+        ${detailTable("Contradictions", payload.contradictions || [], [
+          {key: "id", label: "ID"},
+          {key: "reason", label: "Reason"}
+        ])}
+
+        ${detailTable("Secondary Candidates", payload.secondary_candidates || [], [
+          {key: "primary_type", label: "Candidate"},
+          {key: "confidence", label: "Confidence"},
+          {key: "confidence_band", label: "Band"},
+          {key: "reason", label: "Reason"}
+        ])}
+
+        ${detailTable("Findings", payload.findings || [], [
+          {key: "id", label: "ID"},
+          {key: "name", label: "Name"},
+          {key: "service", label: "Service"},
+          {key: "port", label: "Port"},
+          {key: "score", label: "Score"},
+          {key: "evidence", label: "Evidence"}
+        ])}
+      `;
+    }
+
+    async function loadIntelligenceHostDetail(identity) {
+      const box = document.getElementById("intelligence-host-detail");
+
+      if (box) {
+        box.innerHTML = `<p class="muted">Loading NetSniper v1.7 host evidence for <code>${esc(identity)}</code>...</p>`;
+      }
+
+      try {
+        const payload = await api(`/api/intelligence-host?identity=${encodeURIComponent(identity)}`);
+        renderIntelligenceHostDetail(payload);
+      } catch (error) {
+        renderIntelligenceHostDetail({
+          found: false,
+          message: `Failed to load NetSniper v1.7 host evidence: ${error.message || error}`
+        });
+      }
+    }
+
+    function bindIntelligenceHostLinks(root) {
+      const scope = root || document;
+
+      scope.querySelectorAll("[data-intelligence-host]").forEach(button => {
+        if (button.dataset.boundIntelligenceHost === "1") return;
+
+        button.dataset.boundIntelligenceHost = "1";
+
+        button.addEventListener("click", event => {
+          event.preventDefault();
+
+          const identity = button.dataset.intelligenceHost;
+
+          if (identity) {
+            loadIntelligenceHostDetail(identity);
+          }
+        });
+      });
+    }
+
+
     async function loadAssetDetail(identifier) {
       activateDashboardTab("investigations");
 
@@ -7994,7 +8594,15 @@ def dashboard_index_html():
       const v17ReviewRows = v17ReviewQueue.length
         ? v17ReviewQueue.map(row => `
             <tr>
-              <td><code>${esc(row.identity || row.ip || row.host_id || "-")}</code></td>
+              <td>
+                <button
+                  type="button"
+                  class="link-button"
+                  data-intelligence-host="${esc(row.identity || row.ip || row.host_id || "")}"
+                >
+                  <code>${esc(row.identity || row.ip || row.host_id || "-")}</code>
+                </button>
+              </td>
               <td>${esc(row.primary_type || row.classification || "Unknown")}</td>
               <td>${esc(row.confidence || 0)}</td>
               <td>${esc(row.decision || "unknown")}</td>
@@ -8077,6 +8685,11 @@ def dashboard_index_html():
           </thead>
           <tbody>${v17ReviewRows}</tbody>
         </table>
+
+        <h3>v1.7 Host Evidence Drilldown</h3>
+        <div id="intelligence-host-detail" class="detail-box">
+          <p class="muted">Select a NetSniper v1.7 review queue host to inspect its evidence, observed hints, findings, contradictions, and secondary candidates.</p>
+        </div>
       ` : `
         <h3>NetSniper v1.7 Bundle Intelligence</h3>
         <p class="muted">${esc(v17Intel.message || "No NetSniper v1.7 intelligence summary has been imported yet.")}</p>
@@ -8149,6 +8762,7 @@ def dashboard_index_html():
       `;
 
       bindSubjectLinks(section);
+      bindIntelligenceHostLinks(section);
     }
 
     function renderRecommendations(summary, scanContext, riskRows) {
@@ -8397,6 +9011,16 @@ def command_dashboard(args):
                             limit=limit,
                         ),
                     )
+                elif route == "/api/intelligence-host":
+                    identifier = query.get("identity", query.get("host", [""]))[0].strip()
+
+                    dashboard_json_response(
+                        self,
+                        dashboard_netsniper_intelligence_host_payload(
+                            connection,
+                            identifier,
+                        ),
+                    )
                 elif route == "/api/events":
                     dashboard_json_response(self, dashboard_events_payload(connection, limit, scope=scope))
                 elif route == "/api/alerts":
@@ -8623,6 +9247,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("alert_id", type=int)
 
     p = sub.add_parser("intelligence", help="Show latest NetSniper v1.7 intelligence summary")
+
+    p = sub.add_parser("intelligence-hosts", help="List NetSniper v1.7 per-host intelligence drilldown rows")
+    p.add_argument("--limit", type=int, default=25)
+    p.add_argument("--action", help="Filter by SIEM action, such as review_queue")
+    p.add_argument("--decision", help="Filter by classification decision, such as possible or classified")
+    p.add_argument("--band", help="Filter by confidence band, such as weak, possible, strong, high, or unknown")
+
+    p = sub.add_parser("intelligence-host", help="Show NetSniper v1.7 intelligence drilldown for one host")
+    p.add_argument("identity", help="Host ID, IP, MAC, or hostname")
     p = sub.add_parser("dashboard")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8090)
@@ -8685,6 +9318,8 @@ def main() -> int:
 
         if args.command == "investigate-asset": return command_investigate_asset(args)
         if args.command == "intelligence": return command_intelligence(args)
+        if args.command == "intelligence-hosts": return command_intelligence_hosts(args)
+        if args.command == "intelligence-host": return command_intelligence_host(args)
         if args.command == "dashboard": return command_dashboard(args)
 
         if args.command == "risk": return command_risk(args)

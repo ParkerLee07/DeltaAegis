@@ -8,29 +8,31 @@ DeltaAegis ingests finalized NetSniper telemetry bundles, stores normalized hist
 
 ## Current Release
 
-Current release: **DeltaAegis v0.11.1 — Metadata Cleanup**
+Current release: **DeltaAegis v0.12.0 — Intelligence Drilldown**
 
-DeltaAegis v0.11.1 is a documentation and metadata cleanup release for the v0.11 Intelligence Review Dashboard line. It keeps the v0.11 feature set unchanged while correcting stale v0.10 labels in README and CLI metadata.
+DeltaAegis v0.12.0 adds operator-level NetSniper v1.7 intelligence drilldown on top of the v0.11 Intelligence Review Dashboard.
 
-### v0.11 Intelligence Review Dashboard
+### v0.12 Intelligence Drilldown
 
-DeltaAegis v0.11.x adds first-class visibility for NetSniper v1.7 device-intelligence artifacts.
+DeltaAegis now stores and exposes per-host NetSniper v1.7 enriched intelligence from analysis.enriched.json.
 
-Key capabilities:
+New capabilities:
 
-- Ingests NetSniper v1.7 manifest-addressable intelligence artifacts:
-  - analysis.enriched.json
-  - classification_quality.json
-  - classification_quality.md
-- Stores NetSniper v1.7 run-level intelligence summaries in SQLite.
-- Adds the intelligence CLI command for reviewing the latest imported NetSniper intelligence summary.
-- Adds dashboard visibility for host counts, classified hosts, possible/review hosts, unknown hosts, false-confidence candidates, unknown exposed-service hosts, top device types, confidence bands, and review queue samples.
+- Stores per-host NetSniper v1.7 drilldown rows in SQLite.
+- Adds intelligence-hosts for listing review-queue hosts.
+- Adds intelligence-host for inspecting one host by host ID, IP, MAC, or hostname.
+- Adds a dashboard API endpoint for per-host intelligence evidence.
+- Adds a clickable dashboard Host Evidence Drilldown panel inside the Intelligence tab.
+- Shows observed hints, observed summary, evidence, evidence reasons, contradictions, secondary candidates, and findings.
 
-Run the intelligence summary command:
+CLI examples:
 
-    python3 deltaaegis.py intelligence
+    python3 deltaaegis.py intelligence-hosts --action review_queue --limit 25
+    python3 deltaaegis.py intelligence-host 192.168.4.1
 
-The dashboard includes a NetSniper v1.7 Bundle Intelligence section inside the Intelligence tab.
+Dashboard:
+
+    Open the Intelligence tab and select a NetSniper v1.7 review queue host to inspect its evidence.
 ## What v0.10.0 Adds
 
 - First-class storage for NetSniper v1.6 classification fields.
