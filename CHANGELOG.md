@@ -1,27 +1,50 @@
 # Changelog
 
-<!-- DELTAAEGIS_V086_CHANGELOG_START -->
 ## v0.9.0 - 2026-06-19
 
 ### Added
 - Added asset investigation detail payloads for dashboard-driven review.
 - Added clickable risk, event, and alert subjects that open the asset investigation panel.
-- Added inferred `NEEDS_OWNER` status for active assets without annotation context.
-- Added persistent asset investigation status storage and history.
-- Added `investigate-asset` CLI command for saving investigation status and reason.
+- Added inferred `NEEDS_OWNER` status for active assets without owner or annotation context.
+- Added persistent asset investigation status storage through `asset_investigations`.
+- Added persistent investigation history through `asset_investigation_history`.
+- Added `investigate-asset` CLI command for saving investigation status and analyst reason.
 - Added dashboard controls for saving investigation status through `POST /api/investigate-asset`.
-- Added v0.9 validators for asset investigation detail, clickable investigation rows, persistent status, and dashboard controls.
+- Added tabbed dashboard layout for Overview, Investigations, Risk, Assets, Intelligence, Events, and Alerts.
+- Added dashboard tab validation to prevent broken tab initialization and collapsed-card regressions.
+- Added `tools/validate_v0_9_release.sh` as the v0.9 release gate.
+- Added `tools/validate_v0_9_asset_investigation_detail.sh`.
+- Added `tools/validate_v0_9_clickable_investigation_rows.sh`.
+- Added `tools/validate_v0_9_persistent_investigation_status.sh`.
+- Added `tools/validate_v0_9_dashboard_investigation_controls.sh`.
+- Added `tools/validate_v0_9_dashboard_tabs.sh`.
 
 ### Changed
-- Dashboard mode now supports investigation status updates instead of being read-only.
+- Dashboard mode now supports controlled investigation status updates instead of being purely read-only.
 - Asset detail now distinguishes inferred status from persisted operator status.
+- Dashboard information is separated into tabs to reduce visual overload.
+- Dashboard wording now describes local investigation workflow instead of read-only visibility only.
+- Release validation now includes v0.9 investigation workflow and dashboard tab checks.
+
+### Fixed
+- Fixed dashboard tab initialization so tab buttons bind correctly.
+- Removed redundant collapse/expand controls after dashboard sections were separated into tabs.
+- Repaired dashboard tab initialization regression before release.
 
 ### Validation
 - `pytest -q`
+- `tools/validate_v0_9_release.sh`
 - `tools/validate_v0_9_asset_investigation_detail.sh`
 - `tools/validate_v0_9_clickable_investigation_rows.sh`
 - `tools/validate_v0_9_persistent_investigation_status.sh`
 - `tools/validate_v0_9_dashboard_investigation_controls.sh`
+- `tools/validate_v0_9_dashboard_tabs.sh`
+
+### Notes
+- DeltaAegis v0.9.0 remains local-first and conservative.
+- Low-confidence NetSniper classifications are shown as review context and should not be treated as confirmed identity without supporting evidence.
+- The dashboard does not run arbitrary shell commands or launch scans in v0.9.0.
+
 
 ## v0.8.6 - 2026-06-18
 

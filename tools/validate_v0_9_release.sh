@@ -50,12 +50,26 @@ if missing_app:
     raise SystemExit(f"[-] deltaaegis.py missing v0.9 markers: {missing_app}")
 
 required_readme = [
-    "DeltaAegis v0.9.0 Investigation Workflow",
-    "What v0.9.0 adds",
+    "DeltaAegis v0.9.0 — Investigation Workflow and Dashboard Tabs",
+    "What v0.9.0 Adds",
     "Persistent asset investigation status",
     "Dashboard-side investigation status controls",
-    "DeltaAegis v0.9.0 Current Capabilities",
+    "Tabbed dashboard layout",
+    "DeltaAegis v0.9.0 turns the dashboard into a cleaner investigation workflow console",
+    "Current Release",
 ]
+
+forbidden_readme = [
+    "Current Release DeltaAegis v0.8.5",
+    "DeltaAegis v0.8.5 adds a local read-only dashboard",
+    "Collapsible dashboard cards to reduce visual overload",
+    "The dashboard is local-first and read-only by default.",
+]
+
+stale_readme = [item for item in forbidden_readme if item in readme]
+
+if stale_readme:
+    raise SystemExit(f"[-] README.md still contains stale release/dashboard wording: {stale_readme}")
 
 missing_readme = [item for item in required_readme if item not in readme]
 
@@ -66,7 +80,11 @@ required_changelog = [
     "## v0.9.0 - 2026-06-19",
     "Added asset investigation detail payloads",
     "Added dashboard controls for saving investigation status",
+    "Added tabbed dashboard layout",
+    "Fixed dashboard tab initialization",
     "tools/validate_v0_9_dashboard_investigation_controls.sh",
+    "tools/validate_v0_9_dashboard_tabs.sh",
+    "tools/validate_v0_9_release.sh",
 ]
 
 missing_changelog = [item for item in required_changelog if item not in changelog]
