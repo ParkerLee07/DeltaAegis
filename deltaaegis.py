@@ -6936,7 +6936,7 @@ def dashboard_index_html():
       <tr>
         <td class="severity-${esc(row.level || "").toLowerCase()}">${esc(row.level || "-")}</td>
         <td>${esc(row.score ?? "-")}</td>
-        <td>${esc(row.subject_key || "-")}</td>
+        <td>${subjectButton(row.subject_key || "-")}</td>
         <td>${esc(row.ip_address || row.ip || "-")}</td>
         <td>${esc(row.mac_address || row.mac || "-")}</td>
         <td>${esc(row.identity_confidence || row.identity_state || "-")}</td>
@@ -6948,6 +6948,8 @@ def dashboard_index_html():
       </tr>
     `;
   }).join("");
+
+  bindSubjectLinks(tbody);
 }
 
     function renderEvents(rows) {
@@ -6967,7 +6969,7 @@ def dashboard_index_html():
       <td>${esc(row.baseline_scan_id || "-")}</td>
       <td class="severity-${esc(row.severity || "").toLowerCase()}">${esc(row.severity || "-")}</td>
       <td>${esc(row.event_type || row.type || "-")}</td>
-      <td>${esc(row.subject_key || "-")}</td>
+      <td>${subjectButton(row.subject_key || "-")}</td>
       <td>${esc(row.ip_address || row.ip || "-")}</td>
       <td>${esc(row.mac_address || row.mac || "-")}</td>
       <td>${esc(row.identity_confidence || row.identity_state || "-")}</td>
@@ -6975,6 +6977,8 @@ def dashboard_index_html():
       <td>${esc(row.summary || "-")}</td>
     </tr>
   `).join("");
+
+  bindSubjectLinks(tbody);
 }
 
     function renderAlerts(rows) {
@@ -6992,7 +6996,7 @@ def dashboard_index_html():
       <td>${esc(row.alert_id || row.id || "-")}</td>
       <td>${esc(row.status || "-")}</td>
       <td class="severity-${esc(row.severity || "").toLowerCase()}">${esc(row.severity || "-")}</td>
-      <td>${esc(row.subject_key || "-")}</td>
+      <td>${subjectButton(row.subject_key || "-")}</td>
       <td>${esc(row.event_type || row.type || "-")}</td>
       <td>${esc(row.ip_address || row.ip || "-")}</td>
       <td>${esc(row.mac_address || row.mac || "-")}</td>
@@ -7000,6 +7004,8 @@ def dashboard_index_html():
       <td>${esc(row.summary || "-")}</td>
     </tr>
   `).join("");
+
+  bindSubjectLinks(tbody);
 }
 
     function renderAnnotations(rows) {
