@@ -333,6 +333,37 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+
+
+
+def ensure_netsniper_intelligence_schema(connection: sqlite3.Connection) -> None:
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS netsniper_intelligence_summaries (
+            scan_id TEXT PRIMARY KEY,
+            manifest_path TEXT NOT NULL,
+            analysis_enriched_json TEXT,
+            classification_quality_json TEXT,
+            classification_quality_markdown TEXT,
+            host_count INTEGER NOT NULL DEFAULT 0,
+            classified_count INTEGER NOT NULL DEFAULT 0,
+            possible_or_review_count INTEGER NOT NULL DEFAULT 0,
+            unknown_count INTEGER NOT NULL DEFAULT 0,
+            contradiction_host_count INTEGER NOT NULL DEFAULT 0,
+            false_confidence_candidate_count INTEGER NOT NULL DEFAULT 0,
+            unknown_with_exposed_services_count INTEGER NOT NULL DEFAULT 0,
+            decision_counts_json TEXT NOT NULL DEFAULT '{}',
+            siem_action_counts_json TEXT NOT NULL DEFAULT '{}',
+            confidence_band_counts_json TEXT NOT NULL DEFAULT '{}',
+            top_device_types_json TEXT NOT NULL DEFAULT '{}',
+            review_queue_json TEXT NOT NULL DEFAULT '[]',
+            contradiction_review_json TEXT NOT NULL DEFAULT '[]',
+            false_confidence_candidates_json TEXT NOT NULL DEFAULT '[]',
+            unknown_with_exposed_services_json TEXT NOT NULL DEFAULT '[]',
+            sample_explanations_json TEXT NOT NULL DEFAULT '{}',
+            imported_at TEXT NOT NULL
+        )
+    """)
+
 def ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
     columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
@@ -819,6 +850,207 @@ def load_snapshot(manifest_path: Path) -> Snapshot:
         nmap_version=telemetry.get("nmap_version"), bundle_status=str(manifest.get("status", "UNKNOWN")),
         xml_exit_status=exit_status, hosts_up=hosts_up, hosts_down=hosts_down, hosts_total=hosts_total, assets=assets,
     )
+
+
+
+def manifest_file_path(manifest_path: Path, manifest: dict[str, Any], key: str) -> Path | None:
+    files = manifest.get("files", {})
+    if not isinstance(files, dict):
+        return None
+
+    value = files.get(key)
+    if not value:
+        return None
+
+    candidate = Path(str(value))
+    if not candidate.is_absolute():
+        candidate = manifest_path.parent / candidate
+
+    return candidate
+
+
+def load_json_file(path: Path | None, default: Any = None) -> Any:
+    if path is None or not path.is_file():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def store_netsniper_intelligence_summary(
+    connection: sqlite3.Connection,
+    snapshot: Snapshot,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+) -> None:
+    ensure_netsniper_intelligence_schema(connection)
+    analysis_enriched_path = manifest_file_path(manifest_path, manifest, "analysis_enriched_json")
+    quality_json_path = manifest_file_path(manifest_path, manifest, "classification_quality_json")
+    quality_md_path = manifest_file_path(manifest_path, manifest, "classification_quality_markdown")
+
+    quality = load_json_file(quality_json_path, {})
+    if not isinstance(quality, dict):
+        quality = {}
+
+    connection.execute(
+        """
+        INSERT INTO netsniper_intelligence_summaries (
+            scan_id,
+            manifest_path,
+            analysis_enriched_json,
+            classification_quality_json,
+            classification_quality_markdown,
+            host_count,
+            classified_count,
+            possible_or_review_count,
+            unknown_count,
+            contradiction_host_count,
+            false_confidence_candidate_count,
+            unknown_with_exposed_services_count,
+            decision_counts_json,
+            siem_action_counts_json,
+            confidence_band_counts_json,
+            top_device_types_json,
+            review_queue_json,
+            contradiction_review_json,
+            false_confidence_candidates_json,
+            unknown_with_exposed_services_json,
+            sample_explanations_json,
+            imported_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(scan_id) DO UPDATE SET
+            manifest_path=excluded.manifest_path,
+            analysis_enriched_json=excluded.analysis_enriched_json,
+            classification_quality_json=excluded.classification_quality_json,
+            classification_quality_markdown=excluded.classification_quality_markdown,
+            host_count=excluded.host_count,
+            classified_count=excluded.classified_count,
+            possible_or_review_count=excluded.possible_or_review_count,
+            unknown_count=excluded.unknown_count,
+            contradiction_host_count=excluded.contradiction_host_count,
+            false_confidence_candidate_count=excluded.false_confidence_candidate_count,
+            unknown_with_exposed_services_count=excluded.unknown_with_exposed_services_count,
+            decision_counts_json=excluded.decision_counts_json,
+            siem_action_counts_json=excluded.siem_action_counts_json,
+            confidence_band_counts_json=excluded.confidence_band_counts_json,
+            top_device_types_json=excluded.top_device_types_json,
+            review_queue_json=excluded.review_queue_json,
+            contradiction_review_json=excluded.contradiction_review_json,
+            false_confidence_candidates_json=excluded.false_confidence_candidates_json,
+            unknown_with_exposed_services_json=excluded.unknown_with_exposed_services_json,
+            sample_explanations_json=excluded.sample_explanations_json,
+            imported_at=excluded.imported_at
+        """,
+        (
+            snapshot.scan_id,
+            str(manifest_path),
+            str(analysis_enriched_path) if analysis_enriched_path else None,
+            str(quality_json_path) if quality_json_path else None,
+            str(quality_md_path) if quality_md_path else None,
+            safe_int(quality.get("host_count")) or 0,
+            safe_int(quality.get("classified_count")) or 0,
+            safe_int(quality.get("possible_or_review_count")) or 0,
+            safe_int(quality.get("unknown_count")) or 0,
+            safe_int(quality.get("contradiction_host_count")) or 0,
+            safe_int(quality.get("false_confidence_candidate_count")) or 0,
+            safe_int(quality.get("unknown_with_exposed_services_count")) or 0,
+            json.dumps(quality.get("decision_counts") or {}, sort_keys=True),
+            json.dumps(quality.get("siem_action_counts") or {}, sort_keys=True),
+            json.dumps(quality.get("confidence_band_counts") or {}, sort_keys=True),
+            json.dumps(quality.get("top_device_types") or {}, sort_keys=True),
+            json.dumps(quality.get("review_queue_sample") or quality.get("review_queue") or [], sort_keys=True),
+            json.dumps(quality.get("contradiction_review_sample") or quality.get("contradiction_review") or [], sort_keys=True),
+            json.dumps(quality.get("false_confidence_candidates") or [], sort_keys=True),
+            json.dumps(quality.get("unknown_with_exposed_services_sample") or [], sort_keys=True),
+            json.dumps(quality.get("sample_explanations_by_type") or {}, sort_keys=True),
+            utc_now(),
+        ),
+    )
+
+
+def latest_netsniper_intelligence_summary(connection: sqlite3.Connection) -> sqlite3.Row | None:
+    ensure_netsniper_intelligence_schema(connection)
+    return connection.execute(
+        """
+        SELECT *
+        FROM netsniper_intelligence_summaries
+        ORDER BY imported_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+
+
+
+def _decode_json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+
+    if value in {None, "", "{}"}:
+        return {}
+
+    try:
+        decoded = json.loads(value)
+    except Exception:
+        return {}
+
+    if isinstance(decoded, dict):
+        return decoded
+
+    return {}
+
+def print_netsniper_intelligence_summary(row: sqlite3.Row | None) -> None:
+    if row is None:
+        print("No NetSniper v1.7 intelligence summary has been imported yet.")
+        return
+
+    print(f"Scan ID:                    {row['scan_id']}")
+    print(f"Hosts:                      {row['host_count']}")
+    print(f"Classified:                 {row['classified_count']}")
+    print(f"Possible / review:          {row['possible_or_review_count']}")
+    print(f"Unknown:                    {row['unknown_count']}")
+    print(f"Contradiction hosts:         {row['contradiction_host_count']}")
+    print(f"False-confidence candidates: {row['false_confidence_candidate_count']}")
+    print(f"Unknown exposed services:    {row['unknown_with_exposed_services_count']}")
+    print()
+    print("Top device types:")
+
+    top_types = _decode_json_dict(row["top_device_types_json"])
+    if not top_types:
+        print("  None recorded.")
+    else:
+        for name, count in top_types.items():
+            print(f"  {name}: {count}")
+
+    print()
+    print("Confidence bands:")
+    bands = _decode_json_dict(row["confidence_band_counts_json"])
+    if not bands:
+        print("  None recorded.")
+    else:
+        for name, count in bands.items():
+            print(f"  {name}: {count}")
+
+    print()
+    print("Review queue sample:")
+    review = _decode_json_list(row["review_queue_json"])
+    if not review:
+        print("  No review queue items.")
+    else:
+        for item in review[:10]:
+            identity = item.get("identity") or item.get("ip") or item.get("host_id") or "unknown"
+            classification = item.get("primary_type") or item.get("classification") or "Unknown"
+            confidence = item.get("confidence", 0)
+            decision = item.get("decision", "unknown")
+            reason = item.get("reason") or item.get("siem_action") or "review"
+            print(f"  {identity} | {classification} | confidence={confidence} | decision={decision} | reason={reason}")
+
+
+def command_intelligence(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    row = latest_netsniper_intelligence_summary(connection)
+    print_netsniper_intelligence_summary(row)
+    return 0
 
 
 def snapshot_exists(connection: sqlite3.Connection, scan_id: str) -> bool:
@@ -1484,6 +1716,10 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
     baseline = latest_accepted_snapshot(connection, snapshot.target)
     quality_status, quality_reason = assess_quality(snapshot, baseline)
     insert_snapshot(connection, snapshot, quality_status, quality_reason)
+    manifest_data = load_json_file(manifest_path, {})
+    if not isinstance(manifest_data, dict):
+        manifest_data = {}
+    store_netsniper_intelligence_summary(connection, snapshot, manifest_path, manifest_data)
     events: list[dict[str, Any]] = []
     if quality_status == "ACCEPTED":
         if baseline is None:
@@ -8217,6 +8453,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("alert-notes")
     p.add_argument("alert_id", type=int)
 
+    p = sub.add_parser("intelligence", help="Show latest NetSniper v1.7 intelligence summary")
     p = sub.add_parser("dashboard")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8090)
@@ -8278,6 +8515,7 @@ def main() -> int:
 
 
         if args.command == "investigate-asset": return command_investigate_asset(args)
+        if args.command == "intelligence": return command_intelligence(args)
         if args.command == "dashboard": return command_dashboard(args)
 
         if args.command == "risk": return command_risk(args)
