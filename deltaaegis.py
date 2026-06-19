@@ -286,6 +286,28 @@ CREATE TABLE IF NOT EXISTS asset_annotation_history (
 
 CREATE INDEX IF NOT EXISTS idx_asset_annotation_history_asset_key
 ON asset_annotation_history(asset_key);
+
+CREATE TABLE IF NOT EXISTS asset_investigations (
+    network_scope TEXT NOT NULL DEFAULT '',
+    asset_key TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (network_scope, asset_key)
+);
+
+CREATE TABLE IF NOT EXISTS asset_investigation_history (
+    investigation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    network_scope TEXT NOT NULL DEFAULT '',
+    asset_key TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_investigation_history_asset
+ON asset_investigation_history(network_scope, asset_key);
 """
 
 
@@ -4137,6 +4159,181 @@ def normalize_optional_text(value):
     return value
 
 
+INVESTIGATION_STATUSES = {
+    "NEW",
+    "REVIEWING",
+    "NEEDS_OWNER",
+    "EXPECTED",
+    "FALSE_POSITIVE",
+    "MONITORING",
+    "RESOLVED",
+}
+
+
+def normalize_investigation_status(value):
+    status = str(value or "").strip().upper().replace("-", "_")
+
+    if status not in INVESTIGATION_STATUSES:
+        allowed = ", ".join(sorted(INVESTIGATION_STATUSES))
+        raise DeltaAegisError(
+            f"invalid investigation status: {status}. Allowed: {allowed}"
+        )
+
+    return status
+
+
+def fetch_asset_investigation(connection, asset_key, scope):
+    row = connection.execute(
+        """
+        SELECT network_scope, asset_key, status, reason, created_at, updated_at
+        FROM asset_investigations
+        WHERE asset_key = ?
+          AND network_scope = ?
+        """,
+        (asset_key, scope),
+    ).fetchone()
+
+    return dict(row) if row else None
+
+
+def resolve_asset_for_investigation(connection, identifier, scope=None):
+    identifier = str(identifier or "").strip()
+
+    if not identifier:
+        raise DeltaAegisError("asset identifier cannot be empty")
+
+    normalized = identifier.lower()
+
+    clauses = [
+        """
+        (
+            LOWER(asset_key) = ?
+            OR LOWER(current_ip) = ?
+            OR LOWER(COALESCE(mac_address, '')) = ?
+        )
+        """
+    ]
+
+    params = [normalized, normalized, normalized]
+
+    if scope:
+        clauses.append("network_scope = ?")
+        params.append(scope)
+
+    rows = connection.execute(
+        f"""
+        SELECT network_scope, asset_key, current_ip, mac_address
+        FROM asset_lifecycle
+        WHERE {" AND ".join(clauses)}
+        ORDER BY network_scope ASC, asset_key ASC
+        """,
+        tuple(params),
+    ).fetchall()
+
+    if not rows:
+        raise DeltaAegisError(
+            f"asset not found for investigation status: {identifier}"
+        )
+
+    if len(rows) > 1 and not scope:
+        matches = ", ".join(
+            f"{row['network_scope']}:{row['asset_key']}" for row in rows
+        )
+        raise DeltaAegisError(
+            "multiple assets matched. Re-run with --scope. "
+            f"Matches: {matches}"
+        )
+
+    row = rows[0]
+    return row["asset_key"], row["network_scope"]
+
+
+def set_asset_investigation_status(connection, asset_key, scope, status, reason):
+    status = normalize_investigation_status(status)
+    reason = normalize_optional_text(reason)
+
+    if reason is None:
+        raise DeltaAegisError(
+            "provide --reason when setting an investigation status"
+        )
+
+    now = utc_now()
+    existing = fetch_asset_investigation(connection, asset_key, scope)
+
+    if existing:
+        connection.execute(
+            """
+            UPDATE asset_investigations
+            SET status = ?,
+                reason = ?,
+                updated_at = ?
+            WHERE asset_key = ?
+              AND network_scope = ?
+            """,
+            (status, reason, now, asset_key, scope),
+        )
+    else:
+        connection.execute(
+            """
+            INSERT INTO asset_investigations (
+                network_scope,
+                asset_key,
+                status,
+                reason,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (scope, asset_key, status, reason, now, now),
+        )
+
+    connection.execute(
+        """
+        INSERT INTO asset_investigation_history (
+            network_scope,
+            asset_key,
+            status,
+            reason,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (scope, asset_key, status, reason, now),
+    )
+
+    return fetch_asset_investigation(connection, asset_key, scope)
+
+
+def command_investigate_asset(args):
+    connection = connect(args.db)
+    scope = optional_network_scope(getattr(args, "scope", None))
+
+    asset_key, resolved_scope = resolve_asset_for_investigation(
+        connection,
+        args.identifier,
+        scope=scope,
+    )
+
+    record = set_asset_investigation_status(
+        connection,
+        asset_key,
+        resolved_scope,
+        args.status,
+        args.reason,
+    )
+
+    connection.commit()
+
+    print(f"Asset investigation status saved: {asset_key}")
+    print(f"Scope:  {resolved_scope}")
+    print(f"Status: {record['status']}")
+    print(f"Reason: {record['reason']}")
+    print(f"Updated: {record['updated_at']}")
+
+    return 0
+
+
 def command_annotate_asset(args):
     connection = connect(args.db)
 
@@ -5491,6 +5688,11 @@ def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20)
     ).fetchone()
 
     annotation_dict = dict(annotation) if annotation else None
+    persisted_investigation = fetch_asset_investigation(
+        connection,
+        asset_key,
+        asset_scope,
+    )
 
     alert_ids = [
         item.get("alert_id")
@@ -5549,21 +5751,28 @@ def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20)
     }
 
     if "OPEN" in alert_statuses:
-        investigation_status = "NEW"
+        inferred_investigation_status = "NEW"
     elif "ACKNOWLEDGED" in alert_statuses:
-        investigation_status = "REVIEWING"
+        inferred_investigation_status = "REVIEWING"
     elif alert_statuses and alert_statuses <= {"SUPPRESSED"}:
-        investigation_status = "FALSE_POSITIVE"
+        inferred_investigation_status = "FALSE_POSITIVE"
     elif alert_statuses and alert_statuses <= {"RESOLVED"}:
-        investigation_status = "RESOLVED"
+        inferred_investigation_status = "RESOLVED"
     elif not annotation_dict and (alerts or events or services or findings):
-        investigation_status = "NEEDS_OWNER"
+        inferred_investigation_status = "NEEDS_OWNER"
     elif annotation_dict:
-        investigation_status = "EXPECTED"
+        inferred_investigation_status = "EXPECTED"
     elif events:
-        investigation_status = "MONITORING"
+        inferred_investigation_status = "MONITORING"
     else:
-        investigation_status = "NEW"
+        inferred_investigation_status = "NEW"
+
+    if persisted_investigation:
+        investigation_status = persisted_investigation["status"]
+        investigation_status_source = "persisted"
+    else:
+        investigation_status = inferred_investigation_status
+        investigation_status_source = "inferred"
 
     recommended_steps = []
 
@@ -5633,6 +5842,9 @@ def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20)
 
     investigation = {
         "status": investigation_status,
+        "inferred_status": inferred_investigation_status,
+        "status_source": investigation_status_source,
+        "persisted_status": persisted_investigation,
         "recommended_next_steps": recommended_steps,
         "timeline": timeline[:limit],
         "alert_notes": alert_notes,
@@ -6764,6 +6976,8 @@ def dashboard_index_html():
         <h3>Investigation Summary</h3>
         <div class="detail-grid">
           <div class="detail-box"><div class="label">Status</div>${esc(investigation.status || "NEW")}</div>
+          <div class="detail-box"><div class="label">Status Source</div>${esc(investigation.status_source || "inferred")}</div>
+          <div class="detail-box"><div class="label">Inferred Status</div>${esc(investigation.inferred_status || "NEW")}</div>
           <div class="detail-box"><div class="label">Classification</div>${esc(reviewContext.classification_type || "Unknown / Ambiguous")}</div>
           <div class="detail-box"><div class="label">Decision</div>${esc(reviewContext.classification_decision || "unknown")}</div>
           <div class="detail-box"><div class="label">Confidence</div>${esc(reviewContext.classification_confidence || 0)}</div>
@@ -7470,6 +7684,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--criticality")
     p.add_argument("--notes")
 
+    p = sub.add_parser("investigate-asset")
+    p.add_argument("identifier")
+    p.add_argument(
+        "--status",
+        required=True,
+        choices=sorted(INVESTIGATION_STATUSES),
+    )
+    p.add_argument("--reason", required=True)
+    p.add_argument("--scope")
+
     p = sub.add_parser("asset-notes")
     p.add_argument("asset_key")
     p.add_argument("--history", action="store_true")
@@ -7548,6 +7772,7 @@ def main() -> int:
         if args.command == "alert-notes": return command_alert_notes(args)
 
 
+        if args.command == "investigate-asset": return command_investigate_asset(args)
         if args.command == "dashboard": return command_dashboard(args)
 
         if args.command == "risk": return command_risk(args)
