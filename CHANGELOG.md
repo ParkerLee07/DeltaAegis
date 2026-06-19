@@ -2,6 +2,34 @@
 
 
 
+
+## v0.12.0 — Intelligence Drilldown
+
+### Added
+
+- Added SQLite storage for per-host NetSniper v1.7 enriched intelligence from analysis.enriched.json.
+- Added intelligence-hosts CLI command for listing review-queue host drilldown rows.
+- Added intelligence-host CLI command for inspecting one host by host ID, IP, MAC, or hostname.
+- Added dashboard API endpoint for per-host NetSniper v1.7 intelligence evidence.
+- Added clickable dashboard Host Evidence Drilldown panel inside the Intelligence tab.
+- Added rendering for observed hints, observed summary, evidence, evidence reasons, contradictions, secondary candidates, and findings.
+- Added v0.12 validators:
+  - tools/validate_v0_12_intelligence_drilldown.sh
+  - tools/validate_v0_12_dashboard_intelligence_api.sh
+  - tools/validate_v0_12_dashboard_intelligence_panel.sh
+  - tools/validate_v0_12_release.sh
+
+### Validation
+
+- Verified against NetSniper v1.7 bundle 20260619-134116.
+- Verified 82 per-host intelligence rows are stored.
+- Verified 192.168.4.1 drilldown includes:
+  - Web Server / Web Application Host
+  - confidence 15
+  - weak confidence band
+  - possible decision
+  - review_queue SIEM action
+  - http_80 evidence on tcp/80
 ## v0.11.1 — Metadata Cleanup
 
 ### Fixed
