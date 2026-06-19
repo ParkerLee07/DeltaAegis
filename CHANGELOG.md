@@ -1,6 +1,21 @@
 # Changelog
 
 
+
+## v0.11.1 — Metadata Cleanup
+
+### Fixed
+
+- Corrected README current-release wording so v0.11 is presented as the active release line instead of v0.10.
+- Removed duplicate appended v0.11 README release text.
+- Updated stale DeltaAegis v0.10 CLI metadata to v0.11.1.
+- Updated CLI summary heading from v0.10.0 to v0.11.1.
+- Added a v0.11.1 metadata validator to catch stale release labels.
+
+### Validation
+
+- Carried forward the v0.11 release validator.
+- Verified README, CHANGELOG, CLI description, and summary label metadata.
 ## v0.11.0 — Intelligence Review Dashboard
 
 ### Added
