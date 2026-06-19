@@ -6916,6 +6916,23 @@ def dashboard_index_html():
       const annotation = payload.annotation || {};
       const investigation = payload.investigation || {};
       const reviewContext = investigation.review_context || {};
+      const persistedStatus = investigation.persisted_status || {};
+      const investigationStatuses = [
+        "NEW",
+        "REVIEWING",
+        "NEEDS_OWNER",
+        "EXPECTED",
+        "FALSE_POSITIVE",
+        "MONITORING",
+        "RESOLVED"
+      ];
+      const investigationStatusOptions = investigationStatuses
+        .map(status => `
+          <option value="${esc(status)}" ${status === investigation.status ? "selected" : ""}>
+            ${esc(status)}
+          </option>
+        `)
+        .join("");
       const recommendedSteps = (investigation.recommended_next_steps || [])
         .map(item => `<li>${esc(item)}</li>`)
         .join("");
@@ -6990,6 +7007,33 @@ def dashboard_index_html():
           ${recommendedSteps || "<li>Continue monitoring this asset for future changes.</li>"}
         </ul>
 
+        <h4>Update Investigation Status</h4>
+        <div class="detail-grid">
+          <div class="detail-box">
+            <label class="label" for="investigation-status-select">Status</label>
+            <select id="investigation-status-select">
+              ${investigationStatusOptions}
+            </select>
+          </div>
+          <div class="detail-box">
+            <label class="label" for="investigation-reason-input">Reason</label>
+            <input
+              id="investigation-reason-input"
+              type="text"
+              value="${esc(persistedStatus.reason || "")}"
+              placeholder="Reason for this investigation status"
+            />
+          </div>
+        </div>
+        <button
+          id="save-investigation-status"
+          data-asset-identifier="${esc(asset.asset_key)}"
+          data-network-scope="${esc(asset.network_scope)}"
+        >
+          Save Investigation Status
+        </button>
+        <p id="investigation-status-message" class="muted"></p>
+
         ${detailTable("Investigation Timeline", investigation.timeline || [], [
           {key: "kind", label: "Kind"},
           {key: "id", label: "ID"},
@@ -7041,7 +7085,75 @@ def dashboard_index_html():
           {key: "evidence", label: "Evidence"}
         ])}
       `;
+
+      bindInvestigationStatusForm(box);
     }
+
+    function bindInvestigationStatusForm(root) {
+      if (!root) return;
+
+      const button = root.querySelector("#save-investigation-status");
+      const statusInput = root.querySelector("#investigation-status-select");
+      const reasonInput = root.querySelector("#investigation-reason-input");
+      const message = root.querySelector("#investigation-status-message");
+
+      if (!button || !statusInput || !reasonInput) return;
+      if (button.dataset.bound === "true") return;
+
+      button.addEventListener("click", async () => {
+        const status = statusInput.value;
+        const reason = reasonInput.value.trim();
+        const identifier = button.dataset.assetIdentifier;
+        const scope = button.dataset.networkScope;
+
+        if (!reason) {
+          if (message) message.textContent = "Provide a reason before saving investigation status.";
+          return;
+        }
+
+        button.disabled = true;
+
+        if (message) message.textContent = "Saving investigation status...";
+
+        try {
+          const response = await fetch(scopedPath("/api/investigate-asset"), {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              identifier,
+              scope,
+              status,
+              reason
+            })
+          });
+
+          const payload = await response.json();
+
+          if (!response.ok || !payload.ok) {
+            throw new Error(payload.message || payload.error || "Failed to save investigation status.");
+          }
+
+          renderAssetDetail(payload.asset_detail);
+
+          const nextMessage = document.getElementById("investigation-status-message");
+
+          if (nextMessage) {
+            nextMessage.textContent = `Saved investigation status: ${status}`;
+          }
+        } catch (error) {
+          if (message) {
+            message.textContent = error && error.message ? error.message : String(error);
+          }
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      button.dataset.bound = "true";
+    }
+
 
     async function loadAssetDetail(identifier) {
       const detail = await api(scopedPath(`/api/asset?identifier=${encodeURIComponent(identifier)}`));
@@ -7619,6 +7731,118 @@ def command_dashboard(args):
             finally:
                 connection.close()
 
+        def do_POST(self):
+            parsed = urlparse(self.path)
+            route = parsed.path
+
+            if not self.require_auth():
+                return
+
+            if route != "/api/investigate-asset":
+                dashboard_json_response(
+                    self,
+                    {
+                        "error": "not_found",
+                        "path": route,
+                    },
+                    status=404,
+                )
+                return
+
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                content_length = 0
+
+            if content_length <= 0:
+                dashboard_json_response(
+                    self,
+                    {
+                        "error": "missing_body",
+                        "message": "POST body must be JSON.",
+                    },
+                    status=400,
+                )
+                return
+
+            if content_length > 65536:
+                dashboard_json_response(
+                    self,
+                    {
+                        "error": "body_too_large",
+                        "message": "POST body is too large.",
+                    },
+                    status=413,
+                )
+                return
+
+            try:
+                raw_body = self.rfile.read(content_length).decode("utf-8")
+                payload = json.loads(raw_body)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                dashboard_json_response(
+                    self,
+                    {
+                        "error": "invalid_json",
+                        "message": "POST body must be valid JSON.",
+                    },
+                    status=400,
+                )
+                return
+
+            identifier = str(payload.get("identifier") or "").strip()
+            raw_scope = str(payload.get("scope") or "").strip()
+            status = str(payload.get("status") or "").strip()
+            reason = str(payload.get("reason") or "").strip()
+
+            try:
+                scope = optional_network_scope(raw_scope) if raw_scope else None
+                connection = self.open_connection()
+
+                try:
+                    asset_key, resolved_scope = resolve_asset_for_investigation(
+                        connection,
+                        identifier,
+                        scope=scope,
+                    )
+                    record = set_asset_investigation_status(
+                        connection,
+                        asset_key,
+                        resolved_scope,
+                        status,
+                        reason,
+                    )
+                    connection.commit()
+
+                    detail = dashboard_asset_detail_payload(
+                        connection,
+                        asset_key,
+                        scope=resolved_scope,
+                    )
+
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": True,
+                            "asset_key": asset_key,
+                            "scope": resolved_scope,
+                            "investigation": record,
+                            "asset_detail": detail,
+                        },
+                    )
+                finally:
+                    connection.close()
+            except (DeltaAegisError, ValueError) as exc:
+                dashboard_json_response(
+                    self,
+                    {
+                        "ok": False,
+                        "error": "investigation_status_failed",
+                        "message": str(exc),
+                    },
+                    status=400,
+                )
+
     server_address = (args.host, args.port)
     server = ThreadingHTTPServer(server_address, DeltaAegisDashboardHandler)
 
@@ -7626,7 +7850,7 @@ def command_dashboard(args):
     print("============================")
     print(f"URL:      http://{args.host}:{args.port}")
     print(f"Database: {db_path}")
-    print("Mode:     read-only")
+    print("Mode:     dashboard + investigation status updates")
 
     if token:
         print("Auth:     token required")
