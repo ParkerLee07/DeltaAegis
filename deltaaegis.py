@@ -90,6 +90,16 @@ class AssetObservation:
     classification_contradictions_json: str = "[]"
     classification_candidates_json: str = "[]"
 
+    # NetSniper v1.6 SIEM-facing classification calibration fields.
+    classification_confidence_band: str | None = None
+    classification_calibrated_decision: str | None = None
+    classification_siem_action: str | None = None
+    classification_calibration_reason: str | None = None
+    classification_validation_state: str | None = None
+    classification_contradiction_count: int | None = None
+    classification_validator_summary_json: str = "{}"
+    classification_validators_json: str = "[]"
+
 
 @dataclass
 class Snapshot:
@@ -169,6 +179,14 @@ CREATE TABLE IF NOT EXISTS asset_observations (
     classification_evidence_json TEXT NOT NULL DEFAULT '[]',
     classification_contradictions_json TEXT NOT NULL DEFAULT '[]',
     classification_candidates_json TEXT NOT NULL DEFAULT '[]',
+    classification_confidence_band TEXT,
+    classification_calibrated_decision TEXT,
+    classification_siem_action TEXT,
+    classification_calibration_reason TEXT,
+    classification_validation_state TEXT,
+    classification_contradiction_count INTEGER,
+    classification_validator_summary_json TEXT NOT NULL DEFAULT '{}',
+    classification_validators_json TEXT NOT NULL DEFAULT '[]',
     severity TEXT,
     score INTEGER,
     PRIMARY KEY (scan_id, asset_key),
@@ -452,6 +470,16 @@ def connect(db_path: Path) -> sqlite3.Connection:
     ensure_column(connection, "asset_observations", "classification_contradictions_json", "classification_contradictions_json TEXT NOT NULL DEFAULT '[]'")
     ensure_column(connection, "asset_observations", "classification_candidates_json", "classification_candidates_json TEXT NOT NULL DEFAULT '[]'")
 
+    # NetSniper v1.6 SIEM-facing classification calibration columns.
+    ensure_column(connection, "asset_observations", "classification_confidence_band", "classification_confidence_band TEXT")
+    ensure_column(connection, "asset_observations", "classification_calibrated_decision", "classification_calibrated_decision TEXT")
+    ensure_column(connection, "asset_observations", "classification_siem_action", "classification_siem_action TEXT")
+    ensure_column(connection, "asset_observations", "classification_calibration_reason", "classification_calibration_reason TEXT")
+    ensure_column(connection, "asset_observations", "classification_validation_state", "classification_validation_state TEXT")
+    ensure_column(connection, "asset_observations", "classification_contradiction_count", "classification_contradiction_count INTEGER")
+    ensure_column(connection, "asset_observations", "classification_validator_summary_json", "classification_validator_summary_json TEXT NOT NULL DEFAULT '{}'")
+    ensure_column(connection, "asset_observations", "classification_validators_json", "classification_validators_json TEXT NOT NULL DEFAULT '[]'")
+
     backfill_snapshot_network_scopes(connection)
     ensure_scoped_asset_lifecycle_schema(connection)
     connection.commit()
@@ -686,6 +714,18 @@ def parse_service_xml(path: Path, analysis: dict[str, dict[str, Any]], target_ne
         if not isinstance(classification_candidates, list):
             classification_candidates = []
 
+        classification_validators = classification.get("validators", [])
+        if not isinstance(classification_validators, list):
+            classification_validators = []
+
+        classification_validator_summary = classification.get("validator_summary", {})
+        if not isinstance(classification_validator_summary, dict):
+            classification_validator_summary = {}
+
+        classification_contradiction_count = safe_int(classification.get("contradiction_count"))
+        if classification_contradiction_count is None:
+            classification_contradiction_count = len(classification_contradictions)
+
         confidence = "HIGH" if source in {"DISCOVERY_XML", "SERVICE_XML"} else "MEDIUM" if source == "NEIGHBOR_TABLE" else "LOW"
 
         preliminary.append(
@@ -714,6 +754,14 @@ def parse_service_xml(path: Path, analysis: dict[str, dict[str, Any]], target_ne
                 classification_evidence_json=json.dumps(classification_evidence, sort_keys=True),
                 classification_contradictions_json=json.dumps(classification_contradictions, sort_keys=True),
                 classification_candidates_json=json.dumps(classification_candidates, sort_keys=True),
+                classification_confidence_band=classification.get("confidence_band"),
+                classification_calibrated_decision=classification.get("calibrated_decision"),
+                classification_siem_action=classification.get("siem_action"),
+                classification_calibration_reason=classification.get("calibration_reason"),
+                classification_validation_state=classification.get("validation_state"),
+                classification_contradiction_count=classification_contradiction_count,
+                classification_validator_summary_json=json.dumps(classification_validator_summary, sort_keys=True),
+                classification_validators_json=json.dumps(classification_validators, sort_keys=True),
             )
         )
     mac_counts = Counter(asset.mac_address for asset in preliminary if asset.mac_address)
@@ -839,9 +887,17 @@ def insert_snapshot(connection: sqlite3.Connection, snapshot: Snapshot, quality_
                 classification_evidence_json,
                 classification_contradictions_json,
                 classification_candidates_json,
-                severity,
-                score
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  classification_confidence_band,
+                  classification_calibrated_decision,
+                  classification_siem_action,
+                  classification_calibration_reason,
+                  classification_validation_state,
+                  classification_contradiction_count,
+                  classification_validator_summary_json,
+                  classification_validators_json,
+                  severity,
+                  score
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 snapshot.scan_id,
                 asset.asset_key,
@@ -864,8 +920,16 @@ def insert_snapshot(connection: sqlite3.Connection, snapshot: Snapshot, quality_
                 asset.classification_evidence_json,
                 asset.classification_contradictions_json,
                 asset.classification_candidates_json,
-                asset.severity,
-                asset.score,
+                  asset.classification_confidence_band,
+                  asset.classification_calibrated_decision,
+                  asset.classification_siem_action,
+                  asset.classification_calibration_reason,
+                  asset.classification_validation_state,
+                  asset.classification_contradiction_count,
+                  asset.classification_validator_summary_json,
+                  asset.classification_validators_json,
+                  asset.severity,
+                  asset.score,
             ),
         )
         for service in asset.services:
@@ -905,6 +969,14 @@ def load_assets_from_db(connection: sqlite3.Connection, scan_id: str) -> dict[st
             classification_evidence_json=row["classification_evidence_json"],
             classification_contradictions_json=row["classification_contradictions_json"],
             classification_candidates_json=row["classification_candidates_json"],
+            classification_confidence_band=row["classification_confidence_band"],
+            classification_calibrated_decision=row["classification_calibrated_decision"],
+            classification_siem_action=row["classification_siem_action"],
+            classification_calibration_reason=row["classification_calibration_reason"],
+            classification_validation_state=row["classification_validation_state"],
+            classification_contradiction_count=row["classification_contradiction_count"],
+            classification_validator_summary_json=row["classification_validator_summary_json"],
+            classification_validators_json=row["classification_validators_json"],
         )
     return assets
 
@@ -1197,6 +1269,14 @@ def _has_classification_intelligence(asset: AssetObservation) -> bool:
         or asset.classification_evidence_json not in {None, "", "[]"}
         or asset.classification_contradictions_json not in {None, "", "[]"}
         or asset.classification_candidates_json not in {None, "", "[]"}
+        or asset.classification_confidence_band
+        or asset.classification_calibrated_decision
+        or asset.classification_siem_action
+        or asset.classification_calibration_reason
+        or asset.classification_validation_state
+        or asset.classification_contradiction_count is not None
+        or asset.classification_validator_summary_json not in {None, "", "{}"}
+        or asset.classification_validators_json not in {None, "", "[]"}
     )
 
 
@@ -1204,6 +1284,15 @@ def _classification_snapshot(asset: AssetObservation) -> dict[str, Any]:
     evidence = _decode_json_list(asset.classification_evidence_json)
     contradictions = _decode_json_list(asset.classification_contradictions_json)
     candidates = _decode_json_list(asset.classification_candidates_json)
+    validators = _decode_json_list(asset.classification_validators_json)
+
+    validator_summary = {}
+    try:
+        decoded_summary = json.loads(asset.classification_validator_summary_json or "{}")
+        if isinstance(decoded_summary, dict):
+            validator_summary = decoded_summary
+    except (TypeError, json.JSONDecodeError):
+        validator_summary = {}
 
     return {
         "ip_address": asset.ip_address,
@@ -1215,9 +1304,20 @@ def _classification_snapshot(asset: AssetObservation) -> dict[str, Any]:
         "classification_confidence_label": asset.classification_confidence_label,
         "classification_decision": _classification_decision(asset) or None,
         "classification_method": asset.classification_method,
+        "classification_confidence_band": asset.classification_confidence_band,
+        "classification_calibrated_decision": asset.classification_calibrated_decision,
+        "classification_siem_action": asset.classification_siem_action,
+        "classification_calibration_reason": asset.classification_calibration_reason,
+        "classification_validation_state": asset.classification_validation_state,
         "evidence_count": len(evidence),
-        "contradiction_count": len(contradictions),
+        "contradiction_count": (
+            asset.classification_contradiction_count
+            if asset.classification_contradiction_count is not None
+            else len(contradictions)
+        ),
         "candidate_count": len(candidates),
+        "validator_count": len(validators),
+        "validator_summary": validator_summary,
     }
 
 
@@ -6386,7 +6486,7 @@ def dashboard_index_html():
     .identity-unknown {
       color: #fecaca;
     }
-  
+
     /* Severity and risk-level coloring used by dashboard tables. */
     .severity-critical,
     td.severity-critical {
