@@ -1,6 +1,28 @@
 # Changelog
 
 <!-- DELTAAEGIS_V086_CHANGELOG_START -->
+## v0.9.0 - 2026-06-19
+
+### Added
+- Added asset investigation detail payloads for dashboard-driven review.
+- Added clickable risk, event, and alert subjects that open the asset investigation panel.
+- Added inferred `NEEDS_OWNER` status for active assets without annotation context.
+- Added persistent asset investigation status storage and history.
+- Added `investigate-asset` CLI command for saving investigation status and reason.
+- Added dashboard controls for saving investigation status through `POST /api/investigate-asset`.
+- Added v0.9 validators for asset investigation detail, clickable investigation rows, persistent status, and dashboard controls.
+
+### Changed
+- Dashboard mode now supports investigation status updates instead of being read-only.
+- Asset detail now distinguishes inferred status from persisted operator status.
+
+### Validation
+- `pytest -q`
+- `tools/validate_v0_9_asset_investigation_detail.sh`
+- `tools/validate_v0_9_clickable_investigation_rows.sh`
+- `tools/validate_v0_9_persistent_investigation_status.sh`
+- `tools/validate_v0_9_dashboard_investigation_controls.sh`
+
 ## v0.8.6 - 2026-06-18
 
 ### Fixed

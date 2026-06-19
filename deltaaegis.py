@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.8.6: classification-aware network-state monitoring, investigation, risk prioritization, reporting, and dashboard console.
+"""DeltaAegis v0.9.0: classification-aware network-state monitoring, investigation workflow, risk prioritization, reporting, and dashboard console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -286,6 +286,28 @@ CREATE TABLE IF NOT EXISTS asset_annotation_history (
 
 CREATE INDEX IF NOT EXISTS idx_asset_annotation_history_asset_key
 ON asset_annotation_history(asset_key);
+
+CREATE TABLE IF NOT EXISTS asset_investigations (
+    network_scope TEXT NOT NULL DEFAULT '',
+    asset_key TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (network_scope, asset_key)
+);
+
+CREATE TABLE IF NOT EXISTS asset_investigation_history (
+    investigation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    network_scope TEXT NOT NULL DEFAULT '',
+    asset_key TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_investigation_history_asset
+ON asset_investigation_history(network_scope, asset_key);
 """
 
 
@@ -1566,7 +1588,7 @@ def command_summary(args: argparse.Namespace) -> int:
     event_count = connection.execute("SELECT COUNT(*) FROM delta_events").fetchone()[0]
     open_alerts = connection.execute("SELECT COUNT(*) FROM alerts WHERE status = 'OPEN'").fetchone()[0]
     latest = connection.execute("SELECT scan_id, quality_status, hosts_up, identity_coverage FROM snapshots ORDER BY created_at DESC LIMIT 1").fetchone()
-    print("DeltaAegis v0.8.6 Summary")
+    print("DeltaAegis v0.9.0 Summary")
     print(f"Snapshots imported: {snapshot_count}")
     print(f"Network scopes: {scope_count}")
     print(f"Accepted snapshots: {accepted_count}")
@@ -4137,6 +4159,181 @@ def normalize_optional_text(value):
     return value
 
 
+INVESTIGATION_STATUSES = {
+    "NEW",
+    "REVIEWING",
+    "NEEDS_OWNER",
+    "EXPECTED",
+    "FALSE_POSITIVE",
+    "MONITORING",
+    "RESOLVED",
+}
+
+
+def normalize_investigation_status(value):
+    status = str(value or "").strip().upper().replace("-", "_")
+
+    if status not in INVESTIGATION_STATUSES:
+        allowed = ", ".join(sorted(INVESTIGATION_STATUSES))
+        raise DeltaAegisError(
+            f"invalid investigation status: {status}. Allowed: {allowed}"
+        )
+
+    return status
+
+
+def fetch_asset_investigation(connection, asset_key, scope):
+    row = connection.execute(
+        """
+        SELECT network_scope, asset_key, status, reason, created_at, updated_at
+        FROM asset_investigations
+        WHERE asset_key = ?
+          AND network_scope = ?
+        """,
+        (asset_key, scope),
+    ).fetchone()
+
+    return dict(row) if row else None
+
+
+def resolve_asset_for_investigation(connection, identifier, scope=None):
+    identifier = str(identifier or "").strip()
+
+    if not identifier:
+        raise DeltaAegisError("asset identifier cannot be empty")
+
+    normalized = identifier.lower()
+
+    clauses = [
+        """
+        (
+            LOWER(asset_key) = ?
+            OR LOWER(current_ip) = ?
+            OR LOWER(COALESCE(mac_address, '')) = ?
+        )
+        """
+    ]
+
+    params = [normalized, normalized, normalized]
+
+    if scope:
+        clauses.append("network_scope = ?")
+        params.append(scope)
+
+    rows = connection.execute(
+        f"""
+        SELECT network_scope, asset_key, current_ip, mac_address
+        FROM asset_lifecycle
+        WHERE {" AND ".join(clauses)}
+        ORDER BY network_scope ASC, asset_key ASC
+        """,
+        tuple(params),
+    ).fetchall()
+
+    if not rows:
+        raise DeltaAegisError(
+            f"asset not found for investigation status: {identifier}"
+        )
+
+    if len(rows) > 1 and not scope:
+        matches = ", ".join(
+            f"{row['network_scope']}:{row['asset_key']}" for row in rows
+        )
+        raise DeltaAegisError(
+            "multiple assets matched. Re-run with --scope. "
+            f"Matches: {matches}"
+        )
+
+    row = rows[0]
+    return row["asset_key"], row["network_scope"]
+
+
+def set_asset_investigation_status(connection, asset_key, scope, status, reason):
+    status = normalize_investigation_status(status)
+    reason = normalize_optional_text(reason)
+
+    if reason is None:
+        raise DeltaAegisError(
+            "provide --reason when setting an investigation status"
+        )
+
+    now = utc_now()
+    existing = fetch_asset_investigation(connection, asset_key, scope)
+
+    if existing:
+        connection.execute(
+            """
+            UPDATE asset_investigations
+            SET status = ?,
+                reason = ?,
+                updated_at = ?
+            WHERE asset_key = ?
+              AND network_scope = ?
+            """,
+            (status, reason, now, asset_key, scope),
+        )
+    else:
+        connection.execute(
+            """
+            INSERT INTO asset_investigations (
+                network_scope,
+                asset_key,
+                status,
+                reason,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (scope, asset_key, status, reason, now, now),
+        )
+
+    connection.execute(
+        """
+        INSERT INTO asset_investigation_history (
+            network_scope,
+            asset_key,
+            status,
+            reason,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (scope, asset_key, status, reason, now),
+    )
+
+    return fetch_asset_investigation(connection, asset_key, scope)
+
+
+def command_investigate_asset(args):
+    connection = connect(args.db)
+    scope = optional_network_scope(getattr(args, "scope", None))
+
+    asset_key, resolved_scope = resolve_asset_for_investigation(
+        connection,
+        args.identifier,
+        scope=scope,
+    )
+
+    record = set_asset_investigation_status(
+        connection,
+        asset_key,
+        resolved_scope,
+        args.status,
+        args.reason,
+    )
+
+    connection.commit()
+
+    print(f"Asset investigation status saved: {asset_key}")
+    print(f"Scope:  {resolved_scope}")
+    print(f"Status: {record['status']}")
+    print(f"Reason: {record['reason']}")
+    print(f"Updated: {record['updated_at']}")
+
+    return 0
+
+
 def command_annotate_asset(args):
     connection = connect(args.db)
 
@@ -5490,6 +5687,182 @@ def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20)
         (asset_key,),
     ).fetchone()
 
+    annotation_dict = dict(annotation) if annotation else None
+    persisted_investigation = fetch_asset_investigation(
+        connection,
+        asset_key,
+        asset_scope,
+    )
+
+    alert_ids = [
+        item.get("alert_id")
+        for item in alerts
+        if isinstance(item, dict) and item.get("alert_id") is not None
+    ]
+
+    alert_notes = []
+
+    if alert_ids:
+        placeholders = ",".join("?" for _ in alert_ids)
+
+        alert_notes = dashboard_safe_query(
+            connection,
+            f"""
+            SELECT
+                note_id,
+                alert_id,
+                action,
+                reason,
+                created_at
+            FROM alert_notes
+            WHERE alert_id IN ({placeholders})
+            ORDER BY created_at DESC, note_id DESC
+            LIMIT ?
+            """,
+            tuple(alert_ids + [limit]),
+        )
+
+    observation = latest_observation_dict or {}
+    classification_type = (
+        observation.get("classification_display_type")
+        or observation.get("device_type")
+        or "Unknown / Ambiguous"
+    )
+    classification_decision = str(
+        observation.get("classification_display_decision") or "unknown"
+    ).lower()
+    classification_confidence = dashboard_int(
+        observation.get("classification_display_confidence"),
+        0,
+    )
+    evidence_count = dashboard_int(
+        observation.get("classification_evidence_count"),
+        0,
+    )
+    contradiction_count = dashboard_int(
+        observation.get("classification_contradiction_count"),
+        0,
+    )
+
+    alert_statuses = {
+        str(item.get("status") or "").upper()
+        for item in alerts
+        if isinstance(item, dict)
+    }
+
+    if "OPEN" in alert_statuses:
+        inferred_investigation_status = "NEW"
+    elif "ACKNOWLEDGED" in alert_statuses:
+        inferred_investigation_status = "REVIEWING"
+    elif alert_statuses and alert_statuses <= {"SUPPRESSED"}:
+        inferred_investigation_status = "FALSE_POSITIVE"
+    elif alert_statuses and alert_statuses <= {"RESOLVED"}:
+        inferred_investigation_status = "RESOLVED"
+    elif not annotation_dict and (alerts or events or services or findings):
+        inferred_investigation_status = "NEEDS_OWNER"
+    elif annotation_dict:
+        inferred_investigation_status = "EXPECTED"
+    elif events:
+        inferred_investigation_status = "MONITORING"
+    else:
+        inferred_investigation_status = "NEW"
+
+    if persisted_investigation:
+        investigation_status = persisted_investigation["status"]
+        investigation_status_source = "persisted"
+    else:
+        investigation_status = inferred_investigation_status
+        investigation_status_source = "inferred"
+
+    recommended_steps = []
+
+    if alerts:
+        recommended_steps.append(
+            "Review open or recent alerts tied to this asset before closing the investigation."
+        )
+
+    if contradiction_count:
+        recommended_steps.append(
+            "Review NetSniper classification contradictions and verify the asset role manually."
+        )
+
+    if (
+        classification_decision in {"possible", "weak", "unknown"}
+        or classification_confidence < 40
+    ):
+        recommended_steps.append(
+            "Verify the suspected asset role with service evidence, vendor context, or manual annotation."
+        )
+
+    if not annotation_dict:
+        recommended_steps.append(
+            "Add an asset annotation for owner, role, criticality, and notes if this asset is expected."
+        )
+
+    if services:
+        recommended_steps.append(
+            "Confirm exposed services are expected for this asset role and network scope."
+        )
+
+    if not recommended_steps:
+        recommended_steps.append(
+            "Continue monitoring this asset for future service, classification, or alert changes."
+        )
+
+    timeline = []
+
+    for item in events:
+        timeline.append(
+            {
+                "kind": "event",
+                "id": item.get("event_id"),
+                "created_at": item.get("created_at"),
+                "severity": item.get("severity"),
+                "type": item.get("event_type"),
+                "summary": item.get("summary"),
+            }
+        )
+
+    for item in alerts:
+        timeline.append(
+            {
+                "kind": "alert",
+                "id": item.get("alert_id"),
+                "created_at": item.get("opened_at") or item.get("last_seen_at"),
+                "severity": item.get("severity"),
+                "type": item.get("event_type"),
+                "summary": item.get("summary"),
+            }
+        )
+
+    timeline.sort(
+        key=lambda item: str(item.get("created_at") or ""),
+        reverse=True,
+    )
+
+    investigation = {
+        "status": investigation_status,
+        "inferred_status": inferred_investigation_status,
+        "status_source": investigation_status_source,
+        "persisted_status": persisted_investigation,
+        "recommended_next_steps": recommended_steps,
+        "timeline": timeline[:limit],
+        "alert_notes": alert_notes,
+        "review_context": {
+            "classification_type": classification_type,
+            "classification_decision": classification_decision,
+            "classification_confidence": classification_confidence,
+            "classification_evidence_count": evidence_count,
+            "classification_contradiction_count": contradiction_count,
+            "service_count": len(services),
+            "finding_count": len(findings),
+            "event_count": len(events),
+            "alert_count": len(alerts),
+            "alert_note_count": len(alert_notes),
+            "has_annotation": bool(annotation_dict),
+        },
+    }
+
     return {
         "found": True,
         "identifier": identifier,
@@ -5500,7 +5873,8 @@ def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20)
         "findings": findings,
         "events": events,
         "alerts": alerts,
-        "annotation": dict(annotation) if annotation else None,
+        "annotation": annotation_dict,
+        "investigation": investigation,
     }
 
 def dashboard_events_payload(connection, limit, scope=None):
@@ -6540,6 +6914,28 @@ def dashboard_index_html():
       const asset = payload.asset || {};
       const observation = payload.latest_observation || {};
       const annotation = payload.annotation || {};
+      const investigation = payload.investigation || {};
+      const reviewContext = investigation.review_context || {};
+      const persistedStatus = investigation.persisted_status || {};
+      const investigationStatuses = [
+        "NEW",
+        "REVIEWING",
+        "NEEDS_OWNER",
+        "EXPECTED",
+        "FALSE_POSITIVE",
+        "MONITORING",
+        "RESOLVED"
+      ];
+      const investigationStatusOptions = investigationStatuses
+        .map(status => `
+          <option value="${esc(status)}" ${status === investigation.status ? "selected" : ""}>
+            ${esc(status)}
+          </option>
+        `)
+        .join("");
+      const recommendedSteps = (investigation.recommended_next_steps || [])
+        .map(item => `<li>${esc(item)}</li>`)
+        .join("");
 
       box.innerHTML = `
         <div class="detail-grid">
@@ -6594,6 +6990,67 @@ def dashboard_index_html():
           <div class="detail-box"><div class="label">Notes</div>${esc(annotation.notes)}</div>
         </div>
 
+        <h3>Investigation Summary</h3>
+        <div class="detail-grid">
+          <div class="detail-box"><div class="label">Status</div>${esc(investigation.status || "NEW")}</div>
+          <div class="detail-box"><div class="label">Status Source</div>${esc(investigation.status_source || "inferred")}</div>
+          <div class="detail-box"><div class="label">Inferred Status</div>${esc(investigation.inferred_status || "NEW")}</div>
+          <div class="detail-box"><div class="label">Classification</div>${esc(reviewContext.classification_type || "Unknown / Ambiguous")}</div>
+          <div class="detail-box"><div class="label">Decision</div>${esc(reviewContext.classification_decision || "unknown")}</div>
+          <div class="detail-box"><div class="label">Confidence</div>${esc(reviewContext.classification_confidence || 0)}</div>
+          <div class="detail-box"><div class="label">Alerts</div>${esc(reviewContext.alert_count || 0)}</div>
+          <div class="detail-box"><div class="label">Notes</div>${esc(reviewContext.alert_note_count || 0)}</div>
+        </div>
+
+        <h4>Recommended Next Steps</h4>
+        <ul class="muted">
+          ${recommendedSteps || "<li>Continue monitoring this asset for future changes.</li>"}
+        </ul>
+
+        <h4>Update Investigation Status</h4>
+        <div class="detail-grid">
+          <div class="detail-box">
+            <label class="label" for="investigation-status-select">Status</label>
+            <select id="investigation-status-select">
+              ${investigationStatusOptions}
+            </select>
+          </div>
+          <div class="detail-box">
+            <label class="label" for="investigation-reason-input">Reason</label>
+            <input
+              id="investigation-reason-input"
+              type="text"
+              value="${esc(persistedStatus.reason || "")}"
+              placeholder="Reason for this investigation status"
+            />
+          </div>
+        </div>
+        <button
+          id="save-investigation-status"
+          data-asset-identifier="${esc(asset.asset_key)}"
+          data-network-scope="${esc(asset.network_scope)}"
+        >
+          Save Investigation Status
+        </button>
+        <p id="investigation-status-message" class="muted"></p>
+
+        ${detailTable("Investigation Timeline", investigation.timeline || [], [
+          {key: "kind", label: "Kind"},
+          {key: "id", label: "ID"},
+          {key: "created_at", label: "Time"},
+          {key: "severity", label: "Severity"},
+          {key: "type", label: "Type"},
+          {key: "summary", label: "Summary"}
+        ])}
+
+        ${detailTable("Alert Review Notes", investigation.alert_notes || [], [
+          {key: "note_id", label: "Note"},
+          {key: "alert_id", label: "Alert"},
+          {key: "action", label: "Action"},
+          {key: "reason", label: "Reason"},
+          {key: "created_at", label: "Time"}
+        ])}
+
         ${detailTable("Open/Recent Alerts", payload.alerts, [
           {key: "alert_id", label: "ID"},
           {key: "status", label: "Status"},
@@ -6628,7 +7085,75 @@ def dashboard_index_html():
           {key: "evidence", label: "Evidence"}
         ])}
       `;
+
+      bindInvestigationStatusForm(box);
     }
+
+    function bindInvestigationStatusForm(root) {
+      if (!root) return;
+
+      const button = root.querySelector("#save-investigation-status");
+      const statusInput = root.querySelector("#investigation-status-select");
+      const reasonInput = root.querySelector("#investigation-reason-input");
+      const message = root.querySelector("#investigation-status-message");
+
+      if (!button || !statusInput || !reasonInput) return;
+      if (button.dataset.bound === "true") return;
+
+      button.addEventListener("click", async () => {
+        const status = statusInput.value;
+        const reason = reasonInput.value.trim();
+        const identifier = button.dataset.assetIdentifier;
+        const scope = button.dataset.networkScope;
+
+        if (!reason) {
+          if (message) message.textContent = "Provide a reason before saving investigation status.";
+          return;
+        }
+
+        button.disabled = true;
+
+        if (message) message.textContent = "Saving investigation status...";
+
+        try {
+          const response = await fetch(scopedPath("/api/investigate-asset"), {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              identifier,
+              scope,
+              status,
+              reason
+            })
+          });
+
+          const payload = await response.json();
+
+          if (!response.ok || !payload.ok) {
+            throw new Error(payload.message || payload.error || "Failed to save investigation status.");
+          }
+
+          renderAssetDetail(payload.asset_detail);
+
+          const nextMessage = document.getElementById("investigation-status-message");
+
+          if (nextMessage) {
+            nextMessage.textContent = `Saved investigation status: ${status}`;
+          }
+        } catch (error) {
+          if (message) {
+            message.textContent = error && error.message ? error.message : String(error);
+          }
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      button.dataset.bound = "true";
+    }
+
 
     async function loadAssetDetail(identifier) {
       const detail = await api(scopedPath(`/api/asset?identifier=${encodeURIComponent(identifier)}`));
@@ -6739,7 +7264,7 @@ def dashboard_index_html():
       <tr>
         <td class="severity-${esc(row.level || "").toLowerCase()}">${esc(row.level || "-")}</td>
         <td>${esc(row.score ?? "-")}</td>
-        <td>${esc(row.subject_key || "-")}</td>
+        <td>${subjectButton(row.subject_key || "-")}</td>
         <td>${esc(row.ip_address || row.ip || "-")}</td>
         <td>${esc(row.mac_address || row.mac || "-")}</td>
         <td>${esc(row.identity_confidence || row.identity_state || "-")}</td>
@@ -6751,6 +7276,8 @@ def dashboard_index_html():
       </tr>
     `;
   }).join("");
+
+  bindSubjectLinks(tbody);
 }
 
     function renderEvents(rows) {
@@ -6770,7 +7297,7 @@ def dashboard_index_html():
       <td>${esc(row.baseline_scan_id || "-")}</td>
       <td class="severity-${esc(row.severity || "").toLowerCase()}">${esc(row.severity || "-")}</td>
       <td>${esc(row.event_type || row.type || "-")}</td>
-      <td>${esc(row.subject_key || "-")}</td>
+      <td>${subjectButton(row.subject_key || "-")}</td>
       <td>${esc(row.ip_address || row.ip || "-")}</td>
       <td>${esc(row.mac_address || row.mac || "-")}</td>
       <td>${esc(row.identity_confidence || row.identity_state || "-")}</td>
@@ -6778,6 +7305,8 @@ def dashboard_index_html():
       <td>${esc(row.summary || "-")}</td>
     </tr>
   `).join("");
+
+  bindSubjectLinks(tbody);
 }
 
     function renderAlerts(rows) {
@@ -6795,7 +7324,7 @@ def dashboard_index_html():
       <td>${esc(row.alert_id || row.id || "-")}</td>
       <td>${esc(row.status || "-")}</td>
       <td class="severity-${esc(row.severity || "").toLowerCase()}">${esc(row.severity || "-")}</td>
-      <td>${esc(row.subject_key || "-")}</td>
+      <td>${subjectButton(row.subject_key || "-")}</td>
       <td>${esc(row.event_type || row.type || "-")}</td>
       <td>${esc(row.ip_address || row.ip || "-")}</td>
       <td>${esc(row.mac_address || row.mac || "-")}</td>
@@ -6803,6 +7332,8 @@ def dashboard_index_html():
       <td>${esc(row.summary || "-")}</td>
     </tr>
   `).join("");
+
+  bindSubjectLinks(tbody);
 }
 
     function renderAnnotations(rows) {
@@ -7200,6 +7731,118 @@ def command_dashboard(args):
             finally:
                 connection.close()
 
+        def do_POST(self):
+            parsed = urlparse(self.path)
+            route = parsed.path
+
+            if not self.require_auth():
+                return
+
+            if route != "/api/investigate-asset":
+                dashboard_json_response(
+                    self,
+                    {
+                        "error": "not_found",
+                        "path": route,
+                    },
+                    status=404,
+                )
+                return
+
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                content_length = 0
+
+            if content_length <= 0:
+                dashboard_json_response(
+                    self,
+                    {
+                        "error": "missing_body",
+                        "message": "POST body must be JSON.",
+                    },
+                    status=400,
+                )
+                return
+
+            if content_length > 65536:
+                dashboard_json_response(
+                    self,
+                    {
+                        "error": "body_too_large",
+                        "message": "POST body is too large.",
+                    },
+                    status=413,
+                )
+                return
+
+            try:
+                raw_body = self.rfile.read(content_length).decode("utf-8")
+                payload = json.loads(raw_body)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                dashboard_json_response(
+                    self,
+                    {
+                        "error": "invalid_json",
+                        "message": "POST body must be valid JSON.",
+                    },
+                    status=400,
+                )
+                return
+
+            identifier = str(payload.get("identifier") or "").strip()
+            raw_scope = str(payload.get("scope") or "").strip()
+            status = str(payload.get("status") or "").strip()
+            reason = str(payload.get("reason") or "").strip()
+
+            try:
+                scope = optional_network_scope(raw_scope) if raw_scope else None
+                connection = self.open_connection()
+
+                try:
+                    asset_key, resolved_scope = resolve_asset_for_investigation(
+                        connection,
+                        identifier,
+                        scope=scope,
+                    )
+                    record = set_asset_investigation_status(
+                        connection,
+                        asset_key,
+                        resolved_scope,
+                        status,
+                        reason,
+                    )
+                    connection.commit()
+
+                    detail = dashboard_asset_detail_payload(
+                        connection,
+                        asset_key,
+                        scope=resolved_scope,
+                    )
+
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": True,
+                            "asset_key": asset_key,
+                            "scope": resolved_scope,
+                            "investigation": record,
+                            "asset_detail": detail,
+                        },
+                    )
+                finally:
+                    connection.close()
+            except (DeltaAegisError, ValueError) as exc:
+                dashboard_json_response(
+                    self,
+                    {
+                        "ok": False,
+                        "error": "investigation_status_failed",
+                        "message": str(exc),
+                    },
+                    status=400,
+                )
+
     server_address = (args.host, args.port)
     server = ThreadingHTTPServer(server_address, DeltaAegisDashboardHandler)
 
@@ -7207,7 +7850,7 @@ def command_dashboard(args):
     print("============================")
     print(f"URL:      http://{args.host}:{args.port}")
     print(f"Database: {db_path}")
-    print("Mode:     read-only")
+    print("Mode:     dashboard + investigation status updates")
 
     if token:
         print("Auth:     token required")
@@ -7229,7 +7872,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.8.6 classification-aware network-state monitoring, investigation, risk prioritization, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.9.0 classification-aware network-state monitoring, investigation workflow, risk prioritization, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
@@ -7264,6 +7907,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--role")
     p.add_argument("--criticality")
     p.add_argument("--notes")
+
+    p = sub.add_parser("investigate-asset")
+    p.add_argument("identifier")
+    p.add_argument(
+        "--status",
+        required=True,
+        choices=sorted(INVESTIGATION_STATUSES),
+    )
+    p.add_argument("--reason", required=True)
+    p.add_argument("--scope")
 
     p = sub.add_parser("asset-notes")
     p.add_argument("asset_key")
@@ -7343,6 +7996,7 @@ def main() -> int:
         if args.command == "alert-notes": return command_alert_notes(args)
 
 
+        if args.command == "investigate-asset": return command_investigate_asset(args)
         if args.command == "dashboard": return command_dashboard(args)
 
         if args.command == "risk": return command_risk(args)
