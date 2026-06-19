@@ -5479,6 +5479,58 @@ def dashboard_scopes_payload(connection):
 
     return [dict(row) for row in rows]
 
+
+def dashboard_netsniper_intelligence_summary_payload(connection, limit=10):
+    row = latest_netsniper_intelligence_summary(connection)
+
+    if row is None:
+        return {
+            "available": False,
+            "message": "No NetSniper v1.7 intelligence summary has been imported yet.",
+        }
+
+    top_device_types = _decode_json_dict(row["top_device_types_json"])
+    confidence_bands = _decode_json_dict(row["confidence_band_counts_json"])
+    review_queue = _decode_json_list(row["review_queue_json"])
+    false_confidence = _decode_json_list(row["false_confidence_candidates_json"])
+    unknown_exposed = _decode_json_list(row["unknown_with_exposed_services_json"])
+
+    return {
+        "available": True,
+        "scan_id": row["scan_id"],
+        "host_count": int(row["host_count"] or 0),
+        "classified_count": int(row["classified_count"] or 0),
+        "possible_or_review_count": int(row["possible_or_review_count"] or 0),
+        "unknown_count": int(row["unknown_count"] or 0),
+        "contradiction_host_count": int(row["contradiction_host_count"] or 0),
+        "false_confidence_candidate_count": int(row["false_confidence_candidate_count"] or 0),
+        "unknown_with_exposed_services_count": int(row["unknown_with_exposed_services_count"] or 0),
+        "top_device_types": [
+            {
+                "device_type": device_type,
+                "count": count,
+            }
+            for device_type, count in sorted(
+                top_device_types.items(),
+                key=lambda item: (-int(item[1] or 0), str(item[0]).lower()),
+            )
+        ],
+        "confidence_band_counts": [
+            {
+                "band": band,
+                "count": count,
+            }
+            for band, count in sorted(
+                confidence_bands.items(),
+                key=lambda item: str(item[0]).lower(),
+            )
+        ],
+        "review_queue": review_queue[:limit],
+        "false_confidence_candidates": false_confidence[:limit],
+        "unknown_with_exposed_services": unknown_exposed[:limit],
+    }
+
+
 def dashboard_summary_payload(connection, scope=None):
     if scope:
         snapshot_count = connection.execute(
@@ -5602,6 +5654,9 @@ def dashboard_summary_payload(connection, scope=None):
         "classification_summary": dashboard_classification_summary_payload(
             connection,
             scope=scope,
+        ),
+        "netsniper_intelligence_summary": dashboard_netsniper_intelligence_summary_payload(
+            connection,
         ),
         "top_risks": risk_rows,
     }
@@ -7867,6 +7922,7 @@ def dashboard_index_html():
 
     function renderClassificationSummary(summary) {
       const intel = (summary && summary.classification_summary) || {};
+      const v17Intel = (summary && summary.netsniper_intelligence_summary) || {};
 
       let section = document.getElementById("classification-summary-section");
 
@@ -7888,6 +7944,9 @@ def dashboard_index_html():
 
       const topClassifications = intel.top_classifications || [];
       const reviewQueue = intel.review_queue || [];
+      const v17TopTypes = v17Intel.top_device_types || [];
+      const v17ReviewQueue = v17Intel.review_queue || [];
+      const v17ConfidenceBands = v17Intel.confidence_band_counts || [];
 
       const topRows = topClassifications.length
         ? topClassifications.map(row => `
@@ -7912,6 +7971,116 @@ def dashboard_index_html():
             </tr>
           `).join("")
         : `<tr><td colspan="8">No weak, unknown, or contradictory classifications require review.</td></tr>`;
+
+
+      const v17TopRows = v17TopTypes.length
+        ? v17TopTypes.map(row => `
+            <tr>
+              <td>${esc(row.device_type)}</td>
+              <td>${esc(row.count)}</td>
+            </tr>
+          `).join("")
+        : `<tr><td colspan="2">No NetSniper v1.7 device-type summary is available yet.</td></tr>`;
+
+      const v17BandRows = v17ConfidenceBands.length
+        ? v17ConfidenceBands.map(row => `
+            <tr>
+              <td>${esc(row.band)}</td>
+              <td>${esc(row.count)}</td>
+            </tr>
+          `).join("")
+        : `<tr><td colspan="2">No NetSniper v1.7 confidence-band summary is available yet.</td></tr>`;
+
+      const v17ReviewRows = v17ReviewQueue.length
+        ? v17ReviewQueue.map(row => `
+            <tr>
+              <td><code>${esc(row.identity || row.ip || row.host_id || "-")}</code></td>
+              <td>${esc(row.primary_type || row.classification || "Unknown")}</td>
+              <td>${esc(row.confidence || 0)}</td>
+              <td>${esc(row.decision || "unknown")}</td>
+              <td>${esc(row.siem_action || row.reason || "review")}</td>
+            </tr>
+          `).join("")
+        : `<tr><td colspan="5">No NetSniper v1.7 review queue items are available.</td></tr>`;
+
+      const v17Block = v17Intel.available ? `
+        <h3>NetSniper v1.7 Bundle Intelligence</h3>
+        <p class="muted">Run-level quality summary imported from NetSniper v1.7 manifest-addressable artifacts. Latest scan: <code>${esc(v17Intel.scan_id || "-")}</code>.</p>
+
+        <div class="cards">
+          <div class="card">
+            <div class="label">v1.7 Hosts</div>
+            <strong>${esc(v17Intel.host_count || 0)}</strong>
+          </div>
+          <div class="card">
+            <div class="label">v1.7 Classified</div>
+            <strong>${esc(v17Intel.classified_count || 0)}</strong>
+          </div>
+          <div class="card">
+            <div class="label">v1.7 Review</div>
+            <strong>${esc(v17Intel.possible_or_review_count || 0)}</strong>
+          </div>
+          <div class="card">
+            <div class="label">v1.7 Unknown</div>
+            <strong>${esc(v17Intel.unknown_count || 0)}</strong>
+          </div>
+          <div class="card">
+            <div class="label">False Confidence</div>
+            <strong>${esc(v17Intel.false_confidence_candidate_count || 0)}</strong>
+          </div>
+          <div class="card">
+            <div class="label">Unknown Exposed</div>
+            <strong>${esc(v17Intel.unknown_with_exposed_services_count || 0)}</strong>
+          </div>
+        </div>
+
+        ${v17Block}
+
+        <div class="grid two-col">
+          <div>
+            <h3>v1.7 Top Device Types</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>Device Type</th>
+                  <th>Hosts</th>
+                </tr>
+              </thead>
+              <tbody>${v17TopRows}</tbody>
+            </table>
+          </div>
+
+          <div>
+            <h3>v1.7 Confidence Bands</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>Band</th>
+                  <th>Hosts</th>
+                </tr>
+              </thead>
+              <tbody>${v17BandRows}</tbody>
+            </table>
+          </div>
+        </div>
+
+        <h3>v1.7 Review Queue Sample</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Identity</th>
+              <th>Classification</th>
+              <th>Confidence</th>
+              <th>Decision</th>
+              <th>SIEM Action</th>
+            </tr>
+          </thead>
+          <tbody>${v17ReviewRows}</tbody>
+        </table>
+      ` : `
+        <h3>NetSniper v1.7 Bundle Intelligence</h3>
+        <p class="muted">${esc(v17Intel.message || "No NetSniper v1.7 intelligence summary has been imported yet.")}</p>
+      `;
 
       section.innerHTML = `
         <h2>NetSniper Intelligence Summary</h2>
