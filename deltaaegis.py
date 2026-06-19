@@ -6364,6 +6364,66 @@ def dashboard_assets_payload(connection, limit, scope=None, state=None, identity
 
     return dashboard_enrich_classification_rows(rows)
 
+
+def dashboard_netsniper_intelligence_host_payload(connection, identity):
+    identity = str(identity or "").strip()
+
+    if not identity:
+        return {
+            "found": False,
+            "error": "missing_identity",
+            "message": "Provide identity, host ID, IP, MAC, or hostname.",
+        }
+
+    row = get_netsniper_intelligence_host(connection, identity)
+
+    if row is None:
+        return {
+            "found": False,
+            "identity": identity,
+            "message": "No matching NetSniper v1.7 intelligence host was found.",
+        }
+
+    evidence = _decode_json_list(row["evidence_json"])
+    contradictions = _decode_json_list(row["contradictions_json"])
+    secondary_candidates = _decode_json_list(row["secondary_candidates_json"])
+    observed = _decode_json_dict(row["observed_json"])
+    observed_summary = _decode_json_dict(row["observed_summary_json"])
+    findings = _decode_json_list(row["findings_json"])
+
+    return {
+        "found": True,
+        "identity": identity,
+        "scan_id": row["scan_id"],
+        "host_id": row["host_id"],
+        "ip": row["ip"],
+        "mac": row["mac"],
+        "hostname": row["hostname"],
+        "device_type": row["device_type"],
+        "device_type_confidence": int(row["device_type_confidence"] or 0),
+        "severity": row["severity"],
+        "score": int(row["score"] or 0),
+        "classification": {
+            "primary_type": row["primary_type"],
+            "category": row["category"],
+            "confidence": int(row["confidence"] or 0),
+            "confidence_band": row["confidence_band"],
+            "decision": row["decision"],
+            "siem_action": row["siem_action"],
+            "evidence_count": int(row["evidence_count"] or 0),
+            "contradiction_count": int(row["contradiction_count"] or 0),
+            "secondary_candidate_count": int(row["secondary_candidate_count"] or 0),
+            "explanation": row["explanation"],
+        },
+        "observed_summary": observed_summary,
+        "observed": observed,
+        "evidence": evidence,
+        "contradictions": contradictions,
+        "secondary_candidates": secondary_candidates,
+        "findings": findings,
+    }
+
+
 def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20):
     identifier = str(identifier or "").strip()
 
@@ -8806,6 +8866,16 @@ def command_dashboard(args):
                             identifier,
                             scope=scope,
                             limit=limit,
+                        ),
+                    )
+                elif route == "/api/intelligence-host":
+                    identifier = query.get("identity", query.get("host", [""]))[0].strip()
+
+                    dashboard_json_response(
+                        self,
+                        dashboard_netsniper_intelligence_host_payload(
+                            connection,
+                            identifier,
                         ),
                     )
                 elif route == "/api/events":
