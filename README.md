@@ -1,29 +1,23 @@
 # DeltaAegis
 
 <!-- DELTAAEGIS_V086_README_START -->
-## DeltaAegis v0.8.6 Dashboard Polish
+## DeltaAegis v0.9.0 Investigation Workflow
 
-DeltaAegis v0.8.6 is a patch release focused on dashboard reliability and investigation readability after the v0.8.5 classification-aware risk milestone.
+DeltaAegis v0.9.0 adds a dashboard-driven investigation workflow on top of the classification-aware risk dashboard. It turns DeltaAegis from a read-only visibility console into an investigation console where asset status, review context, and follow-up decisions can be tracked over time.
 
-### What v0.8.6 fixes
+### What v0.9.0 adds
 
-- Dashboard risk, event, and alert tables now render backend data correctly.
-- Top Risk Subjects now aligns row data with accurate column headers.
-- Recent Delta Events now aligns IP, MAC, identity, created time, and summary fields correctly.
-- Recent Alerts now includes a Type column so alert event types no longer shift into IP/MAC columns.
-- Dashboard severity and risk-level colors are restored for CRITICAL, HIGH, MEDIUM, LOW, and INFO values.
-- New validators protect dashboard table IDs, column alignment, backend payload presence, and severity styling.
+- Asset investigation detail payloads with services, findings, events, alerts, annotations, classification evidence, and recommended next steps.
+- Clickable risk, event, and alert subjects that jump directly into the asset investigation panel.
+- `NEEDS_OWNER` inferred investigation status for active unannotated assets.
+- Persistent asset investigation status storage through `asset_investigations` and `asset_investigation_history`.
+- `investigate-asset` CLI command for setting `NEW`, `REVIEWING`, `NEEDS_OWNER`, `EXPECTED`, `FALSE_POSITIVE`, `MONITORING`, or `RESOLVED`.
+- Dashboard-side investigation status controls using `POST /api/investigate-asset`.
+- Release validators for asset investigation detail, clickable investigation rows, persistent status, and dashboard status controls.
 
-### Why this release matters
+## DeltaAegis v0.9.0 Current Capabilities
 
-DeltaAegis v0.8.5 added stronger classification-aware intelligence, but dashboard trust depends on displaying that intelligence accurately. v0.8.6 makes the dashboard safer to use during investigation by ensuring the visible table layout matches the backend payload.
-<!-- DELTAAEGIS_V086_README_END -->
-
-
-<!-- DELTAAEGIS_V085_README_START -->
-## DeltaAegis v0.8.6 Current Capabilities
-
-DeltaAegis v0.8.6 is a snapshot-based network-state monitoring and investigation console that uses NetSniper telemetry to track assets, compare accepted scans, surface meaningful changes, and prioritize follow-up work.
+DeltaAegis v0.9.0 is a snapshot-based network-state monitoring and investigation workflow console that uses NetSniper telemetry to track assets, compare accepted scans, surface meaningful changes, and prioritize follow-up work.
 
 ### What v0.8.5 adds
 
