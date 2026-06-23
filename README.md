@@ -175,6 +175,13 @@ DeltaAegis does not require a separate database server.
 
 ---
 
+
+## Recent v0.12 Releases
+
+- DeltaAegis v0.12.0 — Intelligence Drilldown established the current NetSniper v1.7 per-host intelligence drilldown baseline.
+- DeltaAegis v0.12.1 — README Metadata Cleanup refreshed project metadata and documentation for the v0.12 baseline.
+- DeltaAegis v0.12.2 — Dashboard Runtime Hotfix fixed the Intelligence tab JavaScript runtime error without changing database schema, ingestion behavior, or NetSniper intelligence behavior.
+
 ## Installation
 
 ```bash
