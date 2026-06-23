@@ -9174,7 +9174,7 @@ def dashboard_index_html():
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>DeltaAegis Dashboard</title>
+  <title>DeltaAegis Executive SIEM Dashboard</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root {
@@ -9633,18 +9633,284 @@ def dashboard_index_html():
       color: #bbf7d0;
     }
 
+    /* v0.17 Executive SIEM Dashboard Refresh */
+    .dashboard-shell-refresh-v017 {
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 18% -10%, rgba(59, 130, 246, 0.22), transparent 34%),
+        radial-gradient(circle at 82% 0%, rgba(168, 85, 247, 0.16), transparent 32%),
+        linear-gradient(180deg, #020617 0%, #07111f 44%, #0b1020 100%);
+      color: var(--text);
+    }
+
+    .dashboard-shell-refresh-v017 .executive-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 22px;
+      align-items: center;
+      padding: 28px 32px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+      background:
+        linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(17, 24, 39, 0.86)),
+        radial-gradient(circle at top right, rgba(96, 165, 250, 0.2), transparent 35%);
+      box-shadow: 0 20px 55px rgba(0, 0, 0, 0.38);
+    }
+
+    .executive-kicker {
+      color: #67e8f9;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    .dashboard-shell-refresh-v017 header h1 {
+      margin-top: 6px;
+      font-size: clamp(30px, 4vw, 46px);
+      line-height: 1.02;
+      letter-spacing: -0.04em;
+    }
+
+    .dashboard-shell-refresh-v017 header p {
+      max-width: 820px;
+      color: #cbd5e1;
+      font-size: 15px;
+      line-height: 1.65;
+    }
+
+    .executive-status-grid {
+      display: grid;
+      gap: 10px;
+      min-width: 280px;
+    }
+
+    .executive-status-pill {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: 16px;
+      background: rgba(15, 23, 42, 0.64);
+      padding: 10px 12px;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+
+    .executive-status-pill span:first-child {
+      color: #94a3b8;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .executive-status-pill span:last-child {
+      color: #e0f2fe;
+      font-size: 12px;
+      font-weight: 800;
+      text-align: right;
+    }
+
+    .dashboard-shell-refresh-v017 .dashboard-main {
+      width: min(1540px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 22px 0 36px;
+      gap: 22px;
+    }
+
+    .executive-overview {
+      border: 1px solid rgba(96, 165, 250, 0.24);
+      border-radius: 24px;
+      background:
+        linear-gradient(135deg, rgba(30, 41, 59, 0.92), rgba(15, 23, 42, 0.92)),
+        radial-gradient(circle at 90% 12%, rgba(34, 211, 238, 0.14), transparent 32%);
+      padding: 22px;
+      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+    }
+
+    .executive-overview h2 {
+      margin: 6px 0 8px;
+      font-size: 26px;
+      letter-spacing: -0.03em;
+    }
+
+    .executive-overview p {
+      max-width: 860px;
+      color: #cbd5e1;
+      line-height: 1.65;
+    }
+
+    .executive-objectives {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .executive-objective {
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 18px;
+      background: rgba(2, 6, 23, 0.34);
+      padding: 14px;
+    }
+
+    .executive-objective strong {
+      display: block;
+      margin-bottom: 6px;
+      color: #e0f2fe;
+    }
+
+    .executive-objective span {
+      color: #94a3b8;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .dashboard-shell-refresh-v017 .executive-tabs {
+      top: 10px;
+      border-color: rgba(148, 163, 184, 0.22);
+      background: rgba(2, 6, 23, 0.72);
+      box-shadow: 0 16px 50px rgba(0, 0, 0, 0.3);
+    }
+
+    .dashboard-shell-refresh-v017 .tab-button {
+      background: rgba(15, 23, 42, 0.82);
+      border-color: rgba(148, 163, 184, 0.2);
+      color: #cbd5e1;
+      transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+    }
+
+    .dashboard-shell-refresh-v017 .tab-button:hover {
+      transform: translateY(-1px);
+      background: rgba(30, 41, 59, 0.95);
+    }
+
+    .dashboard-shell-refresh-v017 .tab-button.active {
+      border-color: rgba(34, 211, 238, 0.7);
+      background: linear-gradient(135deg, #1d4ed8, #0891b2);
+      box-shadow: 0 10px 28px rgba(8, 145, 178, 0.28);
+    }
+
+    .dashboard-shell-refresh-v017 .card {
+      border-color: rgba(148, 163, 184, 0.18);
+      border-radius: 20px;
+      background:
+        linear-gradient(180deg, rgba(15, 23, 42, 0.96), rgba(15, 23, 42, 0.84));
+      box-shadow: 0 16px 44px rgba(0, 0, 0, 0.26);
+      overflow-x: auto;
+    }
+
+    .dashboard-shell-refresh-v017 .card h2 {
+      color: #f8fafc;
+      letter-spacing: -0.02em;
+    }
+
+    .metric-card {
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 20px;
+      background:
+        linear-gradient(180deg, rgba(30, 41, 59, 0.94), rgba(15, 23, 42, 0.9));
+      padding: 16px;
+      box-shadow: 0 14px 38px rgba(0, 0, 0, 0.24);
+      min-height: 96px;
+    }
+
+    .metric-value {
+      margin-top: 8px;
+      color: #f8fafc;
+      font-size: 34px;
+      font-weight: 850;
+      letter-spacing: -0.05em;
+    }
+
+    .dashboard-shell-refresh-v017 .metric {
+      color: #f8fafc;
+      font-weight: 850;
+      letter-spacing: -0.05em;
+    }
+
+    .dashboard-shell-refresh-v017 table {
+      border-collapse: separate;
+      border-spacing: 0;
+    }
+
+    .dashboard-shell-refresh-v017 th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: rgba(15, 23, 42, 0.96);
+      color: #cbd5e1;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+    }
+
+    .dashboard-shell-refresh-v017 td {
+      border-bottom-color: rgba(148, 163, 184, 0.14);
+    }
+
+    .dashboard-shell-refresh-v017 tbody tr:hover {
+      background: rgba(96, 165, 250, 0.06);
+    }
+
+    .dashboard-shell-refresh-v017 .command-center-trigger {
+      border-color: rgba(34, 211, 238, 0.32);
+      background: rgba(8, 145, 178, 0.16);
+      color: #a5f3fc;
+    }
+
+    .dashboard-shell-refresh-v017 .severity-critical,
+    .dashboard-shell-refresh-v017 .CRITICAL {
+      color: #fecaca;
+      text-shadow: 0 0 14px rgba(239, 68, 68, 0.28);
+    }
+
+    .dashboard-shell-refresh-v017 .severity-high,
+    .dashboard-shell-refresh-v017 .HIGH {
+      color: #fed7aa;
+    }
+
+    .dashboard-shell-refresh-v017 .severity-medium,
+    .dashboard-shell-refresh-v017 .MEDIUM {
+      color: #fde68a;
+    }
+
+    .dashboard-shell-refresh-v017 .severity-low,
+    .dashboard-shell-refresh-v017 .LOW {
+      color: #bbf7d0;
+    }
+
+    @media (max-width: 860px) {
+      .dashboard-shell-refresh-v017 .executive-header {
+        grid-template-columns: 1fr;
+      }
+
+      .executive-status-grid {
+        min-width: 0;
+      }
+
+      .dashboard-shell-refresh-v017 .dashboard-main {
+        width: min(100vw - 18px, 1540px);
+      }
+    }
+
   </style>
 </head>
-<body>
-  <header>
-    <h1>DeltaAegis Dashboard</h1>
-    <p>Local investigation dashboard for network deltas, alerts, annotations, risk prioritization, and asset review workflow.</p>
+<body class="dashboard-shell-refresh-v017">
+  <header class="executive-header">
+    <div>
+      <div class="executive-kicker">DeltaAegis SIEM Console</div>
+      <h1>Executive Security Overview</h1>
+      <p>Analyst-focused network-state monitoring for current exposure, investigation priority, NetSniper intelligence, MAC-port behavior, alerts, and scan orchestration.</p>
+    </div>
+    <div class="executive-status-grid" aria-label="Dashboard status">
+      <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
+      <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.17 Preview</span></div>
+    </div>
   </header>
 
-  <main>
+  <main class="dashboard-main">
     <div id="error" class="error"></div>
 
-    <nav class="dashboard-tabs" aria-label="DeltaAegis dashboard sections">
+    <nav class="dashboard-tabs executive-tabs" aria-label="DeltaAegis dashboard sections">
       <button type="button" class="tab-button" data-tab-target="overview">Overview</button>
       <button type="button" class="tab-button" data-tab-target="command-center">Command Center</button>
       <button type="button" class="tab-button" data-tab-target="investigations">Investigations</button>
@@ -9656,6 +9922,29 @@ def dashboard_index_html():
       <button type="button" class="tab-button" data-tab-target="alerts">Alerts</button>
       <button type="button" class="tab-button" data-tab-target="scan-jobs">Scan Jobs</button>
     </nav>
+
+    <section class="executive-overview" data-tab-panel="overview">
+      <div class="executive-kicker">Executive Overview</div>
+      <h2>Network Investigation at a Glance</h2>
+      <p>
+        Start with the Command Center queue, then drill into risk, MAC-port behavior,
+        asset intelligence, alerts, events, and scan jobs without leaving the dashboard.
+      </p>
+      <div class="executive-objectives">
+        <div class="executive-objective">
+          <strong>Prioritize</strong>
+          <span>Identify the highest-impact subjects using current risk and open alert context.</span>
+        </div>
+        <div class="executive-objective">
+          <strong>Explain</strong>
+          <span>Show why a device matters through evidence, classification, and behavior changes.</span>
+        </div>
+        <div class="executive-objective">
+          <strong>Act</strong>
+          <span>Surface recommended next steps while preserving dashboard safety.</span>
+        </div>
+      </div>
+    </section>
 
     <section class="card" data-tab-panel="command-center">
       <h2>Investigation Command Center</h2>
@@ -10081,7 +10370,7 @@ def dashboard_index_html():
 
 
     function metric(label, value) {
-      return `<div class="card"><div class="label">${esc(label)}</div><div class="metric">${esc(value)}</div></div>`;
+      return `<div class="metric-card"><div class="label">${esc(label)}</div><div class="metric-value">${esc(value)}</div></div>`;
     }
 
     function formatPercent(value) {
@@ -11055,9 +11344,9 @@ def dashboard_index_html():
           ["With Open Alerts", summary.with_open_alerts || 0],
           ["With Port Behavior", summary.with_port_behavior || 0]
         ].map(([label, value]) => `
-          <div class="metric">
+          <div class="metric-card command-center-kpi">
             <div class="label">${esc(label)}</div>
-            <div class="value">${esc(value)}</div>
+            <div class="metric-value">${esc(value)}</div>
           </div>
         `).join("");
       }
