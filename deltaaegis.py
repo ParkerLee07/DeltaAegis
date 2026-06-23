@@ -8430,6 +8430,35 @@ def build_current_risk_register(connection, limit, scope=None):
     return rows
 
 
+
+def dashboard_port_behavior_payload(connection, limit, scope=None, lookback=5):
+    try:
+        return mac_port_behavior_rows(
+            connection,
+            limit=limit,
+            scope=scope,
+            lookback=lookback,
+        )
+    except Exception as exc:
+        return [
+            {
+                "behavior": "PORT_BEHAVIOR_ERROR",
+                "severity": "INFO",
+                "mac_identity": "-",
+                "asset_key": "-",
+                "ip_address": "-",
+                "device_type": "Unknown",
+                "port_key": "-",
+                "current_state": "UNKNOWN",
+                "baseline_state": "UNKNOWN",
+                "seen_count": 0,
+                "missing_count": 0,
+                "transition_count": 0,
+                "latest_scan_id": "-",
+                "reason": f"MAC-port behavior unavailable: {exc}",
+            }
+        ]
+
 def dashboard_current_risk_payload(connection, limit, scope=None):
     try:
         return build_current_risk_register(connection, limit, scope=scope)
@@ -8915,6 +8944,7 @@ def dashboard_index_html():
       <button type="button" class="tab-button" data-tab-target="overview">Overview</button>
       <button type="button" class="tab-button" data-tab-target="investigations">Investigations</button>
       <button type="button" class="tab-button" data-tab-target="risk">Risk</button>
+      <button type="button" class="tab-button" data-tab-target="port-behavior">Port Behavior</button>
       <button type="button" class="tab-button" data-tab-target="assets">Assets</button>
       <button type="button" class="tab-button" data-tab-target="intelligence">Intelligence</button>
       <button type="button" class="tab-button" data-tab-target="events">Events</button>
@@ -9031,6 +9061,33 @@ def dashboard_index_html():
           <tr><th>Level</th><th>Score</th><th>Subject</th><th>IP</th><th>MAC</th><th>Identity</th><th>Owner</th><th>Role</th><th>Open Alerts</th><th>Events</th><th>Why This Level?</th></tr>
         </thead>
         <tbody id="historical-risk-body"></tbody>
+      </table>
+    </section>
+
+
+    <section class="card" data-tab-panel="port-behavior">
+      <h2>MAC-Port Behavior</h2>
+      <p class="muted">
+        Correlates MAC-backed device identity with open-port history across accepted scans.
+        Use this to spot ports that appeared unexpectedly or changed open/not-observed state over time.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Severity</th>
+            <th>Behavior</th>
+            <th>MAC</th>
+            <th>IP</th>
+            <th>Device</th>
+            <th>Port</th>
+            <th>Current</th>
+            <th>Seen</th>
+            <th>Missing</th>
+            <th>Transitions</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody id="port-behavior-body"></tbody>
       </table>
     </section>
 
@@ -10212,6 +10269,44 @@ def dashboard_index_html():
       }).join("");
     }
 
+    function portBehaviorSeverityClass(severity) {
+      const value = String(severity || "").toLowerCase();
+      if (["critical", "high", "medium", "low", "info"].includes(value)) {
+        return `severity-${value}`;
+      }
+      return "severity-unknown";
+    }
+
+    function renderPortBehavior(rows) {
+      const tbody = document.getElementById("port-behavior-body");
+
+      if (!tbody) return;
+
+      const items = Array.isArray(rows) ? rows : [];
+
+      if (!items.length) {
+        tbody.innerHTML = `<tr><td colspan="11" class="muted">No MAC-port behavior changes were detected for the selected scope.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = items.map(row => `
+        <tr>
+          <td class="${portBehaviorSeverityClass(row.severity)}">${esc(row.severity || "-")}</td>
+          <td>${esc(row.behavior || "-")}</td>
+          <td><code>${esc(row.mac_identity || "-")}</code></td>
+          <td><code>${esc(row.ip_address || "-")}</code></td>
+          <td>${esc(row.device_type || "Unknown")}</td>
+          <td><code>${esc(row.port_key || "-")}</code></td>
+          <td>${esc(row.current_state || "-")}</td>
+          <td>${esc(row.seen_count ?? 0)}</td>
+          <td>${esc(row.missing_count ?? 0)}</td>
+          <td>${esc(row.transition_count ?? 0)}</td>
+          <td>${esc(row.reason || "-")}</td>
+        </tr>
+      `).join("");
+    }
+
+
     function renderRisk(rows) {
       const tbody = document.getElementById("risk-body");
 
@@ -10618,7 +10713,7 @@ def dashboard_index_html():
       try {
         setupDashboardTabs();
 
-        const [scopes, summary, scanContext, currentState, scanJobs, assets, currentRisk, historicalRisk, events, alerts, annotations] = await Promise.all([
+        const [scopes, summary, scanContext, currentState, scanJobs, assets, currentRisk, historicalRisk, portBehavior, events, alerts, annotations] = await Promise.all([
           api("/api/scopes"),
           api(scopedPath("/api/summary")),
           api(scopedPath("/api/scan-context")),
@@ -10627,6 +10722,7 @@ def dashboard_index_html():
           api(scopedPath("/api/assets?limit=25")),
           api(scopedPath("/api/current-risk?limit=10")),
           api(scopedPath("/api/risk?limit=10")),
+          api(scopedPath("/api/port-behavior?limit=25&lookback=5")),
           api(scopedPath("/api/events?limit=20")),
           api(scopedPath("/api/alerts?limit=20")),
           api(scopedPath("/api/annotations?limit=20"))
@@ -10640,6 +10736,7 @@ def dashboard_index_html():
         renderAssets(assets);
         renderRisk(currentRisk);
         renderHistoricalRisk(historicalRisk);
+        renderPortBehavior(portBehavior);
         renderEvents(events);
         renderAlerts(alerts);
         renderAnnotations(annotations);
@@ -10837,6 +10934,23 @@ def command_dashboard(args):
                     dashboard_json_response(self, dashboard_events_payload(connection, limit, scope=scope))
                 elif route == "/api/alerts":
                     dashboard_json_response(self, dashboard_alerts_payload(connection, limit, scope=scope))
+                elif route == "/api/port-behavior":
+                    lookback_value = query.get("lookback", ["5"])[0]
+
+                    try:
+                        lookback_limit = max(1, min(25, int(lookback_value)))
+                    except ValueError:
+                        lookback_limit = 5
+
+                    dashboard_json_response(
+                        self,
+                        dashboard_port_behavior_payload(
+                            connection,
+                            limit=limit,
+                            scope=scope,
+                            lookback=lookback_limit,
+                        ),
+                    )
                 elif route == "/api/current-risk":
                     dashboard_json_response(self, dashboard_current_risk_payload(connection, limit, scope=scope))
                 elif route == "/api/risk":
