@@ -830,6 +830,188 @@ def parse_service_xml(path: Path, analysis: dict[str, dict[str, Any]], target_ne
                 classification_validators_json=json.dumps(classification_validators, sort_keys=True),
             )
         )
+    service_ips = {asset.ip_address for asset in preliminary}
+
+    for ipv4 in sorted(analysis):
+        if ipv4 in service_ips:
+            continue
+
+        if not is_usable_target_address(ipv4, target_network):
+            continue
+
+        interpretation = analysis.get(ipv4, {})
+        if not isinstance(interpretation, dict):
+            interpretation = {}
+
+        evidence = discovery.get(ipv4, IdentityEvidence())
+
+        candidates = [
+            (evidence.mac_address, evidence.vendor, evidence.source),
+            (neighbors.get(ipv4), None, "NEIGHBOR_TABLE"),
+        ]
+        candidates = [item for item in candidates if item[0]]
+
+        mac, vendor, source = (
+            max(candidates, key=lambda item: identity_rank(item[2]))
+            if candidates
+            else (None, evidence.vendor, "IP_ONLY")
+        )
+
+        classification = interpretation.get("classification", {})
+        if not isinstance(classification, dict):
+            classification = {}
+
+        if not classification:
+            classification = {
+                "schema_version": "netsniper-classification-v1",
+                "type": "Unknown / Ambiguous",
+                "primary_type": "Unknown / Ambiguous",
+                "confidence": 0,
+                "confidence_label": "unknown",
+                "confidence_band": "unknown",
+                "calibrated_decision": "unknown",
+                "siem_action": "no_action",
+                "calibration_reason": (
+                    "Host was present in the NetSniper inventory but did not have "
+                    "monitored service evidence."
+                ),
+                "validation_state": "not_applicable",
+                "contradiction_count": 0,
+                "decision": "unknown",
+                "method": "deltaaegis_full_inventory_preservation",
+                "evidence": [],
+                "validators": [],
+                "validator_summary": {
+                    "total": 0,
+                    "confirmed": 0,
+                    "inconclusive": 0,
+                    "refuted": 0,
+                    "not_applicable": 0,
+                    "error": 0,
+                    "names": [],
+                },
+                "contradictions": [],
+                "candidates": [],
+                "secondary_candidates": [],
+            }
+
+        findings = interpretation.get("findings", [])
+        if not isinstance(findings, list):
+            findings = []
+
+        classification_evidence = classification.get("evidence", [])
+        if not isinstance(classification_evidence, list):
+            classification_evidence = []
+
+        classification_contradictions = classification.get("contradictions", [])
+        if not isinstance(classification_contradictions, list):
+            classification_contradictions = []
+
+        classification_candidates = classification.get(
+            "candidates",
+            classification.get("secondary_candidates", []),
+        )
+        if not isinstance(classification_candidates, list):
+            classification_candidates = []
+
+        classification_validators = classification.get("validators", [])
+        if not isinstance(classification_validators, list):
+            classification_validators = []
+
+        classification_validator_summary = classification.get("validator_summary", {})
+        if not isinstance(classification_validator_summary, dict):
+            classification_validator_summary = {}
+
+        classification_contradiction_count = safe_int(
+            classification.get("contradiction_count")
+        )
+        if classification_contradiction_count is None:
+            classification_contradiction_count = len(classification_contradictions)
+
+        confidence = (
+            "HIGH"
+            if source in {"DISCOVERY_XML", "SERVICE_XML"}
+            else "MEDIUM"
+            if source == "NEIGHBOR_TABLE"
+            else "LOW"
+        )
+
+        preliminary.append(
+            AssetObservation(
+                "",
+                classify_identity(mac),
+                confidence,
+                source,
+                ipv4,
+                mac,
+                vendor,
+                evidence.hostname,
+                interpretation.get("device_type") or "Unknown",
+                interpretation.get("severity") or "INFO",
+                safe_int(interpretation.get("score")) or 0,
+                [],
+                [item for item in findings if isinstance(item, dict)],
+                device_type_confidence=safe_int(
+                    interpretation.get("device_type_confidence")
+                ) or 0,
+                classification_type=classification.get("type")
+                or classification.get("primary_type")
+                or "Unknown / Ambiguous",
+                classification_primary_type=classification.get(
+                    "primary_type",
+                    classification.get("type", "Unknown / Ambiguous"),
+                ),
+                classification_confidence=safe_int(classification.get("confidence")) or 0,
+                classification_confidence_label=classification.get(
+                    "confidence_label",
+                    "unknown",
+                ),
+                classification_decision=classification.get("decision", "unknown"),
+                classification_method=classification.get(
+                    "method",
+                    "deltaaegis_full_inventory_preservation",
+                ),
+                classification_json=json.dumps(classification, sort_keys=True),
+                classification_evidence_json=json.dumps(
+                    classification_evidence,
+                    sort_keys=True,
+                ),
+                classification_contradictions_json=json.dumps(
+                    classification_contradictions,
+                    sort_keys=True,
+                ),
+                classification_candidates_json=json.dumps(
+                    classification_candidates,
+                    sort_keys=True,
+                ),
+                classification_confidence_band=classification.get(
+                    "confidence_band",
+                    "unknown",
+                ),
+                classification_calibrated_decision=classification.get(
+                    "calibrated_decision",
+                    classification.get("decision", "unknown"),
+                ),
+                classification_siem_action=classification.get("siem_action", "no_action"),
+                classification_calibration_reason=classification.get(
+                    "calibration_reason",
+                ),
+                classification_validation_state=classification.get(
+                    "validation_state",
+                    "not_applicable",
+                ),
+                classification_contradiction_count=classification_contradiction_count,
+                classification_validator_summary_json=json.dumps(
+                    classification_validator_summary,
+                    sort_keys=True,
+                ),
+                classification_validators_json=json.dumps(
+                    classification_validators,
+                    sort_keys=True,
+                ),
+            )
+        )
+
     mac_counts = Counter(asset.mac_address for asset in preliminary if asset.mac_address)
     assets: dict[str, AssetObservation] = {}
     for asset in preliminary:
@@ -868,6 +1050,20 @@ def load_snapshot(manifest_path: Path) -> Snapshot:
     discovery = parse_discovery_xml(discovery_xml, target_network)
     neighbors = parse_neighbors(optional_file(bundle_dir, manifest, "neighbors"), target_network)
     exit_status, hosts_up, hosts_down, hosts_total, assets = parse_service_xml(services_xml, analysis, target_network, discovery, neighbors)
+
+    # NetSniper v1.8 preserves discovery-only hosts in analysis.json.
+    # Treat the merged asset inventory as the current live inventory so
+    # service-less-but-discovered hosts remain visible in DeltaAegis.
+    counts = manifest.get("counts", {}) if isinstance(manifest.get("counts"), dict) else {}
+    discovered_hosts = safe_int(counts.get("discovered_hosts"))
+    inventory_hosts = max(len(assets), discovered_hosts or 0)
+
+    if inventory_hosts > hosts_up:
+        hosts_up = inventory_hosts
+
+    if hosts_total < hosts_up:
+        hosts_total = hosts_up
+
     scan_profile = str(manifest.get("scan_profile", "UNKNOWN"))
     profile = manifest.get("profile", {}) if isinstance(manifest.get("profile"), dict) else {}
     monitored_ports = tuple(sorted(int(port) for port in profile.get("monitored_ports", []) if isinstance(port, int) or str(port).isdigit()))
@@ -6304,6 +6500,140 @@ def dashboard_scan_context_payload(connection, scope=None):
         "delta_scan_pairs": dashboard_delta_scan_pairs(connection, 10, scope=scope),
     }
 
+
+def dashboard_latest_accepted_snapshot(connection, scope=None):
+    params = []
+    where = "WHERE quality_status = 'ACCEPTED'"
+
+    if scope:
+        where += " AND network_scope = ?"
+        params.append(scope)
+
+    try:
+        row = connection.execute(
+            f"""
+            SELECT *
+            FROM snapshots
+            {where}
+            ORDER BY imported_at DESC, created_at DESC, scan_id DESC
+            LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
+    except Exception:
+        return None
+
+    return dict(row) if row is not None else None
+
+
+def dashboard_current_state_payload(connection, scope=None):
+    snapshot = dashboard_latest_accepted_snapshot(connection, scope=scope)
+
+    if snapshot is None:
+        return {
+            "available": False,
+            "selected_scope": scope,
+            "message": "No accepted snapshot is available for the selected scope.",
+        }
+
+    scan_id = snapshot["scan_id"]
+
+    asset_row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM asset_observations
+        WHERE scan_id = ?
+        """,
+        (scan_id,),
+    ).fetchone()
+
+    intelligence_row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM netsniper_intelligence_hosts
+        WHERE scan_id = ?
+        """,
+        (scan_id,),
+    ).fetchone()
+
+    service_row = connection.execute(
+        """
+        SELECT COUNT(DISTINCT asset_key) AS count
+        FROM service_observations
+        WHERE scan_id = ?
+        """,
+        (scan_id,),
+    ).fetchone()
+
+    summary = connection.execute(
+        """
+        SELECT
+            host_count,
+            classified_count,
+            possible_or_review_count,
+            unknown_count,
+            contradiction_host_count,
+            false_confidence_candidate_count,
+            unknown_with_exposed_services_count
+        FROM netsniper_intelligence_summaries
+        WHERE scan_id = ?
+        """,
+        (scan_id,),
+    ).fetchone()
+
+    assets = int(asset_row["count"] or 0) if asset_row else 0
+    intelligence_hosts = int(intelligence_row["count"] or 0) if intelligence_row else 0
+    service_observed_assets = int(service_row["count"] or 0) if service_row else 0
+    discovery_only_assets = max(0, assets - service_observed_assets)
+
+    if summary is not None:
+        classified = int(summary["classified_count"] or 0)
+        possible_or_review = int(summary["possible_or_review_count"] or 0)
+        unknown = int(summary["unknown_count"] or 0)
+        contradiction_hosts = int(summary["contradiction_host_count"] or 0)
+        false_confidence_candidates = int(summary["false_confidence_candidate_count"] or 0)
+        unknown_with_exposed_services = int(summary["unknown_with_exposed_services_count"] or 0)
+        summary_host_count = int(summary["host_count"] or 0)
+    else:
+        classified = 0
+        possible_or_review = 0
+        unknown = 0
+        contradiction_hosts = 0
+        false_confidence_candidates = 0
+        unknown_with_exposed_services = 0
+        summary_host_count = 0
+
+    return {
+        "available": True,
+        "selected_scope": scope,
+        "scan_id": scan_id,
+        "target": snapshot["target"],
+        "network_scope": snapshot.get("network_scope"),
+        "created_at": snapshot.get("created_at"),
+        "imported_at": snapshot.get("imported_at"),
+        "scanner_version": snapshot.get("scanner_version"),
+        "scan_profile": snapshot.get("scan_profile"),
+        "quality_status": snapshot.get("quality_status"),
+        "hosts_up": int(snapshot["hosts_up"] or 0),
+        "hosts_total": int(snapshot["hosts_total"] or 0),
+        "mac_backed_assets": int(snapshot["mac_backed_assets"] or 0),
+        "identity_coverage": float(snapshot["identity_coverage"] or 0.0),
+        "assets": assets,
+        "intelligence_hosts": intelligence_hosts,
+        "service_observed_assets": service_observed_assets,
+        "discovery_only_or_no_open_service_assets": discovery_only_assets,
+        "summary_host_count": summary_host_count,
+        "classified": classified,
+        "possible_or_review": possible_or_review,
+        "unknown": unknown,
+        "contradiction_hosts": contradiction_hosts,
+        "false_confidence_candidates": false_confidence_candidates,
+        "unknown_with_exposed_services": unknown_with_exposed_services,
+        "snapshot": dashboard_enrich_snapshot(connection, snapshot),
+    }
+
+
+
 def dashboard_assets_payload(connection, limit, scope=None, state=None, identity=None):
     clauses = []
     params = []
@@ -6915,6 +7245,306 @@ def dashboard_annotations_payload(connection, limit, scope=None):
         scope=scope,
     )
 
+
+def build_current_risk_register(connection, limit, scope=None):
+    snapshot = dashboard_latest_accepted_snapshot(connection, scope=scope)
+
+    if snapshot is None:
+        return []
+
+    scan_id = snapshot["scan_id"]
+
+    asset_rows = connection.execute(
+        """
+        SELECT
+            asset_key,
+            identity_class,
+            identity_confidence,
+            identity_source,
+            ip_address,
+            mac_address,
+            vendor,
+            hostname,
+            device_type,
+            severity,
+            score,
+            classification_primary_type,
+            classification_confidence,
+            classification_decision,
+            classification_siem_action,
+            classification_contradiction_count
+        FROM asset_observations
+        WHERE scan_id = ?
+        """,
+        (scan_id,),
+    ).fetchall()
+
+    services = {}
+    for row in connection.execute(
+        """
+        SELECT asset_key, protocol, port, service_name
+        FROM service_observations
+        WHERE scan_id = ?
+        ORDER BY asset_key, protocol, port
+        """,
+        (scan_id,),
+    ).fetchall():
+        services.setdefault(row["asset_key"], []).append(row)
+
+    findings = {}
+    for row in connection.execute(
+        """
+        SELECT asset_key, COUNT(*) AS finding_count, MAX(score) AS max_score
+        FROM finding_observations
+        WHERE scan_id = ?
+        GROUP BY asset_key
+        """,
+        (scan_id,),
+    ).fetchall():
+        findings[row["asset_key"]] = row
+
+    open_alert_rows = connection.execute(
+        """
+        SELECT alert_id, severity, subject_key, summary, last_seen_at
+        FROM alerts
+        WHERE status = 'OPEN'
+        ORDER BY alert_id DESC
+        LIMIT 500
+        """
+    ).fetchall()
+
+    # Ports that should materially raise current risk when exposed.
+    high_signal_ports = {
+        21, 22, 23, 445, 554, 2375, 2376, 3389, 5000, 5432,
+        5555, 5900, 6379, 6443, 7547, 8080, 8081, 8443, 9000,
+        9090, 9200, 9300, 9443, 10250, 10255, 27017,
+    }
+
+    # Common management/expected service ports. These matter, but should not
+    # alone turn ordinary infrastructure into CRITICAL risk.
+    baseline_exposure_ports = {
+        80, 443, 631, 9100,
+    }
+
+    current_severity_points = {
+        "CRITICAL": 20,
+        "HIGH": 15,
+        "MEDIUM": 8,
+        "LOW": 3,
+        "INFO": 0,
+    }
+
+    rows = []
+
+    for asset in asset_rows:
+        asset_key = asset["asset_key"]
+        record = risk_subject_record(asset_key)
+
+        record["current_scan_id"] = scan_id
+        record["risk_scope"] = "current"
+        record["ip_address"] = asset["ip_address"]
+        record["mac_address"] = asset["mac_address"]
+        record["identity_confidence"] = asset["identity_confidence"]
+        record["identity_source"] = asset["identity_source"]
+        record["identity_class"] = asset["identity_class"]
+        record["device_type"] = asset["device_type"]
+        record["classification"] = asset["classification_primary_type"]
+        record["classification_confidence"] = int(asset["classification_confidence"] or 0)
+        record["classification_decision"] = asset["classification_decision"]
+        record["classification_siem_action"] = asset["classification_siem_action"]
+
+        score = 0
+        asset_services = services.get(asset_key, [])
+        asset_findings = findings.get(asset_key)
+
+        severity = str(asset["severity"] or "INFO").upper()
+        severity_points = current_severity_points.get(severity, 0)
+
+        if severity_points:
+            score += severity_points
+            risk_add_reason(
+                record["reasons"],
+                f"Current asset severity {severity}: +{severity_points}",
+            )
+
+        asset_score = safe_int(asset["score"]) or 0
+
+        if asset_score > 0:
+            points = min(18, max(1, asset_score // 2))
+            score += points
+            risk_add_reason(record["reasons"], f"Current NetSniper score {asset_score}: +{points}")
+
+        finding_count = 0
+        max_finding_score = 0
+
+        if asset_findings is not None:
+            finding_count = int(asset_findings["finding_count"] or 0)
+            max_finding_score = safe_int(asset_findings["max_score"]) or 0
+
+            if finding_count:
+                points = min(12, finding_count * 2)
+                score += points
+                risk_add_reason(record["reasons"], f"{finding_count} current finding(s): +{points}")
+
+            if max_finding_score:
+                points = min(10, max_finding_score)
+                score += points
+                risk_add_reason(record["reasons"], f"Max current finding score {max_finding_score}: +{points}")
+
+        open_ports = []
+        signal_ports = []
+        baseline_ports = []
+
+        for service in asset_services:
+            port = int(service["port"] or 0)
+            protocol = str(service["protocol"] or "tcp").lower()
+            open_ports.append(f"{protocol}/{port}")
+
+            if port in high_signal_ports:
+                signal_ports.append(f"{protocol}/{port}")
+            elif port in baseline_exposure_ports:
+                baseline_ports.append(f"{protocol}/{port}")
+
+        if signal_ports:
+            points = min(30, len(signal_ports) * 10)
+            score += points
+            risk_add_reason(
+                record["reasons"],
+                f"Current high-signal exposed service(s) {', '.join(signal_ports[:6])}: +{points}",
+            )
+
+        if baseline_ports:
+            points = min(6, len(baseline_ports))
+            score += points
+            risk_add_reason(
+                record["reasons"],
+                f"Current baseline management/printing exposure {', '.join(baseline_ports[:6])}: +{points}",
+            )
+
+        classification_action = str(asset["classification_siem_action"] or "").lower()
+        classification_decision = str(asset["classification_decision"] or "").lower()
+        classification_type = str(asset["classification_primary_type"] or "Unknown")
+        contradiction_count = int(asset["classification_contradiction_count"] or 0)
+
+        if classification_action == "alert_eligible":
+            score += 5
+            risk_add_reason(record["reasons"], "Current classification is alert eligible: +5")
+        elif classification_action == "review_queue":
+            score += 4
+            risk_add_reason(record["reasons"], "Current classification is in review queue: +4")
+
+        if contradiction_count:
+            points = min(20, contradiction_count * 10)
+            score += points
+            risk_add_reason(record["reasons"], f"Current classification contradiction(s): +{points}")
+
+        unknown_with_services = (
+            bool(asset_services)
+            and classification_type in {"", "Unknown", "Unknown / Ambiguous"}
+            and classification_decision in {"", "unknown", "possible"}
+        )
+
+        if unknown_with_services:
+            score += 8
+            risk_add_reason(record["reasons"], "Current unknown asset has exposed service(s): +8")
+
+        asset_ip = str(asset["ip_address"] or "")
+        asset_mac = str(asset["mac_address"] or "").lower()
+
+        for alert in open_alert_rows:
+            subject = str(alert["subject_key"] or "")
+            subject_lower = subject.lower()
+
+            if (
+                subject == asset_key
+                or subject.startswith(asset_key)
+                or (asset_ip and asset_ip in subject)
+                or (asset_mac and asset_mac in subject_lower)
+            ):
+                record["open_alerts"] += 1
+                severity = str(alert["severity"] or "INFO").upper()
+                risk_add_reason(record["reasons"], f"Open current-context {severity} alert present")
+
+        if record["open_alerts"]:
+            points = min(50, record["open_alerts"] * 25)
+            score += points
+            risk_add_reason(record["reasons"], f"{record['open_alerts']} open alert(s): +{points}")
+
+        annotation_match = fetch_risk_annotation(connection, asset_key)
+
+        if annotation_match is not None:
+            annotation, matched_key = annotation_match
+            record["annotation_key"] = matched_key
+            record["owner"] = annotation["owner"]
+            record["role"] = annotation["role"]
+            record["criticality"] = annotation["criticality"]
+            record["notes"] = annotation["notes"]
+
+            criticality = str(annotation["criticality"] or "").upper()
+            criticality_points = RISK_CRITICALITY_POINTS.get(criticality, 0)
+
+            if criticality_points:
+                score += criticality_points
+                risk_add_reason(
+                    record["reasons"],
+                    f"Asset criticality {criticality}: +{criticality_points}",
+                )
+
+        record["score"] = min(100, score)
+        record["level"] = risk_level(record["score"])
+        record["open_ports"] = open_ports
+        record["current_service_count"] = len(asset_services)
+        record["current_finding_count"] = finding_count
+        record["high_signal_ports"] = signal_ports
+        record["baseline_exposure_ports"] = baseline_ports
+        record["recommended_actions"] = risk_role_recommended_actions(record)
+
+        actionable = (
+            record["open_alerts"] > 0
+            or bool(signal_ports)
+            or unknown_with_services
+            or contradiction_count > 0
+            or classification_action in {"alert_eligible", "review_queue"}
+            or finding_count > 0
+        )
+
+        if actionable and record["score"] > 0:
+            rows.append(record)
+
+    rows = sorted(
+        rows,
+        key=lambda row: (
+            row["score"],
+            row["open_alerts"],
+            len(row.get("high_signal_ports", [])),
+            row.get("current_finding_count", 0),
+            row["subject_key"],
+        ),
+        reverse=True,
+    )
+
+    if limit is not None:
+        rows = rows[:limit]
+
+    return rows
+
+
+def dashboard_current_risk_payload(connection, limit, scope=None):
+    try:
+        return build_current_risk_register(connection, limit, scope=scope)
+    except Exception as exc:
+        return [
+            {
+                "subject_key": "current-risk-error",
+                "score": 0,
+                "level": "INFO",
+                "risk_scope": "current",
+                "reasons": [f"Current risk unavailable: {exc}"],
+            }
+        ]
+
+
+
 def dashboard_risk_payload(connection, limit, scope=None):
     try:
         return build_risk_register(connection, limit, scope=scope)
@@ -7390,6 +8020,12 @@ def dashboard_index_html():
     </section>
 
     <section class="card" data-tab-panel="overview">
+      <h2>Current Network State</h2>
+      <p class="muted">Latest accepted snapshot for the selected scope. These cards are current-state inventory and intelligence numbers, not historical totals.</p>
+      <div id="current-state"></div>
+    </section>
+
+    <section class="card" data-tab-panel="overview">
       <h2>NetSniper Scan Context</h2>
       <p class="muted">Shows the latest NetSniper scan, the baseline scan used for delta comparison, and identity coverage for MAC/IP tracking.</p>
       <div class="scan-grid" id="scan-context"></div>
@@ -7432,12 +8068,22 @@ def dashboard_index_html():
     </section>
 
     <section class="card" data-tab-panel="risk">
-      <h2>Top Risk Subjects</h2>
+      <h2>Current Risk Subjects</h2>
+      <p class="muted">Current risk is limited to assets present in the latest accepted snapshot for the selected scope.</p>
+      <table>
+        <thead>
+          <tr><th>Level</th><th>Score</th><th>Subject</th><th>IP</th><th>MAC</th><th>Identity</th><th>Owner</th><th>Role</th><th>Open Alerts</th><th>Current Findings</th><th>Primary Reason</th></tr>
+        </thead>
+        <tbody id="risk-body"></tbody>
+      </table>
+
+      <h3>Historical Risk Context</h3>
+      <p class="muted">Historical context is based on past delta events and alerts. It may include assets that are not present in the latest accepted snapshot.</p>
       <table>
         <thead>
           <tr><th>Level</th><th>Score</th><th>Subject</th><th>IP</th><th>MAC</th><th>Identity</th><th>Owner</th><th>Role</th><th>Open Alerts</th><th>Events</th><th>Primary Reason</th></tr>
         </thead>
-        <tbody id="risk-body"></tbody>
+        <tbody id="historical-risk-body"></tbody>
       </table>
     </section>
 
@@ -7698,6 +8344,74 @@ def dashboard_index_html():
     function metric(label, value) {
       return `<div class="card"><div class="label">${esc(label)}</div><div class="metric">${esc(value)}</div></div>`;
     }
+
+    function formatPercent(value) {
+      const number = Number(value || 0);
+      if (!Number.isFinite(number)) return "0%";
+      return `${Math.round(number * 100)}%`;
+    }
+
+    function renderCurrentState(state) {
+      const target = document.getElementById("current-state");
+
+      if (!target) return;
+
+      if (!state || !state.available) {
+        target.innerHTML = `<p class="muted">${esc((state && state.message) || "No accepted current-state snapshot is available for this scope.")}</p>`;
+        return;
+      }
+
+      target.innerHTML = `
+        <div class="cards">
+          <div class="card">
+            <div class="label">Current Assets</div>
+            <div class="metric">${esc(state.assets || 0)}</div>
+          </div>
+          <div class="card">
+            <div class="label">Intelligence Hosts</div>
+            <div class="metric">${esc(state.intelligence_hosts || 0)}</div>
+          </div>
+          <div class="card">
+            <div class="label">Service-Observed Assets</div>
+            <div class="metric">${esc(state.service_observed_assets || 0)}</div>
+          </div>
+          <div class="card">
+            <div class="label">Discovery / No Open Service</div>
+            <div class="metric">${esc(state.discovery_only_or_no_open_service_assets || 0)}</div>
+          </div>
+          <div class="card">
+            <div class="label">Classified</div>
+            <div class="metric">${esc(state.classified || 0)}</div>
+          </div>
+          <div class="card">
+            <div class="label">Review / Possible</div>
+            <div class="metric">${esc(state.possible_or_review || 0)}</div>
+          </div>
+          <div class="card">
+            <div class="label">Unknown</div>
+            <div class="metric">${esc(state.unknown || 0)}</div>
+          </div>
+          <div class="card">
+            <div class="label">False Confidence</div>
+            <div class="metric">${esc(state.false_confidence_candidates || 0)}</div>
+          </div>
+          <div class="card">
+            <div class="label">MAC Identity</div>
+            <div class="metric">${esc(formatPercent(state.identity_coverage))}</div>
+          </div>
+        </div>
+
+        <div class="detail-box">
+          <div><span>Latest Scan</span><span><code>${esc(state.scan_id || "-")}</code></span></div>
+          <div><span>Scope</span><span><code>${esc(state.network_scope || state.selected_scope || "-")}</code></span></div>
+          <div><span>Target</span><span><code>${esc(state.target || "-")}</code></span></div>
+          <div><span>Scanner</span><span>${esc(state.scanner_version || "-")}</span></div>
+          <div><span>Quality</span><span>${esc(state.quality_status || "-")}</span></div>
+          <div><span>Imported</span><span>${esc(state.imported_at || "-")}</span></div>
+        </div>
+      `;
+    }
+
 
     function renderMetrics(summary) {
       document.getElementById("metrics").innerHTML = [
@@ -8415,39 +9129,63 @@ def dashboard_index_html():
       });
     }
 
+    function riskRowsHtml(rows, emptyMessage, currentMode) {
+      if (!rows || !rows.length) {
+        return `<tr><td colspan="11">${esc(emptyMessage)}</td></tr>`;
+      }
+
+      return rows.map(row => {
+        const reasons = Array.isArray(row.reasons) ? row.reasons : [];
+        const primaryReason = reasons.length ? reasons[0] : "-";
+        const countColumn = currentMode
+          ? (row.current_finding_count ?? 0)
+          : (row.event_count ?? 0);
+
+        return `
+          <tr>
+            <td class="severity-${esc(row.level || "").toLowerCase()}">${esc(row.level || "-")}</td>
+            <td>${esc(row.score ?? "-")}</td>
+            <td>${subjectButton(row.subject_key || "-")}</td>
+            <td>${esc(row.ip_address || row.ip || "-")}</td>
+            <td>${esc(row.mac_address || row.mac || "-")}</td>
+            <td>${esc(row.identity_confidence || row.identity_state || "-")}</td>
+            <td>${esc(row.owner || "-")}</td>
+            <td>${esc(row.role || row.classification || "-")}</td>
+            <td>${esc(row.open_alerts ?? 0)}</td>
+            <td>${esc(countColumn)}</td>
+            <td>${esc(primaryReason)}</td>
+          </tr>
+        `;
+      }).join("");
+    }
+
     function renderRisk(rows) {
-  const tbody = document.getElementById("risk-body");
+      const tbody = document.getElementById("risk-body");
 
-  if (!tbody) return;
+      if (!tbody) return;
 
-  if (!rows || !rows.length) {
-    tbody.innerHTML = `<tr><td colspan="11">No risk subjects calculated for the current dashboard scope.</td></tr>`;
-    return;
-  }
+      tbody.innerHTML = riskRowsHtml(
+        rows,
+        "No current risk subjects calculated for the latest accepted snapshot.",
+        true
+      );
 
-  tbody.innerHTML = rows.map(row => {
-    const reasons = Array.isArray(row.reasons) ? row.reasons : [];
-    const primaryReason = reasons.length ? reasons[0] : "-";
+      bindSubjectLinks(tbody);
+    }
 
-    return `
-      <tr>
-        <td class="severity-${esc(row.level || "").toLowerCase()}">${esc(row.level || "-")}</td>
-        <td>${esc(row.score ?? "-")}</td>
-        <td>${subjectButton(row.subject_key || "-")}</td>
-        <td>${esc(row.ip_address || row.ip || "-")}</td>
-        <td>${esc(row.mac_address || row.mac || "-")}</td>
-        <td>${esc(row.identity_confidence || row.identity_state || "-")}</td>
-        <td>${esc(row.owner || "-")}</td>
-        <td>${esc(row.role || row.classification || "-")}</td>
-        <td>${esc(row.open_alerts ?? 0)}</td>
-        <td>${esc(row.event_count ?? 0)}</td>
-        <td>${esc(primaryReason)}</td>
-      </tr>
-    `;
-  }).join("");
+    function renderHistoricalRisk(rows) {
+      const tbody = document.getElementById("historical-risk-body");
 
-  bindSubjectLinks(tbody);
-}
+      if (!tbody) return;
+
+      tbody.innerHTML = riskRowsHtml(
+        rows,
+        "No historical risk context matched the current dashboard scope.",
+        false
+      );
+
+      bindSubjectLinks(tbody);
+    }
 
     function renderEvents(rows) {
   const tbody = document.getElementById("events-body");
@@ -8827,11 +9565,13 @@ def dashboard_index_html():
       try {
         setupDashboardTabs();
 
-        const [scopes, summary, scanContext, assets, risk, events, alerts, annotations] = await Promise.all([
+        const [scopes, summary, scanContext, currentState, assets, currentRisk, historicalRisk, events, alerts, annotations] = await Promise.all([
           api("/api/scopes"),
           api(scopedPath("/api/summary")),
           api(scopedPath("/api/scan-context")),
+          api(scopedPath("/api/current-state")),
           api(scopedPath("/api/assets?limit=25")),
+          api(scopedPath("/api/current-risk?limit=10")),
           api(scopedPath("/api/risk?limit=10")),
           api(scopedPath("/api/events?limit=20")),
           api(scopedPath("/api/alerts?limit=20")),
@@ -8840,14 +9580,16 @@ def dashboard_index_html():
 
         renderScopes(scopes);
         renderMetrics(summary);
+        renderCurrentState(currentState);
         renderScanContext(scanContext);
         renderAssets(assets);
-        renderRisk(risk);
+        renderRisk(currentRisk);
+        renderHistoricalRisk(historicalRisk);
         renderEvents(events);
         renderAlerts(alerts);
         renderAnnotations(annotations);
         renderClassificationSummary(summary);
-        renderRecommendations(summary, scanContext, risk);
+        renderRecommendations(summary, scanContext, historicalRisk);
         applyDashboardTabState();
       } catch (error) {
         const box = document.getElementById("error");
@@ -8990,6 +9732,8 @@ def command_dashboard(args):
                     dashboard_json_response(self, dashboard_summary_payload(connection, scope=scope))
                 elif route == "/api/scan-context":
                     dashboard_json_response(self, dashboard_scan_context_payload(connection, scope=scope))
+                elif route == "/api/current-state":
+                    dashboard_json_response(self, dashboard_current_state_payload(connection, scope=scope))
                 elif route == "/api/assets":
                     dashboard_json_response(
                         self,
@@ -9027,6 +9771,8 @@ def command_dashboard(args):
                     dashboard_json_response(self, dashboard_events_payload(connection, limit, scope=scope))
                 elif route == "/api/alerts":
                     dashboard_json_response(self, dashboard_alerts_payload(connection, limit, scope=scope))
+                elif route == "/api/current-risk":
+                    dashboard_json_response(self, dashboard_current_risk_payload(connection, limit, scope=scope))
                 elif route == "/api/risk":
                     dashboard_json_response(self, dashboard_risk_payload(connection, limit, scope=scope))
                 elif route == "/api/annotations":

@@ -15,8 +15,8 @@ pass() {
 grep -q '^# DeltaAegis$' README.md \
   || fail "README title is missing or malformed"
 
-grep -q 'DeltaAegis v0.12.2 — Dashboard Runtime Hotfix' README.md \
-  || fail "README does not identify v0.12.1 as current release"
+grep -q 'DeltaAegis v0.13.0 — Current-State SIEM Dashboard' README.md \
+  || fail "README does not identify v0.13.0 as current release"
 
 grep -q 'DeltaAegis v0.12.0 — Intelligence Drilldown' README.md \
   || fail "README does not preserve the v0.12.0 feature baseline"
