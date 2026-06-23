@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.13.0 — Current-State SIEM Dashboard
+
+### Added
+
+- Preserved full NetSniper inventory during DeltaAegis ingest, including discovered hosts with no monitored open services.
+- Added `/api/current-state` for latest accepted snapshot inventory and intelligence state.
+- Added dashboard Current Network State cards for assets, intelligence hosts, service-observed assets, discovery/no-open-service assets, classification counts, false-confidence candidates, and MAC identity coverage.
+- Added `/api/current-risk` for latest-snapshot-only risk scoring.
+- Added separate dashboard sections for Current Risk Subjects and Historical Risk Context.
+- Added v0.13 validators:
+  - `tools/validate_v0_13_full_inventory_ingest.sh`
+  - `tools/validate_v0_13_current_state_payload.sh`
+  - `tools/validate_v0_13_current_state_dashboard_ui.sh`
+  - `tools/validate_v0_13_current_risk.sh`
+  - `tools/validate_v0_13_release.sh`
+
+### Changed
+
+- Calibrated current-risk scoring so normal printer/web management exposure does not automatically saturate to CRITICAL.
+- Kept historical event-driven risk available separately as context instead of mixing it into current risk.
+
+### Validation
+
+- Verified against NetSniper v1.8.0-dev bundle `20260623-123007`.
+- Verified latest accepted snapshot state:
+  - 49 assets
+  - 49 intelligence hosts
+  - 23 service-observed assets
+  - 26 discovery/no-open-service assets
+  - 12 classified
+  - 9 possible/review
+  - 28 unknown
+- Verified current-risk rows are latest-snapshot subjects only.
+- Verified current-risk scoring has zero all-100 saturation in the top current-risk rows.
+- Verified v0.12 dashboard intelligence drilldown regression validators still pass.
+
+
 
 
 

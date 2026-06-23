@@ -14,20 +14,24 @@ Markdown reports, and a local dashboard.
 
 ## Current Release
 
-**DeltaAegis v0.12.2 — Dashboard Runtime Hotfix**
+**DeltaAegis v0.13.0 — Current-State SIEM Dashboard**
 
-v0.12.2 fixes a dashboard JavaScript runtime error where the Intelligence tab could attempt to
-access the lexical declaration `v17Block` before initialization.
+v0.13.0 promotes DeltaAegis from historical drilldown toward a current-state SIEM dashboard.
+It preserves the full NetSniper inventory during ingest, including discovered hosts that have no
+monitored open services, and exposes latest accepted snapshot state through the dashboard.
 
-No database schema, ingestion behavior, or NetSniper intelligence behavior changed from v0.12.0.
+Current feature baseline: **DeltaAegis v0.13.0 — Current-State SIEM Dashboard**.
 
-Current feature baseline: **DeltaAegis v0.12.0 — Intelligence Drilldown**.
+DeltaAegis v0.13.0 adds:
 
-DeltaAegis v0.12.0 adds operator-level NetSniper v1.7 intelligence drilldown. DeltaAegis stores
-per-host NetSniper v1.7 enriched intelligence from `analysis.enriched.json`, exposes it through CLI
-commands, and renders clickable host evidence drilldown inside the dashboard Intelligence tab.
+- Full NetSniper inventory preservation during ingest.
+- `/api/current-state` for latest accepted snapshot state.
+- Dashboard Current Network State cards.
+- `/api/current-risk` for latest-snapshot-only risk scoring.
+- Separate Current Risk Subjects and Historical Risk Context dashboard sections.
+- Calibrated current-risk scoring to avoid all-CRITICAL score saturation.
+- v0.13 validators for full inventory ingest, current-state payloads, dashboard UI wiring, and current-risk scoring.
 
----
 
 ## What DeltaAegis Does
 
@@ -176,11 +180,14 @@ DeltaAegis does not require a separate database server.
 ---
 
 
-## Recent v0.12 Releases
+## Recent Releases
 
-- DeltaAegis v0.12.0 — Intelligence Drilldown established the current NetSniper v1.7 per-host intelligence drilldown baseline.
-- DeltaAegis v0.12.1 — README Metadata Cleanup refreshed project metadata and documentation for the v0.12 baseline.
+- DeltaAegis v0.13.0 — Current-State SIEM Dashboard adds latest accepted snapshot
+  state, full NetSniper inventory preservation, current-state dashboard cards,
+  separated current/historical risk views, and calibrated current-risk scoring.
 - DeltaAegis v0.12.2 — Dashboard Runtime Hotfix fixed the Intelligence tab JavaScript runtime error without changing database schema, ingestion behavior, or NetSniper intelligence behavior.
+- DeltaAegis v0.12.1 — README Metadata Cleanup refreshed project metadata and documentation for the v0.12 baseline.
+- DeltaAegis v0.12.0 — Intelligence Drilldown established the NetSniper v1.7 per-host intelligence drilldown baseline.
 
 ## Installation
 
@@ -440,6 +447,14 @@ Current release validation:
 tools/validate_v0_12_release.sh
 ```
 
+Important v0.13 validators:
+
+- `tools/validate_v0_13_full_inventory_ingest.sh`
+- `tools/validate_v0_13_current_state_payload.sh`
+- `tools/validate_v0_13_current_state_dashboard_ui.sh`
+- `tools/validate_v0_13_current_risk.sh`
+- `tools/validate_v0_13_release.sh`
+
 Important v0.12 validators:
 
 ```bash
@@ -459,6 +474,15 @@ pytest -q
 ---
 
 ## Version Highlights
+
+### v0.13.0 — Current-State SIEM Dashboard
+
+- Full NetSniper inventory preservation during ingest.
+- Latest accepted snapshot current-state API.
+- Dashboard Current Network State cards.
+- Current Risk Subjects separated from Historical Risk Context.
+- Current-risk scoring calibrated against all-CRITICAL saturation.
+- v0.13 release validators for ingest, API payloads, dashboard UI wiring, and risk scoring.
 
 ### v0.12.0 — Intelligence Drilldown
 
