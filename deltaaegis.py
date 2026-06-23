@@ -32,6 +32,7 @@ IDENTITY_COVERAGE_THRESHOLD = 0.50
 IDENTITY_DROP_REVIEW_THRESHOLD = 0.25
 REMOVAL_THRESHOLD = 3
 MAC_RE = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
+SCAN_JOB_STATUSES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED"}
 
 
 class DeltaAegisError(RuntimeError):
@@ -326,6 +327,36 @@ CREATE TABLE IF NOT EXISTS asset_investigation_history (
 
 CREATE INDEX IF NOT EXISTS idx_asset_investigation_history_asset
 ON asset_investigation_history(network_scope, asset_key);
+
+CREATE TABLE IF NOT EXISTS scan_jobs (
+    job_id TEXT PRIMARY KEY,
+    target TEXT NOT NULL,
+    network_scope TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    netsniper_path TEXT NOT NULL DEFAULT '',
+    runs_dir TEXT NOT NULL DEFAULT '',
+    bundle_path TEXT,
+    exit_code INTEGER,
+    auto_ingest INTEGER NOT NULL DEFAULT 0,
+    stdout_log TEXT,
+    stderr_log TEXT,
+    status_json TEXT NOT NULL DEFAULT '{}',
+    message TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_jobs_created_at
+    ON scan_jobs(created_at);
+
+CREATE INDEX IF NOT EXISTS idx_scan_jobs_status
+    ON scan_jobs(status);
+
+CREATE INDEX IF NOT EXISTS idx_scan_jobs_scope
+    ON scan_jobs(network_scope);
+
 """
 
 
@@ -2367,6 +2398,180 @@ def command_ingest(args: argparse.Namespace) -> int:
             print(ingest_manifest(connection, manifest, args.events))
         except DeltaAegisError as exc:
             print(f"ERROR {manifest}: {exc}", file=sys.stderr)
+    return 0
+
+
+
+def utc_now_text() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def validate_private_cidr(target: str) -> str:
+    raw = (target or "").strip()
+
+    if not raw:
+        raise DeltaAegisError("target CIDR is required")
+
+    try:
+        network = ipaddress.ip_network(raw, strict=False)
+    except ValueError as exc:
+        raise DeltaAegisError(f"invalid target CIDR: {raw}") from exc
+
+    if network.version != 4:
+        raise DeltaAegisError("only IPv4 CIDR targets are supported")
+
+    if not network.is_private:
+        raise DeltaAegisError("target must be a private IPv4 CIDR")
+
+    return str(network)
+
+
+def build_netsniper_headless_command(netsniper_path: Path, target: str) -> list[str]:
+    safe_target = validate_private_cidr(target)
+
+    return [
+        str(netsniper_path),
+        "--non-interactive",
+        "--target",
+        safe_target,
+        "--greenbone",
+        "no",
+        "--json-status",
+    ]
+
+
+def decode_json_field(value: str | None, default):
+    if not value:
+        return default
+
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
+def scan_job_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+
+    item["auto_ingest"] = bool(item.get("auto_ingest"))
+    item["status_json"] = decode_json_field(item.get("status_json"), {})
+
+    return item
+
+
+def query_scan_jobs(
+    connection: sqlite3.Connection,
+    limit: int = 20,
+    status: str | None = None,
+    scope: str | None = None,
+) -> list[sqlite3.Row]:
+    clauses = []
+    params: list[Any] = []
+
+    if status:
+        normalized_status = status.strip().upper()
+
+        if normalized_status not in SCAN_JOB_STATUSES:
+            raise DeltaAegisError(f"invalid scan job status: {status}")
+
+        clauses.append("status = ?")
+        params.append(normalized_status)
+
+    if scope:
+        clauses.append("network_scope = ?")
+        params.append(scope)
+
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+
+    params.append(limit)
+
+    return connection.execute(
+        f"""
+        SELECT
+            job_id,
+            target,
+            network_scope,
+            status,
+            created_at,
+            updated_at,
+            started_at,
+            finished_at,
+            netsniper_path,
+            runs_dir,
+            bundle_path,
+            exit_code,
+            auto_ingest,
+            stdout_log,
+            stderr_log,
+            status_json,
+            message
+        FROM scan_jobs
+        {where}
+        ORDER BY created_at DESC, updated_at DESC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+
+
+def dashboard_scan_jobs_payload(
+    connection: sqlite3.Connection,
+    limit: int = 20,
+    scope: str | None = None,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    return [
+        scan_job_to_dict(row)
+        for row in query_scan_jobs(
+            connection,
+            limit=limit,
+            status=status,
+            scope=scope,
+        )
+    ]
+
+
+def print_scan_job_rows(rows: Iterable[sqlite3.Row]) -> None:
+    rows = list(rows)
+
+    if not rows:
+        print("No scan jobs found.")
+        return
+
+    print("DeltaAegis Scan Jobs")
+    print("====================")
+    print()
+
+    for row in rows:
+        item = scan_job_to_dict(row)
+        print(
+            f"{item['job_id']}  "
+            f"{item['status']:<9}  "
+            f"{item['target']:<18}  "
+            f"scope={item['network_scope'] or '-'}"
+        )
+        print(f"  created={item['created_at']}  updated={item['updated_at']}")
+
+        if item.get("bundle_path"):
+            print(f"  bundle={item['bundle_path']}")
+
+        if item.get("message"):
+            print(f"  message={item['message']}")
+
+
+def command_scan_jobs(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    scope = optional_network_scope(getattr(args, "scope", None))
+
+    print_scan_job_rows(
+        query_scan_jobs(
+            connection,
+            limit=args.limit,
+            status=getattr(args, "status", None),
+            scope=scope,
+        )
+    )
+
     return 0
 
 
@@ -9734,6 +9939,17 @@ def command_dashboard(args):
                     dashboard_json_response(self, dashboard_scan_context_payload(connection, scope=scope))
                 elif route == "/api/current-state":
                     dashboard_json_response(self, dashboard_current_state_payload(connection, scope=scope))
+                elif route == "/api/scan-jobs":
+                    status_filter = query.get("status", [""])[0].strip() or None
+                    dashboard_json_response(
+                        self,
+                        dashboard_scan_jobs_payload(
+                            connection,
+                            limit=limit,
+                            scope=scope,
+                            status=status_filter,
+                        ),
+                    )
                 elif route == "/api/assets":
                     dashboard_json_response(
                         self,
@@ -9938,6 +10154,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("menu")
     sub.add_parser("ingest")
+    p = sub.add_parser("scan-jobs", help="List NetSniper scan orchestration jobs")
+    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--status", choices=sorted(SCAN_JOB_STATUSES))
+    p.add_argument("--scope")
     sub.add_parser("scopes")
     p = sub.add_parser("summary")
     p = sub.add_parser("snapshots"); p.add_argument("--limit", type=int, default=20); p.add_argument("--scope")
@@ -10040,6 +10260,7 @@ def main() -> int:
     try:
         if args.command in {None, "menu"}: return run_interactive_menu(args)
         if args.command == "ingest": return command_ingest(args)
+        if args.command == "scan-jobs": return command_scan_jobs(args)
         if args.command == "summary": return command_summary(args)
         if args.command == "scopes": return command_scopes(args)
         if args.command == "snapshots": return command_snapshots(args)
