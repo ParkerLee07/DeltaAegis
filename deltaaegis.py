@@ -5441,6 +5441,7 @@ def append_report_dashboard_usage_section(lines, scope=None):
 
     lines.append("- The dashboard remains read-only and is intended for local or trusted-access investigation.")
     lines.append("- Port behavior API: `/api/port-behavior?limit=25&lookback=5`")
+    lines.append("- Investigation Center API: `/api/investigation-center?limit=25`")
     lines.append("- Use the Asset Inventory table, asset selector, or clickable risk/event/alert subjects to open Asset Detail.")
     lines.append("")
 
@@ -5672,6 +5673,71 @@ def append_report_role_aware_recommendations_section(lines, risk_rows):
         lines.append("")
 
 
+
+def append_report_investigation_center_section(lines, investigation_rows):
+    lines.append("## Investigation Command Center")
+    lines.append("")
+    lines.append(
+        "This section summarizes the highest-priority investigation queue from the "
+        "same Command Center logic used by the dashboard and `investigation-center` CLI."
+    )
+    lines.append("")
+    lines.append(
+        "Queue priority combines current risk, open alerts, recent delta events, "
+        "MAC-port behavior, identity context, classification context, and recommended actions."
+    )
+    lines.append("")
+
+    rows = list(investigation_rows or [])
+
+    if not rows:
+        lines.append("No Investigation Command Center queue items matched this report scope.")
+        lines.append("")
+        return
+
+    lines.append("| Priority | Score | Subject | IP Address | MAC Address | Device / Role | Triggers | Why Review? | Recommended Action | Counts |")
+    lines.append("|---|---:|---|---|---|---|---|---|---|---|")
+
+    for row in rows:
+        role = row.get("role") or row.get("classification") or row.get("device_type") or "Unknown"
+        device = row.get("device_type") or "Unknown"
+
+        if device != role:
+            device_role = f"{device} / {role}"
+        else:
+            device_role = role
+
+        triggers = ", ".join(row.get("triggers") or []) or "-"
+        counts = (
+            f"alerts={int(row.get('open_alerts') or 0)}, "
+            f"events={int(row.get('recent_events') or 0)}, "
+            f"ports={int(row.get('port_behavior_count') or 0)}, "
+            f"findings={int(row.get('current_finding_count') or 0)}"
+        )
+
+        lines.append(
+            "| "
+            f"{safe_markdown(row.get('priority_level') or 'INFO')} | "
+            f"{safe_markdown(row.get('priority_score') or 0)} | "
+            f"`{safe_markdown(row.get('subject_key'))}` | "
+            f"`{safe_markdown(row.get('ip_address') or '-')}` | "
+            f"`{safe_markdown(row.get('mac_address') or '-')}` | "
+            f"{safe_markdown(device_role)} | "
+            f"{safe_markdown(triggers)} | "
+            f"{safe_markdown(row.get('primary_reason') or '-')} | "
+            f"{safe_markdown(row.get('recommended_action') or '-')} | "
+            f"`{safe_markdown(counts)}` |"
+        )
+
+    lines.append("")
+    lines.append(
+        "Use this queue as the starting point for review. The detailed Risk, "
+        "MAC-Port Behavior, Active Alerts, Delta Events, and Asset Inventory sections "
+        "provide supporting evidence for each item."
+    )
+    lines.append("")
+
+
 def append_report_risk_section(lines, risk_rows):
     lines.append("## Top Risk Subjects")
     lines.append("")
@@ -5821,6 +5887,12 @@ def command_report(args):
         lookback=5,
     )
 
+    report_investigation_center_rows = investigation_center_rows(
+        connection,
+        limit=args.risk_limit,
+        scope=scope,
+    )
+
     report_lifecycle_rows = report_asset_lifecycle_summary(
         connection,
         scope=scope,
@@ -5888,6 +5960,7 @@ def command_report(args):
     append_report_asset_lifecycle_section(lines, report_lifecycle_rows)
     append_report_classification_summary_section(lines, report_classification_summary)
     append_report_asset_inventory_section(lines, report_asset_rows, args.asset_limit)
+    append_report_investigation_center_section(lines, report_investigation_center_rows)
     append_report_risk_section(lines, report_risk_rows)
     append_report_port_behavior_section(lines, report_port_behavior_rows)
     append_report_role_aware_recommendations_section(lines, report_risk_rows)
