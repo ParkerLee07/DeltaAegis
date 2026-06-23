@@ -9891,6 +9891,129 @@ def dashboard_index_html():
       }
     }
 
+    /* v0.17 SIEM-style executive chart panels */
+    .siem-analytics-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .siem-chart-panel {
+      min-height: 300px;
+    }
+
+    .siem-chart-panel h3 {
+      margin: 0 0 4px;
+      font-size: 15px;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      color: #e2e8f0;
+    }
+
+    .siem-chart-subtitle {
+      margin: 0 0 16px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .siem-bar-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .siem-bar-row {
+      display: grid;
+      grid-template-columns: minmax(110px, 180px) minmax(0, 1fr) 48px;
+      gap: 10px;
+      align-items: center;
+      font-size: 13px;
+    }
+
+    .siem-bar-label {
+      color: #dbeafe;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .siem-bar-track {
+      height: 12px;
+      overflow: hidden;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.86);
+    }
+
+    .siem-bar-fill {
+      height: 100%;
+      min-width: 4px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #22d3ee, #3b82f6);
+      box-shadow: 0 0 18px rgba(34, 211, 238, 0.24);
+    }
+
+    .siem-bar-value {
+      color: #f8fafc;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      font-weight: 800;
+    }
+
+    .siem-donut-wrap {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      gap: 18px;
+      align-items: center;
+    }
+
+    .siem-donut {
+      width: 150px;
+      height: 150px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: conic-gradient(#22d3ee 0deg, #22d3ee 120deg, #3b82f6 120deg, #3b82f6 210deg, #a855f7 210deg, #a855f7 290deg, #f59e0b 290deg, #f59e0b 360deg);
+      box-shadow: 0 0 30px rgba(34, 211, 238, 0.12);
+    }
+
+    .siem-donut::after {
+      content: "";
+      width: 82px;
+      height: 82px;
+      border-radius: 50%;
+      background: #0f172a;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+    }
+
+    .siem-legend {
+      display: grid;
+      gap: 8px;
+      font-size: 13px;
+    }
+
+    .siem-legend-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: #cbd5e1;
+    }
+
+    .siem-legend-row strong {
+      color: #f8fafc;
+      font-variant-numeric: tabular-nums;
+    }
+
+    @media (max-width: 1100px) {
+      .siem-analytics-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .siem-donut-wrap {
+        grid-template-columns: 1fr;
+      }
+    }
+
   </style>
 </head>
 <body class="dashboard-shell-refresh-v017">
@@ -9911,16 +10034,16 @@ def dashboard_index_html():
     <div id="error" class="error"></div>
 
     <nav class="dashboard-tabs executive-tabs" aria-label="DeltaAegis dashboard sections">
-      <button type="button" class="tab-button" data-tab-target="overview">Overview</button>
-      <button type="button" class="tab-button" data-tab-target="command-center">Command Center</button>
+      <button type="button" class="tab-button" data-tab-target="overview">Executive</button>
+      <button type="button" class="tab-button" data-tab-target="command-center">Tickets</button>
       <button type="button" class="tab-button" data-tab-target="investigations">Investigations</button>
-      <button type="button" class="tab-button" data-tab-target="risk">Risk</button>
-      <button type="button" class="tab-button" data-tab-target="port-behavior">Port Behavior</button>
-      <button type="button" class="tab-button" data-tab-target="assets">Assets</button>
+      <button type="button" class="tab-button" data-tab-target="risk">Risk Analysis</button>
+      <button type="button" class="tab-button" data-tab-target="port-behavior">Network Activity</button>
+      <button type="button" class="tab-button" data-tab-target="assets">Taxonomy</button>
       <button type="button" class="tab-button" data-tab-target="intelligence">Intelligence</button>
-      <button type="button" class="tab-button" data-tab-target="events">Events</button>
-      <button type="button" class="tab-button" data-tab-target="alerts">Alerts</button>
-      <button type="button" class="tab-button" data-tab-target="scan-jobs">Scan Jobs</button>
+      <button type="button" class="tab-button" data-tab-target="events">Security Events</button>
+      <button type="button" class="tab-button" data-tab-target="alerts">Alarms</button>
+      <button type="button" class="tab-button" data-tab-target="scan-jobs">Data Sources</button>
     </nav>
 
     <section class="executive-overview" data-tab-panel="overview">
@@ -9947,7 +10070,7 @@ def dashboard_index_html():
     </section>
 
     <section class="card" data-tab-panel="command-center">
-      <h2>Investigation Command Center</h2>
+      <h2>Tickets: Investigation Queue</h2>
       <p class="muted">
         Prioritized analyst queue combining current risk, MAC-port behavior, open alerts,
         recent delta events, asset identity, classification, and recommended next action.
@@ -9985,6 +10108,32 @@ def dashboard_index_html():
 
     <section class="grid" id="metrics" data-tab-panel="overview"></section>
 
+    <section class="siem-analytics-grid" data-tab-panel="overview">
+      <div class="card siem-chart-panel">
+        <h3>Security Events: Top Categories</h3>
+        <p class="siem-chart-subtitle">Recent delta-event categories in the selected dashboard scope.</p>
+        <div id="chart-event-categories"></div>
+      </div>
+
+      <div class="card siem-chart-panel">
+        <h3>Risk Analysis: Priority Distribution</h3>
+        <p class="siem-chart-subtitle">Current-risk level distribution from the latest accepted snapshot.</p>
+        <div id="chart-risk-levels"></div>
+      </div>
+
+      <div class="card siem-chart-panel">
+        <h3>Taxonomy: Asset Classification Mix</h3>
+        <p class="siem-chart-subtitle">Top observed device classifications from the current asset inventory.</p>
+        <div id="chart-classification-mix"></div>
+      </div>
+
+      <div class="card siem-chart-panel">
+        <h3>Network Activity: MAC-Port Behavior</h3>
+        <p class="siem-chart-subtitle">MAC-backed port behavior changes across accepted scans.</p>
+        <div id="chart-port-behavior"></div>
+      </div>
+    </section>
+
     <section class="card" data-tab-panel="overview">
       <h2>Network Scopes</h2>
       <p class="muted">Choose which subnet scope the dashboard should display. Deltas are only meaningful inside the same network scope.</p>
@@ -10006,7 +10155,7 @@ def dashboard_index_html():
 
 
     <section class="card" data-tab-panel="scan-jobs">
-      <h2>Scan Jobs</h2>
+      <h2>Data Sources: Scan Jobs</h2>
       <p class="muted">
         Read-only NetSniper scan orchestration history. Start scans from the CLI with
         <code>deltaaegis scan-start --target &lt;private-cidr&gt;</code>.
@@ -10028,7 +10177,7 @@ def dashboard_index_html():
     </section>
 
     <section class="card" data-tab-panel="assets">
-      <h2>Asset Inventory</h2>
+      <h2>Taxonomy: Asset Inventory</h2>
       <p class="muted">Current scoped asset lifecycle view. Use the scope selector above to isolate a subnet.</p>
       <table>
         <thead>
@@ -10111,7 +10260,7 @@ def dashboard_index_html():
     </section>
 
     <section class="card" data-tab-panel="events">
-      <h2>Recent Delta Events</h2>
+      <h2>Security Events</h2>
       <table>
         <thead>
           <tr><th>ID</th><th>Scan</th><th>Baseline</th><th>Severity</th><th>Type</th><th>Subject</th><th>IP</th><th>MAC</th><th>Identity</th><th>Created</th><th>Summary</th></tr>
@@ -10121,7 +10270,7 @@ def dashboard_index_html():
     </section>
 
     <section class="card" data-tab-panel="alerts">
-      <h2>Recent Alerts</h2>
+      <h2>Alarms</h2>
       <table>
         <thead>
           <tr><th>ID</th><th>Status</th><th>Severity</th><th>Subject</th><th>Type</th><th>IP</th><th>MAC</th><th>Identity</th><th>Summary</th></tr>
@@ -10378,6 +10527,128 @@ def dashboard_index_html():
       if (!Number.isFinite(number)) return "0%";
       return `${Math.round(number * 100)}%`;
     }
+
+
+    function countBy(items, keyFn) {
+      const counts = new Map();
+
+      (Array.isArray(items) ? items : []).forEach(item => {
+        const key = keyFn(item) || "Unknown";
+        counts.set(key, (counts.get(key) || 0) + 1);
+      });
+
+      return Array.from(counts.entries())
+        .map(([label, value]) => ({label, value}))
+        .sort((a, b) => b.value - a.value || String(a.label).localeCompare(String(b.label)));
+    }
+
+    function renderHorizontalBars(targetId, rows, emptyMessage, limit = 8) {
+      const target = document.getElementById(targetId);
+      if (!target) return;
+
+      const items = (Array.isArray(rows) ? rows : [])
+        .filter(row => Number(row.value || 0) > 0)
+        .slice(0, limit);
+
+      if (!items.length) {
+        target.innerHTML = `<p class="muted">${esc(emptyMessage || "No chart data available.")}</p>`;
+        return;
+      }
+
+      const maxValue = Math.max(...items.map(row => Number(row.value || 0)), 1);
+
+      target.innerHTML = `
+        <div class="siem-bar-list">
+          ${items.map(row => {
+            const value = Number(row.value || 0);
+            const width = Math.max(4, Math.round((value / maxValue) * 100));
+            return `
+              <div class="siem-bar-row">
+                <div class="siem-bar-label" title="${esc(row.label)}">${esc(row.label)}</div>
+                <div class="siem-bar-track">
+                  <div class="siem-bar-fill" style="width: ${width}%"></div>
+                </div>
+                <div class="siem-bar-value">${esc(value)}</div>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      `;
+    }
+
+    function renderDistributionPanel(targetId, rows, emptyMessage) {
+      const target = document.getElementById(targetId);
+      if (!target) return;
+
+      const items = (Array.isArray(rows) ? rows : [])
+        .filter(row => Number(row.value || 0) > 0)
+        .slice(0, 6);
+
+      if (!items.length) {
+        target.innerHTML = `<p class="muted">${esc(emptyMessage || "No distribution data available.")}</p>`;
+        return;
+      }
+
+      const total = items.reduce((sum, row) => sum + Number(row.value || 0), 0);
+
+      target.innerHTML = `
+        <div class="siem-donut-wrap">
+          <div class="siem-donut" aria-hidden="true"></div>
+          <div class="siem-legend">
+            ${items.map(row => {
+              const value = Number(row.value || 0);
+              const percent = total ? Math.round((value / total) * 100) : 0;
+              return `
+                <div class="siem-legend-row">
+                  <span>${esc(row.label)}</span>
+                  <strong>${esc(value)} · ${esc(percent)}%</strong>
+                </div>
+              `;
+            }).join("")}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderExecutiveCharts(summary, currentRisk, portBehavior, investigationCenter, assets, events, alerts) {
+      const eventRows = countBy(events, row => row.event_type || row.type || row.severity || "Unknown event");
+      const riskRows = countBy(currentRisk, row => row.level || "INFO");
+      const classificationRows = countBy(assets, row =>
+        row.classification_display_type ||
+        row.classification ||
+        row.device_type ||
+        "Unknown"
+      );
+      const portRows = countBy(portBehavior, row => row.behavior || row.severity || "No port behavior");
+
+      renderHorizontalBars(
+        "chart-event-categories",
+        eventRows,
+        "No recent security events matched this scope.",
+        8
+      );
+
+      renderDistributionPanel(
+        "chart-risk-levels",
+        riskRows,
+        "No current-risk subjects are available for this scope."
+      );
+
+      renderHorizontalBars(
+        "chart-classification-mix",
+        classificationRows,
+        "No asset classification data is available for this scope.",
+        8
+      );
+
+      renderHorizontalBars(
+        "chart-port-behavior",
+        portRows,
+        "No MAC-port behavior changes were detected for this scope.",
+        8
+      );
+    }
+
 
     function renderCurrentState(state) {
       const target = document.getElementById("current-state");
@@ -11837,6 +12108,7 @@ def dashboard_index_html():
         renderAnnotations(annotations);
         renderClassificationSummary(summary);
         renderRecommendations(summary, scanContext, historicalRisk);
+        renderExecutiveCharts(summary, currentRisk, portBehavior, investigationCenter, assets, events, alerts);
         applyDashboardTabState();
       } catch (error) {
         const box = document.getElementById("error");
