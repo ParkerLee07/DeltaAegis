@@ -7245,6 +7245,267 @@ def dashboard_annotations_payload(connection, limit, scope=None):
         scope=scope,
     )
 
+
+def build_current_risk_register(connection, limit, scope=None):
+    snapshot = dashboard_latest_accepted_snapshot(connection, scope=scope)
+
+    if snapshot is None:
+        return []
+
+    scan_id = snapshot["scan_id"]
+
+    asset_rows = connection.execute(
+        """
+        SELECT
+            asset_key,
+            identity_class,
+            identity_confidence,
+            identity_source,
+            ip_address,
+            mac_address,
+            vendor,
+            hostname,
+            device_type,
+            severity,
+            score,
+            classification_primary_type,
+            classification_confidence,
+            classification_decision,
+            classification_siem_action,
+            classification_contradiction_count
+        FROM asset_observations
+        WHERE scan_id = ?
+        """,
+        (scan_id,),
+    ).fetchall()
+
+    services = {}
+    for row in connection.execute(
+        """
+        SELECT asset_key, protocol, port, service_name
+        FROM service_observations
+        WHERE scan_id = ?
+        ORDER BY asset_key, protocol, port
+        """,
+        (scan_id,),
+    ).fetchall():
+        services.setdefault(row["asset_key"], []).append(row)
+
+    findings = {}
+    for row in connection.execute(
+        """
+        SELECT asset_key, COUNT(*) AS finding_count, MAX(score) AS max_score
+        FROM finding_observations
+        WHERE scan_id = ?
+        GROUP BY asset_key
+        """,
+        (scan_id,),
+    ).fetchall():
+        findings[row["asset_key"]] = row
+
+    open_alert_rows = connection.execute(
+        """
+        SELECT alert_id, severity, subject_key, summary, last_seen_at
+        FROM alerts
+        WHERE status = 'OPEN'
+        ORDER BY alert_id DESC
+        LIMIT 500
+        """
+    ).fetchall()
+
+    high_signal_ports = {
+        21, 22, 23, 80, 443, 445, 554, 631, 2375, 2376, 3389,
+        5000, 5900, 6379, 8000, 8080, 8081, 8443, 9000, 9090,
+        9100, 9200, 9443, 10250, 10255, 27017,
+    }
+
+    rows = []
+
+    for asset in asset_rows:
+        asset_key = asset["asset_key"]
+        record = risk_subject_record(asset_key)
+
+        record["current_scan_id"] = scan_id
+        record["risk_scope"] = "current"
+        record["ip_address"] = asset["ip_address"]
+        record["mac_address"] = asset["mac_address"]
+        record["identity_confidence"] = asset["identity_confidence"]
+        record["identity_source"] = asset["identity_source"]
+        record["identity_class"] = asset["identity_class"]
+        record["device_type"] = asset["device_type"]
+        record["classification"] = asset["classification_primary_type"]
+        record["classification_confidence"] = int(asset["classification_confidence"] or 0)
+        record["classification_decision"] = asset["classification_decision"]
+        record["classification_siem_action"] = asset["classification_siem_action"]
+
+        score = 0
+        asset_services = services.get(asset_key, [])
+        asset_findings = findings.get(asset_key)
+
+        severity = str(asset["severity"] or "INFO").upper()
+        severity_points = RISK_SEVERITY_POINTS.get(severity, 0)
+
+        if severity_points and severity not in {"INFO"}:
+            score += min(25, severity_points)
+            risk_add_reason(
+                record["reasons"],
+                f"Current asset severity {severity}: +{min(25, severity_points)}",
+            )
+
+        asset_score = safe_int(asset["score"]) or 0
+
+        if asset_score > 0:
+            points = min(35, asset_score)
+            score += points
+            risk_add_reason(record["reasons"], f"Current NetSniper score {asset_score}: +{points}")
+
+        if asset_findings is not None:
+            finding_count = int(asset_findings["finding_count"] or 0)
+            max_finding_score = safe_int(asset_findings["max_score"]) or 0
+
+            if finding_count:
+                points = min(30, finding_count * 10)
+                score += points
+                risk_add_reason(record["reasons"], f"{finding_count} current finding(s): +{points}")
+
+            if max_finding_score:
+                points = min(20, max_finding_score)
+                score += points
+                risk_add_reason(record["reasons"], f"Max current finding score {max_finding_score}: +{points}")
+
+        open_ports = []
+        signal_ports = []
+
+        for service in asset_services:
+            port = int(service["port"] or 0)
+            protocol = str(service["protocol"] or "tcp").lower()
+            open_ports.append(f"{protocol}/{port}")
+
+            if port in high_signal_ports:
+                signal_ports.append(f"{protocol}/{port}")
+
+        if signal_ports:
+            points = min(25, len(signal_ports) * 5)
+            score += points
+            risk_add_reason(
+                record["reasons"],
+                f"Current exposed monitored service(s) {', '.join(signal_ports[:6])}: +{points}",
+            )
+
+        classification_action = str(asset["classification_siem_action"] or "").lower()
+        classification_decision = str(asset["classification_decision"] or "").lower()
+        classification_type = str(asset["classification_primary_type"] or "Unknown")
+        contradiction_count = int(asset["classification_contradiction_count"] or 0)
+
+        if classification_action == "alert_eligible":
+            score += 15
+            risk_add_reason(record["reasons"], "Current classification is alert eligible: +15")
+        elif classification_action == "review_queue":
+            score += 8
+            risk_add_reason(record["reasons"], "Current classification is in review queue: +8")
+
+        if contradiction_count:
+            points = min(20, contradiction_count * 10)
+            score += points
+            risk_add_reason(record["reasons"], f"Current classification contradiction(s): +{points}")
+
+        if (
+            asset_services
+            and classification_type in {"", "Unknown", "Unknown / Ambiguous"}
+            and classification_decision in {"", "unknown", "possible"}
+        ):
+            score += 5
+            risk_add_reason(record["reasons"], "Current unknown asset has exposed monitored service(s): +5")
+
+        asset_ip = str(asset["ip_address"] or "")
+        asset_mac = str(asset["mac_address"] or "").lower()
+
+        for alert in open_alert_rows:
+            subject = str(alert["subject_key"] or "")
+            subject_lower = subject.lower()
+
+            if (
+                subject == asset_key
+                or subject.startswith(asset_key)
+                or (asset_ip and asset_ip in subject)
+                or (asset_mac and asset_mac in subject_lower)
+            ):
+                record["open_alerts"] += 1
+                severity = str(alert["severity"] or "INFO").upper()
+                risk_add_reason(record["reasons"], f"Open current-context {severity} alert present")
+
+        if record["open_alerts"]:
+            points = min(50, record["open_alerts"] * 25)
+            score += points
+            risk_add_reason(record["reasons"], f"{record['open_alerts']} open alert(s): +{points}")
+
+        annotation_match = fetch_risk_annotation(connection, asset_key)
+
+        if annotation_match is not None:
+            annotation, matched_key = annotation_match
+            record["annotation_key"] = matched_key
+            record["owner"] = annotation["owner"]
+            record["role"] = annotation["role"]
+            record["criticality"] = annotation["criticality"]
+            record["notes"] = annotation["notes"]
+
+            criticality = str(annotation["criticality"] or "").upper()
+            criticality_points = RISK_CRITICALITY_POINTS.get(criticality, 0)
+
+            if criticality_points:
+                score += criticality_points
+                risk_add_reason(
+                    record["reasons"],
+                    f"Asset criticality {criticality}: +{criticality_points}",
+                )
+
+        record["score"] = min(100, score)
+        record["level"] = risk_level(record["score"])
+        record["open_ports"] = open_ports
+        record["current_service_count"] = len(asset_services)
+        record["current_finding_count"] = (
+            int(asset_findings["finding_count"] or 0)
+            if asset_findings is not None
+            else 0
+        )
+        record["recommended_actions"] = risk_role_recommended_actions(record)
+
+        if record["score"] > 0 or record["open_alerts"] or record["current_finding_count"]:
+            rows.append(record)
+
+    rows = sorted(
+        rows,
+        key=lambda row: (
+            row["score"],
+            row["open_alerts"],
+            row.get("current_finding_count", 0),
+            row["subject_key"],
+        ),
+        reverse=True,
+    )
+
+    if limit is not None:
+        rows = rows[:limit]
+
+    return rows
+
+
+def dashboard_current_risk_payload(connection, limit, scope=None):
+    try:
+        return build_current_risk_register(connection, limit, scope=scope)
+    except Exception as exc:
+        return [
+            {
+                "subject_key": "current-risk-error",
+                "score": 0,
+                "level": "INFO",
+                "risk_scope": "current",
+                "reasons": [f"Current risk unavailable: {exc}"],
+            }
+        ]
+
+
+
 def dashboard_risk_payload(connection, limit, scope=None):
     try:
         return build_risk_register(connection, limit, scope=scope)
@@ -7768,12 +8029,22 @@ def dashboard_index_html():
     </section>
 
     <section class="card" data-tab-panel="risk">
-      <h2>Top Risk Subjects</h2>
+      <h2>Current Risk Subjects</h2>
+      <p class="muted">Current risk is limited to assets present in the latest accepted snapshot for the selected scope.</p>
+      <table>
+        <thead>
+          <tr><th>Level</th><th>Score</th><th>Subject</th><th>IP</th><th>MAC</th><th>Identity</th><th>Owner</th><th>Role</th><th>Open Alerts</th><th>Current Findings</th><th>Primary Reason</th></tr>
+        </thead>
+        <tbody id="risk-body"></tbody>
+      </table>
+
+      <h3>Historical Risk Context</h3>
+      <p class="muted">Historical context is based on past delta events and alerts. It may include assets that are not present in the latest accepted snapshot.</p>
       <table>
         <thead>
           <tr><th>Level</th><th>Score</th><th>Subject</th><th>IP</th><th>MAC</th><th>Identity</th><th>Owner</th><th>Role</th><th>Open Alerts</th><th>Events</th><th>Primary Reason</th></tr>
         </thead>
-        <tbody id="risk-body"></tbody>
+        <tbody id="historical-risk-body"></tbody>
       </table>
     </section>
 
@@ -8819,39 +9090,63 @@ def dashboard_index_html():
       });
     }
 
+    function riskRowsHtml(rows, emptyMessage, currentMode) {
+      if (!rows || !rows.length) {
+        return `<tr><td colspan="11">${esc(emptyMessage)}</td></tr>`;
+      }
+
+      return rows.map(row => {
+        const reasons = Array.isArray(row.reasons) ? row.reasons : [];
+        const primaryReason = reasons.length ? reasons[0] : "-";
+        const countColumn = currentMode
+          ? (row.current_finding_count ?? 0)
+          : (row.event_count ?? 0);
+
+        return `
+          <tr>
+            <td class="severity-${esc(row.level || "").toLowerCase()}">${esc(row.level || "-")}</td>
+            <td>${esc(row.score ?? "-")}</td>
+            <td>${subjectButton(row.subject_key || "-")}</td>
+            <td>${esc(row.ip_address || row.ip || "-")}</td>
+            <td>${esc(row.mac_address || row.mac || "-")}</td>
+            <td>${esc(row.identity_confidence || row.identity_state || "-")}</td>
+            <td>${esc(row.owner || "-")}</td>
+            <td>${esc(row.role || row.classification || "-")}</td>
+            <td>${esc(row.open_alerts ?? 0)}</td>
+            <td>${esc(countColumn)}</td>
+            <td>${esc(primaryReason)}</td>
+          </tr>
+        `;
+      }).join("");
+    }
+
     function renderRisk(rows) {
-  const tbody = document.getElementById("risk-body");
+      const tbody = document.getElementById("risk-body");
 
-  if (!tbody) return;
+      if (!tbody) return;
 
-  if (!rows || !rows.length) {
-    tbody.innerHTML = `<tr><td colspan="11">No risk subjects calculated for the current dashboard scope.</td></tr>`;
-    return;
-  }
+      tbody.innerHTML = riskRowsHtml(
+        rows,
+        "No current risk subjects calculated for the latest accepted snapshot.",
+        true
+      );
 
-  tbody.innerHTML = rows.map(row => {
-    const reasons = Array.isArray(row.reasons) ? row.reasons : [];
-    const primaryReason = reasons.length ? reasons[0] : "-";
+      bindSubjectLinks(tbody);
+    }
 
-    return `
-      <tr>
-        <td class="severity-${esc(row.level || "").toLowerCase()}">${esc(row.level || "-")}</td>
-        <td>${esc(row.score ?? "-")}</td>
-        <td>${subjectButton(row.subject_key || "-")}</td>
-        <td>${esc(row.ip_address || row.ip || "-")}</td>
-        <td>${esc(row.mac_address || row.mac || "-")}</td>
-        <td>${esc(row.identity_confidence || row.identity_state || "-")}</td>
-        <td>${esc(row.owner || "-")}</td>
-        <td>${esc(row.role || row.classification || "-")}</td>
-        <td>${esc(row.open_alerts ?? 0)}</td>
-        <td>${esc(row.event_count ?? 0)}</td>
-        <td>${esc(primaryReason)}</td>
-      </tr>
-    `;
-  }).join("");
+    function renderHistoricalRisk(rows) {
+      const tbody = document.getElementById("historical-risk-body");
 
-  bindSubjectLinks(tbody);
-}
+      if (!tbody) return;
+
+      tbody.innerHTML = riskRowsHtml(
+        rows,
+        "No historical risk context matched the current dashboard scope.",
+        false
+      );
+
+      bindSubjectLinks(tbody);
+    }
 
     function renderEvents(rows) {
   const tbody = document.getElementById("events-body");
@@ -9231,12 +9526,13 @@ def dashboard_index_html():
       try {
         setupDashboardTabs();
 
-        const [scopes, summary, scanContext, currentState, assets, risk, events, alerts, annotations] = await Promise.all([
+        const [scopes, summary, scanContext, currentState, assets, currentRisk, historicalRisk, events, alerts, annotations] = await Promise.all([
           api("/api/scopes"),
           api(scopedPath("/api/summary")),
           api(scopedPath("/api/scan-context")),
           api(scopedPath("/api/current-state")),
           api(scopedPath("/api/assets?limit=25")),
+          api(scopedPath("/api/current-risk?limit=10")),
           api(scopedPath("/api/risk?limit=10")),
           api(scopedPath("/api/events?limit=20")),
           api(scopedPath("/api/alerts?limit=20")),
@@ -9248,12 +9544,13 @@ def dashboard_index_html():
         renderCurrentState(currentState);
         renderScanContext(scanContext);
         renderAssets(assets);
-        renderRisk(risk);
+        renderRisk(currentRisk);
+        renderHistoricalRisk(historicalRisk);
         renderEvents(events);
         renderAlerts(alerts);
         renderAnnotations(annotations);
         renderClassificationSummary(summary);
-        renderRecommendations(summary, scanContext, risk);
+        renderRecommendations(summary, scanContext, historicalRisk);
         applyDashboardTabState();
       } catch (error) {
         const box = document.getElementById("error");
@@ -9435,6 +9732,8 @@ def command_dashboard(args):
                     dashboard_json_response(self, dashboard_events_payload(connection, limit, scope=scope))
                 elif route == "/api/alerts":
                     dashboard_json_response(self, dashboard_alerts_payload(connection, limit, scope=scope))
+                elif route == "/api/current-risk":
+                    dashboard_json_response(self, dashboard_current_risk_payload(connection, limit, scope=scope))
                 elif route == "/api/risk":
                     dashboard_json_response(self, dashboard_risk_payload(connection, limit, scope=scope))
                 elif route == "/api/annotations":

@@ -25,8 +25,10 @@ grep -q 'function renderCurrentState(state)' deltaaegis.py \
 grep -q 'api(scopedPath("/api/current-state"))' deltaaegis.py \
     || fail "Dashboard does not fetch /api/current-state"
 
-grep -Fq 'const [scopes, summary, scanContext, currentState, assets, risk, events, alerts, annotations]' deltaaegis.py \
-    || fail "Dashboard Promise unpack does not include currentState in the correct position"
+if ! grep -Fq 'const [scopes, summary, scanContext, currentState, assets, risk, events, alerts, annotations]' deltaaegis.py \
+   && ! grep -Fq 'const [scopes, summary, scanContext, currentState, assets, currentRisk, historicalRisk, events, alerts, annotations]' deltaaegis.py; then
+    fail "Dashboard Promise unpack does not include currentState in a supported position"
+fi
 
 grep -q 'renderCurrentState(currentState)' deltaaegis.py \
     || fail "Dashboard does not render currentState"
