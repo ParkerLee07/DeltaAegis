@@ -6500,6 +6500,140 @@ def dashboard_scan_context_payload(connection, scope=None):
         "delta_scan_pairs": dashboard_delta_scan_pairs(connection, 10, scope=scope),
     }
 
+
+def dashboard_latest_accepted_snapshot(connection, scope=None):
+    params = []
+    where = "WHERE quality_status = 'ACCEPTED'"
+
+    if scope:
+        where += " AND network_scope = ?"
+        params.append(scope)
+
+    try:
+        row = connection.execute(
+            f"""
+            SELECT *
+            FROM snapshots
+            {where}
+            ORDER BY imported_at DESC, created_at DESC, scan_id DESC
+            LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
+    except Exception:
+        return None
+
+    return dict(row) if row is not None else None
+
+
+def dashboard_current_state_payload(connection, scope=None):
+    snapshot = dashboard_latest_accepted_snapshot(connection, scope=scope)
+
+    if snapshot is None:
+        return {
+            "available": False,
+            "selected_scope": scope,
+            "message": "No accepted snapshot is available for the selected scope.",
+        }
+
+    scan_id = snapshot["scan_id"]
+
+    asset_row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM asset_observations
+        WHERE scan_id = ?
+        """,
+        (scan_id,),
+    ).fetchone()
+
+    intelligence_row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM netsniper_intelligence_hosts
+        WHERE scan_id = ?
+        """,
+        (scan_id,),
+    ).fetchone()
+
+    service_row = connection.execute(
+        """
+        SELECT COUNT(DISTINCT asset_key) AS count
+        FROM service_observations
+        WHERE scan_id = ?
+        """,
+        (scan_id,),
+    ).fetchone()
+
+    summary = connection.execute(
+        """
+        SELECT
+            host_count,
+            classified_count,
+            possible_or_review_count,
+            unknown_count,
+            contradiction_host_count,
+            false_confidence_candidate_count,
+            unknown_with_exposed_services_count
+        FROM netsniper_intelligence_summaries
+        WHERE scan_id = ?
+        """,
+        (scan_id,),
+    ).fetchone()
+
+    assets = int(asset_row["count"] or 0) if asset_row else 0
+    intelligence_hosts = int(intelligence_row["count"] or 0) if intelligence_row else 0
+    service_observed_assets = int(service_row["count"] or 0) if service_row else 0
+    discovery_only_assets = max(0, assets - service_observed_assets)
+
+    if summary is not None:
+        classified = int(summary["classified_count"] or 0)
+        possible_or_review = int(summary["possible_or_review_count"] or 0)
+        unknown = int(summary["unknown_count"] or 0)
+        contradiction_hosts = int(summary["contradiction_host_count"] or 0)
+        false_confidence_candidates = int(summary["false_confidence_candidate_count"] or 0)
+        unknown_with_exposed_services = int(summary["unknown_with_exposed_services_count"] or 0)
+        summary_host_count = int(summary["host_count"] or 0)
+    else:
+        classified = 0
+        possible_or_review = 0
+        unknown = 0
+        contradiction_hosts = 0
+        false_confidence_candidates = 0
+        unknown_with_exposed_services = 0
+        summary_host_count = 0
+
+    return {
+        "available": True,
+        "selected_scope": scope,
+        "scan_id": scan_id,
+        "target": snapshot["target"],
+        "network_scope": snapshot.get("network_scope"),
+        "created_at": snapshot.get("created_at"),
+        "imported_at": snapshot.get("imported_at"),
+        "scanner_version": snapshot.get("scanner_version"),
+        "scan_profile": snapshot.get("scan_profile"),
+        "quality_status": snapshot.get("quality_status"),
+        "hosts_up": int(snapshot["hosts_up"] or 0),
+        "hosts_total": int(snapshot["hosts_total"] or 0),
+        "mac_backed_assets": int(snapshot["mac_backed_assets"] or 0),
+        "identity_coverage": float(snapshot["identity_coverage"] or 0.0),
+        "assets": assets,
+        "intelligence_hosts": intelligence_hosts,
+        "service_observed_assets": service_observed_assets,
+        "discovery_only_or_no_open_service_assets": discovery_only_assets,
+        "summary_host_count": summary_host_count,
+        "classified": classified,
+        "possible_or_review": possible_or_review,
+        "unknown": unknown,
+        "contradiction_hosts": contradiction_hosts,
+        "false_confidence_candidates": false_confidence_candidates,
+        "unknown_with_exposed_services": unknown_with_exposed_services,
+        "snapshot": dashboard_enrich_snapshot(connection, snapshot),
+    }
+
+
+
 def dashboard_assets_payload(connection, limit, scope=None, state=None, identity=None):
     clauses = []
     params = []
@@ -9027,6 +9161,7 @@ def dashboard_index_html():
           api("/api/scopes"),
           api(scopedPath("/api/summary")),
           api(scopedPath("/api/scan-context")),
+          api(scopedPath("/api/current-state")),
           api(scopedPath("/api/assets?limit=25")),
           api(scopedPath("/api/risk?limit=10")),
           api(scopedPath("/api/events?limit=20")),
@@ -9186,6 +9321,8 @@ def command_dashboard(args):
                     dashboard_json_response(self, dashboard_summary_payload(connection, scope=scope))
                 elif route == "/api/scan-context":
                     dashboard_json_response(self, dashboard_scan_context_payload(connection, scope=scope))
+                elif route == "/api/current-state":
+                    dashboard_json_response(self, dashboard_current_state_payload(connection, scope=scope))
                 elif route == "/api/assets":
                     dashboard_json_response(
                         self,
