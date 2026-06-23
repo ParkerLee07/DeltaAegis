@@ -9445,6 +9445,29 @@ def dashboard_index_html():
       color: #bbf7d0;
     }
 
+    .command-center-trigger {
+      display: inline-block;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 2px 8px;
+      margin: 2px;
+      background: var(--panel2);
+      color: #bfdbfe;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .command-center-reason {
+      max-width: 520px;
+      color: var(--text);
+    }
+
+    .command-center-action {
+      max-width: 520px;
+      color: #bbf7d0;
+    }
+
   </style>
 </head>
 <body>
@@ -9458,6 +9481,7 @@ def dashboard_index_html():
 
     <nav class="dashboard-tabs" aria-label="DeltaAegis dashboard sections">
       <button type="button" class="tab-button" data-tab-target="overview">Overview</button>
+      <button type="button" class="tab-button" data-tab-target="command-center">Command Center</button>
       <button type="button" class="tab-button" data-tab-target="investigations">Investigations</button>
       <button type="button" class="tab-button" data-tab-target="risk">Risk</button>
       <button type="button" class="tab-button" data-tab-target="port-behavior">Port Behavior</button>
@@ -9467,6 +9491,31 @@ def dashboard_index_html():
       <button type="button" class="tab-button" data-tab-target="alerts">Alerts</button>
       <button type="button" class="tab-button" data-tab-target="scan-jobs">Scan Jobs</button>
     </nav>
+
+    <section class="card" data-tab-panel="command-center">
+      <h2>Investigation Command Center</h2>
+      <p class="muted">
+        Prioritized analyst queue combining current risk, MAC-port behavior, open alerts,
+        recent delta events, asset identity, classification, and recommended next action.
+      </p>
+      <div id="investigation-center-summary" class="grid"></div>
+      <table>
+        <thead>
+          <tr>
+            <th>Priority</th>
+            <th>Subject</th>
+            <th>IP</th>
+            <th>MAC</th>
+            <th>Device / Role</th>
+            <th>Triggers</th>
+            <th>Why Review?</th>
+            <th>Recommended Action</th>
+            <th>Counts</th>
+          </tr>
+        </thead>
+        <tbody id="investigation-center-body"></tbody>
+      </table>
+    </section>
 
     <section class="card explain" data-tab-panel="overview">
       <h2>What am I looking at?</h2>
@@ -9699,6 +9748,7 @@ def dashboard_index_html():
 
     const DASHBOARD_TABS = [
       "overview",
+      "command-center",
       "investigations",
       "risk",
       "port-behavior",
@@ -10825,6 +10875,77 @@ def dashboard_index_html():
     }
 
 
+
+    function renderInvestigationCenter(payload) {
+      const summaryBox = document.getElementById("investigation-center-summary");
+      const tbody = document.getElementById("investigation-center-body");
+      const items = payload && Array.isArray(payload.items) ? payload.items : [];
+      const summary = payload && payload.summary ? payload.summary : {};
+
+      if (summaryBox) {
+        summaryBox.innerHTML = [
+          ["Queue Items", payload && payload.item_count !== undefined ? payload.item_count : items.length],
+          ["Critical", summary.critical || 0],
+          ["High", summary.high || 0],
+          ["With Open Alerts", summary.with_open_alerts || 0],
+          ["With Port Behavior", summary.with_port_behavior || 0]
+        ].map(([label, value]) => `
+          <div class="metric">
+            <div class="label">${esc(label)}</div>
+            <div class="value">${esc(value)}</div>
+          </div>
+        `).join("");
+      }
+
+      if (!tbody) return;
+
+      if (!items.length) {
+        const message = payload && payload.available === false
+          ? (payload.error || "Investigation Command Center is unavailable.")
+          : "No investigation queue items matched the selected scope.";
+        tbody.innerHTML = `<tr><td colspan="9" class="muted">${esc(message)}</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = items.map(row => {
+        const triggers = Array.isArray(row.triggers) && row.triggers.length
+          ? row.triggers.map(trigger => `<span class="command-center-trigger">${esc(trigger)}</span>`).join(" ")
+          : "-";
+
+        const counts = [
+          `alerts=${esc(row.open_alerts || 0)}`,
+          `events=${esc(row.recent_events || 0)}`,
+          `ports=${esc(row.port_behavior_count || 0)}`,
+          `findings=${esc(row.current_finding_count || 0)}`
+        ].join(" ");
+
+        const role = row.role || row.classification || row.device_type || "Unknown";
+        const device = row.device_type && row.device_type !== role
+          ? `${esc(row.device_type)} / ${esc(role)}`
+          : esc(role);
+
+        return `
+          <tr>
+            <td class="severity-${esc(String(row.priority_level || "info").toLowerCase())}">
+              ${esc(row.priority_level || "INFO")}<br>
+              <span class="muted">${esc(row.priority_score || 0)}</span>
+            </td>
+            <td>${subjectButton(row.subject_key || "-")}</td>
+            <td><code>${esc(row.ip_address || "-")}</code></td>
+            <td><code>${esc(row.mac_address || "-")}</code></td>
+            <td>${device}</td>
+            <td>${triggers}</td>
+            <td class="command-center-reason">${esc(row.primary_reason || "-")}</td>
+            <td class="command-center-action">${esc(row.recommended_action || "-")}</td>
+            <td><code>${counts}</code></td>
+          </tr>
+        `;
+      }).join("");
+
+      bindSubjectLinks(tbody);
+    }
+
+
     function renderRisk(rows) {
       const tbody = document.getElementById("risk-body");
 
@@ -11231,11 +11352,12 @@ def dashboard_index_html():
       try {
         setupDashboardTabs();
 
-        const [scopes, summary, scanContext, currentState, scanJobs, assets, currentRisk, historicalRisk, portBehavior, events, alerts, annotations] = await Promise.all([
+        const [scopes, summary, scanContext, currentState, investigationCenter, scanJobs, assets, currentRisk, historicalRisk, portBehavior, events, alerts, annotations] = await Promise.all([
           api("/api/scopes"),
           api(scopedPath("/api/summary")),
           api(scopedPath("/api/scan-context")),
           api(scopedPath("/api/current-state")),
+          api(scopedPath("/api/investigation-center?limit=25")),
           api(scopedPath("/api/scan-jobs?limit=10")),
           api(scopedPath("/api/assets?limit=25")),
           api(scopedPath("/api/current-risk?limit=10")),
@@ -11249,6 +11371,7 @@ def dashboard_index_html():
         renderScopes(scopes);
         renderMetrics(summary);
         renderCurrentState(currentState);
+        renderInvestigationCenter(investigationCenter);
         renderScanContext(scanContext);
         renderScanJobs(scanJobs);
         renderAssets(assets);
