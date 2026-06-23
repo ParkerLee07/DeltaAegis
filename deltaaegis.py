@@ -7720,6 +7720,12 @@ def dashboard_index_html():
     </section>
 
     <section class="card" data-tab-panel="overview">
+      <h2>Current Network State</h2>
+      <p class="muted">Latest accepted snapshot for the selected scope. These cards are current-state inventory and intelligence numbers, not historical totals.</p>
+      <div id="current-state"></div>
+    </section>
+
+    <section class="card" data-tab-panel="overview">
       <h2>NetSniper Scan Context</h2>
       <p class="muted">Shows the latest NetSniper scan, the baseline scan used for delta comparison, and identity coverage for MAC/IP tracking.</p>
       <div class="scan-grid" id="scan-context"></div>
@@ -8028,6 +8034,74 @@ def dashboard_index_html():
     function metric(label, value) {
       return `<div class="card"><div class="label">${esc(label)}</div><div class="metric">${esc(value)}</div></div>`;
     }
+
+    function formatPercent(value) {
+      const number = Number(value || 0);
+      if (!Number.isFinite(number)) return "0%";
+      return `${Math.round(number * 100)}%`;
+    }
+
+    function renderCurrentState(state) {
+      const target = document.getElementById("current-state");
+
+      if (!target) return;
+
+      if (!state || !state.available) {
+        target.innerHTML = `<p class="muted">${esc((state && state.message) || "No accepted current-state snapshot is available for this scope.")}</p>`;
+        return;
+      }
+
+      target.innerHTML = `
+        <div class="cards">
+          <div class="card">
+            <div class="label">Current Assets</div>
+            <div class="metric">${esc(state.assets || 0)}</div>
+          </div>
+          <div class="card">
+            <div class="label">Intelligence Hosts</div>
+            <div class="metric">${esc(state.intelligence_hosts || 0)}</div>
+          </div>
+          <div class="card">
+            <div class="label">Service-Observed Assets</div>
+            <div class="metric">${esc(state.service_observed_assets || 0)}</div>
+          </div>
+          <div class="card">
+            <div class="label">Discovery / No Open Service</div>
+            <div class="metric">${esc(state.discovery_only_or_no_open_service_assets || 0)}</div>
+          </div>
+          <div class="card">
+            <div class="label">Classified</div>
+            <div class="metric">${esc(state.classified || 0)}</div>
+          </div>
+          <div class="card">
+            <div class="label">Review / Possible</div>
+            <div class="metric">${esc(state.possible_or_review || 0)}</div>
+          </div>
+          <div class="card">
+            <div class="label">Unknown</div>
+            <div class="metric">${esc(state.unknown || 0)}</div>
+          </div>
+          <div class="card">
+            <div class="label">False Confidence</div>
+            <div class="metric">${esc(state.false_confidence_candidates || 0)}</div>
+          </div>
+          <div class="card">
+            <div class="label">MAC Identity</div>
+            <div class="metric">${esc(formatPercent(state.identity_coverage))}</div>
+          </div>
+        </div>
+
+        <div class="detail-box">
+          <div><span>Latest Scan</span><span><code>${esc(state.scan_id || "-")}</code></span></div>
+          <div><span>Scope</span><span><code>${esc(state.network_scope || state.selected_scope || "-")}</code></span></div>
+          <div><span>Target</span><span><code>${esc(state.target || "-")}</code></span></div>
+          <div><span>Scanner</span><span>${esc(state.scanner_version || "-")}</span></div>
+          <div><span>Quality</span><span>${esc(state.quality_status || "-")}</span></div>
+          <div><span>Imported</span><span>${esc(state.imported_at || "-")}</span></div>
+        </div>
+      `;
+    }
+
 
     function renderMetrics(summary) {
       document.getElementById("metrics").innerHTML = [
@@ -9157,7 +9231,7 @@ def dashboard_index_html():
       try {
         setupDashboardTabs();
 
-        const [scopes, summary, scanContext, assets, risk, events, alerts, annotations] = await Promise.all([
+        const [scopes, summary, scanContext, currentState, assets, risk, events, alerts, annotations] = await Promise.all([
           api("/api/scopes"),
           api(scopedPath("/api/summary")),
           api(scopedPath("/api/scan-context")),
@@ -9171,6 +9245,7 @@ def dashboard_index_html():
 
         renderScopes(scopes);
         renderMetrics(summary);
+        renderCurrentState(currentState);
         renderScanContext(scanContext);
         renderAssets(assets);
         renderRisk(risk);
