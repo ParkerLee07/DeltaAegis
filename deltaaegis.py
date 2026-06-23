@@ -4886,6 +4886,9 @@ def risk_role_recommended_actions(record):
     ):
         add("Resolve contradictory device evidence before treating the asset role as confirmed.")
 
+    if record.get("port_behavior_points") or record.get("port_behavior"):
+        add("Review MAC-port behavior changes and confirm whether the new or volatile service is expected for this device.")
+
     if is_unknown_role:
         if open_ports:
             add("Identify this unknown asset before closing the investigation; exposed services are present but the role is not established.")
@@ -8147,6 +8150,58 @@ def dashboard_annotations_payload(connection, limit, scope=None):
     )
 
 
+
+def current_port_behavior_risk_by_asset(connection, scope=None, lookback=5, limit=500):
+    rows = mac_port_behavior_rows(
+        connection,
+        limit=limit,
+        scope=scope,
+        lookback=lookback,
+    )
+
+    by_asset = {}
+
+    for row in rows:
+        asset_key = row.get("asset_key")
+
+        if not asset_key:
+            continue
+
+        behavior = str(row.get("behavior") or "").upper()
+
+        if behavior not in {"UNEXPECTED_PORT_OPENED", "PORT_FLAPPING"}:
+            continue
+
+        by_asset.setdefault(asset_key, []).append(row)
+
+    return by_asset
+
+
+def port_behavior_risk_points(row):
+    behavior = str(row.get("behavior") or "").upper()
+    current_state = str(row.get("current_state") or "").upper()
+
+    try:
+        port = int(row.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+
+    if behavior == "UNEXPECTED_PORT_OPENED":
+        if port in PORT_BEHAVIOR_HIGH_SIGNAL_PORTS:
+            return 20, f"MAC-port behavior detected unexpected high-signal port {row.get('port_key')}: +20"
+        if port in PORT_BEHAVIOR_MEDIUM_SIGNAL_PORTS:
+            return 10, f"MAC-port behavior detected unexpected monitored port {row.get('port_key')}: +10"
+        return 5, f"MAC-port behavior detected unexpected open port {row.get('port_key')}: +5"
+
+    if behavior == "PORT_FLAPPING":
+        if current_state == "OPEN" and port in PORT_BEHAVIOR_HIGH_SIGNAL_PORTS:
+            return 15, f"MAC-port behavior detected volatile high-signal port {row.get('port_key')}: +15"
+        if current_state == "OPEN":
+            return 5, f"MAC-port behavior detected volatile open port {row.get('port_key')}: +5"
+
+    return 0, ""
+
+
 def build_current_risk_register(connection, limit, scope=None):
     snapshot = dashboard_latest_accepted_snapshot(connection, scope=scope)
 
@@ -8235,6 +8290,13 @@ def build_current_risk_register(connection, limit, scope=None):
         "INFO": 0,
     }
 
+    port_behavior_by_asset = current_port_behavior_risk_by_asset(
+        connection,
+        scope=scope,
+        lookback=5,
+        limit=500,
+    )
+
     rows = []
 
     for asset in asset_rows:
@@ -8322,6 +8384,35 @@ def build_current_risk_register(connection, limit, scope=None):
                 f"Current baseline management/printing exposure {', '.join(baseline_ports[:6])}: +{points}",
             )
 
+        port_behavior_rows = port_behavior_by_asset.get(asset_key, [])
+        port_behavior_points = 0
+
+        for behavior_row in port_behavior_rows:
+            points, reason = port_behavior_risk_points(behavior_row)
+
+            if points <= 0:
+                continue
+
+            remaining = max(0, 20 - port_behavior_points)
+            applied_points = min(points, remaining)
+
+            if applied_points <= 0:
+                break
+
+            port_behavior_points += applied_points
+
+            if applied_points != points:
+                reason = reason.rsplit(":+", 1)[0] if ":+ " in reason else reason
+                reason = f"MAC-port behavior contribution capped: +{applied_points}"
+
+            risk_add_reason(record["reasons"], reason)
+
+        if port_behavior_points:
+            score += port_behavior_points
+
+        record["port_behavior"] = port_behavior_rows[:10]
+        record["port_behavior_points"] = port_behavior_points
+
         classification_action = str(asset["classification_siem_action"] or "").lower()
         classification_decision = str(asset["classification_decision"] or "").lower()
         classification_type = str(asset["classification_primary_type"] or "Unknown")
@@ -8407,6 +8498,7 @@ def build_current_risk_register(connection, limit, scope=None):
             or contradiction_count > 0
             or classification_action in {"alert_eligible", "review_queue"}
             or finding_count > 0
+            or port_behavior_points > 0
         )
 
         if actionable and record["score"] > 0:
