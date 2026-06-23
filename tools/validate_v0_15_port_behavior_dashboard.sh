@@ -40,6 +40,27 @@ grep -q 'api(scopedPath("/api/port-behavior?limit=25&lookback=5"))' deltaaegis.p
 grep -q 'renderPortBehavior(portBehavior)' deltaaegis.py \
     || fail "dashboard does not render port behavior rows"
 
+python3 - <<'PY2'
+from pathlib import Path
+import re
+
+text = Path("deltaaegis.py").read_text(encoding="utf-8")
+
+match = re.search(
+    r"const\s+DASHBOARD_TABS\s*=\s*\[([\s\S]*?)\];",
+    text,
+)
+
+assert match, "DASHBOARD_TABS block not found"
+
+tabs = match.group(1)
+
+assert '"port-behavior"' in tabs, "DASHBOARD_TABS does not include port-behavior"
+assert '"scan-jobs"' in tabs, "DASHBOARD_TABS does not include scan-jobs"
+
+print("[PASS] Dashboard tab allowlist includes Port Behavior and Scan Jobs")
+PY2
+
 python3 - <<'PY'
 import deltaaegis
 

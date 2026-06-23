@@ -9339,10 +9339,12 @@ def dashboard_index_html():
       "overview",
       "investigations",
       "risk",
+      "port-behavior",
       "assets",
       "intelligence",
       "events",
-      "alerts"
+      "alerts",
+      "scan-jobs"
     ];
 
     let activeDashboardTab = null;
