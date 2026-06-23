@@ -89,9 +89,37 @@ for row in rows:
             f"current risk row {subject!r} should not be event-history driven"
         )
 
+hundred_count = sum(1 for row in rows if int(row.get("score") or 0) >= 100)
+
+if rows and hundred_count >= min(10, len(rows)):
+    raise SystemExit(
+        "current risk calibration failed: all top current-risk rows are saturated at 100"
+    )
+
+expected_only_printer_ports = {"tcp/80", "tcp/443", "tcp/631", "tcp/9100"}
+
+for row in rows:
+    open_ports = set(row.get("open_ports") or [])
+    high_signal_ports = set(row.get("high_signal_ports") or [])
+    classification = str(row.get("classification") or "")
+
+    if (
+        "Printer" in classification
+        and open_ports
+        and open_ports.issubset(expected_only_printer_ports)
+        and not high_signal_ports
+        and int(row.get("open_alerts") or 0) == 0
+        and int(row.get("score") or 0) >= 75
+    ):
+        raise SystemExit(
+            f"expected-service-only printer row {row.get('subject_key')} should not be CRITICAL"
+        )
+
 print(f"[PASS] current risk rows={len(rows)}")
+print(f"[PASS] current risk saturated rows={hundred_count}")
 print("[PASS] all current risk subjects are present in latest accepted snapshot")
 print("[PASS] current risk rows are not historical-event driven")
+print("[PASS] current risk scoring is calibrated against all-100 saturation")
 PY
 
 pass "DeltaAegis v0.13 current-risk validation passed"

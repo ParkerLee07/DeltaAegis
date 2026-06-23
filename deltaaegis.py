@@ -7313,10 +7313,25 @@ def build_current_risk_register(connection, limit, scope=None):
         """
     ).fetchall()
 
+    # Ports that should materially raise current risk when exposed.
     high_signal_ports = {
-        21, 22, 23, 80, 443, 445, 554, 631, 2375, 2376, 3389,
-        5000, 5900, 6379, 8000, 8080, 8081, 8443, 9000, 9090,
-        9100, 9200, 9443, 10250, 10255, 27017,
+        21, 22, 23, 445, 554, 2375, 2376, 3389, 5000, 5432,
+        5555, 5900, 6379, 6443, 7547, 8080, 8081, 8443, 9000,
+        9090, 9200, 9300, 9443, 10250, 10255, 27017,
+    }
+
+    # Common management/expected service ports. These matter, but should not
+    # alone turn ordinary infrastructure into CRITICAL risk.
+    baseline_exposure_ports = {
+        80, 443, 631, 9100,
+    }
+
+    current_severity_points = {
+        "CRITICAL": 20,
+        "HIGH": 15,
+        "MEDIUM": 8,
+        "LOW": 3,
+        "INFO": 0,
     }
 
     rows = []
@@ -7343,38 +7358,42 @@ def build_current_risk_register(connection, limit, scope=None):
         asset_findings = findings.get(asset_key)
 
         severity = str(asset["severity"] or "INFO").upper()
-        severity_points = RISK_SEVERITY_POINTS.get(severity, 0)
+        severity_points = current_severity_points.get(severity, 0)
 
-        if severity_points and severity not in {"INFO"}:
-            score += min(25, severity_points)
+        if severity_points:
+            score += severity_points
             risk_add_reason(
                 record["reasons"],
-                f"Current asset severity {severity}: +{min(25, severity_points)}",
+                f"Current asset severity {severity}: +{severity_points}",
             )
 
         asset_score = safe_int(asset["score"]) or 0
 
         if asset_score > 0:
-            points = min(35, asset_score)
+            points = min(18, max(1, asset_score // 2))
             score += points
             risk_add_reason(record["reasons"], f"Current NetSniper score {asset_score}: +{points}")
+
+        finding_count = 0
+        max_finding_score = 0
 
         if asset_findings is not None:
             finding_count = int(asset_findings["finding_count"] or 0)
             max_finding_score = safe_int(asset_findings["max_score"]) or 0
 
             if finding_count:
-                points = min(30, finding_count * 10)
+                points = min(12, finding_count * 2)
                 score += points
                 risk_add_reason(record["reasons"], f"{finding_count} current finding(s): +{points}")
 
             if max_finding_score:
-                points = min(20, max_finding_score)
+                points = min(10, max_finding_score)
                 score += points
                 risk_add_reason(record["reasons"], f"Max current finding score {max_finding_score}: +{points}")
 
         open_ports = []
         signal_ports = []
+        baseline_ports = []
 
         for service in asset_services:
             port = int(service["port"] or 0)
@@ -7383,13 +7402,23 @@ def build_current_risk_register(connection, limit, scope=None):
 
             if port in high_signal_ports:
                 signal_ports.append(f"{protocol}/{port}")
+            elif port in baseline_exposure_ports:
+                baseline_ports.append(f"{protocol}/{port}")
 
         if signal_ports:
-            points = min(25, len(signal_ports) * 5)
+            points = min(30, len(signal_ports) * 10)
             score += points
             risk_add_reason(
                 record["reasons"],
-                f"Current exposed monitored service(s) {', '.join(signal_ports[:6])}: +{points}",
+                f"Current high-signal exposed service(s) {', '.join(signal_ports[:6])}: +{points}",
+            )
+
+        if baseline_ports:
+            points = min(6, len(baseline_ports))
+            score += points
+            risk_add_reason(
+                record["reasons"],
+                f"Current baseline management/printing exposure {', '.join(baseline_ports[:6])}: +{points}",
             )
 
         classification_action = str(asset["classification_siem_action"] or "").lower()
@@ -7398,24 +7427,26 @@ def build_current_risk_register(connection, limit, scope=None):
         contradiction_count = int(asset["classification_contradiction_count"] or 0)
 
         if classification_action == "alert_eligible":
-            score += 15
-            risk_add_reason(record["reasons"], "Current classification is alert eligible: +15")
+            score += 5
+            risk_add_reason(record["reasons"], "Current classification is alert eligible: +5")
         elif classification_action == "review_queue":
-            score += 8
-            risk_add_reason(record["reasons"], "Current classification is in review queue: +8")
+            score += 4
+            risk_add_reason(record["reasons"], "Current classification is in review queue: +4")
 
         if contradiction_count:
             points = min(20, contradiction_count * 10)
             score += points
             risk_add_reason(record["reasons"], f"Current classification contradiction(s): +{points}")
 
-        if (
-            asset_services
+        unknown_with_services = (
+            bool(asset_services)
             and classification_type in {"", "Unknown", "Unknown / Ambiguous"}
             and classification_decision in {"", "unknown", "possible"}
-        ):
-            score += 5
-            risk_add_reason(record["reasons"], "Current unknown asset has exposed monitored service(s): +5")
+        )
+
+        if unknown_with_services:
+            score += 8
+            risk_add_reason(record["reasons"], "Current unknown asset has exposed service(s): +8")
 
         asset_ip = str(asset["ip_address"] or "")
         asset_mac = str(asset["mac_address"] or "").lower()
@@ -7463,14 +7494,21 @@ def build_current_risk_register(connection, limit, scope=None):
         record["level"] = risk_level(record["score"])
         record["open_ports"] = open_ports
         record["current_service_count"] = len(asset_services)
-        record["current_finding_count"] = (
-            int(asset_findings["finding_count"] or 0)
-            if asset_findings is not None
-            else 0
-        )
+        record["current_finding_count"] = finding_count
+        record["high_signal_ports"] = signal_ports
+        record["baseline_exposure_ports"] = baseline_ports
         record["recommended_actions"] = risk_role_recommended_actions(record)
 
-        if record["score"] > 0 or record["open_alerts"] or record["current_finding_count"]:
+        actionable = (
+            record["open_alerts"] > 0
+            or bool(signal_ports)
+            or unknown_with_services
+            or contradiction_count > 0
+            or classification_action in {"alert_eligible", "review_queue"}
+            or finding_count > 0
+        )
+
+        if actionable and record["score"] > 0:
             rows.append(record)
 
     rows = sorted(
@@ -7478,6 +7516,7 @@ def build_current_risk_register(connection, limit, scope=None):
         key=lambda row: (
             row["score"],
             row["open_alerts"],
+            len(row.get("high_signal_ports", [])),
             row.get("current_finding_count", 0),
             row["subject_key"],
         ),
