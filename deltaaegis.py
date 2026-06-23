@@ -8991,6 +8991,97 @@ def dashboard_investigation_center_payload(connection, limit=25, scope=None):
         }
 
 
+
+def print_investigation_center_rows(payload):
+    available = bool(payload.get("available", False))
+    scope = payload.get("selected_scope")
+    rows = list(payload.get("items") or [])
+
+    print("DeltaAegis Investigation Command Center")
+    print("=======================================")
+
+    if scope:
+        print(f"Network scope: {scope}")
+
+    print()
+
+    if not available:
+        print(payload.get("error") or "Investigation Command Center is unavailable.")
+        return
+
+    if not rows:
+        print("No investigation queue items matched the selected scope.")
+        return
+
+    for index, row in enumerate(rows, start=1):
+        print(
+            f"{index:>2}. "
+            f"{row.get('priority_level', 'INFO'):<8} "
+            f"{int(row.get('priority_score') or 0):>3}  "
+            f"{row.get('subject_key') or '-'}"
+        )
+        print(f"    IP:       {row.get('ip_address') or '-'}")
+        print(f"    MAC:      {row.get('mac_address') or '-'}")
+
+        device = row.get("device_type") or "Unknown"
+        role = row.get("role") or row.get("classification") or "Unknown"
+        print(f"    Device:   {device}")
+        print(f"    Role:     {role}")
+
+        triggers = row.get("triggers") or []
+        print(f"    Triggers: {', '.join(triggers) if triggers else '-'}")
+        print(f"    Why:      {row.get('primary_reason') or '-'}")
+        print(f"    Action:   {row.get('recommended_action') or '-'}")
+        print(
+            "    Counts:   "
+            f"alerts={int(row.get('open_alerts') or 0)}, "
+            f"events={int(row.get('recent_events') or 0)}, "
+            f"ports={int(row.get('port_behavior_count') or 0)}, "
+            f"findings={int(row.get('current_finding_count') or 0)}"
+        )
+
+        port_behavior = row.get("port_behavior") or []
+        if port_behavior:
+            first = port_behavior[0]
+            print(
+                "    Port:     "
+                f"{first.get('behavior') or '-'} "
+                f"{first.get('port_key') or '-'} "
+                f"({first.get('severity') or 'INFO'})"
+            )
+
+        alerts = row.get("alerts") or []
+        if alerts:
+            first = alerts[0]
+            print(
+                "    Alert:    "
+                f"#{first.get('alert_id') or '-'} "
+                f"{first.get('severity') or 'INFO'} "
+                f"{first.get('event_type') or '-'}"
+            )
+
+        print()
+
+
+def command_investigation_center(args):
+    connection = connect(args.db)
+    scope = optional_network_scope(getattr(args, "scope", None))
+
+    try:
+        payload = dashboard_investigation_center_payload(
+            connection,
+            limit=args.limit,
+            scope=scope,
+        )
+    finally:
+        connection.close()
+
+    print_investigation_center_rows(payload)
+
+    return 0 if payload.get("available", False) else 1
+
+
+
 def dashboard_risk_payload(connection, limit, scope=None):
     try:
         return build_risk_register(connection, limit, scope=scope)
@@ -11777,6 +11868,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--status", choices=sorted(SCAN_JOB_STATUSES))
     p.add_argument("--scope")
+    p = sub.add_parser("investigation-center", help="Show prioritized investigation command center queue")
+    p.add_argument("--limit", type=int, default=25)
+    p.add_argument("--scope")
     p = sub.add_parser("port-behavior", help="Show MAC-port behavior changes across accepted scans")
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--scope")
@@ -11885,6 +11979,7 @@ def main() -> int:
         if args.command == "ingest": return command_ingest(args)
         if args.command == "scan-start": return command_scan_start(args)
         if args.command == "scan-jobs": return command_scan_jobs(args)
+        if args.command == "investigation-center": return command_investigation_center(args)
         if args.command == "port-behavior": return command_port_behavior(args)
         if args.command == "summary": return command_summary(args)
         if args.command == "scopes": return command_scopes(args)
