@@ -15,7 +15,9 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
+import uuid
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import asdict, dataclass
@@ -25,6 +27,8 @@ from typing import Any, Iterable
 
 DEFAULT_DB = Path.home() / "DeltaAegis" / "data" / "deltaaegis.db"
 DEFAULT_RUNS = Path.home() / "NetSniper" / "runs"
+DEFAULT_NETSNIPER = Path.home() / "NetSniper" / "netsniper.sh"
+DEFAULT_SCAN_LOGS = Path.home() / "DeltaAegis" / "scan-logs"
 DEFAULT_EVENTS = Path.home() / "DeltaAegis" / "events" / "events.jsonl"
 DEFAULT_REPORTS = Path.home() / "DeltaAegis" / "reports"
 QUALITY_RATIO_THRESHOLD = 0.50
@@ -2438,6 +2442,313 @@ def build_netsniper_headless_command(netsniper_path: Path, target: str) -> list[
         "no",
         "--json-status",
     ]
+
+
+
+def create_scan_job(
+    connection: sqlite3.Connection,
+    target: str,
+    netsniper_path: Path,
+    runs_dir: Path,
+    auto_ingest: bool = False,
+) -> dict[str, Any]:
+    safe_target = validate_private_cidr(target)
+    now = utc_now_text()
+    job_id = f"scan-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+
+    connection.execute(
+        """
+        INSERT INTO scan_jobs (
+            job_id,
+            target,
+            network_scope,
+            status,
+            created_at,
+            updated_at,
+            netsniper_path,
+            runs_dir,
+            auto_ingest,
+            status_json,
+            message
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job_id,
+            safe_target,
+            safe_target,
+            "QUEUED",
+            now,
+            now,
+            str(netsniper_path),
+            str(runs_dir),
+            1 if auto_ingest else 0,
+            "{}",
+            "scan job queued",
+        ),
+    )
+
+    return {
+        "job_id": job_id,
+        "target": safe_target,
+        "network_scope": safe_target,
+        "status": "QUEUED",
+        "created_at": now,
+        "updated_at": now,
+        "netsniper_path": str(netsniper_path),
+        "runs_dir": str(runs_dir),
+        "auto_ingest": auto_ingest,
+        "status_json": {},
+        "message": "scan job queued",
+    }
+
+
+def update_scan_job(
+    connection: sqlite3.Connection,
+    job_id: str,
+    **fields: Any,
+) -> None:
+    allowed = {
+        "status",
+        "started_at",
+        "finished_at",
+        "bundle_path",
+        "exit_code",
+        "stdout_log",
+        "stderr_log",
+        "status_json",
+        "message",
+    }
+
+    updates = []
+    params: list[Any] = []
+
+    for key, value in fields.items():
+        if key not in allowed:
+            raise DeltaAegisError(f"invalid scan job field update: {key}")
+
+        if key == "status":
+            value = str(value).upper()
+
+            if value not in SCAN_JOB_STATUSES:
+                raise DeltaAegisError(f"invalid scan job status: {value}")
+
+        if key == "status_json":
+            value = json.dumps(value or {}, sort_keys=True)
+
+        updates.append(f"{key} = ?")
+        params.append(value)
+
+    updates.append("updated_at = ?")
+    params.append(utc_now_text())
+    params.append(job_id)
+
+    connection.execute(
+        f"""
+        UPDATE scan_jobs
+        SET {", ".join(updates)}
+        WHERE job_id = ?
+        """,
+        tuple(params),
+    )
+
+
+def extract_netsniper_status_json(stdout_text: str) -> dict[str, Any]:
+    for raw_line in reversed((stdout_text or "").splitlines()):
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        candidates = [line]
+
+        if "{" in line and "}" in line:
+            candidates.append(line[line.find("{"): line.rfind("}") + 1])
+
+        for candidate in candidates:
+            try:
+                value = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+
+            if isinstance(value, dict):
+                return value
+
+    return {}
+
+
+def extract_netsniper_bundle_path(status_json: dict[str, Any]) -> str | None:
+    for key in ("bundle_path", "bundle_dir", "run_dir", "run_directory"):
+        value = status_json.get(key)
+
+        if value:
+            return str(value)
+
+    return None
+
+
+def execute_scan_job(
+    connection: sqlite3.Connection,
+    job_id: str,
+    target: str,
+    netsniper_path: Path,
+    runs_dir: Path,
+    logs_dir: Path,
+    events_path: Path,
+    auto_ingest: bool = False,
+) -> dict[str, Any]:
+    safe_target = validate_private_cidr(target)
+    netsniper_path = Path(netsniper_path).expanduser()
+    runs_dir = Path(runs_dir).expanduser()
+    logs_dir = Path(logs_dir).expanduser()
+    events_path = Path(events_path).expanduser()
+
+    if not netsniper_path.is_file():
+        raise DeltaAegisError(f"NetSniper executable not found: {netsniper_path}")
+
+    command = build_netsniper_headless_command(netsniper_path, safe_target)
+
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    stdout_log = logs_dir / f"{job_id}.stdout.log"
+    stderr_log = logs_dir / f"{job_id}.stderr.log"
+
+    started_at = utc_now_text()
+
+    update_scan_job(
+        connection,
+        job_id,
+        status="RUNNING",
+        started_at=started_at,
+        stdout_log=str(stdout_log),
+        stderr_log=str(stderr_log),
+        message="NetSniper scan running",
+    )
+    connection.commit()
+
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(netsniper_path.parent),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as exc:
+        update_scan_job(
+            connection,
+            job_id,
+            status="FAILED",
+            finished_at=utc_now_text(),
+            exit_code=127,
+            message=f"failed to launch NetSniper: {exc}",
+        )
+        connection.commit()
+        raise DeltaAegisError(f"failed to launch NetSniper: {exc}") from exc
+
+    stdout_log.write_text(completed.stdout or "", encoding="utf-8")
+    stderr_log.write_text(completed.stderr or "", encoding="utf-8")
+
+    status_json = extract_netsniper_status_json(completed.stdout)
+    bundle_path = extract_netsniper_bundle_path(status_json)
+    final_status = "COMPLETED" if completed.returncode == 0 else "FAILED"
+
+    message_parts = []
+
+    if final_status == "COMPLETED":
+        message_parts.append("NetSniper scan completed")
+    else:
+        message_parts.append(f"NetSniper scan failed with exit code {completed.returncode}")
+
+    if bundle_path:
+        message_parts.append(f"bundle={bundle_path}")
+
+    if final_status == "COMPLETED" and auto_ingest and bundle_path:
+        manifest = Path(bundle_path) / "manifest.json"
+
+        if manifest.is_file():
+            ingest_result = ingest_manifest(connection, manifest, events_path)
+            message_parts.append(f"auto-ingest={ingest_result}")
+        else:
+            final_status = "FAILED"
+            message_parts.append(f"auto-ingest failed: manifest not found at {manifest}")
+
+    update_scan_job(
+        connection,
+        job_id,
+        status=final_status,
+        finished_at=utc_now_text(),
+        bundle_path=bundle_path,
+        exit_code=completed.returncode,
+        status_json=status_json,
+        message="; ".join(message_parts),
+    )
+
+    connection.commit()
+
+    row = connection.execute(
+        "SELECT * FROM scan_jobs WHERE job_id = ?",
+        (job_id,),
+    ).fetchone()
+
+    if row is None:
+        raise DeltaAegisError(f"scan job disappeared unexpectedly: {job_id}")
+
+    return scan_job_to_dict(row)
+
+
+def command_scan_start(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+
+    safe_target = validate_private_cidr(args.target)
+    netsniper_path = Path(args.netsniper_path).expanduser()
+    logs_dir = Path(args.scan_logs_dir).expanduser()
+    runs_dir = Path(args.runs_dir).expanduser()
+
+    job = create_scan_job(
+        connection,
+        safe_target,
+        netsniper_path,
+        runs_dir,
+        auto_ingest=args.auto_ingest,
+    )
+    connection.commit()
+
+    print(f"Created scan job: {job['job_id']}")
+    print(f"Target: {safe_target}")
+    print(f"NetSniper: {netsniper_path}")
+    print(f"Auto-ingest: {'yes' if args.auto_ingest else 'no'}")
+    print()
+
+    try:
+        result = execute_scan_job(
+            connection,
+            job["job_id"],
+            safe_target,
+            netsniper_path,
+            runs_dir,
+            logs_dir,
+            args.events,
+            auto_ingest=args.auto_ingest,
+        )
+    except DeltaAegisError as exc:
+        print(f"Scan job failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Job: {result['job_id']}")
+    print(f"Status: {result['status']}")
+    print(f"Exit code: {result.get('exit_code')}")
+    print(f"Stdout log: {result.get('stdout_log') or '-'}")
+    print(f"Stderr log: {result.get('stderr_log') or '-'}")
+
+    if result.get("bundle_path"):
+        print(f"Bundle: {result['bundle_path']}")
+
+    if result.get("message"):
+        print(f"Message: {result['message']}")
+
+    return 0 if result["status"] == "COMPLETED" else 1
 
 
 def decode_json_field(value: str | None, default):
@@ -10154,6 +10465,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("menu")
     sub.add_parser("ingest")
+    p = sub.add_parser("scan-start", help="Run a safe NetSniper v1.8 headless scan job")
+    p.add_argument("--target", required=True, help="Private IPv4 CIDR target, such as 192.168.5.0/24")
+    p.add_argument("--netsniper-path", type=Path, default=DEFAULT_NETSNIPER)
+    p.add_argument("--scan-logs-dir", type=Path, default=DEFAULT_SCAN_LOGS)
+    p.add_argument("--auto-ingest", action="store_true", help="Ingest the completed NetSniper bundle after a successful scan")
     p = sub.add_parser("scan-jobs", help="List NetSniper scan orchestration jobs")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--status", choices=sorted(SCAN_JOB_STATUSES))
@@ -10260,6 +10576,7 @@ def main() -> int:
     try:
         if args.command in {None, "menu"}: return run_interactive_menu(args)
         if args.command == "ingest": return command_ingest(args)
+        if args.command == "scan-start": return command_scan_start(args)
         if args.command == "scan-jobs": return command_scan_jobs(args)
         if args.command == "summary": return command_summary(args)
         if args.command == "scopes": return command_scopes(args)
