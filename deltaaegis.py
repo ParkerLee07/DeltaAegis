@@ -8512,6 +8512,7 @@ def dashboard_index_html():
       <button type="button" class="tab-button" data-tab-target="intelligence">Intelligence</button>
       <button type="button" class="tab-button" data-tab-target="events">Events</button>
       <button type="button" class="tab-button" data-tab-target="alerts">Alerts</button>
+      <button type="button" class="tab-button" data-tab-target="scan-jobs">Scan Jobs</button>
     </nav>
 
     <section class="card explain" data-tab-panel="overview">
@@ -8545,6 +8546,29 @@ def dashboard_index_html():
       <h2>NetSniper Scan Context</h2>
       <p class="muted">Shows the latest NetSniper scan, the baseline scan used for delta comparison, and identity coverage for MAC/IP tracking.</p>
       <div class="scan-grid" id="scan-context"></div>
+    </section>
+
+
+    <section class="card" data-tab-panel="scan-jobs">
+      <h2>Scan Jobs</h2>
+      <p class="muted">
+        Read-only NetSniper scan orchestration history. Start scans from the CLI with
+        <code>deltaaegis scan-start --target &lt;private-cidr&gt;</code>.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Status</th>
+            <th>Job</th>
+            <th>Target</th>
+            <th>Created</th>
+            <th>Updated</th>
+            <th>Bundle</th>
+            <th>Message</th>
+          </tr>
+        </thead>
+        <tbody id="scan-jobs-body"></tbody>
+      </table>
     </section>
 
     <section class="card" data-tab-panel="assets">
@@ -9013,6 +9037,54 @@ def dashboard_index_html():
         </div>
       </div>`;
     }
+
+    function scanJobStatusClass(status) {
+      const value = String(status || "").toUpperCase();
+
+      if (value === "COMPLETED") return "status-current";
+      if (value === "RUNNING" || value === "QUEUED") return "status-stale";
+      if (value === "FAILED") return "severity-critical";
+
+      return "status-unknown";
+    }
+
+    function renderScanJobs(jobs) {
+      const tbody = document.getElementById("scan-jobs-body");
+
+      if (!tbody) return;
+
+      const rows = Array.isArray(jobs) ? jobs : [];
+
+      if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="7" class="muted">No scan jobs found for the current dashboard scope.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = rows.map(job => {
+        const status = String(job.status || "UNKNOWN").toUpperCase();
+        const bundle = job.bundle_path
+          ? `<code>${esc(job.bundle_path)}</code>`
+          : `<span class="muted">-</span>`;
+
+        const message = job.message
+          ? esc(job.message)
+          : `<span class="muted">-</span>`;
+
+        return `
+          <tr>
+            <td><span class="status ${scanJobStatusClass(status)}">${esc(status)}</span></td>
+            <td><code>${esc(job.job_id || "-")}</code></td>
+            <td><code>${esc(job.target || "-")}</code></td>
+            <td>${esc(job.created_at || "-")}</td>
+            <td>${esc(job.updated_at || "-")}</td>
+            <td>${bundle}</td>
+            <td>${message}</td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+
 
     function renderScanContext(context) {
       const pairs = context.delta_scan_pairs || [];
@@ -10081,11 +10153,12 @@ def dashboard_index_html():
       try {
         setupDashboardTabs();
 
-        const [scopes, summary, scanContext, currentState, assets, currentRisk, historicalRisk, events, alerts, annotations] = await Promise.all([
+        const [scopes, summary, scanContext, currentState, scanJobs, assets, currentRisk, historicalRisk, events, alerts, annotations] = await Promise.all([
           api("/api/scopes"),
           api(scopedPath("/api/summary")),
           api(scopedPath("/api/scan-context")),
           api(scopedPath("/api/current-state")),
+          api(scopedPath("/api/scan-jobs?limit=10")),
           api(scopedPath("/api/assets?limit=25")),
           api(scopedPath("/api/current-risk?limit=10")),
           api(scopedPath("/api/risk?limit=10")),
@@ -10098,6 +10171,7 @@ def dashboard_index_html():
         renderMetrics(summary);
         renderCurrentState(currentState);
         renderScanContext(scanContext);
+        renderScanJobs(scanJobs);
         renderAssets(assets);
         renderRisk(currentRisk);
         renderHistoricalRisk(historicalRisk);
