@@ -8,26 +8,39 @@ SQLite, compares accepted scans over time, and explains what changed on a monito
 
 It is built for conservative, evidence-backed monitoring: asset lifecycle tracking, service-delta
 detection, alert review, investigation notes, risk prioritization, NetSniper intelligence review,
-Markdown reports, and a local dashboard.
+Markdown reports, MAC-port behavior correlation, and a local dashboard.
 
 ---
 
 ## Current Release
 
-**DeltaAegis v0.14.0 — NetSniper Scan Orchestration**
+**DeltaAegis v0.15.0 — MAC-Port Behavior Correlation**
 
-v0.14.0 adds the first controlled NetSniper scan-orchestration workflow to DeltaAegis.
-It introduces a scan job registry, a safe CLI scan launcher for NetSniper v1.8 headless
-scans, captured stdout/stderr logs, optional auto-ingest, and read-only dashboard scan
-job visibility.
+v0.15.0 adds MAC-port behavior correlation to DeltaAegis. It correlates stable
+MAC-backed device identity with open-port history across accepted NetSniper scans
+so the SIEM can detect ports that appeared unexpectedly, disappeared, or changed
+open/not-observed state repeatedly over time.
 
-Current feature baseline: **DeltaAegis v0.14.0 — NetSniper Scan Orchestration**.
+Current feature baseline: **DeltaAegis v0.15.0 — MAC-Port Behavior Correlation**.
 
-DeltaAegis v0.14.0 adds:
+DeltaAegis v0.15.0 adds:
+
+- `port-behavior` CLI command for MAC-backed open-port behavior review.
+- `/api/port-behavior` for dashboard access to MAC-port behavior rows.
+- Dashboard Port Behavior tab showing severity, behavior, MAC identity, IP, device role,
+  port, current state, seen/missing counts, transitions, and reason.
+- Current-risk integration for unexpected or volatile MAC-backed ports.
+- Conservative risk contribution caps so normal printer/web management volatility does not
+  automatically create false CRITICAL risk.
+- Markdown report section named `MAC-Port Behavior Changes`.
+- Report dashboard/API usage note for `/api/port-behavior?limit=25&lookback=5`.
+- v0.15 validators for CLI detection, dashboard wiring, current-risk integration,
+  report integration, and release validation.
+
+DeltaAegis v0.14.0 scan-orchestration compatibility remains available through:
 
 - `scan_jobs` SQLite registry for NetSniper orchestration history.
 - `scan-start --target <private-cidr>` for safe NetSniper v1.8 headless scans.
-- Private IPv4 CIDR validation before scan launch.
 - Fixed NetSniper command execution with `--non-interactive`, `--greenbone no`,
   and `--json-status`.
 - Captured scan stdout/stderr logs under the DeltaAegis scan log directory.
@@ -35,9 +48,6 @@ DeltaAegis v0.14.0 adds:
 - `/api/scan-jobs` for read-only dashboard scan job history.
 - Dashboard Scan Jobs tab for status, target, bundle path, and job messages.
 - Expandable dashboard explanations for why assets are Critical, High, Medium, Low, or Info.
-- v0.14 validators for scan job registry, scan-start behavior, dashboard wiring,
-  and release validation.
-
 
 ## What DeltaAegis Does
 
@@ -50,6 +60,7 @@ DeltaAegis answers:
 - Which alerts are open, acknowledged, resolved, or suppressed?
 - Which assets need an owner, role, criticality, or analyst review?
 - Which NetSniper classifications are strong, weak, contradictory, or review-only?
+- Did the same MAC-backed device unexpectedly expose a new or volatile port?
 - Why did DeltaAegis assign risk or review priority to a subject?
 
 Basic flow:
@@ -137,9 +148,11 @@ review queue entries.
 
 - Calculates an explainable risk register for prioritized analyst review.
 - Uses classification-aware risk context conservatively.
+- Uses MAC-port behavior correlation to highlight unexpected or volatile open ports.
 - Avoids inflating risk from weak or display-only classifications.
+- Avoids over-weighting normal printer/web management port volatility.
 - Generates Markdown investigation reports.
-- Includes asset context, alert review notes, NetSniper intelligence summaries, risk explanations, events, alerts, and recommended actions.
+- Includes asset context, alert review notes, NetSniper intelligence summaries, MAC-port behavior changes, risk explanations, events, alerts, and recommended actions.
 
 ### Dashboard
 
@@ -148,6 +161,7 @@ The local dashboard includes tabs for:
 - Overview
 - Investigations
 - Risk
+- Port Behavior
 - Assets
 - Intelligence
 - Events
@@ -159,6 +173,7 @@ Dashboard features include:
 - asset inventory
 - event and alert tables
 - risk register
+- MAC-port behavior review
 - asset investigation panel
 - investigation status controls
 - NetSniper intelligence summary
@@ -188,7 +203,13 @@ DeltaAegis does not require a separate database server.
 
 ## Recent Releases
 
-- DeltaAegis v0.14.0 — NetSniper Scan Orchestration adds controlled scan jobs,
+- DeltaAegis v0.15.0 — MAC-Port Behavior Correlation adds MAC-backed
+  open-port behavior detection, `port-behavior`, `/api/port-behavior`,
+  dashboard Port Behavior visibility, current-risk integration, and
+  MAC-Port Behavior Changes in Markdown reports.
+- DeltaAegis v0.14.1 — Dashboard Risk Explanation Polish added expandable
+  dashboard explanations for why assets are Critical, High, Medium, Low, or Info.
+- DeltaAegis v0.14.0 — NetSniper Scan Orchestration added controlled scan jobs,
   safe NetSniper v1.8 headless CLI launch, optional auto-ingest, captured logs,
   `/api/scan-jobs`, and read-only dashboard scan job history.
 - DeltaAegis v0.13.0 — Current-State SIEM Dashboard added latest accepted snapshot
@@ -495,6 +516,15 @@ pytest -q
 ---
 
 ## Version Highlights
+
+### v0.15.0 — MAC-Port Behavior Correlation
+
+- `port-behavior` CLI command for MAC-backed open-port behavior review.
+- `/api/port-behavior` dashboard API.
+- Dashboard Port Behavior tab.
+- Current-risk integration for unexpected or volatile MAC-backed ports.
+- Conservative risk contribution caps for normal printer/web service volatility.
+- Markdown report section for MAC-Port Behavior Changes.
 
 ### v0.14.0 — NetSniper Scan Orchestration
 

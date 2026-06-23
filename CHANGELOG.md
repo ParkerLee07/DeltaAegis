@@ -1,3 +1,41 @@
+## v0.15.0 — MAC-Port Behavior Correlation
+
+### Added
+
+- Added `port-behavior` CLI command for MAC-backed open-port behavior review.
+- Added MAC identity normalization for port behavior correlation.
+- Added detection for `UNEXPECTED_PORT_OPENED`, `PORT_FLAPPING`,
+  `PORT_NO_LONGER_OBSERVED`, and `PORT_BASELINE_ESTABLISHED`.
+- Added `/api/port-behavior` dashboard API.
+- Added dashboard Port Behavior tab.
+- Added current-risk integration for unexpected or volatile MAC-backed ports.
+- Added conservative current-risk contribution caps for MAC-port behavior.
+- Added role-aware recommended action text for reviewing MAC-port behavior changes.
+- Added Markdown report section `MAC-Port Behavior Changes`.
+- Added report dashboard/API usage note for `/api/port-behavior?limit=25&lookback=5`.
+- Added v0.15 validators:
+  - `tools/validate_v0_15_port_behavior_cli.sh`
+  - `tools/validate_v0_15_port_behavior_dashboard.sh`
+  - `tools/validate_v0_15_port_behavior_risk.sh`
+  - `tools/validate_v0_15_port_behavior_report.sh`
+  - `tools/validate_v0_15_release.sh`
+
+### Changed
+
+- Preserved v0.14 scan orchestration behavior.
+- Preserved v0.13 current-state/current-risk dashboard behavior.
+- Preserved v0.12 NetSniper intelligence drilldown behavior.
+- Updated README current-release metadata to v0.15.0.
+
+### Validation
+
+- Verified synthetic MAC-port behavior detection.
+- Verified dashboard Port Behavior HTML and payload wiring.
+- Verified current risk integrates unexpected MAC-port behavior.
+- Verified Markdown reports include MAC-Port Behavior Changes.
+- Verified v0.14, v0.13, and v0.12 regression gates.
+
+
 ## v0.14.0 — NetSniper Scan Orchestration
 
 ### Added

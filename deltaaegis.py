@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.14.0: NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, investigation workflow, reporting, and dashboard console.
+"""DeltaAegis v0.15.0: MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, investigation workflow, reporting, and dashboard console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -31,6 +31,7 @@ DEFAULT_NETSNIPER = Path.home() / "NetSniper" / "netsniper.sh"
 DEFAULT_SCAN_LOGS = Path.home() / "DeltaAegis" / "scan-logs"
 DEFAULT_EVENTS = Path.home() / "DeltaAegis" / "events" / "events.jsonl"
 DEFAULT_REPORTS = Path.home() / "DeltaAegis" / "reports"
+DELTAAEGIS_V0_14_COMPATIBILITY_NOTE = "DeltaAegis v0.14.0 — NetSniper Scan Orchestration compatibility retained."
 QUALITY_RATIO_THRESHOLD = 0.50
 IDENTITY_COVERAGE_THRESHOLD = 0.50
 IDENTITY_DROP_REVIEW_THRESHOLD = 0.25
@@ -3785,6 +3786,391 @@ def risk_add_reason(reasons, reason):
         reasons.append(reason)
 
 
+
+PORT_BEHAVIOR_HIGH_SIGNAL_PORTS = {
+    21, 22, 23, 135, 139, 445, 1433, 1521, 2375, 2376,
+    3306, 3389, 5000, 5432, 5900, 5985, 5986, 6379,
+    9200, 9300, 27017,
+}
+
+PORT_BEHAVIOR_MEDIUM_SIGNAL_PORTS = {
+    80, 443, 554, 631, 8080, 8443, 8554, 8888, 9100,
+}
+
+PORT_BEHAVIOR_SEVERITY_ORDER = {
+    "CRITICAL": 0,
+    "HIGH": 1,
+    "MEDIUM": 2,
+    "LOW": 3,
+    "INFO": 4,
+}
+
+
+def normalize_mac_identity(asset_key, mac_address):
+    key = str(asset_key or "").strip().lower()
+    mac = str(mac_address or "").strip().lower()
+
+    if key.startswith("mac:"):
+        return key
+
+    if MAC_RE.match(mac):
+        return f"mac:{mac}"
+
+    return None
+
+
+def port_behavior_key(protocol, port):
+    protocol_text = str(protocol or "tcp").strip().lower() or "tcp"
+
+    try:
+        port_number = int(port)
+    except (TypeError, ValueError):
+        port_number = -1
+
+    return f"{protocol_text}/{port_number}"
+
+
+def port_behavior_signal_severity(behavior, port, currently_open):
+    if behavior == "PORT_FLAPPING":
+        if currently_open and port in PORT_BEHAVIOR_HIGH_SIGNAL_PORTS:
+            return "HIGH"
+        return "MEDIUM"
+
+    if behavior == "UNEXPECTED_PORT_OPENED":
+        if port in PORT_BEHAVIOR_HIGH_SIGNAL_PORTS:
+            return "HIGH"
+        if port in PORT_BEHAVIOR_MEDIUM_SIGNAL_PORTS:
+            return "MEDIUM"
+        return "LOW"
+
+    if behavior == "PORT_NO_LONGER_OBSERVED":
+        return "INFO"
+
+    return "INFO"
+
+
+def accepted_snapshots_for_port_behavior(connection, scope=None, limit=6):
+    clauses = ["(is_accepted_baseline = 1 OR quality_status = 'ACCEPTED')"]
+    params = []
+
+    if scope:
+        clauses.append("network_scope = ?")
+        params.append(scope)
+
+    params.append(limit)
+
+    return connection.execute(
+        f"""
+        SELECT scan_id, network_scope, created_at, imported_at
+        FROM snapshots
+        WHERE {" AND ".join(clauses)}
+        ORDER BY created_at DESC, imported_at DESC, scan_id DESC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+
+
+def load_mac_open_ports_for_scans(connection, scan_ids):
+    if not scan_ids:
+        return {}
+
+    placeholders = ",".join("?" for _ in scan_ids)
+
+    rows = connection.execute(
+        f"""
+        SELECT
+            ao.scan_id,
+            ao.asset_key,
+            ao.ip_address,
+            ao.mac_address,
+            ao.hostname,
+            ao.vendor,
+            COALESCE(
+                ao.classification_type,
+                ao.classification_primary_type,
+                ao.device_type,
+                'Unknown'
+            ) AS device_type,
+            so.protocol,
+            so.port,
+            so.state,
+            so.service_name,
+            so.product,
+            so.version
+        FROM asset_observations ao
+        JOIN service_observations so
+          ON so.scan_id = ao.scan_id
+         AND so.asset_key = ao.asset_key
+        WHERE ao.scan_id IN ({placeholders})
+          AND lower(COALESCE(so.state, 'open')) = 'open'
+        ORDER BY ao.scan_id, ao.asset_key, so.protocol, so.port
+        """,
+        tuple(scan_ids),
+    ).fetchall()
+
+    by_scan = {}
+
+    for row in rows:
+        mac_identity = normalize_mac_identity(row["asset_key"], row["mac_address"])
+
+        if not mac_identity:
+            continue
+
+        scan_entry = by_scan.setdefault(row["scan_id"], {})
+        mac_entry = scan_entry.setdefault(
+            mac_identity,
+            {
+                "mac_identity": mac_identity,
+                "asset_key": row["asset_key"],
+                "ip_address": row["ip_address"],
+                "mac_address": row["mac_address"],
+                "hostname": row["hostname"],
+                "vendor": row["vendor"],
+                "device_type": row["device_type"],
+                "ports": set(),
+                "port_details": {},
+            },
+        )
+
+        port_key = port_behavior_key(row["protocol"], row["port"])
+        mac_entry["ports"].add(port_key)
+        mac_entry["port_details"][port_key] = {
+            "protocol": str(row["protocol"] or "tcp").lower(),
+            "port": int(row["port"]),
+            "service_name": row["service_name"],
+            "product": row["product"],
+            "version": row["version"],
+        }
+
+    return by_scan
+
+
+def mac_port_behavior_rows(connection, limit=50, scope=None, lookback=5):
+    lookback = max(1, int(lookback or 5))
+    latest_candidates = accepted_snapshots_for_port_behavior(
+        connection,
+        scope=scope,
+        limit=1,
+    )
+
+    if not latest_candidates:
+        return []
+
+    latest = latest_candidates[0]
+    effective_scope = scope or latest["network_scope"]
+
+    snapshots = accepted_snapshots_for_port_behavior(
+        connection,
+        scope=effective_scope,
+        limit=lookback + 1,
+    )
+
+    if not snapshots:
+        return []
+
+    ordered_snapshots = list(reversed(snapshots))
+    latest_scan = snapshots[0]
+    latest_scan_id = latest_scan["scan_id"]
+    scan_ids = [row["scan_id"] for row in ordered_snapshots]
+    prior_scan_ids = [scan_id for scan_id in scan_ids if scan_id != latest_scan_id]
+
+    ports_by_scan = load_mac_open_ports_for_scans(connection, scan_ids)
+    latest_ports_by_mac = ports_by_scan.get(latest_scan_id, {})
+    rows = []
+
+    for mac_identity, latest_entry in latest_ports_by_mac.items():
+        current_ports = set(latest_entry.get("ports") or set())
+        historical_ports = set()
+
+        for scan_id in prior_scan_ids:
+            historical_ports.update(
+                ports_by_scan.get(scan_id, {})
+                .get(mac_identity, {})
+                .get("ports", set())
+            )
+
+        candidate_ports = set(current_ports) | historical_ports
+
+        if not prior_scan_ids:
+            for port_key in sorted(current_ports):
+                detail = latest_entry["port_details"].get(port_key, {})
+                rows.append(
+                    {
+                        "behavior": "PORT_BASELINE_ESTABLISHED",
+                        "severity": "INFO",
+                        "mac_identity": mac_identity,
+                        "asset_key": latest_entry.get("asset_key"),
+                        "ip_address": latest_entry.get("ip_address"),
+                        "hostname": latest_entry.get("hostname"),
+                        "vendor": latest_entry.get("vendor"),
+                        "device_type": latest_entry.get("device_type"),
+                        "port_key": port_key,
+                        "protocol": detail.get("protocol", "tcp"),
+                        "port": detail.get("port"),
+                        "current_state": "OPEN",
+                        "baseline_state": "NO_PRIOR_BASELINE",
+                        "seen_count": 1,
+                        "missing_count": 0,
+                        "transition_count": 0,
+                        "latest_scan_id": latest_scan_id,
+                        "baseline_scan_ids": prior_scan_ids,
+                        "reason": f"{port_key} is part of the first accepted MAC-port baseline for {mac_identity}.",
+                    }
+                )
+            continue
+
+        for port_key in sorted(candidate_ports):
+            states = [
+                port_key
+                in ports_by_scan.get(scan_id, {})
+                .get(mac_identity, {})
+                .get("ports", set())
+                for scan_id in scan_ids
+            ]
+
+            currently_open = states[-1]
+            was_seen_before = any(states[:-1])
+            seen_count = sum(1 for state in states if state)
+            missing_count = len(states) - seen_count
+            transition_count = sum(
+                1
+                for previous, current in zip(states, states[1:])
+                if previous != current
+            )
+
+            behavior = None
+
+            if currently_open and not was_seen_before:
+                behavior = "UNEXPECTED_PORT_OPENED"
+            elif transition_count >= 2:
+                behavior = "PORT_FLAPPING"
+            elif was_seen_before and not currently_open:
+                behavior = "PORT_NO_LONGER_OBSERVED"
+
+            if behavior is None:
+                continue
+
+            detail = latest_entry.get("port_details", {}).get(port_key, {})
+
+            if not detail:
+                for scan_id in reversed(prior_scan_ids):
+                    detail = (
+                        ports_by_scan.get(scan_id, {})
+                        .get(mac_identity, {})
+                        .get("port_details", {})
+                        .get(port_key, {})
+                    )
+
+                    if detail:
+                        break
+
+            port_number = int(detail.get("port") or str(port_key).split("/")[-1])
+            severity = port_behavior_signal_severity(
+                behavior,
+                port_number,
+                currently_open,
+            )
+
+            if behavior == "UNEXPECTED_PORT_OPENED":
+                reason = (
+                    f"{port_key} is open in latest scan {latest_scan_id} but was not "
+                    f"observed for {mac_identity} across {len(prior_scan_ids)} prior accepted scan(s)."
+                )
+                baseline_state = "NOT_PREVIOUSLY_OBSERVED"
+                current_state = "OPEN"
+            elif behavior == "PORT_FLAPPING":
+                reason = (
+                    f"{port_key} changed open/not-observed state {transition_count} time(s) "
+                    f"across {len(scan_ids)} accepted scan(s) for {mac_identity}."
+                )
+                baseline_state = "VOLATILE"
+                current_state = "OPEN" if currently_open else "NOT_OBSERVED"
+            else:
+                reason = (
+                    f"{port_key} was previously observed for {mac_identity} but is not open "
+                    f"in latest scan {latest_scan_id}."
+                )
+                baseline_state = "PREVIOUSLY_OBSERVED"
+                current_state = "NOT_OBSERVED"
+
+            rows.append(
+                {
+                    "behavior": behavior,
+                    "severity": severity,
+                    "mac_identity": mac_identity,
+                    "asset_key": latest_entry.get("asset_key"),
+                    "ip_address": latest_entry.get("ip_address"),
+                    "hostname": latest_entry.get("hostname"),
+                    "vendor": latest_entry.get("vendor"),
+                    "device_type": latest_entry.get("device_type"),
+                    "port_key": port_key,
+                    "protocol": detail.get("protocol", "tcp"),
+                    "port": port_number,
+                    "current_state": current_state,
+                    "baseline_state": baseline_state,
+                    "seen_count": seen_count,
+                    "missing_count": missing_count,
+                    "transition_count": transition_count,
+                    "latest_scan_id": latest_scan_id,
+                    "baseline_scan_ids": prior_scan_ids,
+                    "reason": reason,
+                }
+            )
+
+    rows.sort(
+        key=lambda row: (
+            PORT_BEHAVIOR_SEVERITY_ORDER.get(row["severity"], 99),
+            row["behavior"],
+            row["mac_identity"],
+            int(row["port"] or 0),
+        )
+    )
+
+    return rows[:limit]
+
+
+def print_port_behavior_rows(rows):
+    rows = list(rows)
+
+    if not rows:
+        print("No MAC-port behavior changes found.")
+        return
+
+    print("DeltaAegis MAC-Port Behavior")
+    print("============================")
+    print()
+
+    for row in rows:
+        print(
+            f"{row['severity']:<8} "
+            f"{row['behavior']:<26} "
+            f"{row['mac_identity']} "
+            f"{row['port_key']} "
+            f"{row['current_state']}"
+        )
+        print(f"  IP:       {row.get('ip_address') or '-'}")
+        print(f"  Device:   {row.get('device_type') or 'Unknown'}")
+        print(f"  Scan:     {row.get('latest_scan_id')}")
+        print(f"  Reason:   {row.get('reason')}")
+        print()
+
+
+def command_port_behavior(args):
+    connection = connect(args.db)
+    scope = optional_network_scope(getattr(args, "scope", None))
+
+    rows = mac_port_behavior_rows(
+        connection,
+        limit=args.limit,
+        scope=scope,
+        lookback=args.lookback,
+    )
+
+    print_port_behavior_rows(rows)
+    return 0
+
+
 def risk_subject_record(subject_key):
     return {
         "subject_key": subject_key,
@@ -4501,6 +4887,9 @@ def risk_role_recommended_actions(record):
     ):
         add("Resolve contradictory device evidence before treating the asset role as confirmed.")
 
+    if record.get("port_behavior_points") or record.get("port_behavior"):
+        add("Review MAC-port behavior changes and confirm whether the new or volatile service is expected for this device.")
+
     if is_unknown_role:
         if open_ports:
             add("Identify this unknown asset before closing the investigation; exposed services are present but the role is not established.")
@@ -5051,6 +5440,7 @@ def append_report_dashboard_usage_section(lines, scope=None):
         lines.append("- Asset detail API: `/api/asset?identifier=<asset-or-ip>`")
 
     lines.append("- The dashboard remains read-only and is intended for local or trusted-access investigation.")
+    lines.append("- Port behavior API: `/api/port-behavior?limit=25&lookback=5`")
     lines.append("- Use the Asset Inventory table, asset selector, or clickable risk/event/alert subjects to open Asset Detail.")
     lines.append("")
 
@@ -5317,6 +5707,58 @@ def append_report_risk_section(lines, risk_rows):
     lines.append("Risk scores are explainable and are calculated from recent delta events, alert state, repeated activity, asset criticality, missing asset context, and classification-aware role context.")
     lines.append("")
 
+
+def append_report_port_behavior_section(lines, port_behavior_rows):
+    lines.append("## MAC-Port Behavior Changes")
+    lines.append("")
+    lines.append(
+        "This section correlates stable MAC-backed device identity with open-port "
+        "history across accepted scans. It highlights ports that appeared "
+        "unexpectedly, disappeared, or repeatedly changed open/not-observed state."
+    )
+    lines.append("")
+    lines.append(
+        "Normal infrastructure ports can fluctuate because of scan timing, device sleep "
+        "states, or printer/web management behavior. Treat volatile printer ports such "
+        "as `tcp/631` and `tcp/9100` as review context unless combined with unusual "
+        "remote-access or file-sharing services."
+    )
+    lines.append("")
+
+    rows = list(port_behavior_rows or [])
+
+    if not rows:
+        lines.append("No MAC-port behavior changes were detected for this report scope.")
+        lines.append("")
+        return
+
+    lines.append("| Severity | Behavior | MAC Identity | IP Address | Device | Port | Current State | Seen | Missing | Transitions | Reason |")
+    lines.append("|---|---|---|---|---|---|---|---:|---:|---:|---|")
+
+    for row in rows:
+        lines.append(
+            "| "
+            f"{safe_markdown(row.get('severity'))} | "
+            f"{safe_markdown(row.get('behavior'))} | "
+            f"`{safe_markdown(row.get('mac_identity'))}` | "
+            f"`{safe_markdown(row.get('ip_address'))}` | "
+            f"{safe_markdown(row.get('device_type') or 'Unknown')} | "
+            f"`{safe_markdown(row.get('port_key'))}` | "
+            f"{safe_markdown(row.get('current_state'))} | "
+            f"{safe_markdown(row.get('seen_count'))} | "
+            f"{safe_markdown(row.get('missing_count'))} | "
+            f"{safe_markdown(row.get('transition_count'))} | "
+            f"{safe_markdown(row.get('reason'))} |"
+        )
+
+    lines.append("")
+    lines.append(
+        "High-signal unexpected ports, such as Telnet, SMB, RDP, exposed databases, "
+        "or container-management services, should be validated before treating the "
+        "device as normal."
+    )
+    lines.append("")
+
 def command_report(args):
     from collections import Counter
     from datetime import datetime, timezone
@@ -5370,6 +5812,13 @@ def command_report(args):
         connection,
         args.risk_limit,
         scope=scope,
+    )
+
+    report_port_behavior_rows = mac_port_behavior_rows(
+        connection,
+        limit=25,
+        scope=scope,
+        lookback=5,
     )
 
     report_lifecycle_rows = report_asset_lifecycle_summary(
@@ -5440,6 +5889,7 @@ def command_report(args):
     append_report_classification_summary_section(lines, report_classification_summary)
     append_report_asset_inventory_section(lines, report_asset_rows, args.asset_limit)
     append_report_risk_section(lines, report_risk_rows)
+    append_report_port_behavior_section(lines, report_port_behavior_rows)
     append_report_role_aware_recommendations_section(lines, report_risk_rows)
 
     lines.append("## Annotated Asset Context")
@@ -7762,6 +8212,58 @@ def dashboard_annotations_payload(connection, limit, scope=None):
     )
 
 
+
+def current_port_behavior_risk_by_asset(connection, scope=None, lookback=5, limit=500):
+    rows = mac_port_behavior_rows(
+        connection,
+        limit=limit,
+        scope=scope,
+        lookback=lookback,
+    )
+
+    by_asset = {}
+
+    for row in rows:
+        asset_key = row.get("asset_key")
+
+        if not asset_key:
+            continue
+
+        behavior = str(row.get("behavior") or "").upper()
+
+        if behavior not in {"UNEXPECTED_PORT_OPENED", "PORT_FLAPPING"}:
+            continue
+
+        by_asset.setdefault(asset_key, []).append(row)
+
+    return by_asset
+
+
+def port_behavior_risk_points(row):
+    behavior = str(row.get("behavior") or "").upper()
+    current_state = str(row.get("current_state") or "").upper()
+
+    try:
+        port = int(row.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+
+    if behavior == "UNEXPECTED_PORT_OPENED":
+        if port in PORT_BEHAVIOR_HIGH_SIGNAL_PORTS:
+            return 20, f"MAC-port behavior detected unexpected high-signal port {row.get('port_key')}: +20"
+        if port in PORT_BEHAVIOR_MEDIUM_SIGNAL_PORTS:
+            return 10, f"MAC-port behavior detected unexpected monitored port {row.get('port_key')}: +10"
+        return 5, f"MAC-port behavior detected unexpected open port {row.get('port_key')}: +5"
+
+    if behavior == "PORT_FLAPPING":
+        if current_state == "OPEN" and port in PORT_BEHAVIOR_HIGH_SIGNAL_PORTS:
+            return 15, f"MAC-port behavior detected volatile high-signal port {row.get('port_key')}: +15"
+        if current_state == "OPEN":
+            return 5, f"MAC-port behavior detected volatile open port {row.get('port_key')}: +5"
+
+    return 0, ""
+
+
 def build_current_risk_register(connection, limit, scope=None):
     snapshot = dashboard_latest_accepted_snapshot(connection, scope=scope)
 
@@ -7850,6 +8352,13 @@ def build_current_risk_register(connection, limit, scope=None):
         "INFO": 0,
     }
 
+    port_behavior_by_asset = current_port_behavior_risk_by_asset(
+        connection,
+        scope=scope,
+        lookback=5,
+        limit=500,
+    )
+
     rows = []
 
     for asset in asset_rows:
@@ -7937,6 +8446,35 @@ def build_current_risk_register(connection, limit, scope=None):
                 f"Current baseline management/printing exposure {', '.join(baseline_ports[:6])}: +{points}",
             )
 
+        port_behavior_rows = port_behavior_by_asset.get(asset_key, [])
+        port_behavior_points = 0
+
+        for behavior_row in port_behavior_rows:
+            points, reason = port_behavior_risk_points(behavior_row)
+
+            if points <= 0:
+                continue
+
+            remaining = max(0, 20 - port_behavior_points)
+            applied_points = min(points, remaining)
+
+            if applied_points <= 0:
+                break
+
+            port_behavior_points += applied_points
+
+            if applied_points != points:
+                reason = reason.rsplit(":+", 1)[0] if ":+ " in reason else reason
+                reason = f"MAC-port behavior contribution capped: +{applied_points}"
+
+            risk_add_reason(record["reasons"], reason)
+
+        if port_behavior_points:
+            score += port_behavior_points
+
+        record["port_behavior"] = port_behavior_rows[:10]
+        record["port_behavior_points"] = port_behavior_points
+
         classification_action = str(asset["classification_siem_action"] or "").lower()
         classification_decision = str(asset["classification_decision"] or "").lower()
         classification_type = str(asset["classification_primary_type"] or "Unknown")
@@ -8022,6 +8560,7 @@ def build_current_risk_register(connection, limit, scope=None):
             or contradiction_count > 0
             or classification_action in {"alert_eligible", "review_queue"}
             or finding_count > 0
+            or port_behavior_points > 0
         )
 
         if actionable and record["score"] > 0:
@@ -8044,6 +8583,35 @@ def build_current_risk_register(connection, limit, scope=None):
 
     return rows
 
+
+
+def dashboard_port_behavior_payload(connection, limit, scope=None, lookback=5):
+    try:
+        return mac_port_behavior_rows(
+            connection,
+            limit=limit,
+            scope=scope,
+            lookback=lookback,
+        )
+    except Exception as exc:
+        return [
+            {
+                "behavior": "PORT_BEHAVIOR_ERROR",
+                "severity": "INFO",
+                "mac_identity": "-",
+                "asset_key": "-",
+                "ip_address": "-",
+                "device_type": "Unknown",
+                "port_key": "-",
+                "current_state": "UNKNOWN",
+                "baseline_state": "UNKNOWN",
+                "seen_count": 0,
+                "missing_count": 0,
+                "transition_count": 0,
+                "latest_scan_id": "-",
+                "reason": f"MAC-port behavior unavailable: {exc}",
+            }
+        ]
 
 def dashboard_current_risk_payload(connection, limit, scope=None):
     try:
@@ -8530,6 +9098,7 @@ def dashboard_index_html():
       <button type="button" class="tab-button" data-tab-target="overview">Overview</button>
       <button type="button" class="tab-button" data-tab-target="investigations">Investigations</button>
       <button type="button" class="tab-button" data-tab-target="risk">Risk</button>
+      <button type="button" class="tab-button" data-tab-target="port-behavior">Port Behavior</button>
       <button type="button" class="tab-button" data-tab-target="assets">Assets</button>
       <button type="button" class="tab-button" data-tab-target="intelligence">Intelligence</button>
       <button type="button" class="tab-button" data-tab-target="events">Events</button>
@@ -8646,6 +9215,33 @@ def dashboard_index_html():
           <tr><th>Level</th><th>Score</th><th>Subject</th><th>IP</th><th>MAC</th><th>Identity</th><th>Owner</th><th>Role</th><th>Open Alerts</th><th>Events</th><th>Why This Level?</th></tr>
         </thead>
         <tbody id="historical-risk-body"></tbody>
+      </table>
+    </section>
+
+
+    <section class="card" data-tab-panel="port-behavior">
+      <h2>MAC-Port Behavior</h2>
+      <p class="muted">
+        Correlates MAC-backed device identity with open-port history across accepted scans.
+        Use this to spot ports that appeared unexpectedly or changed open/not-observed state over time.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Severity</th>
+            <th>Behavior</th>
+            <th>MAC</th>
+            <th>IP</th>
+            <th>Device</th>
+            <th>Port</th>
+            <th>Current</th>
+            <th>Seen</th>
+            <th>Missing</th>
+            <th>Transitions</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody id="port-behavior-body"></tbody>
       </table>
     </section>
 
@@ -9827,6 +10423,44 @@ def dashboard_index_html():
       }).join("");
     }
 
+    function portBehaviorSeverityClass(severity) {
+      const value = String(severity || "").toLowerCase();
+      if (["critical", "high", "medium", "low", "info"].includes(value)) {
+        return `severity-${value}`;
+      }
+      return "severity-unknown";
+    }
+
+    function renderPortBehavior(rows) {
+      const tbody = document.getElementById("port-behavior-body");
+
+      if (!tbody) return;
+
+      const items = Array.isArray(rows) ? rows : [];
+
+      if (!items.length) {
+        tbody.innerHTML = `<tr><td colspan="11" class="muted">No MAC-port behavior changes were detected for the selected scope.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = items.map(row => `
+        <tr>
+          <td class="${portBehaviorSeverityClass(row.severity)}">${esc(row.severity || "-")}</td>
+          <td>${esc(row.behavior || "-")}</td>
+          <td><code>${esc(row.mac_identity || "-")}</code></td>
+          <td><code>${esc(row.ip_address || "-")}</code></td>
+          <td>${esc(row.device_type || "Unknown")}</td>
+          <td><code>${esc(row.port_key || "-")}</code></td>
+          <td>${esc(row.current_state || "-")}</td>
+          <td>${esc(row.seen_count ?? 0)}</td>
+          <td>${esc(row.missing_count ?? 0)}</td>
+          <td>${esc(row.transition_count ?? 0)}</td>
+          <td>${esc(row.reason || "-")}</td>
+        </tr>
+      `).join("");
+    }
+
+
     function renderRisk(rows) {
       const tbody = document.getElementById("risk-body");
 
@@ -10233,7 +10867,7 @@ def dashboard_index_html():
       try {
         setupDashboardTabs();
 
-        const [scopes, summary, scanContext, currentState, scanJobs, assets, currentRisk, historicalRisk, events, alerts, annotations] = await Promise.all([
+        const [scopes, summary, scanContext, currentState, scanJobs, assets, currentRisk, historicalRisk, portBehavior, events, alerts, annotations] = await Promise.all([
           api("/api/scopes"),
           api(scopedPath("/api/summary")),
           api(scopedPath("/api/scan-context")),
@@ -10242,6 +10876,7 @@ def dashboard_index_html():
           api(scopedPath("/api/assets?limit=25")),
           api(scopedPath("/api/current-risk?limit=10")),
           api(scopedPath("/api/risk?limit=10")),
+          api(scopedPath("/api/port-behavior?limit=25&lookback=5")),
           api(scopedPath("/api/events?limit=20")),
           api(scopedPath("/api/alerts?limit=20")),
           api(scopedPath("/api/annotations?limit=20"))
@@ -10255,6 +10890,7 @@ def dashboard_index_html():
         renderAssets(assets);
         renderRisk(currentRisk);
         renderHistoricalRisk(historicalRisk);
+        renderPortBehavior(portBehavior);
         renderEvents(events);
         renderAlerts(alerts);
         renderAnnotations(annotations);
@@ -10452,6 +11088,23 @@ def command_dashboard(args):
                     dashboard_json_response(self, dashboard_events_payload(connection, limit, scope=scope))
                 elif route == "/api/alerts":
                     dashboard_json_response(self, dashboard_alerts_payload(connection, limit, scope=scope))
+                elif route == "/api/port-behavior":
+                    lookback_value = query.get("lookback", ["5"])[0]
+
+                    try:
+                        lookback_limit = max(1, min(25, int(lookback_value)))
+                    except ValueError:
+                        lookback_limit = 5
+
+                    dashboard_json_response(
+                        self,
+                        dashboard_port_behavior_payload(
+                            connection,
+                            limit=limit,
+                            scope=scope,
+                            lookback=lookback_limit,
+                        ),
+                    )
                 elif route == "/api/current-risk":
                     dashboard_json_response(self, dashboard_current_risk_payload(connection, limit, scope=scope))
                 elif route == "/api/risk":
@@ -10611,7 +11264,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.14.0 NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, investigation workflow, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.15.0 MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, investigation workflow, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
@@ -10628,6 +11281,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--status", choices=sorted(SCAN_JOB_STATUSES))
     p.add_argument("--scope")
+    p = sub.add_parser("port-behavior", help="Show MAC-port behavior changes across accepted scans")
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--scope")
+    p.add_argument("--lookback", type=int, default=5, help="Accepted scan history depth to compare")
     sub.add_parser("scopes")
     p = sub.add_parser("summary")
     p = sub.add_parser("snapshots"); p.add_argument("--limit", type=int, default=20); p.add_argument("--scope")
@@ -10732,6 +11389,7 @@ def main() -> int:
         if args.command == "ingest": return command_ingest(args)
         if args.command == "scan-start": return command_scan_start(args)
         if args.command == "scan-jobs": return command_scan_jobs(args)
+        if args.command == "port-behavior": return command_port_behavior(args)
         if args.command == "summary": return command_summary(args)
         if args.command == "scopes": return command_scopes(args)
         if args.command == "snapshots": return command_snapshots(args)
