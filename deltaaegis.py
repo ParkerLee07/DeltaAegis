@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.11.1: NetSniper v1.7 intelligence review dashboard, classification storage, calibrated SIEM risk policy, investigation workflow, reporting, and dashboard console.
+"""DeltaAegis v0.14.0: NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, investigation workflow, reporting, and dashboard console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -10531,7 +10531,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.11.1 NetSniper v1.7 intelligence review dashboard, classification storage, calibrated SIEM risk policy, investigation workflow, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.14.0 NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, investigation workflow, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
