@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.15.0: MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, investigation workflow, reporting, and dashboard console.
+"""DeltaAegis v0.16.0: Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -32,6 +32,7 @@ DEFAULT_SCAN_LOGS = Path.home() / "DeltaAegis" / "scan-logs"
 DEFAULT_EVENTS = Path.home() / "DeltaAegis" / "events" / "events.jsonl"
 DEFAULT_REPORTS = Path.home() / "DeltaAegis" / "reports"
 DELTAAEGIS_V0_14_COMPATIBILITY_NOTE = "DeltaAegis v0.14.0 — NetSniper Scan Orchestration compatibility retained."
+DELTAAEGIS_V0_15_COMPATIBILITY_NOTE = "DeltaAegis v0.15.0 — MAC-Port Behavior Correlation compatibility retained."
 QUALITY_RATIO_THRESHOLD = 0.50
 IDENTITY_COVERAGE_THRESHOLD = 0.50
 IDENTITY_DROP_REVIEW_THRESHOLD = 0.25
@@ -5441,6 +5442,7 @@ def append_report_dashboard_usage_section(lines, scope=None):
 
     lines.append("- The dashboard remains read-only and is intended for local or trusted-access investigation.")
     lines.append("- Port behavior API: `/api/port-behavior?limit=25&lookback=5`")
+    lines.append("- Investigation Center API: `/api/investigation-center?limit=25`")
     lines.append("- Use the Asset Inventory table, asset selector, or clickable risk/event/alert subjects to open Asset Detail.")
     lines.append("")
 
@@ -5672,6 +5674,71 @@ def append_report_role_aware_recommendations_section(lines, risk_rows):
         lines.append("")
 
 
+
+def append_report_investigation_center_section(lines, investigation_rows):
+    lines.append("## Investigation Command Center")
+    lines.append("")
+    lines.append(
+        "This section summarizes the highest-priority investigation queue from the "
+        "same Command Center logic used by the dashboard and `investigation-center` CLI."
+    )
+    lines.append("")
+    lines.append(
+        "Queue priority combines current risk, open alerts, recent delta events, "
+        "MAC-port behavior, identity context, classification context, and recommended actions."
+    )
+    lines.append("")
+
+    rows = list(investigation_rows or [])
+
+    if not rows:
+        lines.append("No Investigation Command Center queue items matched this report scope.")
+        lines.append("")
+        return
+
+    lines.append("| Priority | Score | Subject | IP Address | MAC Address | Device / Role | Triggers | Why Review? | Recommended Action | Counts |")
+    lines.append("|---|---:|---|---|---|---|---|---|---|---|")
+
+    for row in rows:
+        role = row.get("role") or row.get("classification") or row.get("device_type") or "Unknown"
+        device = row.get("device_type") or "Unknown"
+
+        if device != role:
+            device_role = f"{device} / {role}"
+        else:
+            device_role = role
+
+        triggers = ", ".join(row.get("triggers") or []) or "-"
+        counts = (
+            f"alerts={int(row.get('open_alerts') or 0)}, "
+            f"events={int(row.get('recent_events') or 0)}, "
+            f"ports={int(row.get('port_behavior_count') or 0)}, "
+            f"findings={int(row.get('current_finding_count') or 0)}"
+        )
+
+        lines.append(
+            "| "
+            f"{safe_markdown(row.get('priority_level') or 'INFO')} | "
+            f"{safe_markdown(row.get('priority_score') or 0)} | "
+            f"`{safe_markdown(row.get('subject_key'))}` | "
+            f"`{safe_markdown(row.get('ip_address') or '-')}` | "
+            f"`{safe_markdown(row.get('mac_address') or '-')}` | "
+            f"{safe_markdown(device_role)} | "
+            f"{safe_markdown(triggers)} | "
+            f"{safe_markdown(row.get('primary_reason') or '-')} | "
+            f"{safe_markdown(row.get('recommended_action') or '-')} | "
+            f"`{safe_markdown(counts)}` |"
+        )
+
+    lines.append("")
+    lines.append(
+        "Use this queue as the starting point for review. The detailed Risk, "
+        "MAC-Port Behavior, Active Alerts, Delta Events, and Asset Inventory sections "
+        "provide supporting evidence for each item."
+    )
+    lines.append("")
+
+
 def append_report_risk_section(lines, risk_rows):
     lines.append("## Top Risk Subjects")
     lines.append("")
@@ -5821,6 +5888,12 @@ def command_report(args):
         lookback=5,
     )
 
+    report_investigation_center_rows = investigation_center_rows(
+        connection,
+        limit=args.risk_limit,
+        scope=scope,
+    )
+
     report_lifecycle_rows = report_asset_lifecycle_summary(
         connection,
         scope=scope,
@@ -5888,6 +5961,7 @@ def command_report(args):
     append_report_asset_lifecycle_section(lines, report_lifecycle_rows)
     append_report_classification_summary_section(lines, report_classification_summary)
     append_report_asset_inventory_section(lines, report_asset_rows, args.asset_limit)
+    append_report_investigation_center_section(lines, report_investigation_center_rows)
     append_report_risk_section(lines, report_risk_rows)
     append_report_port_behavior_section(lines, report_port_behavior_rows)
     append_report_role_aware_recommendations_section(lines, report_risk_rows)
@@ -8629,6 +8703,459 @@ def dashboard_current_risk_payload(connection, limit, scope=None):
 
 
 
+
+def investigation_center_add_unique(items, value):
+    value = str(value or "").strip()
+
+    if value and value not in items:
+        items.append(value)
+
+
+def investigation_center_severity_points(severity):
+    severity = str(severity or "INFO").upper()
+
+    return {
+        "CRITICAL": 45,
+        "HIGH": 30,
+        "MEDIUM": 15,
+        "LOW": 5,
+        "INFO": 0,
+    }.get(severity, 0)
+
+
+def investigation_center_item(subject_key):
+    subject_key = str(subject_key or "").strip() or "unknown-subject"
+
+    return {
+        "investigation_id": subject_key,
+        "subject_key": subject_key,
+        "priority_score": 0,
+        "priority_level": "INFO",
+        "risk_score": 0,
+        "risk_level": "INFO",
+        "ip_address": None,
+        "mac_address": None,
+        "hostname": None,
+        "vendor": None,
+        "device_type": None,
+        "classification": None,
+        "classification_decision": None,
+        "classification_confidence": 0,
+        "identity_confidence": None,
+        "owner": None,
+        "role": None,
+        "criticality": None,
+        "triggers": [],
+        "reasons": [],
+        "recommended_actions": [],
+        "open_alerts": 0,
+        "recent_events": 0,
+        "port_behavior_count": 0,
+        "current_finding_count": 0,
+        "risk": None,
+        "port_behavior": [],
+        "alerts": [],
+        "events": [],
+        "primary_reason": None,
+        "recommended_action": None,
+    }
+
+
+def investigation_center_merge_identity(item, row):
+    mappings = [
+        ("ip_address", "ip_address"),
+        ("ip", "ip_address"),
+        ("identity_ip_address", "ip_address"),
+        ("mac_address", "mac_address"),
+        ("mac", "mac_address"),
+        ("identity_mac_address", "mac_address"),
+        ("hostname", "hostname"),
+        ("identity_hostname", "hostname"),
+        ("vendor", "vendor"),
+        ("identity_vendor", "vendor"),
+        ("device_type", "device_type"),
+        ("classification", "classification"),
+        ("classification_primary_type", "classification"),
+        ("classification_decision", "classification_decision"),
+        ("classification_confidence", "classification_confidence"),
+        ("identity_confidence", "identity_confidence"),
+        ("owner", "owner"),
+        ("role", "role"),
+        ("criticality", "criticality"),
+    ]
+
+    for source_key, target_key in mappings:
+        value = row.get(source_key) if isinstance(row, dict) else None
+
+        if value not in {None, "", "-"} and not item.get(target_key):
+            item[target_key] = value
+
+
+def investigation_center_raise_priority(item, points):
+    item["priority_score"] = min(
+        100,
+        max(
+            int(item.get("priority_score") or 0),
+            int(points or 0),
+        ),
+    )
+
+
+def investigation_center_add_priority(item, points):
+    item["priority_score"] = min(
+        100,
+        int(item.get("priority_score") or 0) + max(0, int(points or 0)),
+    )
+
+
+def investigation_center_rows(connection, limit=25, scope=None):
+    current_risk_rows = build_current_risk_register(
+        connection,
+        limit=50,
+        scope=scope,
+    )
+
+    port_behavior_rows = mac_port_behavior_rows(
+        connection,
+        limit=50,
+        scope=scope,
+        lookback=5,
+    )
+
+    alert_rows = dashboard_alerts_payload(
+        connection,
+        limit=50,
+        scope=scope,
+    )
+
+    event_rows = dashboard_events_payload(
+        connection,
+        limit=50,
+        scope=scope,
+    )
+
+    items = {}
+
+    def ensure(subject_key):
+        subject_key = str(subject_key or "").strip()
+
+        if not subject_key:
+            return None
+
+        if subject_key not in items:
+            items[subject_key] = investigation_center_item(subject_key)
+
+        return items[subject_key]
+
+    for row in current_risk_rows:
+        subject_key = row.get("subject_key")
+        item = ensure(subject_key)
+
+        if item is None:
+            continue
+
+        score = risk_int(row.get("score"), 0)
+        investigation_center_raise_priority(item, score)
+        investigation_center_add_unique(item["triggers"], "CURRENT_RISK")
+        investigation_center_merge_identity(item, row)
+
+        item["risk_score"] = score
+        item["risk_level"] = row.get("level") or "INFO"
+        item["risk"] = {
+            "score": score,
+            "level": row.get("level") or "INFO",
+            "open_alerts": row.get("open_alerts", 0),
+            "current_finding_count": row.get("current_finding_count", 0),
+            "high_signal_ports": row.get("high_signal_ports") or [],
+            "baseline_exposure_ports": row.get("baseline_exposure_ports") or [],
+        }
+
+        item["open_alerts"] = max(
+            int(item.get("open_alerts") or 0),
+            int(row.get("open_alerts") or 0),
+        )
+        item["current_finding_count"] = max(
+            int(item.get("current_finding_count") or 0),
+            int(row.get("current_finding_count") or 0),
+        )
+
+        for reason in (row.get("reasons") or [])[:4]:
+            investigation_center_add_unique(item["reasons"], reason)
+
+        for action in (row.get("recommended_actions") or [])[:3]:
+            investigation_center_add_unique(item["recommended_actions"], action)
+
+    for row in port_behavior_rows:
+        subject_key = row.get("asset_key") or row.get("mac_identity")
+        item = ensure(subject_key)
+
+        if item is None:
+            continue
+
+        severity = str(row.get("severity") or "INFO").upper()
+        behavior = str(row.get("behavior") or "PORT_BEHAVIOR").upper()
+        points = investigation_center_severity_points(severity)
+
+        if behavior == "UNEXPECTED_PORT_OPENED":
+            points += 10
+        elif behavior == "PORT_FLAPPING":
+            points += 5
+
+        investigation_center_add_priority(item, points)
+        investigation_center_add_unique(item["triggers"], "PORT_BEHAVIOR")
+        investigation_center_merge_identity(item, row)
+
+        item["port_behavior_count"] += 1
+        item["port_behavior"].append(
+            {
+                "behavior": row.get("behavior"),
+                "severity": row.get("severity"),
+                "port_key": row.get("port_key"),
+                "current_state": row.get("current_state"),
+                "seen_count": row.get("seen_count"),
+                "missing_count": row.get("missing_count"),
+                "transition_count": row.get("transition_count"),
+                "reason": row.get("reason"),
+            }
+        )
+
+        investigation_center_add_unique(
+            item["reasons"],
+            row.get("reason") or f"MAC-port behavior detected on {row.get('port_key')}.",
+        )
+        investigation_center_add_unique(
+            item["recommended_actions"],
+            "Confirm whether the new or volatile MAC-port behavior is expected for this device.",
+        )
+
+    for row in alert_rows:
+        status = str(row.get("status") or "").upper()
+
+        if status != "OPEN":
+            continue
+
+        subject_key = row.get("subject_key")
+        item = ensure(subject_key)
+
+        if item is None:
+            continue
+
+        severity = str(row.get("severity") or "INFO").upper()
+        investigation_center_add_priority(
+            item,
+            investigation_center_severity_points(severity),
+        )
+        investigation_center_add_unique(item["triggers"], "OPEN_ALERT")
+        investigation_center_merge_identity(item, row)
+
+        item["open_alerts"] += 1
+        item["alerts"].append(
+            {
+                "alert_id": row.get("alert_id"),
+                "severity": row.get("severity"),
+                "event_type": row.get("event_type"),
+                "summary": row.get("summary"),
+                "last_seen_at": row.get("last_seen_at"),
+            }
+        )
+
+        investigation_center_add_unique(
+            item["reasons"],
+            row.get("summary") or f"Open {severity} alert is present.",
+        )
+        investigation_center_add_unique(
+            item["recommended_actions"],
+            "Review the open alert and acknowledge, suppress, or resolve it with a clear reason.",
+        )
+
+    for row in event_rows:
+        subject_key = row.get("subject_key")
+        item = ensure(subject_key)
+
+        if item is None:
+            continue
+
+        severity = str(row.get("severity") or "INFO").upper()
+        investigation_center_add_priority(
+            item,
+            max(3, investigation_center_severity_points(severity) // 2),
+        )
+        investigation_center_add_unique(item["triggers"], "RECENT_EVENT")
+        investigation_center_merge_identity(item, row)
+
+        item["recent_events"] += 1
+
+        if len(item["events"]) < 5:
+            item["events"].append(
+                {
+                    "event_id": row.get("event_id"),
+                    "severity": row.get("severity"),
+                    "event_type": row.get("event_type"),
+                    "summary": row.get("summary"),
+                    "created_at": row.get("created_at"),
+                }
+            )
+
+        investigation_center_add_unique(
+            item["reasons"],
+            row.get("summary") or f"Recent {severity} delta event is present.",
+        )
+
+    rows = []
+
+    for item in items.values():
+        item["priority_score"] = min(100, int(item.get("priority_score") or 0))
+        item["priority_level"] = risk_level(item["priority_score"])
+        item["primary_reason"] = (
+            item["reasons"][0]
+            if item["reasons"]
+            else "Review this subject using current risk, alerts, events, and asset context."
+        )
+        item["recommended_action"] = (
+            item["recommended_actions"][0]
+            if item["recommended_actions"]
+            else "Open the asset detail view and verify the observed network behavior."
+        )
+
+        rows.append(item)
+
+    rows.sort(
+        key=lambda row: (
+            int(row.get("priority_score") or 0),
+            int(row.get("open_alerts") or 0),
+            int(row.get("port_behavior_count") or 0),
+            int(row.get("recent_events") or 0),
+            str(row.get("subject_key") or ""),
+        ),
+        reverse=True,
+    )
+
+    return rows[:limit]
+
+
+def dashboard_investigation_center_payload(connection, limit=25, scope=None):
+    try:
+        items = investigation_center_rows(
+            connection,
+            limit=limit,
+            scope=scope,
+        )
+
+        return {
+            "available": True,
+            "selected_scope": scope,
+            "item_count": len(items),
+            "items": items,
+            "summary": {
+                "critical": sum(1 for row in items if row.get("priority_level") == "CRITICAL"),
+                "high": sum(1 for row in items if row.get("priority_level") == "HIGH"),
+                "medium": sum(1 for row in items if row.get("priority_level") == "MEDIUM"),
+                "with_open_alerts": sum(1 for row in items if int(row.get("open_alerts") or 0) > 0),
+                "with_port_behavior": sum(1 for row in items if int(row.get("port_behavior_count") or 0) > 0),
+            },
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "selected_scope": scope,
+            "item_count": 0,
+            "items": [],
+            "summary": {},
+            "error": f"Investigation Command Center unavailable: {exc}",
+        }
+
+
+
+def print_investigation_center_rows(payload):
+    available = bool(payload.get("available", False))
+    scope = payload.get("selected_scope")
+    rows = list(payload.get("items") or [])
+
+    print("DeltaAegis Investigation Command Center")
+    print("=======================================")
+
+    if scope:
+        print(f"Network scope: {scope}")
+
+    print()
+
+    if not available:
+        print(payload.get("error") or "Investigation Command Center is unavailable.")
+        return
+
+    if not rows:
+        print("No investigation queue items matched the selected scope.")
+        return
+
+    for index, row in enumerate(rows, start=1):
+        print(
+            f"{index:>2}. "
+            f"{row.get('priority_level', 'INFO'):<8} "
+            f"{int(row.get('priority_score') or 0):>3}  "
+            f"{row.get('subject_key') or '-'}"
+        )
+        print(f"    IP:       {row.get('ip_address') or '-'}")
+        print(f"    MAC:      {row.get('mac_address') or '-'}")
+
+        device = row.get("device_type") or "Unknown"
+        role = row.get("role") or row.get("classification") or "Unknown"
+        print(f"    Device:   {device}")
+        print(f"    Role:     {role}")
+
+        triggers = row.get("triggers") or []
+        print(f"    Triggers: {', '.join(triggers) if triggers else '-'}")
+        print(f"    Why:      {row.get('primary_reason') or '-'}")
+        print(f"    Action:   {row.get('recommended_action') or '-'}")
+        print(
+            "    Counts:   "
+            f"alerts={int(row.get('open_alerts') or 0)}, "
+            f"events={int(row.get('recent_events') or 0)}, "
+            f"ports={int(row.get('port_behavior_count') or 0)}, "
+            f"findings={int(row.get('current_finding_count') or 0)}"
+        )
+
+        port_behavior = row.get("port_behavior") or []
+        if port_behavior:
+            first = port_behavior[0]
+            print(
+                "    Port:     "
+                f"{first.get('behavior') or '-'} "
+                f"{first.get('port_key') or '-'} "
+                f"({first.get('severity') or 'INFO'})"
+            )
+
+        alerts = row.get("alerts") or []
+        if alerts:
+            first = alerts[0]
+            print(
+                "    Alert:    "
+                f"#{first.get('alert_id') or '-'} "
+                f"{first.get('severity') or 'INFO'} "
+                f"{first.get('event_type') or '-'}"
+            )
+
+        print()
+
+
+def command_investigation_center(args):
+    connection = connect(args.db)
+    scope = optional_network_scope(getattr(args, "scope", None))
+
+    try:
+        payload = dashboard_investigation_center_payload(
+            connection,
+            limit=args.limit,
+            scope=scope,
+        )
+    finally:
+        connection.close()
+
+    print_investigation_center_rows(payload)
+
+    return 0 if payload.get("available", False) else 1
+
+
+
 def dashboard_risk_payload(connection, limit, scope=None):
     try:
         return build_risk_register(connection, limit, scope=scope)
@@ -9083,6 +9610,29 @@ def dashboard_index_html():
       color: #bbf7d0;
     }
 
+    .command-center-trigger {
+      display: inline-block;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 2px 8px;
+      margin: 2px;
+      background: var(--panel2);
+      color: #bfdbfe;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .command-center-reason {
+      max-width: 520px;
+      color: var(--text);
+    }
+
+    .command-center-action {
+      max-width: 520px;
+      color: #bbf7d0;
+    }
+
   </style>
 </head>
 <body>
@@ -9096,6 +9646,7 @@ def dashboard_index_html():
 
     <nav class="dashboard-tabs" aria-label="DeltaAegis dashboard sections">
       <button type="button" class="tab-button" data-tab-target="overview">Overview</button>
+      <button type="button" class="tab-button" data-tab-target="command-center">Command Center</button>
       <button type="button" class="tab-button" data-tab-target="investigations">Investigations</button>
       <button type="button" class="tab-button" data-tab-target="risk">Risk</button>
       <button type="button" class="tab-button" data-tab-target="port-behavior">Port Behavior</button>
@@ -9105,6 +9656,31 @@ def dashboard_index_html():
       <button type="button" class="tab-button" data-tab-target="alerts">Alerts</button>
       <button type="button" class="tab-button" data-tab-target="scan-jobs">Scan Jobs</button>
     </nav>
+
+    <section class="card" data-tab-panel="command-center">
+      <h2>Investigation Command Center</h2>
+      <p class="muted">
+        Prioritized analyst queue combining current risk, MAC-port behavior, open alerts,
+        recent delta events, asset identity, classification, and recommended next action.
+      </p>
+      <div id="investigation-center-summary" class="grid"></div>
+      <table>
+        <thead>
+          <tr>
+            <th>Priority</th>
+            <th>Subject</th>
+            <th>IP</th>
+            <th>MAC</th>
+            <th>Device / Role</th>
+            <th>Triggers</th>
+            <th>Why Review?</th>
+            <th>Recommended Action</th>
+            <th>Counts</th>
+          </tr>
+        </thead>
+        <tbody id="investigation-center-body"></tbody>
+      </table>
+    </section>
 
     <section class="card explain" data-tab-panel="overview">
       <h2>What am I looking at?</h2>
@@ -9337,6 +9913,7 @@ def dashboard_index_html():
 
     const DASHBOARD_TABS = [
       "overview",
+      "command-center",
       "investigations",
       "risk",
       "port-behavior",
@@ -10463,6 +11040,77 @@ def dashboard_index_html():
     }
 
 
+
+    function renderInvestigationCenter(payload) {
+      const summaryBox = document.getElementById("investigation-center-summary");
+      const tbody = document.getElementById("investigation-center-body");
+      const items = payload && Array.isArray(payload.items) ? payload.items : [];
+      const summary = payload && payload.summary ? payload.summary : {};
+
+      if (summaryBox) {
+        summaryBox.innerHTML = [
+          ["Queue Items", payload && payload.item_count !== undefined ? payload.item_count : items.length],
+          ["Critical", summary.critical || 0],
+          ["High", summary.high || 0],
+          ["With Open Alerts", summary.with_open_alerts || 0],
+          ["With Port Behavior", summary.with_port_behavior || 0]
+        ].map(([label, value]) => `
+          <div class="metric">
+            <div class="label">${esc(label)}</div>
+            <div class="value">${esc(value)}</div>
+          </div>
+        `).join("");
+      }
+
+      if (!tbody) return;
+
+      if (!items.length) {
+        const message = payload && payload.available === false
+          ? (payload.error || "Investigation Command Center is unavailable.")
+          : "No investigation queue items matched the selected scope.";
+        tbody.innerHTML = `<tr><td colspan="9" class="muted">${esc(message)}</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = items.map(row => {
+        const triggers = Array.isArray(row.triggers) && row.triggers.length
+          ? row.triggers.map(trigger => `<span class="command-center-trigger">${esc(trigger)}</span>`).join(" ")
+          : "-";
+
+        const counts = [
+          `alerts=${esc(row.open_alerts || 0)}`,
+          `events=${esc(row.recent_events || 0)}`,
+          `ports=${esc(row.port_behavior_count || 0)}`,
+          `findings=${esc(row.current_finding_count || 0)}`
+        ].join(" ");
+
+        const role = row.role || row.classification || row.device_type || "Unknown";
+        const device = row.device_type && row.device_type !== role
+          ? `${esc(row.device_type)} / ${esc(role)}`
+          : esc(role);
+
+        return `
+          <tr>
+            <td class="severity-${esc(String(row.priority_level || "info").toLowerCase())}">
+              ${esc(row.priority_level || "INFO")}<br>
+              <span class="muted">${esc(row.priority_score || 0)}</span>
+            </td>
+            <td>${subjectButton(row.subject_key || "-")}</td>
+            <td><code>${esc(row.ip_address || "-")}</code></td>
+            <td><code>${esc(row.mac_address || "-")}</code></td>
+            <td>${device}</td>
+            <td>${triggers}</td>
+            <td class="command-center-reason">${esc(row.primary_reason || "-")}</td>
+            <td class="command-center-action">${esc(row.recommended_action || "-")}</td>
+            <td><code>${counts}</code></td>
+          </tr>
+        `;
+      }).join("");
+
+      bindSubjectLinks(tbody);
+    }
+
+
     function renderRisk(rows) {
       const tbody = document.getElementById("risk-body");
 
@@ -10869,11 +11517,12 @@ def dashboard_index_html():
       try {
         setupDashboardTabs();
 
-        const [scopes, summary, scanContext, currentState, scanJobs, assets, currentRisk, historicalRisk, portBehavior, events, alerts, annotations] = await Promise.all([
+        const [scopes, summary, scanContext, currentState, investigationCenter, scanJobs, assets, currentRisk, historicalRisk, portBehavior, events, alerts, annotations] = await Promise.all([
           api("/api/scopes"),
           api(scopedPath("/api/summary")),
           api(scopedPath("/api/scan-context")),
           api(scopedPath("/api/current-state")),
+          api(scopedPath("/api/investigation-center?limit=25")),
           api(scopedPath("/api/scan-jobs?limit=10")),
           api(scopedPath("/api/assets?limit=25")),
           api(scopedPath("/api/current-risk?limit=10")),
@@ -10887,6 +11536,7 @@ def dashboard_index_html():
         renderScopes(scopes);
         renderMetrics(summary);
         renderCurrentState(currentState);
+        renderInvestigationCenter(investigationCenter);
         renderScanContext(scanContext);
         renderScanJobs(scanJobs);
         renderAssets(assets);
@@ -11086,6 +11736,15 @@ def command_dashboard(args):
                             identifier,
                         ),
                     )
+                elif route == "/api/investigation-center":
+                    dashboard_json_response(
+                        self,
+                        dashboard_investigation_center_payload(
+                            connection,
+                            limit=limit,
+                            scope=scope,
+                        ),
+                    )
                 elif route == "/api/events":
                     dashboard_json_response(self, dashboard_events_payload(connection, limit, scope=scope))
                 elif route == "/api/alerts":
@@ -11266,7 +11925,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.15.0 MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, investigation workflow, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.16.0 Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
@@ -11282,6 +11941,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("scan-jobs", help="List NetSniper scan orchestration jobs")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--status", choices=sorted(SCAN_JOB_STATUSES))
+    p.add_argument("--scope")
+    p = sub.add_parser("investigation-center", help="Show prioritized investigation command center queue")
+    p.add_argument("--limit", type=int, default=25)
     p.add_argument("--scope")
     p = sub.add_parser("port-behavior", help="Show MAC-port behavior changes across accepted scans")
     p.add_argument("--limit", type=int, default=50)
@@ -11391,6 +12053,7 @@ def main() -> int:
         if args.command == "ingest": return command_ingest(args)
         if args.command == "scan-start": return command_scan_start(args)
         if args.command == "scan-jobs": return command_scan_jobs(args)
+        if args.command == "investigation-center": return command_investigation_center(args)
         if args.command == "port-behavior": return command_port_behavior(args)
         if args.command == "summary": return command_summary(args)
         if args.command == "scopes": return command_scopes(args)

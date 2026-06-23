@@ -21,7 +21,7 @@ python3 -m py_compile deltaaegis.py \
     || fail "deltaaegis.py does not compile"
 
 grep -q 'DeltaAegis v0.15.0 — MAC-Port Behavior Correlation' README.md \
-    || fail "README does not identify v0.15.0 as current release"
+    || fail "README no longer preserves v0.15.0 release text"
 
 grep -q 'DeltaAegis v0.14.0 — NetSniper Scan Orchestration' README.md \
     || fail "README no longer preserves v0.14.0 compatibility text"

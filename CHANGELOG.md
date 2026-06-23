@@ -1,3 +1,39 @@
+## v0.16.0 — Investigation Command Center
+
+### Added
+
+- Added `/api/investigation-center` for a prioritized analyst queue.
+- Added dashboard Command Center tab.
+- Added `investigation-center` CLI command.
+- Added Markdown report section `Investigation Command Center`.
+- Added queue triggers for `CURRENT_RISK`, `OPEN_ALERT`, `RECENT_EVENT`, and
+  `PORT_BEHAVIOR`.
+- Added v0.16 validators:
+  - `tools/validate_v0_16_investigation_center_api.sh`
+  - `tools/validate_v0_16_command_center_dashboard.sh`
+  - `tools/validate_v0_16_investigation_center_cli.sh`
+  - `tools/validate_v0_16_investigation_center_report.sh`
+  - `tools/validate_v0_16_release.sh`
+
+### Changed
+
+- Promoted the dashboard from separate detail tabs only into an analyst-first
+  triage workflow.
+- Preserved v0.15 MAC-port behavior correlation.
+- Preserved v0.14 NetSniper scan orchestration.
+- Preserved v0.13 current-state/current-risk dashboard behavior.
+- Preserved v0.12 NetSniper intelligence drilldown behavior.
+- Updated README current-release metadata to v0.16.0.
+
+### Validation
+
+- Verified synthetic Investigation Command Center payload generation.
+- Verified dashboard Command Center HTML, tab allowlist, and API wiring.
+- Verified terminal `investigation-center` CLI output.
+- Verified Markdown reports include the Investigation Command Center section.
+- Verified v0.15, v0.14, v0.13, and v0.12 regression gates.
+
+
 ## v0.15.0 — MAC-Port Behavior Correlation
 
 ### Added
