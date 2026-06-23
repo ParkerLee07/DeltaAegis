@@ -830,6 +830,188 @@ def parse_service_xml(path: Path, analysis: dict[str, dict[str, Any]], target_ne
                 classification_validators_json=json.dumps(classification_validators, sort_keys=True),
             )
         )
+    service_ips = {asset.ip_address for asset in preliminary}
+
+    for ipv4 in sorted(analysis):
+        if ipv4 in service_ips:
+            continue
+
+        if not is_usable_target_address(ipv4, target_network):
+            continue
+
+        interpretation = analysis.get(ipv4, {})
+        if not isinstance(interpretation, dict):
+            interpretation = {}
+
+        evidence = discovery.get(ipv4, IdentityEvidence())
+
+        candidates = [
+            (evidence.mac_address, evidence.vendor, evidence.source),
+            (neighbors.get(ipv4), None, "NEIGHBOR_TABLE"),
+        ]
+        candidates = [item for item in candidates if item[0]]
+
+        mac, vendor, source = (
+            max(candidates, key=lambda item: identity_rank(item[2]))
+            if candidates
+            else (None, evidence.vendor, "IP_ONLY")
+        )
+
+        classification = interpretation.get("classification", {})
+        if not isinstance(classification, dict):
+            classification = {}
+
+        if not classification:
+            classification = {
+                "schema_version": "netsniper-classification-v1",
+                "type": "Unknown / Ambiguous",
+                "primary_type": "Unknown / Ambiguous",
+                "confidence": 0,
+                "confidence_label": "unknown",
+                "confidence_band": "unknown",
+                "calibrated_decision": "unknown",
+                "siem_action": "no_action",
+                "calibration_reason": (
+                    "Host was present in the NetSniper inventory but did not have "
+                    "monitored service evidence."
+                ),
+                "validation_state": "not_applicable",
+                "contradiction_count": 0,
+                "decision": "unknown",
+                "method": "deltaaegis_full_inventory_preservation",
+                "evidence": [],
+                "validators": [],
+                "validator_summary": {
+                    "total": 0,
+                    "confirmed": 0,
+                    "inconclusive": 0,
+                    "refuted": 0,
+                    "not_applicable": 0,
+                    "error": 0,
+                    "names": [],
+                },
+                "contradictions": [],
+                "candidates": [],
+                "secondary_candidates": [],
+            }
+
+        findings = interpretation.get("findings", [])
+        if not isinstance(findings, list):
+            findings = []
+
+        classification_evidence = classification.get("evidence", [])
+        if not isinstance(classification_evidence, list):
+            classification_evidence = []
+
+        classification_contradictions = classification.get("contradictions", [])
+        if not isinstance(classification_contradictions, list):
+            classification_contradictions = []
+
+        classification_candidates = classification.get(
+            "candidates",
+            classification.get("secondary_candidates", []),
+        )
+        if not isinstance(classification_candidates, list):
+            classification_candidates = []
+
+        classification_validators = classification.get("validators", [])
+        if not isinstance(classification_validators, list):
+            classification_validators = []
+
+        classification_validator_summary = classification.get("validator_summary", {})
+        if not isinstance(classification_validator_summary, dict):
+            classification_validator_summary = {}
+
+        classification_contradiction_count = safe_int(
+            classification.get("contradiction_count")
+        )
+        if classification_contradiction_count is None:
+            classification_contradiction_count = len(classification_contradictions)
+
+        confidence = (
+            "HIGH"
+            if source in {"DISCOVERY_XML", "SERVICE_XML"}
+            else "MEDIUM"
+            if source == "NEIGHBOR_TABLE"
+            else "LOW"
+        )
+
+        preliminary.append(
+            AssetObservation(
+                "",
+                classify_identity(mac),
+                confidence,
+                source,
+                ipv4,
+                mac,
+                vendor,
+                evidence.hostname,
+                interpretation.get("device_type") or "Unknown",
+                interpretation.get("severity") or "INFO",
+                safe_int(interpretation.get("score")) or 0,
+                [],
+                [item for item in findings if isinstance(item, dict)],
+                device_type_confidence=safe_int(
+                    interpretation.get("device_type_confidence")
+                ) or 0,
+                classification_type=classification.get("type")
+                or classification.get("primary_type")
+                or "Unknown / Ambiguous",
+                classification_primary_type=classification.get(
+                    "primary_type",
+                    classification.get("type", "Unknown / Ambiguous"),
+                ),
+                classification_confidence=safe_int(classification.get("confidence")) or 0,
+                classification_confidence_label=classification.get(
+                    "confidence_label",
+                    "unknown",
+                ),
+                classification_decision=classification.get("decision", "unknown"),
+                classification_method=classification.get(
+                    "method",
+                    "deltaaegis_full_inventory_preservation",
+                ),
+                classification_json=json.dumps(classification, sort_keys=True),
+                classification_evidence_json=json.dumps(
+                    classification_evidence,
+                    sort_keys=True,
+                ),
+                classification_contradictions_json=json.dumps(
+                    classification_contradictions,
+                    sort_keys=True,
+                ),
+                classification_candidates_json=json.dumps(
+                    classification_candidates,
+                    sort_keys=True,
+                ),
+                classification_confidence_band=classification.get(
+                    "confidence_band",
+                    "unknown",
+                ),
+                classification_calibrated_decision=classification.get(
+                    "calibrated_decision",
+                    classification.get("decision", "unknown"),
+                ),
+                classification_siem_action=classification.get("siem_action", "no_action"),
+                classification_calibration_reason=classification.get(
+                    "calibration_reason",
+                ),
+                classification_validation_state=classification.get(
+                    "validation_state",
+                    "not_applicable",
+                ),
+                classification_contradiction_count=classification_contradiction_count,
+                classification_validator_summary_json=json.dumps(
+                    classification_validator_summary,
+                    sort_keys=True,
+                ),
+                classification_validators_json=json.dumps(
+                    classification_validators,
+                    sort_keys=True,
+                ),
+            )
+        )
+
     mac_counts = Counter(asset.mac_address for asset in preliminary if asset.mac_address)
     assets: dict[str, AssetObservation] = {}
     for asset in preliminary:
@@ -868,6 +1050,20 @@ def load_snapshot(manifest_path: Path) -> Snapshot:
     discovery = parse_discovery_xml(discovery_xml, target_network)
     neighbors = parse_neighbors(optional_file(bundle_dir, manifest, "neighbors"), target_network)
     exit_status, hosts_up, hosts_down, hosts_total, assets = parse_service_xml(services_xml, analysis, target_network, discovery, neighbors)
+
+    # NetSniper v1.8 preserves discovery-only hosts in analysis.json.
+    # Treat the merged asset inventory as the current live inventory so
+    # service-less-but-discovered hosts remain visible in DeltaAegis.
+    counts = manifest.get("counts", {}) if isinstance(manifest.get("counts"), dict) else {}
+    discovered_hosts = safe_int(counts.get("discovered_hosts"))
+    inventory_hosts = max(len(assets), discovered_hosts or 0)
+
+    if inventory_hosts > hosts_up:
+        hosts_up = inventory_hosts
+
+    if hosts_total < hosts_up:
+        hosts_total = hosts_up
+
     scan_profile = str(manifest.get("scan_profile", "UNKNOWN"))
     profile = manifest.get("profile", {}) if isinstance(manifest.get("profile"), dict) else {}
     monitored_ports = tuple(sorted(int(port) for port in profile.get("monitored_ports", []) if isinstance(port, int) or str(port).isdigit()))
