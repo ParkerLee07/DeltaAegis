@@ -5439,6 +5439,7 @@ def append_report_dashboard_usage_section(lines, scope=None):
         lines.append("- Asset detail API: `/api/asset?identifier=<asset-or-ip>`")
 
     lines.append("- The dashboard remains read-only and is intended for local or trusted-access investigation.")
+    lines.append("- Port behavior API: `/api/port-behavior?limit=25&lookback=5`")
     lines.append("- Use the Asset Inventory table, asset selector, or clickable risk/event/alert subjects to open Asset Detail.")
     lines.append("")
 
@@ -5705,6 +5706,58 @@ def append_report_risk_section(lines, risk_rows):
     lines.append("Risk scores are explainable and are calculated from recent delta events, alert state, repeated activity, asset criticality, missing asset context, and classification-aware role context.")
     lines.append("")
 
+
+def append_report_port_behavior_section(lines, port_behavior_rows):
+    lines.append("## MAC-Port Behavior Changes")
+    lines.append("")
+    lines.append(
+        "This section correlates stable MAC-backed device identity with open-port "
+        "history across accepted scans. It highlights ports that appeared "
+        "unexpectedly, disappeared, or repeatedly changed open/not-observed state."
+    )
+    lines.append("")
+    lines.append(
+        "Normal infrastructure ports can fluctuate because of scan timing, device sleep "
+        "states, or printer/web management behavior. Treat volatile printer ports such "
+        "as `tcp/631` and `tcp/9100` as review context unless combined with unusual "
+        "remote-access or file-sharing services."
+    )
+    lines.append("")
+
+    rows = list(port_behavior_rows or [])
+
+    if not rows:
+        lines.append("No MAC-port behavior changes were detected for this report scope.")
+        lines.append("")
+        return
+
+    lines.append("| Severity | Behavior | MAC Identity | IP Address | Device | Port | Current State | Seen | Missing | Transitions | Reason |")
+    lines.append("|---|---|---|---|---|---|---|---:|---:|---:|---|")
+
+    for row in rows:
+        lines.append(
+            "| "
+            f"{safe_markdown(row.get('severity'))} | "
+            f"{safe_markdown(row.get('behavior'))} | "
+            f"`{safe_markdown(row.get('mac_identity'))}` | "
+            f"`{safe_markdown(row.get('ip_address'))}` | "
+            f"{safe_markdown(row.get('device_type') or 'Unknown')} | "
+            f"`{safe_markdown(row.get('port_key'))}` | "
+            f"{safe_markdown(row.get('current_state'))} | "
+            f"{safe_markdown(row.get('seen_count'))} | "
+            f"{safe_markdown(row.get('missing_count'))} | "
+            f"{safe_markdown(row.get('transition_count'))} | "
+            f"{safe_markdown(row.get('reason'))} |"
+        )
+
+    lines.append("")
+    lines.append(
+        "High-signal unexpected ports, such as Telnet, SMB, RDP, exposed databases, "
+        "or container-management services, should be validated before treating the "
+        "device as normal."
+    )
+    lines.append("")
+
 def command_report(args):
     from collections import Counter
     from datetime import datetime, timezone
@@ -5758,6 +5811,13 @@ def command_report(args):
         connection,
         args.risk_limit,
         scope=scope,
+    )
+
+    report_port_behavior_rows = mac_port_behavior_rows(
+        connection,
+        limit=25,
+        scope=scope,
+        lookback=5,
     )
 
     report_lifecycle_rows = report_asset_lifecycle_summary(
@@ -5828,6 +5888,7 @@ def command_report(args):
     append_report_classification_summary_section(lines, report_classification_summary)
     append_report_asset_inventory_section(lines, report_asset_rows, args.asset_limit)
     append_report_risk_section(lines, report_risk_rows)
+    append_report_port_behavior_section(lines, report_port_behavior_rows)
     append_report_role_aware_recommendations_section(lines, report_risk_rows)
 
     lines.append("## Annotated Asset Context")
