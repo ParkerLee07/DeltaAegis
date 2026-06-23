@@ -8629,6 +8629,368 @@ def dashboard_current_risk_payload(connection, limit, scope=None):
 
 
 
+
+def investigation_center_add_unique(items, value):
+    value = str(value or "").strip()
+
+    if value and value not in items:
+        items.append(value)
+
+
+def investigation_center_severity_points(severity):
+    severity = str(severity or "INFO").upper()
+
+    return {
+        "CRITICAL": 45,
+        "HIGH": 30,
+        "MEDIUM": 15,
+        "LOW": 5,
+        "INFO": 0,
+    }.get(severity, 0)
+
+
+def investigation_center_item(subject_key):
+    subject_key = str(subject_key or "").strip() or "unknown-subject"
+
+    return {
+        "investigation_id": subject_key,
+        "subject_key": subject_key,
+        "priority_score": 0,
+        "priority_level": "INFO",
+        "risk_score": 0,
+        "risk_level": "INFO",
+        "ip_address": None,
+        "mac_address": None,
+        "hostname": None,
+        "vendor": None,
+        "device_type": None,
+        "classification": None,
+        "classification_decision": None,
+        "classification_confidence": 0,
+        "identity_confidence": None,
+        "owner": None,
+        "role": None,
+        "criticality": None,
+        "triggers": [],
+        "reasons": [],
+        "recommended_actions": [],
+        "open_alerts": 0,
+        "recent_events": 0,
+        "port_behavior_count": 0,
+        "current_finding_count": 0,
+        "risk": None,
+        "port_behavior": [],
+        "alerts": [],
+        "events": [],
+        "primary_reason": None,
+        "recommended_action": None,
+    }
+
+
+def investigation_center_merge_identity(item, row):
+    mappings = [
+        ("ip_address", "ip_address"),
+        ("ip", "ip_address"),
+        ("identity_ip_address", "ip_address"),
+        ("mac_address", "mac_address"),
+        ("mac", "mac_address"),
+        ("identity_mac_address", "mac_address"),
+        ("hostname", "hostname"),
+        ("identity_hostname", "hostname"),
+        ("vendor", "vendor"),
+        ("identity_vendor", "vendor"),
+        ("device_type", "device_type"),
+        ("classification", "classification"),
+        ("classification_primary_type", "classification"),
+        ("classification_decision", "classification_decision"),
+        ("classification_confidence", "classification_confidence"),
+        ("identity_confidence", "identity_confidence"),
+        ("owner", "owner"),
+        ("role", "role"),
+        ("criticality", "criticality"),
+    ]
+
+    for source_key, target_key in mappings:
+        value = row.get(source_key) if isinstance(row, dict) else None
+
+        if value not in {None, "", "-"} and not item.get(target_key):
+            item[target_key] = value
+
+
+def investigation_center_raise_priority(item, points):
+    item["priority_score"] = min(
+        100,
+        max(
+            int(item.get("priority_score") or 0),
+            int(points or 0),
+        ),
+    )
+
+
+def investigation_center_add_priority(item, points):
+    item["priority_score"] = min(
+        100,
+        int(item.get("priority_score") or 0) + max(0, int(points or 0)),
+    )
+
+
+def investigation_center_rows(connection, limit=25, scope=None):
+    current_risk_rows = build_current_risk_register(
+        connection,
+        limit=50,
+        scope=scope,
+    )
+
+    port_behavior_rows = mac_port_behavior_rows(
+        connection,
+        limit=50,
+        scope=scope,
+        lookback=5,
+    )
+
+    alert_rows = dashboard_alerts_payload(
+        connection,
+        limit=50,
+        scope=scope,
+    )
+
+    event_rows = dashboard_events_payload(
+        connection,
+        limit=50,
+        scope=scope,
+    )
+
+    items = {}
+
+    def ensure(subject_key):
+        subject_key = str(subject_key or "").strip()
+
+        if not subject_key:
+            return None
+
+        if subject_key not in items:
+            items[subject_key] = investigation_center_item(subject_key)
+
+        return items[subject_key]
+
+    for row in current_risk_rows:
+        subject_key = row.get("subject_key")
+        item = ensure(subject_key)
+
+        if item is None:
+            continue
+
+        score = risk_int(row.get("score"), 0)
+        investigation_center_raise_priority(item, score)
+        investigation_center_add_unique(item["triggers"], "CURRENT_RISK")
+        investigation_center_merge_identity(item, row)
+
+        item["risk_score"] = score
+        item["risk_level"] = row.get("level") or "INFO"
+        item["risk"] = {
+            "score": score,
+            "level": row.get("level") or "INFO",
+            "open_alerts": row.get("open_alerts", 0),
+            "current_finding_count": row.get("current_finding_count", 0),
+            "high_signal_ports": row.get("high_signal_ports") or [],
+            "baseline_exposure_ports": row.get("baseline_exposure_ports") or [],
+        }
+
+        item["open_alerts"] = max(
+            int(item.get("open_alerts") or 0),
+            int(row.get("open_alerts") or 0),
+        )
+        item["current_finding_count"] = max(
+            int(item.get("current_finding_count") or 0),
+            int(row.get("current_finding_count") or 0),
+        )
+
+        for reason in (row.get("reasons") or [])[:4]:
+            investigation_center_add_unique(item["reasons"], reason)
+
+        for action in (row.get("recommended_actions") or [])[:3]:
+            investigation_center_add_unique(item["recommended_actions"], action)
+
+    for row in port_behavior_rows:
+        subject_key = row.get("asset_key") or row.get("mac_identity")
+        item = ensure(subject_key)
+
+        if item is None:
+            continue
+
+        severity = str(row.get("severity") or "INFO").upper()
+        behavior = str(row.get("behavior") or "PORT_BEHAVIOR").upper()
+        points = investigation_center_severity_points(severity)
+
+        if behavior == "UNEXPECTED_PORT_OPENED":
+            points += 10
+        elif behavior == "PORT_FLAPPING":
+            points += 5
+
+        investigation_center_add_priority(item, points)
+        investigation_center_add_unique(item["triggers"], "PORT_BEHAVIOR")
+        investigation_center_merge_identity(item, row)
+
+        item["port_behavior_count"] += 1
+        item["port_behavior"].append(
+            {
+                "behavior": row.get("behavior"),
+                "severity": row.get("severity"),
+                "port_key": row.get("port_key"),
+                "current_state": row.get("current_state"),
+                "seen_count": row.get("seen_count"),
+                "missing_count": row.get("missing_count"),
+                "transition_count": row.get("transition_count"),
+                "reason": row.get("reason"),
+            }
+        )
+
+        investigation_center_add_unique(
+            item["reasons"],
+            row.get("reason") or f"MAC-port behavior detected on {row.get('port_key')}.",
+        )
+        investigation_center_add_unique(
+            item["recommended_actions"],
+            "Confirm whether the new or volatile MAC-port behavior is expected for this device.",
+        )
+
+    for row in alert_rows:
+        status = str(row.get("status") or "").upper()
+
+        if status != "OPEN":
+            continue
+
+        subject_key = row.get("subject_key")
+        item = ensure(subject_key)
+
+        if item is None:
+            continue
+
+        severity = str(row.get("severity") or "INFO").upper()
+        investigation_center_add_priority(
+            item,
+            investigation_center_severity_points(severity),
+        )
+        investigation_center_add_unique(item["triggers"], "OPEN_ALERT")
+        investigation_center_merge_identity(item, row)
+
+        item["open_alerts"] += 1
+        item["alerts"].append(
+            {
+                "alert_id": row.get("alert_id"),
+                "severity": row.get("severity"),
+                "event_type": row.get("event_type"),
+                "summary": row.get("summary"),
+                "last_seen_at": row.get("last_seen_at"),
+            }
+        )
+
+        investigation_center_add_unique(
+            item["reasons"],
+            row.get("summary") or f"Open {severity} alert is present.",
+        )
+        investigation_center_add_unique(
+            item["recommended_actions"],
+            "Review the open alert and acknowledge, suppress, or resolve it with a clear reason.",
+        )
+
+    for row in event_rows:
+        subject_key = row.get("subject_key")
+        item = ensure(subject_key)
+
+        if item is None:
+            continue
+
+        severity = str(row.get("severity") or "INFO").upper()
+        investigation_center_add_priority(
+            item,
+            max(3, investigation_center_severity_points(severity) // 2),
+        )
+        investigation_center_add_unique(item["triggers"], "RECENT_EVENT")
+        investigation_center_merge_identity(item, row)
+
+        item["recent_events"] += 1
+
+        if len(item["events"]) < 5:
+            item["events"].append(
+                {
+                    "event_id": row.get("event_id"),
+                    "severity": row.get("severity"),
+                    "event_type": row.get("event_type"),
+                    "summary": row.get("summary"),
+                    "created_at": row.get("created_at"),
+                }
+            )
+
+        investigation_center_add_unique(
+            item["reasons"],
+            row.get("summary") or f"Recent {severity} delta event is present.",
+        )
+
+    rows = []
+
+    for item in items.values():
+        item["priority_score"] = min(100, int(item.get("priority_score") or 0))
+        item["priority_level"] = risk_level(item["priority_score"])
+        item["primary_reason"] = (
+            item["reasons"][0]
+            if item["reasons"]
+            else "Review this subject using current risk, alerts, events, and asset context."
+        )
+        item["recommended_action"] = (
+            item["recommended_actions"][0]
+            if item["recommended_actions"]
+            else "Open the asset detail view and verify the observed network behavior."
+        )
+
+        rows.append(item)
+
+    rows.sort(
+        key=lambda row: (
+            int(row.get("priority_score") or 0),
+            int(row.get("open_alerts") or 0),
+            int(row.get("port_behavior_count") or 0),
+            int(row.get("recent_events") or 0),
+            str(row.get("subject_key") or ""),
+        ),
+        reverse=True,
+    )
+
+    return rows[:limit]
+
+
+def dashboard_investigation_center_payload(connection, limit=25, scope=None):
+    try:
+        items = investigation_center_rows(
+            connection,
+            limit=limit,
+            scope=scope,
+        )
+
+        return {
+            "available": True,
+            "selected_scope": scope,
+            "item_count": len(items),
+            "items": items,
+            "summary": {
+                "critical": sum(1 for row in items if row.get("priority_level") == "CRITICAL"),
+                "high": sum(1 for row in items if row.get("priority_level") == "HIGH"),
+                "medium": sum(1 for row in items if row.get("priority_level") == "MEDIUM"),
+                "with_open_alerts": sum(1 for row in items if int(row.get("open_alerts") or 0) > 0),
+                "with_port_behavior": sum(1 for row in items if int(row.get("port_behavior_count") or 0) > 0),
+            },
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "selected_scope": scope,
+            "item_count": 0,
+            "items": [],
+            "summary": {},
+            "error": f"Investigation Command Center unavailable: {exc}",
+        }
+
+
 def dashboard_risk_payload(connection, limit, scope=None):
     try:
         return build_risk_register(connection, limit, scope=scope)
@@ -11084,6 +11446,15 @@ def command_dashboard(args):
                         dashboard_netsniper_intelligence_host_payload(
                             connection,
                             identifier,
+                        ),
+                    )
+                elif route == "/api/investigation-center":
+                    dashboard_json_response(
+                        self,
+                        dashboard_investigation_center_payload(
+                            connection,
+                            limit=limit,
+                            scope=scope,
                         ),
                     )
                 elif route == "/api/events":
