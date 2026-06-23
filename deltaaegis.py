@@ -3785,6 +3785,391 @@ def risk_add_reason(reasons, reason):
         reasons.append(reason)
 
 
+
+PORT_BEHAVIOR_HIGH_SIGNAL_PORTS = {
+    21, 22, 23, 135, 139, 445, 1433, 1521, 2375, 2376,
+    3306, 3389, 5000, 5432, 5900, 5985, 5986, 6379,
+    9200, 9300, 27017,
+}
+
+PORT_BEHAVIOR_MEDIUM_SIGNAL_PORTS = {
+    80, 443, 554, 631, 8080, 8443, 8554, 8888, 9100,
+}
+
+PORT_BEHAVIOR_SEVERITY_ORDER = {
+    "CRITICAL": 0,
+    "HIGH": 1,
+    "MEDIUM": 2,
+    "LOW": 3,
+    "INFO": 4,
+}
+
+
+def normalize_mac_identity(asset_key, mac_address):
+    key = str(asset_key or "").strip().lower()
+    mac = str(mac_address or "").strip().lower()
+
+    if key.startswith("mac:"):
+        return key
+
+    if MAC_RE.match(mac):
+        return f"mac:{mac}"
+
+    return None
+
+
+def port_behavior_key(protocol, port):
+    protocol_text = str(protocol or "tcp").strip().lower() or "tcp"
+
+    try:
+        port_number = int(port)
+    except (TypeError, ValueError):
+        port_number = -1
+
+    return f"{protocol_text}/{port_number}"
+
+
+def port_behavior_signal_severity(behavior, port, currently_open):
+    if behavior == "PORT_FLAPPING":
+        if currently_open and port in PORT_BEHAVIOR_HIGH_SIGNAL_PORTS:
+            return "HIGH"
+        return "MEDIUM"
+
+    if behavior == "UNEXPECTED_PORT_OPENED":
+        if port in PORT_BEHAVIOR_HIGH_SIGNAL_PORTS:
+            return "HIGH"
+        if port in PORT_BEHAVIOR_MEDIUM_SIGNAL_PORTS:
+            return "MEDIUM"
+        return "LOW"
+
+    if behavior == "PORT_NO_LONGER_OBSERVED":
+        return "INFO"
+
+    return "INFO"
+
+
+def accepted_snapshots_for_port_behavior(connection, scope=None, limit=6):
+    clauses = ["(is_accepted_baseline = 1 OR quality_status = 'ACCEPTED')"]
+    params = []
+
+    if scope:
+        clauses.append("network_scope = ?")
+        params.append(scope)
+
+    params.append(limit)
+
+    return connection.execute(
+        f"""
+        SELECT scan_id, network_scope, created_at, imported_at
+        FROM snapshots
+        WHERE {" AND ".join(clauses)}
+        ORDER BY created_at DESC, imported_at DESC, scan_id DESC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+
+
+def load_mac_open_ports_for_scans(connection, scan_ids):
+    if not scan_ids:
+        return {}
+
+    placeholders = ",".join("?" for _ in scan_ids)
+
+    rows = connection.execute(
+        f"""
+        SELECT
+            ao.scan_id,
+            ao.asset_key,
+            ao.ip_address,
+            ao.mac_address,
+            ao.hostname,
+            ao.vendor,
+            COALESCE(
+                ao.classification_type,
+                ao.classification_primary_type,
+                ao.device_type,
+                'Unknown'
+            ) AS device_type,
+            so.protocol,
+            so.port,
+            so.state,
+            so.service_name,
+            so.product,
+            so.version
+        FROM asset_observations ao
+        JOIN service_observations so
+          ON so.scan_id = ao.scan_id
+         AND so.asset_key = ao.asset_key
+        WHERE ao.scan_id IN ({placeholders})
+          AND lower(COALESCE(so.state, 'open')) = 'open'
+        ORDER BY ao.scan_id, ao.asset_key, so.protocol, so.port
+        """,
+        tuple(scan_ids),
+    ).fetchall()
+
+    by_scan = {}
+
+    for row in rows:
+        mac_identity = normalize_mac_identity(row["asset_key"], row["mac_address"])
+
+        if not mac_identity:
+            continue
+
+        scan_entry = by_scan.setdefault(row["scan_id"], {})
+        mac_entry = scan_entry.setdefault(
+            mac_identity,
+            {
+                "mac_identity": mac_identity,
+                "asset_key": row["asset_key"],
+                "ip_address": row["ip_address"],
+                "mac_address": row["mac_address"],
+                "hostname": row["hostname"],
+                "vendor": row["vendor"],
+                "device_type": row["device_type"],
+                "ports": set(),
+                "port_details": {},
+            },
+        )
+
+        port_key = port_behavior_key(row["protocol"], row["port"])
+        mac_entry["ports"].add(port_key)
+        mac_entry["port_details"][port_key] = {
+            "protocol": str(row["protocol"] or "tcp").lower(),
+            "port": int(row["port"]),
+            "service_name": row["service_name"],
+            "product": row["product"],
+            "version": row["version"],
+        }
+
+    return by_scan
+
+
+def mac_port_behavior_rows(connection, limit=50, scope=None, lookback=5):
+    lookback = max(1, int(lookback or 5))
+    latest_candidates = accepted_snapshots_for_port_behavior(
+        connection,
+        scope=scope,
+        limit=1,
+    )
+
+    if not latest_candidates:
+        return []
+
+    latest = latest_candidates[0]
+    effective_scope = scope or latest["network_scope"]
+
+    snapshots = accepted_snapshots_for_port_behavior(
+        connection,
+        scope=effective_scope,
+        limit=lookback + 1,
+    )
+
+    if not snapshots:
+        return []
+
+    ordered_snapshots = list(reversed(snapshots))
+    latest_scan = snapshots[0]
+    latest_scan_id = latest_scan["scan_id"]
+    scan_ids = [row["scan_id"] for row in ordered_snapshots]
+    prior_scan_ids = [scan_id for scan_id in scan_ids if scan_id != latest_scan_id]
+
+    ports_by_scan = load_mac_open_ports_for_scans(connection, scan_ids)
+    latest_ports_by_mac = ports_by_scan.get(latest_scan_id, {})
+    rows = []
+
+    for mac_identity, latest_entry in latest_ports_by_mac.items():
+        current_ports = set(latest_entry.get("ports") or set())
+        historical_ports = set()
+
+        for scan_id in prior_scan_ids:
+            historical_ports.update(
+                ports_by_scan.get(scan_id, {})
+                .get(mac_identity, {})
+                .get("ports", set())
+            )
+
+        candidate_ports = set(current_ports) | historical_ports
+
+        if not prior_scan_ids:
+            for port_key in sorted(current_ports):
+                detail = latest_entry["port_details"].get(port_key, {})
+                rows.append(
+                    {
+                        "behavior": "PORT_BASELINE_ESTABLISHED",
+                        "severity": "INFO",
+                        "mac_identity": mac_identity,
+                        "asset_key": latest_entry.get("asset_key"),
+                        "ip_address": latest_entry.get("ip_address"),
+                        "hostname": latest_entry.get("hostname"),
+                        "vendor": latest_entry.get("vendor"),
+                        "device_type": latest_entry.get("device_type"),
+                        "port_key": port_key,
+                        "protocol": detail.get("protocol", "tcp"),
+                        "port": detail.get("port"),
+                        "current_state": "OPEN",
+                        "baseline_state": "NO_PRIOR_BASELINE",
+                        "seen_count": 1,
+                        "missing_count": 0,
+                        "transition_count": 0,
+                        "latest_scan_id": latest_scan_id,
+                        "baseline_scan_ids": prior_scan_ids,
+                        "reason": f"{port_key} is part of the first accepted MAC-port baseline for {mac_identity}.",
+                    }
+                )
+            continue
+
+        for port_key in sorted(candidate_ports):
+            states = [
+                port_key
+                in ports_by_scan.get(scan_id, {})
+                .get(mac_identity, {})
+                .get("ports", set())
+                for scan_id in scan_ids
+            ]
+
+            currently_open = states[-1]
+            was_seen_before = any(states[:-1])
+            seen_count = sum(1 for state in states if state)
+            missing_count = len(states) - seen_count
+            transition_count = sum(
+                1
+                for previous, current in zip(states, states[1:])
+                if previous != current
+            )
+
+            behavior = None
+
+            if currently_open and not was_seen_before:
+                behavior = "UNEXPECTED_PORT_OPENED"
+            elif transition_count >= 2:
+                behavior = "PORT_FLAPPING"
+            elif was_seen_before and not currently_open:
+                behavior = "PORT_NO_LONGER_OBSERVED"
+
+            if behavior is None:
+                continue
+
+            detail = latest_entry.get("port_details", {}).get(port_key, {})
+
+            if not detail:
+                for scan_id in reversed(prior_scan_ids):
+                    detail = (
+                        ports_by_scan.get(scan_id, {})
+                        .get(mac_identity, {})
+                        .get("port_details", {})
+                        .get(port_key, {})
+                    )
+
+                    if detail:
+                        break
+
+            port_number = int(detail.get("port") or str(port_key).split("/")[-1])
+            severity = port_behavior_signal_severity(
+                behavior,
+                port_number,
+                currently_open,
+            )
+
+            if behavior == "UNEXPECTED_PORT_OPENED":
+                reason = (
+                    f"{port_key} is open in latest scan {latest_scan_id} but was not "
+                    f"observed for {mac_identity} across {len(prior_scan_ids)} prior accepted scan(s)."
+                )
+                baseline_state = "NOT_PREVIOUSLY_OBSERVED"
+                current_state = "OPEN"
+            elif behavior == "PORT_FLAPPING":
+                reason = (
+                    f"{port_key} changed open/not-observed state {transition_count} time(s) "
+                    f"across {len(scan_ids)} accepted scan(s) for {mac_identity}."
+                )
+                baseline_state = "VOLATILE"
+                current_state = "OPEN" if currently_open else "NOT_OBSERVED"
+            else:
+                reason = (
+                    f"{port_key} was previously observed for {mac_identity} but is not open "
+                    f"in latest scan {latest_scan_id}."
+                )
+                baseline_state = "PREVIOUSLY_OBSERVED"
+                current_state = "NOT_OBSERVED"
+
+            rows.append(
+                {
+                    "behavior": behavior,
+                    "severity": severity,
+                    "mac_identity": mac_identity,
+                    "asset_key": latest_entry.get("asset_key"),
+                    "ip_address": latest_entry.get("ip_address"),
+                    "hostname": latest_entry.get("hostname"),
+                    "vendor": latest_entry.get("vendor"),
+                    "device_type": latest_entry.get("device_type"),
+                    "port_key": port_key,
+                    "protocol": detail.get("protocol", "tcp"),
+                    "port": port_number,
+                    "current_state": current_state,
+                    "baseline_state": baseline_state,
+                    "seen_count": seen_count,
+                    "missing_count": missing_count,
+                    "transition_count": transition_count,
+                    "latest_scan_id": latest_scan_id,
+                    "baseline_scan_ids": prior_scan_ids,
+                    "reason": reason,
+                }
+            )
+
+    rows.sort(
+        key=lambda row: (
+            PORT_BEHAVIOR_SEVERITY_ORDER.get(row["severity"], 99),
+            row["behavior"],
+            row["mac_identity"],
+            int(row["port"] or 0),
+        )
+    )
+
+    return rows[:limit]
+
+
+def print_port_behavior_rows(rows):
+    rows = list(rows)
+
+    if not rows:
+        print("No MAC-port behavior changes found.")
+        return
+
+    print("DeltaAegis MAC-Port Behavior")
+    print("============================")
+    print()
+
+    for row in rows:
+        print(
+            f"{row['severity']:<8} "
+            f"{row['behavior']:<26} "
+            f"{row['mac_identity']} "
+            f"{row['port_key']} "
+            f"{row['current_state']}"
+        )
+        print(f"  IP:       {row.get('ip_address') or '-'}")
+        print(f"  Device:   {row.get('device_type') or 'Unknown'}")
+        print(f"  Scan:     {row.get('latest_scan_id')}")
+        print(f"  Reason:   {row.get('reason')}")
+        print()
+
+
+def command_port_behavior(args):
+    connection = connect(args.db)
+    scope = optional_network_scope(getattr(args, "scope", None))
+
+    rows = mac_port_behavior_rows(
+        connection,
+        limit=args.limit,
+        scope=scope,
+        lookback=args.lookback,
+    )
+
+    print_port_behavior_rows(rows)
+    return 0
+
+
 def risk_subject_record(subject_key):
     return {
         "subject_key": subject_key,
@@ -10628,6 +11013,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--status", choices=sorted(SCAN_JOB_STATUSES))
     p.add_argument("--scope")
+    p = sub.add_parser("port-behavior", help="Show MAC-port behavior changes across accepted scans")
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--scope")
+    p.add_argument("--lookback", type=int, default=5, help="Accepted scan history depth to compare")
     sub.add_parser("scopes")
     p = sub.add_parser("summary")
     p = sub.add_parser("snapshots"); p.add_argument("--limit", type=int, default=20); p.add_argument("--scope")
@@ -10732,6 +11121,7 @@ def main() -> int:
         if args.command == "ingest": return command_ingest(args)
         if args.command == "scan-start": return command_scan_start(args)
         if args.command == "scan-jobs": return command_scan_jobs(args)
+        if args.command == "port-behavior": return command_port_behavior(args)
         if args.command == "summary": return command_summary(args)
         if args.command == "scopes": return command_scopes(args)
         if args.command == "snapshots": return command_snapshots(args)
