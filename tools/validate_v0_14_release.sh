@@ -44,6 +44,9 @@ grep -q 'route == "/api/scan-jobs"' deltaaegis.py \
 grep -q 'data-tab-target="scan-jobs"' deltaaegis.py \
     || fail "dashboard Scan Jobs tab is missing"
 
+grep -q 'Why This Level?' deltaaegis.py \
+    || fail "dashboard risk explanations are missing"
+
 grep -q -- '--non-interactive' deltaaegis.py \
     || fail "fixed NetSniper command does not include --non-interactive"
 
@@ -63,7 +66,8 @@ fi
 for validator in \
     tools/validate_v0_14_scan_job_registry.sh \
     tools/validate_v0_14_scan_start.sh \
-    tools/validate_v0_14_scan_jobs_dashboard.sh
+    tools/validate_v0_14_scan_jobs_dashboard.sh \
+    tools/validate_v0_14_risk_explanations.sh
 do
     [ -x "$validator" ] || fail "Missing or non-executable validator: $validator"
 done
@@ -71,6 +75,7 @@ done
 ./tools/validate_v0_14_scan_job_registry.sh
 ./tools/validate_v0_14_scan_start.sh
 ./tools/validate_v0_14_scan_jobs_dashboard.sh
+./tools/validate_v0_14_risk_explanations.sh
 ./tools/validate_v0_13_release.sh "$BUNDLE_DIR"
 
 pass "DeltaAegis v0.14 release validation passed"

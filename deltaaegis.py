@@ -8493,6 +8493,28 @@ def dashboard_index_html():
       font-weight: 700;
     }
 
+
+    .risk-explanation summary {
+      cursor: pointer;
+      color: #bfdbfe;
+      font-weight: 700;
+    }
+
+    .risk-explanation ul {
+      margin: 8px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+    }
+
+    .risk-explanation li {
+      margin: 4px 0;
+    }
+
+    .risk-explanation .risk-action {
+      margin-top: 8px;
+      color: #bbf7d0;
+    }
+
   </style>
 </head>
 <body>
@@ -8612,7 +8634,7 @@ def dashboard_index_html():
       <p class="muted">Current risk is limited to assets present in the latest accepted snapshot for the selected scope.</p>
       <table>
         <thead>
-          <tr><th>Level</th><th>Score</th><th>Subject</th><th>IP</th><th>MAC</th><th>Identity</th><th>Owner</th><th>Role</th><th>Open Alerts</th><th>Current Findings</th><th>Primary Reason</th></tr>
+          <tr><th>Level</th><th>Score</th><th>Subject</th><th>IP</th><th>MAC</th><th>Identity</th><th>Owner</th><th>Role</th><th>Open Alerts</th><th>Current Findings</th><th>Why This Level?</th></tr>
         </thead>
         <tbody id="risk-body"></tbody>
       </table>
@@ -8621,7 +8643,7 @@ def dashboard_index_html():
       <p class="muted">Historical context is based on past delta events and alerts. It may include assets that are not present in the latest accepted snapshot.</p>
       <table>
         <thead>
-          <tr><th>Level</th><th>Score</th><th>Subject</th><th>IP</th><th>MAC</th><th>Identity</th><th>Owner</th><th>Role</th><th>Open Alerts</th><th>Events</th><th>Primary Reason</th></tr>
+          <tr><th>Level</th><th>Score</th><th>Subject</th><th>IP</th><th>MAC</th><th>Identity</th><th>Owner</th><th>Role</th><th>Open Alerts</th><th>Events</th><th>Why This Level?</th></tr>
         </thead>
         <tbody id="historical-risk-body"></tbody>
       </table>
@@ -8695,6 +8717,8 @@ def dashboard_index_html():
             <li>Repeated recent activity</li>
             <li>Asset criticality</li>
             <li>Missing owner or asset context</li>
+            <li>NetSniper role classification, contradictions, and exposed services</li>
+            <li>Current findings on assets present in the latest accepted snapshot</li>
           </ul>
         </div>
       </div>
@@ -9717,14 +9741,70 @@ def dashboard_index_html():
       });
     }
 
+    function riskLevelDescription(level) {
+      const value = String(level || "").toUpperCase();
+
+      if (value === "CRITICAL") return "score 85–100, review immediately";
+      if (value === "HIGH") return "score 65–84, prioritize after critical items";
+      if (value === "MEDIUM") return "score 35–64, review after higher-risk items";
+      if (value === "LOW") return "score 15–34, track but usually not urgent";
+      if (value === "INFO") return "score 0–14, informational or context-only";
+
+      return "score band unavailable";
+    }
+
+    function riskExplanationHtml(row) {
+      const reasons = Array.isArray(row.reasons)
+        ? row.reasons.filter(reason => reason)
+        : [];
+
+      const actions = Array.isArray(row.recommended_actions)
+        ? row.recommended_actions.filter(action => action)
+        : [];
+
+      const level = String(row.level || "UNKNOWN").toUpperCase();
+      const score = row.score ?? "-";
+      const primaryReason = reasons.length ? reasons[0] : "No risk reason recorded.";
+
+      const visibleReasons = reasons.slice(0, 6);
+      const hiddenCount = reasons.length - visibleReasons.length;
+
+      const reasonItems = visibleReasons
+        .map(reason => `<li>${esc(reason)}</li>`)
+        .join("");
+
+      const moreReasons = hiddenCount > 0
+        ? `<li>${esc(hiddenCount)} additional scoring reason(s) not shown.</li>`
+        : "";
+
+      const actionItems = actions.slice(0, 2)
+        .map(action => `<li>${esc(action)}</li>`)
+        .join("");
+
+      const actionBlock = actionItems
+        ? `<div class="risk-action"><strong>Suggested follow-up:</strong><ul>${actionItems}</ul></div>`
+        : "";
+
+      return `
+        <details class="risk-explanation">
+          <summary>${esc(level)} ${esc(score)} — ${esc(primaryReason)}</summary>
+          <ul>
+            <li><strong>Risk band:</strong> ${esc(riskLevelDescription(level))}</li>
+            ${reasonItems}
+            ${moreReasons}
+          </ul>
+          ${actionBlock}
+        </details>
+      `;
+    }
+
+
     function riskRowsHtml(rows, emptyMessage, currentMode) {
       if (!rows || !rows.length) {
         return `<tr><td colspan="11">${esc(emptyMessage)}</td></tr>`;
       }
 
       return rows.map(row => {
-        const reasons = Array.isArray(row.reasons) ? row.reasons : [];
-        const primaryReason = reasons.length ? reasons[0] : "-";
         const countColumn = currentMode
           ? (row.current_finding_count ?? 0)
           : (row.event_count ?? 0);
@@ -9741,7 +9821,7 @@ def dashboard_index_html():
             <td>${esc(row.role || row.classification || "-")}</td>
             <td>${esc(row.open_alerts ?? 0)}</td>
             <td>${esc(countColumn)}</td>
-            <td>${esc(primaryReason)}</td>
+            <td>${riskExplanationHtml(row)}</td>
           </tr>
         `;
       }).join("");

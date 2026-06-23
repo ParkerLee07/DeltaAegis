@@ -12,10 +12,12 @@
 - Added optional explicit `--auto-ingest` after successful scan completion.
 - Added `/api/scan-jobs` dashboard API for read-only scan job history.
 - Added read-only dashboard Scan Jobs tab.
+- Added expandable dashboard risk explanations showing score band, scoring reasons, and suggested follow-up actions.
 - Added v0.14 validators:
   - `tools/validate_v0_14_scan_job_registry.sh`
   - `tools/validate_v0_14_scan_start.sh`
   - `tools/validate_v0_14_scan_jobs_dashboard.sh`
+  - `tools/validate_v0_14_risk_explanations.sh`
   - `tools/validate_v0_14_release.sh`
 
 ### Changed

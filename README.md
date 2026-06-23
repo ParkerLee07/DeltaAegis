@@ -34,6 +34,7 @@ DeltaAegis v0.14.0 adds:
 - Optional explicit `--auto-ingest` after successful scan completion.
 - `/api/scan-jobs` for read-only dashboard scan job history.
 - Dashboard Scan Jobs tab for status, target, bundle path, and job messages.
+- Expandable dashboard explanations for why assets are Critical, High, Medium, Low, or Info.
 - v0.14 validators for scan job registry, scan-start behavior, dashboard wiring,
   and release validation.
 
@@ -464,6 +465,7 @@ Important v0.14 validators:
 - `tools/validate_v0_14_scan_job_registry.sh`
 - `tools/validate_v0_14_scan_start.sh`
 - `tools/validate_v0_14_scan_jobs_dashboard.sh`
+- `tools/validate_v0_14_risk_explanations.sh`
 - `tools/validate_v0_14_release.sh`
 
 Important v0.13 validators:
