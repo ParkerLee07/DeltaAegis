@@ -14,40 +14,32 @@ Markdown reports, MAC-port behavior correlation, and a local dashboard.
 
 ## Current Release
 
-**DeltaAegis v0.15.0 — MAC-Port Behavior Correlation**
+**DeltaAegis v0.16.0 — Investigation Command Center**
 
-v0.15.0 adds MAC-port behavior correlation to DeltaAegis. It correlates stable
-MAC-backed device identity with open-port history across accepted NetSniper scans
-so the SIEM can detect ports that appeared unexpectedly, disappeared, or changed
-open/not-observed state repeatedly over time.
+v0.16.0 adds a unified Investigation Command Center to DeltaAegis. It combines
+current risk, MAC-port behavior, open alerts, recent delta events, asset identity,
+NetSniper classification context, and role-aware recommended actions into one
+prioritized analyst queue.
 
-Current feature baseline: **DeltaAegis v0.15.0 — MAC-Port Behavior Correlation**.
+Current feature baseline: **DeltaAegis v0.16.0 — Investigation Command Center**.
 
-DeltaAegis v0.15.0 adds:
+DeltaAegis v0.16.0 adds:
 
-- `port-behavior` CLI command for MAC-backed open-port behavior review.
-- `/api/port-behavior` for dashboard access to MAC-port behavior rows.
-- Dashboard Port Behavior tab showing severity, behavior, MAC identity, IP, device role,
-  port, current state, seen/missing counts, transitions, and reason.
-- Current-risk integration for unexpected or volatile MAC-backed ports.
-- Conservative risk contribution caps so normal printer/web management volatility does not
-  automatically create false CRITICAL risk.
-- Markdown report section named `MAC-Port Behavior Changes`.
-- Report dashboard/API usage note for `/api/port-behavior?limit=25&lookback=5`.
-- v0.15 validators for CLI detection, dashboard wiring, current-risk integration,
-  report integration, and release validation.
+- `/api/investigation-center` for a prioritized investigation queue.
+- Dashboard **Command Center** tab for analyst-first triage.
+- `investigation-center` CLI command for terminal review of the same queue.
+- Markdown report section named `Investigation Command Center`.
+- Queue triggers for `CURRENT_RISK`, `OPEN_ALERT`, `RECENT_EVENT`, and
+  `PORT_BEHAVIOR`.
+- v0.16 validators for API payloads, dashboard wiring, CLI output, report
+  generation, and release regression coverage.
 
-DeltaAegis v0.14.0 scan-orchestration compatibility remains available through:
+Compatibility retained:
 
-- `scan_jobs` SQLite registry for NetSniper orchestration history.
-- `scan-start --target <private-cidr>` for safe NetSniper v1.8 headless scans.
-- Fixed NetSniper command execution with `--non-interactive`, `--greenbone no`,
-  and `--json-status`.
-- Captured scan stdout/stderr logs under the DeltaAegis scan log directory.
-- Optional explicit `--auto-ingest` after successful scan completion.
-- `/api/scan-jobs` for read-only dashboard scan job history.
-- Dashboard Scan Jobs tab for status, target, bundle path, and job messages.
-- Expandable dashboard explanations for why assets are Critical, High, Medium, Low, or Info.
+- DeltaAegis v0.15.0 — MAC-Port Behavior Correlation remains available.
+- DeltaAegis v0.14.0 — NetSniper Scan Orchestration remains available.
+- DeltaAegis v0.13.0 — Current-State SIEM Dashboard remains available.
+- DeltaAegis v0.12.0 — Intelligence Drilldown remains available.
 
 ## What DeltaAegis Does
 
@@ -516,6 +508,15 @@ pytest -q
 ---
 
 ## Version Highlights
+
+### v0.16.0 — Investigation Command Center
+
+- Adds `/api/investigation-center` for a prioritized investigation queue.
+- Adds dashboard Command Center tab.
+- Adds `investigation-center` CLI command.
+- Adds Markdown report section for `Investigation Command Center`.
+- Combines current risk, open alerts, recent events, MAC-port behavior,
+  identity context, classification context, and recommended actions.
 
 ### v0.15.0 — MAC-Port Behavior Correlation
 

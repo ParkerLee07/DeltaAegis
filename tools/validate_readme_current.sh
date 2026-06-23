@@ -15,8 +15,11 @@ pass() {
 grep -q '^# DeltaAegis$' README.md \
   || fail "README title is missing or malformed"
 
+grep -q 'DeltaAegis v0.16.0 — Investigation Command Center' README.md \
+  || fail "README does not identify v0.16.0 as current release"
+
 grep -q 'DeltaAegis v0.15.0 — MAC-Port Behavior Correlation' README.md \
-  || fail "README does not identify v0.15.0 as current release"
+  || fail "README does not preserve the v0.15.0 feature baseline"
 
 grep -q 'DeltaAegis v0.12.0 — Intelligence Drilldown' README.md \
   || fail "README does not preserve the v0.12.0 feature baseline"
@@ -33,11 +36,20 @@ grep -q 'Dashboard' README.md \
 grep -q 'port-behavior' README.md \
   || fail "README does not document port-behavior"
 
+grep -q 'investigation-center' README.md \
+  || fail "README does not document investigation-center"
+
 grep -q '/api/port-behavior' README.md \
   || fail "README does not document /api/port-behavior"
 
+grep -q '/api/investigation-center' README.md \
+  || fail "README does not document /api/investigation-center"
+
 grep -q 'MAC-Port Behavior Changes' README.md \
   || fail "README does not document MAC-Port Behavior report section"
+
+grep -q 'Investigation Command Center' README.md \
+  || fail "README does not document Investigation Command Center report section"
 
 grep -q 'v0.11.x — Intelligence Review Dashboard' README.md \
   || fail "README does not summarize v0.11.x"
