@@ -14,23 +14,28 @@ Markdown reports, and a local dashboard.
 
 ## Current Release
 
-**DeltaAegis v0.13.0 — Current-State SIEM Dashboard**
+**DeltaAegis v0.14.0 — NetSniper Scan Orchestration**
 
-v0.13.0 promotes DeltaAegis from historical drilldown toward a current-state SIEM dashboard.
-It preserves the full NetSniper inventory during ingest, including discovered hosts that have no
-monitored open services, and exposes latest accepted snapshot state through the dashboard.
+v0.14.0 adds the first controlled NetSniper scan-orchestration workflow to DeltaAegis.
+It introduces a scan job registry, a safe CLI scan launcher for NetSniper v1.8 headless
+scans, captured stdout/stderr logs, optional auto-ingest, and read-only dashboard scan
+job visibility.
 
-Current feature baseline: **DeltaAegis v0.13.0 — Current-State SIEM Dashboard**.
+Current feature baseline: **DeltaAegis v0.14.0 — NetSniper Scan Orchestration**.
 
-DeltaAegis v0.13.0 adds:
+DeltaAegis v0.14.0 adds:
 
-- Full NetSniper inventory preservation during ingest.
-- `/api/current-state` for latest accepted snapshot state.
-- Dashboard Current Network State cards.
-- `/api/current-risk` for latest-snapshot-only risk scoring.
-- Separate Current Risk Subjects and Historical Risk Context dashboard sections.
-- Calibrated current-risk scoring to avoid all-CRITICAL score saturation.
-- v0.13 validators for full inventory ingest, current-state payloads, dashboard UI wiring, and current-risk scoring.
+- `scan_jobs` SQLite registry for NetSniper orchestration history.
+- `scan-start --target <private-cidr>` for safe NetSniper v1.8 headless scans.
+- Private IPv4 CIDR validation before scan launch.
+- Fixed NetSniper command execution with `--non-interactive`, `--greenbone no`,
+  and `--json-status`.
+- Captured scan stdout/stderr logs under the DeltaAegis scan log directory.
+- Optional explicit `--auto-ingest` after successful scan completion.
+- `/api/scan-jobs` for read-only dashboard scan job history.
+- Dashboard Scan Jobs tab for status, target, bundle path, and job messages.
+- v0.14 validators for scan job registry, scan-start behavior, dashboard wiring,
+  and release validation.
 
 
 ## What DeltaAegis Does
@@ -182,12 +187,19 @@ DeltaAegis does not require a separate database server.
 
 ## Recent Releases
 
-- DeltaAegis v0.13.0 — Current-State SIEM Dashboard adds latest accepted snapshot
+- DeltaAegis v0.14.0 — NetSniper Scan Orchestration adds controlled scan jobs,
+  safe NetSniper v1.8 headless CLI launch, optional auto-ingest, captured logs,
+  `/api/scan-jobs`, and read-only dashboard scan job history.
+- DeltaAegis v0.13.0 — Current-State SIEM Dashboard added latest accepted snapshot
   state, full NetSniper inventory preservation, current-state dashboard cards,
   separated current/historical risk views, and calibrated current-risk scoring.
-- DeltaAegis v0.12.2 — Dashboard Runtime Hotfix fixed the Intelligence tab JavaScript runtime error without changing database schema, ingestion behavior, or NetSniper intelligence behavior.
-- DeltaAegis v0.12.1 — README Metadata Cleanup refreshed project metadata and documentation for the v0.12 baseline.
-- DeltaAegis v0.12.0 — Intelligence Drilldown established the NetSniper v1.7 per-host intelligence drilldown baseline.
+- DeltaAegis v0.12.2 — Dashboard Runtime Hotfix fixed the Intelligence tab
+  JavaScript runtime error without changing database schema, ingestion behavior,
+  or NetSniper intelligence behavior.
+- DeltaAegis v0.12.1 — README Metadata Cleanup refreshed project metadata and
+  documentation for the v0.12 baseline.
+- DeltaAegis v0.12.0 — Intelligence Drilldown established the NetSniper v1.7
+  per-host intelligence drilldown baseline.
 
 ## Installation
 
@@ -447,6 +459,13 @@ Current release validation:
 tools/validate_v0_12_release.sh
 ```
 
+Important v0.14 validators:
+
+- `tools/validate_v0_14_scan_job_registry.sh`
+- `tools/validate_v0_14_scan_start.sh`
+- `tools/validate_v0_14_scan_jobs_dashboard.sh`
+- `tools/validate_v0_14_release.sh`
+
 Important v0.13 validators:
 
 - `tools/validate_v0_13_full_inventory_ingest.sh`
@@ -474,6 +493,24 @@ pytest -q
 ---
 
 ## Version Highlights
+
+### v0.14.0 — NetSniper Scan Orchestration
+
+- `scan_jobs` registry for NetSniper orchestration history.
+- Safe `scan-start --target <private-cidr>` CLI command.
+- Fixed NetSniper v1.8 headless command execution.
+- Captured scan stdout/stderr logs.
+- Optional explicit auto-ingest after successful scan completion.
+- `/api/scan-jobs` read-only dashboard API.
+- Dashboard Scan Jobs tab for job status and bundle visibility.
+
+### v0.13 compatibility notes
+
+The v0.13 current-state SIEM dashboard baseline remains available through:
+
+- `/api/current-state` for latest accepted snapshot state.
+- `/api/current-risk` for latest-snapshot-only current risk.
+- Current Risk Subjects and Historical Risk Context dashboard sections.
 
 ### v0.13.0 — Current-State SIEM Dashboard
 

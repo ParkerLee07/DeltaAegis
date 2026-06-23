@@ -1,3 +1,40 @@
+## v0.14.0 — NetSniper Scan Orchestration
+
+### Added
+
+- Added `scan_jobs` SQLite registry for NetSniper scan orchestration history.
+- Added `scan-start --target <private-cidr>` for safe synchronous NetSniper v1.8
+  headless scan execution.
+- Added private IPv4 CIDR validation before scan launch.
+- Added fixed NetSniper command construction using `--non-interactive`,
+  `--greenbone no`, and `--json-status`.
+- Added captured stdout/stderr scan logs.
+- Added optional explicit `--auto-ingest` after successful scan completion.
+- Added `/api/scan-jobs` dashboard API for read-only scan job history.
+- Added read-only dashboard Scan Jobs tab.
+- Added v0.14 validators:
+  - `tools/validate_v0_14_scan_job_registry.sh`
+  - `tools/validate_v0_14_scan_start.sh`
+  - `tools/validate_v0_14_scan_jobs_dashboard.sh`
+  - `tools/validate_v0_14_release.sh`
+
+### Changed
+
+- Kept dashboard scan job visibility read-only for this release.
+- Preserved v0.13 current-state dashboard and current-risk behavior.
+- Preserved v0.12 NetSniper intelligence drilldown regression behavior.
+
+### Validation
+
+- Verified scan job registry schema, payload conversion, CLI listing, and safe command builder.
+- Verified `scan-start` with a fake NetSniper executable.
+- Verified fixed command arguments:
+  `--non-interactive --target 192.168.5.0/24 --greenbone no --json-status`
+- Verified public CIDR rejection.
+- Verified read-only dashboard Scan Jobs wiring.
+- Verified v0.13 release regression gate against NetSniper run `20260623-123007`.
+
+
 # Changelog
 
 ## v0.13.0 — Current-State SIEM Dashboard
