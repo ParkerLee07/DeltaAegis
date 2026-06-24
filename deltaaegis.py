@@ -10010,6 +10010,117 @@ def operator_triage_summary(rows):
 
     return summary
 
+
+TRIAGE_URGENCY_LABELS = [
+    "IMMEDIATE",
+    "HIGH",
+    "NORMAL",
+    "LOW",
+]
+
+
+def normalize_triage_bucket_filter(value):
+    if value in (None, "", "ALL", "*"):
+        return None
+
+    normalized = str(value).strip().upper().replace("-", "_").replace(" ", "_")
+
+    if normalized in set(TRIAGE_BUCKETS):
+        return normalized
+
+    return None
+
+
+def normalize_triage_urgency_filter(value):
+    if value in (None, "", "ALL", "*"):
+        return None
+
+    normalized = str(value).strip().upper().replace("-", "_").replace(" ", "_")
+
+    if normalized in set(TRIAGE_URGENCY_LABELS):
+        return normalized
+
+    return None
+
+
+def operator_triage_queue_sort_key(row):
+    triaged = row if row.get("triage_bucket") else operator_triage_enrich_row(row)
+
+    bucket_order = {
+        "CHANGED_SINCE_REVIEW": 0,
+        "NEEDS_REVIEW": 1,
+        "NEEDS_CONTEXT": 2,
+        "STALE_CLOSED": 3,
+        "BASELINE_CONTEXT": 4,
+        "MONITOR": 5,
+    }
+    urgency_order = {
+        "IMMEDIATE": 0,
+        "HIGH": 1,
+        "NORMAL": 2,
+        "LOW": 3,
+    }
+
+    bucket = str(triaged.get("triage_bucket") or "MONITOR").upper()
+    urgency = str(triaged.get("triage_urgency_label") or "LOW").upper()
+
+    return (
+        bucket_order.get(bucket, 99),
+        urgency_order.get(urgency, 99),
+        -risk_int(triaged.get("triage_urgency_score"), 0),
+        -risk_int(triaged.get("priority_score"), 0),
+        str(triaged.get("subject_key") or ""),
+    )
+
+
+def filter_operator_triage_rows(rows, triage_bucket=None, triage_urgency=None):
+    bucket_filter = normalize_triage_bucket_filter(triage_bucket)
+    urgency_filter = normalize_triage_urgency_filter(triage_urgency)
+
+    filtered = []
+
+    for row in list(rows or []):
+        triaged = row if row.get("triage_bucket") else operator_triage_enrich_row(row)
+        bucket = str(triaged.get("triage_bucket") or "MONITOR").upper()
+        urgency = str(triaged.get("triage_urgency_label") or "LOW").upper()
+
+        if bucket_filter and bucket != bucket_filter:
+            continue
+
+        if urgency_filter and urgency != urgency_filter:
+            continue
+
+        filtered.append(triaged)
+
+    return filtered
+
+
+def operator_triage_filter_payload(
+    ticket_status=None,
+    ticket_signal=None,
+    triage_bucket=None,
+    triage_urgency=None,
+):
+    status_filter = normalize_ticket_status_filter(ticket_status)
+    signal_filter = normalize_ticket_signal_filter(ticket_signal)
+    triage_bucket_filter = normalize_triage_bucket_filter(triage_bucket)
+    triage_urgency_filter = normalize_triage_urgency_filter(triage_urgency)
+    bucket_filter = normalize_triage_bucket_filter(triage_bucket)
+    urgency_filter = normalize_triage_urgency_filter(triage_urgency)
+
+    return {
+        "ticket_status": status_filter or "ALL",
+        "ticket_signal": signal_filter or "ALL",
+        "triage_bucket": triage_bucket_filter or "ALL",
+        "triage_urgency": triage_urgency_filter or "ALL",
+        "triage_bucket": bucket_filter or "ALL",
+        "triage_urgency": urgency_filter or "ALL",
+        "ticket_statuses": ["ALL", "OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"],
+        "ticket_signals": ["ALL", "ACTIONABLE", "MEANINGFUL_CHANGE", "BASELINE_CONTEXT"],
+        "triage_buckets": ["ALL"] + list(TRIAGE_BUCKETS),
+        "triage_urgencies": ["ALL"] + list(TRIAGE_URGENCY_LABELS),
+    }
+
 def investigation_center_summary(rows):
     summary = {
         "critical": 0,
@@ -10186,18 +10297,27 @@ def filter_investigation_center_rows(
     return filtered
 
 
-def investigation_center_filter_payload(ticket_status=None, ticket_signal=None):
+def investigation_center_filter_payload(
+    ticket_status=None,
+    ticket_signal=None,
+    triage_bucket=None,
+    triage_urgency=None,
+):
     status_filter = normalize_ticket_status_filter(ticket_status)
     signal_filter = normalize_ticket_signal_filter(ticket_signal)
+    triage_bucket_filter = normalize_triage_bucket_filter(triage_bucket)
+    triage_urgency_filter = normalize_triage_urgency_filter(triage_urgency)
 
     return {
         "ticket_status": status_filter or "ALL",
         "ticket_signal": signal_filter or "ALL",
+        "triage_bucket": triage_bucket_filter or "ALL",
+        "triage_urgency": triage_urgency_filter or "ALL",
         "ticket_statuses": ["ALL", "OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"],
         "ticket_signals": ["ALL", "ACTIONABLE", "MEANINGFUL_CHANGE", "BASELINE_CONTEXT"],
+        "triage_buckets": ["ALL"] + list(TRIAGE_BUCKETS),
+        "triage_urgencies": ["ALL"] + list(TRIAGE_URGENCY_LABELS),
     }
-
-
 
 def dashboard_investigation_center_payload(
     connection,
@@ -10205,6 +10325,8 @@ def dashboard_investigation_center_payload(
     scope=None,
     ticket_status=None,
     ticket_signal=None,
+    triage_bucket=None,
+    triage_urgency=None,
 ):
     requested_limit = risk_int(limit, 25)
 
@@ -10215,6 +10337,8 @@ def dashboard_investigation_center_payload(
         filters = investigation_center_filter_payload(
             ticket_status=ticket_status,
             ticket_signal=ticket_signal,
+            triage_bucket=triage_bucket,
+            triage_urgency=triage_urgency,
         )
         has_filter = (
             filters["ticket_status"] != "ALL"
@@ -10240,6 +10364,12 @@ def dashboard_investigation_center_payload(
             ticket_status=filters["ticket_status"],
             ticket_signal=filters["ticket_signal"],
         )
+        rows = filter_operator_triage_rows(
+            rows,
+            triage_bucket=filters["triage_bucket"],
+            triage_urgency=filters["triage_urgency"],
+        )
+        rows = sorted(rows, key=operator_triage_queue_sort_key)
         rows = rows[:requested_limit]
 
         return {
@@ -10957,6 +11087,10 @@ def print_investigation_center_rows(payload):
         workflow_updated = row.get("ticket_updated_at") or "-"
         workflow_note = row.get("ticket_note") or ""
         print(f"    Workflow: {workflow_status}")
+        triage_bucket = row.get("triage_bucket") or "MONITOR"
+        triage_label = row.get("triage_urgency_label") or "LOW"
+        triage_score = row.get("triage_urgency_score") or 0
+        print(f"    Triage:  {triage_bucket} / {triage_label} ({triage_score})")
         if workflow_analyst != "-" or workflow_updated != "-":
             print(
                 "    Analyst:  "
@@ -11253,6 +11387,8 @@ def command_investigation_center(args):
             scope=scope,
             ticket_status=args.ticket_status,
             ticket_signal=args.ticket_signal,
+            triage_bucket=getattr(args, "triage_bucket", "ALL"),
+            triage_urgency=getattr(args, "triage_urgency", "ALL"),
         )
     finally:
         connection.close()
@@ -15371,6 +15507,8 @@ def command_dashboard(args):
                 elif route == "/api/investigation-center":
                     ticket_status = query.get("ticket_status", ["ALL"])[0]
                     ticket_signal = query.get("ticket_signal", ["ALL"])[0]
+                    triage_bucket = query.get("triage_bucket", ["ALL"])[0]
+                    triage_urgency = query.get("triage_urgency", ["ALL"])[0]
 
                     dashboard_json_response(
                         self,
@@ -15380,6 +15518,8 @@ def command_dashboard(args):
                             scope=scope,
                             ticket_status=ticket_status,
                             ticket_signal=ticket_signal,
+                            triage_bucket=triage_bucket,
+                            triage_urgency=triage_urgency,
                         ),
                     )
                 elif route == "/api/events":
@@ -15657,6 +15797,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--status", choices=["OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"])
     p.add_argument("--analyst")
     p.add_argument("--note")
+    p.add_argument("--triage-bucket", default="ALL", help="Filter by triage bucket: ALL, CHANGED_SINCE_REVIEW, NEEDS_REVIEW, NEEDS_CONTEXT, STALE_CLOSED, BASELINE_CONTEXT, MONITOR")
+    p.add_argument("--triage-urgency", default="ALL", help="Filter by triage urgency: ALL, IMMEDIATE, HIGH, NORMAL, LOW")
+
     p = sub.add_parser("ticket-evidence", help="Show evidence package for one investigation ticket")
     p.add_argument("--subject", dest="subject_key", required=True, help="Ticket subject key such as mac:aa:bb:cc:dd:ee:ff")
     p.add_argument("--scope", help="Optional network scope filter")
@@ -15673,6 +15816,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scope")
     p.add_argument("--ticket-status", choices=["ALL", "OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"], default="ALL", help="Filter Investigation Center tickets by workflow status")
     p.add_argument("--ticket-signal", choices=["ALL", "ACTIONABLE", "MEANINGFUL_CHANGE", "BASELINE_CONTEXT"], default="ALL", help="Filter Investigation Center tickets by signal label")
+    p.add_argument("--triage-bucket", default="ALL", help="Filter by triage bucket: ALL, CHANGED_SINCE_REVIEW, NEEDS_REVIEW, NEEDS_CONTEXT, STALE_CLOSED, BASELINE_CONTEXT, MONITOR")
+    p.add_argument("--triage-urgency", default="ALL", help="Filter by triage urgency: ALL, IMMEDIATE, HIGH, NORMAL, LOW")
 
     p = sub.add_parser("port-behavior", help="Show MAC-port behavior changes across accepted scans")
     p.add_argument("--limit", type=int, default=50)
