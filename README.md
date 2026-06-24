@@ -14,33 +14,36 @@ Markdown reports, MAC-port behavior correlation, and a local dashboard.
 
 ## Current Release
 
-**DeltaAegis v0.17.0 — Executive SIEM Dashboard Refresh**
+**DeltaAegis v0.18.0 — Investigation Workflow Actions**
 
-v0.17.0 refreshes DeltaAegis into a more familiar SIEM-style dashboard. It adds
-an executive overview, SIEM-aligned navigation labels, visual analytics panels,
-ticket-style investigation cards, and tuned ticket signal labels that separate
-actionable items from meaningful changes and baseline inventory context.
+v0.18.0 turns the v0.17 SIEM ticket queue into a persistent analyst workflow.
+It adds ticket state persistence, ticket history, dashboard workflow controls,
+CLI workflow commands, no-op history protection, and a consolidated release gate
+for the new workflow contract.
 
-Current feature baseline: **DeltaAegis v0.17.0 — Executive SIEM Dashboard Refresh**.
+Current feature baseline: **DeltaAegis v0.18.0 — Investigation Workflow Actions**.
 
-DeltaAegis v0.17.0 adds:
+DeltaAegis v0.18.0 adds:
 
-- Executive SIEM dashboard shell and navigation.
-- SIEM-style labels such as `Executive`, `Tickets`, `Risk Analysis`,
-  `Network Activity`, `Taxonomy`, `Security Events`, `Alarms`, and `Data Sources`.
-- Executive chart panels for security-event categories, current-risk distribution,
-  asset classification mix, and MAC-port behavior.
-- Ticket-style investigation queue cards.
-- Ticket signal tuning that reduces normal printer inventory noise.
-- Visible ticket signal labels:
-  - `Actionable`
-  - `Meaningful change`
-  - `Baseline context`
-- v0.17 validators for dashboard shell, chart panels, ticket layout, ticket signal
-  tuning, ticket signal labels, and release regression coverage.
+- Persistent investigation ticket states:
+  - `OPEN`
+  - `IN_REVIEW`
+  - `RESOLVED`
+  - `SUPPRESSED`
+- Ticket workflow history with previous state, new state, analyst, note, and timestamp context.
+- CLI workflow commands:
+  - `ticket-status`
+  - `ticket-list`
+  - `ticket-history`
+- Dashboard ticket workflow badges and ticket-card actions for Open, In Review, Resolve, and Suppress.
+- `/api/ticket-status` for dashboard-driven ticket workflow updates.
+- Compatibility sync from legacy asset investigation status updates into ticket workflow state when statuses align.
+- No-op workflow protection so repeated same-status clicks do not create noisy `RESOLVED -> RESOLVED` audit rows.
+- Consolidated v0.18 release validation for the ticket workflow contract.
 
 Compatibility retained:
 
+- DeltaAegis v0.18.0 — Investigation Workflow Actions remains available.
 - DeltaAegis v0.16.0 — Investigation Command Center remains available.
 - DeltaAegis v0.15.0 — MAC-Port Behavior Correlation remains available.
 - DeltaAegis v0.14.0 — NetSniper Scan Orchestration remains available.
@@ -113,6 +116,9 @@ fact.
 - Supports alert acknowledgement and suppression notes with analyst-provided reasons.
 - Provides asset investigation detail with services, findings, events, alerts, annotations, classification context, and recommended next steps.
 - Supports persistent investigation statuses such as `NEW`, `REVIEWING`, `NEEDS_OWNER`, `EXPECTED`, `FALSE_POSITIVE`, `MONITORING`, and `RESOLVED`.
+- Supports persistent investigation ticket states with `OPEN`, `IN_REVIEW`, `RESOLVED`, and `SUPPRESSED` workflow states.
+- Records ticket workflow history with analyst notes and protects against repeated same-status audit noise.
+- Supports dashboard and CLI-driven ticket workflow updates through `/api/ticket-status`, `ticket-status`, `ticket-list`, and `ticket-history`.
 
 ### NetSniper Intelligence
 
@@ -174,6 +180,7 @@ Dashboard features include:
 - MAC-port behavior review
 - asset investigation panel
 - investigation status controls
+- ticket workflow badges and action buttons
 - NetSniper intelligence summary
 - NetSniper v1.7 host evidence drilldown
 
@@ -200,6 +207,17 @@ DeltaAegis does not require a separate database server.
 
 
 ## Recent Releases
+
+### v0.18.0 — Investigation Workflow Actions
+
+- Adds persistent investigation ticket state for `OPEN`, `IN_REVIEW`, `RESOLVED`, and `SUPPRESSED`.
+- Adds ticket workflow history with analyst and note context.
+- Adds `ticket-status`, `ticket-list`, and `ticket-history` CLI commands.
+- Adds dashboard workflow badges and ticket-card workflow actions.
+- Adds `/api/ticket-status` for dashboard workflow updates.
+- Adds no-op workflow protection to prevent repeated same-status audit noise.
+- Adds consolidated v0.18 release validation for the workflow contract.
+
 
 - DeltaAegis v0.15.0 — MAC-Port Behavior Correlation adds MAC-backed
   open-port behavior detection, `port-behavior`, `/api/port-behavior`,
@@ -514,6 +532,16 @@ pytest -q
 ---
 
 ## Version Highlights
+
+### v0.18.0 — Investigation Workflow Actions
+
+- Adds persistent investigation ticket state for `OPEN`, `IN_REVIEW`, `RESOLVED`, and `SUPPRESSED`.
+- Adds ticket workflow history with analyst and note context.
+- Adds `ticket-status`, `ticket-list`, and `ticket-history` CLI commands.
+- Adds dashboard workflow badges and ticket-card workflow actions.
+- Adds `/api/ticket-status` for dashboard workflow updates.
+- Adds no-op workflow protection to prevent repeated same-status audit noise.
+- Adds consolidated v0.18 release validation for the workflow contract.
 
 ### v0.17.0 — Executive SIEM Dashboard Refresh
 

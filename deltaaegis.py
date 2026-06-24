@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.17.0: Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
+"""DeltaAegis v0.18.0: Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -334,6 +334,41 @@ CREATE TABLE IF NOT EXISTS asset_investigation_history (
 
 CREATE INDEX IF NOT EXISTS idx_asset_investigation_history_asset
 ON asset_investigation_history(network_scope, asset_key);
+
+
+CREATE TABLE IF NOT EXISTS investigation_ticket_state (
+    ticket_key TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'OPEN',
+    analyst TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT,
+    suppressed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_investigation_ticket_state_status
+    ON investigation_ticket_state(status);
+
+CREATE INDEX IF NOT EXISTS idx_investigation_ticket_state_updated_at
+    ON investigation_ticket_state(updated_at);
+
+
+CREATE TABLE IF NOT EXISTS investigation_ticket_history (
+    history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_key TEXT NOT NULL,
+    previous_status TEXT,
+    new_status TEXT NOT NULL,
+    analyst TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_investigation_ticket_history_ticket_key
+    ON investigation_ticket_history(ticket_key);
+
+CREATE INDEX IF NOT EXISTS idx_investigation_ticket_history_created_at
+    ON investigation_ticket_history(created_at);
 
 CREATE TABLE IF NOT EXISTS scan_jobs (
     job_id TEXT PRIMARY KEY,
@@ -8811,6 +8846,267 @@ def investigation_center_add_priority(item, points):
     )
 
 
+
+# v0.18 ticket workflow state model: persistent analyst status for investigation tickets.
+TICKET_WORKFLOW_STATUSES = {"OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"}
+
+TICKET_WORKFLOW_SCHEMA_SQL = (
+    "CREATE TABLE IF NOT EXISTS investigation_ticket_state ("
+    " ticket_key TEXT PRIMARY KEY,"
+    " status TEXT NOT NULL DEFAULT 'OPEN',"
+    " analyst TEXT,"
+    " note TEXT,"
+    " created_at TEXT NOT NULL,"
+    " updated_at TEXT NOT NULL,"
+    " resolved_at TEXT,"
+    " suppressed_at TEXT"
+    ");"
+    " CREATE INDEX IF NOT EXISTS idx_investigation_ticket_state_status"
+    " ON investigation_ticket_state(status);"
+    " CREATE INDEX IF NOT EXISTS idx_investigation_ticket_state_updated_at"
+    " ON investigation_ticket_state(updated_at);"
+)
+
+
+def ensure_investigation_ticket_state_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(TICKET_WORKFLOW_SCHEMA_SQL)
+
+
+def normalize_ticket_workflow_status(status: str | None) -> str:
+    normalized = str(status or "OPEN").strip().upper().replace("-", "_").replace(" ", "_")
+    if normalized not in TICKET_WORKFLOW_STATUSES:
+        raise DeltaAegisError(
+            "invalid ticket status: "
+            f"{status!r}. Expected one of: "
+            + ", ".join(sorted(TICKET_WORKFLOW_STATUSES))
+        )
+    return normalized
+
+
+def stable_ticket_key(subject_key: str | None) -> str:
+    key = str(subject_key or "").strip()
+    if not key:
+        raise DeltaAegisError("ticket subject key is required")
+    if key.lower().startswith("mac:"):
+        return "mac:" + key[4:].lower()
+    if key.lower().startswith("ip:"):
+        return "ip:" + key[3:]
+    if key.lower().startswith("asset:"):
+        return "asset:" + key[6:]
+    return key
+
+
+def ticket_state_default(ticket_key: str) -> dict[str, Any]:
+    return {
+        "ticket_key": ticket_key,
+        "ticket_status": "OPEN",
+        "ticket_analyst": None,
+        "ticket_note": None,
+        "ticket_created_at": None,
+        "ticket_updated_at": None,
+        "ticket_resolved_at": None,
+        "ticket_suppressed_at": None,
+    }
+
+
+def ticket_state_record_from_row(row) -> dict[str, Any]:
+    ticket_key = str(row["ticket_key"])
+    return {
+        "ticket_key": ticket_key,
+        "ticket_status": str(row["status"] or "OPEN").upper(),
+        "ticket_analyst": row["analyst"],
+        "ticket_note": row["note"],
+        "ticket_created_at": row["created_at"],
+        "ticket_updated_at": row["updated_at"],
+        "ticket_resolved_at": row["resolved_at"],
+        "ticket_suppressed_at": row["suppressed_at"],
+    }
+
+
+def get_ticket_state(connection: sqlite3.Connection, subject_key: str | None) -> dict[str, Any]:
+    ensure_investigation_ticket_state_schema(connection)
+    ticket_key = stable_ticket_key(subject_key)
+    row = connection.execute(
+        "SELECT ticket_key, status, analyst, note, created_at, updated_at, resolved_at, suppressed_at "
+        "FROM investigation_ticket_state WHERE ticket_key = ?",
+        (ticket_key,),
+    ).fetchone()
+    if row is None:
+        return ticket_state_default(ticket_key)
+    return ticket_state_record_from_row(row)
+
+
+
+def ticket_history_record_from_row(row) -> dict[str, Any]:
+    return {
+        "history_id": row["history_id"],
+        "ticket_key": row["ticket_key"],
+        "previous_status": row["previous_status"],
+        "new_status": row["new_status"],
+        "analyst": row["analyst"],
+        "note": row["note"],
+        "created_at": row["created_at"],
+    }
+
+
+def add_ticket_history_event(
+    connection: sqlite3.Connection,
+    ticket_key: str,
+    previous_status: str | None,
+    new_status: str,
+    analyst: str | None,
+    note: str | None,
+    created_at: str,
+) -> None:
+    ensure_investigation_ticket_state_schema(connection)
+    connection.execute(
+        "INSERT INTO investigation_ticket_history ("
+        " ticket_key, previous_status, new_status, analyst, note, created_at"
+        ") VALUES (?, ?, ?, ?, ?, ?)",
+        (ticket_key, previous_status, new_status, analyst, note, created_at),
+    )
+
+
+def list_ticket_history(
+    connection: sqlite3.Connection,
+    subject_key: str | None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    ensure_investigation_ticket_state_schema(connection)
+    ticket_key = stable_ticket_key(subject_key)
+    safe_limit = max(1, int(limit or 20))
+    rows = connection.execute(
+        "SELECT history_id, ticket_key, previous_status, new_status, analyst, note, created_at "
+        "FROM investigation_ticket_history "
+        "WHERE ticket_key = ? "
+        "ORDER BY created_at DESC, history_id DESC "
+        "LIMIT ?",
+        (ticket_key, safe_limit),
+    ).fetchall()
+    return [ticket_history_record_from_row(row) for row in rows]
+
+
+
+def set_ticket_state(
+    connection: sqlite3.Connection,
+    subject_key: str | None,
+    status: str,
+    analyst: str | None = None,
+    note: str | None = None,
+) -> dict[str, Any]:
+    ensure_investigation_ticket_state_schema(connection)
+    ticket_key = stable_ticket_key(subject_key)
+    previous_state = get_ticket_state(connection, ticket_key)
+    normalized_status = normalize_ticket_workflow_status(status)
+    now = utc_now()
+    cleaned_analyst = str(analyst).strip() if analyst is not None and str(analyst).strip() else None
+    cleaned_note = str(note).strip() if note is not None and str(note).strip() else None
+
+    if previous_state.get("ticket_status") == normalized_status:
+        return previous_state
+
+    resolved_at = now if normalized_status == "RESOLVED" else None
+    suppressed_at = now if normalized_status == "SUPPRESSED" else None
+
+    connection.execute(
+        "INSERT INTO investigation_ticket_state ("
+        " ticket_key, status, analyst, note, created_at, updated_at, resolved_at, suppressed_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(ticket_key) DO UPDATE SET "
+        " status = excluded.status,"
+        " analyst = COALESCE(excluded.analyst, investigation_ticket_state.analyst),"
+        " note = COALESCE(excluded.note, investigation_ticket_state.note),"
+        " updated_at = excluded.updated_at,"
+        " resolved_at = excluded.resolved_at,"
+        " suppressed_at = excluded.suppressed_at",
+        (
+            ticket_key,
+            normalized_status,
+            cleaned_analyst,
+            cleaned_note,
+            now,
+            now,
+            resolved_at,
+            suppressed_at,
+        ),
+    )
+    add_ticket_history_event(
+        connection,
+        ticket_key,
+        previous_state.get("ticket_status"),
+        normalized_status,
+        cleaned_analyst,
+        cleaned_note,
+        now,
+    )
+    connection.commit()
+    return get_ticket_state(connection, ticket_key)
+
+
+def list_ticket_states(
+    connection: sqlite3.Connection,
+    status: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    ensure_investigation_ticket_state_schema(connection)
+    safe_limit = max(1, int(limit or 50))
+    params: list[Any] = []
+    where = ""
+
+    if status:
+        where = "WHERE status = ?"
+        params.append(normalize_ticket_workflow_status(status))
+
+    params.append(safe_limit)
+    rows = connection.execute(
+        f"SELECT ticket_key, status, analyst, note, created_at, updated_at, resolved_at, suppressed_at "
+        f"FROM investigation_ticket_state {where} ORDER BY updated_at DESC, ticket_key ASC LIMIT ?",
+        params,
+    ).fetchall()
+    return [ticket_state_record_from_row(row) for row in rows]
+
+
+def apply_ticket_states_to_rows(
+    connection: sqlite3.Connection,
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    ensure_investigation_ticket_state_schema(connection)
+
+    if not rows:
+        return rows
+
+    ticket_keys = []
+    for row in rows:
+        try:
+            key = stable_ticket_key(row.get("subject_key"))
+        except DeltaAegisError:
+            key = ""
+        row["ticket_key"] = key
+        if key:
+            ticket_keys.append(key)
+
+    state_by_key: dict[str, dict[str, Any]] = {}
+    if ticket_keys:
+        unique_ticket_keys = list(dict.fromkeys(ticket_keys))
+        placeholders = ",".join("?" for _ in unique_ticket_keys)
+        db_rows = connection.execute(
+            f"SELECT ticket_key, status, analyst, note, created_at, updated_at, resolved_at, suppressed_at "
+            f"FROM investigation_ticket_state WHERE ticket_key IN ({placeholders})",
+            unique_ticket_keys,
+        ).fetchall()
+        state_by_key = {
+            str(db_row["ticket_key"]): ticket_state_record_from_row(db_row)
+            for db_row in db_rows
+        }
+
+    for row in rows:
+        key = str(row.get("ticket_key") or "")
+        state = state_by_key.get(key, ticket_state_default(key))
+        row.update(state)
+
+    return rows
+
+
 def investigation_center_rows(connection, limit=25, scope=None):
     current_risk_rows = build_current_risk_register(
         connection,
@@ -9287,6 +9583,7 @@ def dashboard_investigation_center_payload(connection, limit=25, scope=None):
             scope=scope,
         )
         rows = tune_investigation_center_ticket_signals(rows)
+        rows = apply_ticket_states_to_rows(connection, rows)
         rows = rows[:requested_limit]
 
         return {
@@ -9344,6 +9641,19 @@ def print_investigation_center_rows(payload):
 
         triggers = row.get("triggers") or []
         print(f"    Triggers: {', '.join(triggers) if triggers else '-'}")
+        workflow_status = row.get("ticket_status") or "OPEN"
+        workflow_analyst = row.get("ticket_analyst") or "-"
+        workflow_updated = row.get("ticket_updated_at") or "-"
+        workflow_note = row.get("ticket_note") or ""
+        print(f"    Workflow: {workflow_status}")
+        if workflow_analyst != "-" or workflow_updated != "-":
+            print(
+                "    Analyst:  "
+                f"{workflow_analyst} "
+                f"(updated={workflow_updated})"
+            )
+        if workflow_note:
+            print(f"    Note:     {workflow_note}")
         print(f"    Why:      {row.get('primary_reason') or '-'}")
         print(f"    Action:   {row.get('recommended_action') or '-'}")
         print(
@@ -9375,6 +9685,86 @@ def print_investigation_center_rows(payload):
             )
 
         print()
+
+
+
+def command_ticket_status(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+
+    if getattr(args, "status", None):
+        state = set_ticket_state(
+            connection,
+            args.subject_key,
+            args.status,
+            analyst=getattr(args, "analyst", None),
+            note=getattr(args, "note", None),
+        )
+        print(f"Ticket {state['ticket_key']} marked {state['ticket_status']}.")
+    else:
+        state = get_ticket_state(connection, args.subject_key)
+
+    print(f"Ticket:     {state['ticket_key']}")
+    print(f"Status:     {state['ticket_status']}")
+    print(f"Analyst:    {state['ticket_analyst'] or '-'}")
+    print(f"Note:       {state['ticket_note'] or '-'}")
+    print(f"Created:    {state['ticket_created_at'] or '-'}")
+    print(f"Updated:    {state['ticket_updated_at'] or '-'}")
+    print(f"Resolved:   {state['ticket_resolved_at'] or '-'}")
+    print(f"Suppressed: {state['ticket_suppressed_at'] or '-'}")
+    return 0
+
+
+
+def command_ticket_history(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    ticket_key = stable_ticket_key(args.subject_key)
+    rows = list_ticket_history(
+        connection,
+        args.subject_key,
+        limit=getattr(args, "limit", 20),
+    )
+
+    print(f"Ticket: {ticket_key}")
+    if not rows:
+        print("No ticket workflow history found.")
+        return 0
+
+    for row in rows:
+        previous_status = row["previous_status"] or "-"
+        analyst = row["analyst"] or "-"
+        note = row["note"] or "-"
+        print(
+            f"{row['created_at']}  "
+            f"{previous_status} -> {row['new_status']}  "
+            f"analyst={analyst}"
+        )
+        if note != "-":
+            print(f"  Note: {note}")
+    return 0
+
+
+def command_ticket_list(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    rows = list_ticket_states(
+        connection,
+        status=getattr(args, "status", None),
+        limit=getattr(args, "limit", 50),
+    )
+
+    if not rows:
+        print("No persisted ticket workflow states found.")
+        return 0
+
+    for row in rows:
+        print(
+            f"{row['ticket_status']:<11} "
+            f"{row['ticket_key']:<40} "
+            f"analyst={row['ticket_analyst'] or '-'} "
+            f"updated={row['ticket_updated_at'] or '-'}"
+        )
+        if row["ticket_note"]:
+            print(f"  Note: {row['ticket_note']}")
+    return 0
 
 
 def command_investigation_center(args):
@@ -10428,6 +10818,64 @@ def dashboard_index_html():
     }
 
     /* v0.17 ticket signal state labels */
+
+    /* v0.18 investigation workflow visibility */
+    .ticket-workflow-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      border: 1px solid rgba(148, 163, 184, 0.24);
+      background: rgba(15, 23, 42, 0.42);
+      color: #dbeafe;
+      width: fit-content;
+    }
+
+    .ticket-workflow-open { color: #e2e8f0; }
+    .ticket-workflow-in-review { color: #fde68a; }
+    .ticket-workflow-resolved { color: #bbf7d0; }
+    .ticket-workflow-suppressed { color: #cbd5e1; }
+    .ticket-workflow-unknown { color: #c4b5fd; }
+
+
+    .ticket-action-buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      margin-top: 0.35rem;
+    }
+
+    .small-action-button {
+      border: 1px solid rgba(148, 163, 184, 0.24);
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.52);
+      color: var(--text);
+      cursor: pointer;
+      font-size: 0.75rem;
+      font-weight: 800;
+      padding: 0.28rem 0.62rem;
+    }
+
+    .small-action-button:hover {
+      border-color: rgba(96, 165, 250, 0.72);
+    }
+
+    .small-action-button:disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
+    }
+
+    .ticket-workflow-note {
+      color: var(--muted);
+      font-size: 0.82rem;
+      margin-top: 0.25rem;
+    }
+
     .ticket-signal-badge {
       display: inline-flex;
       align-items: center;
@@ -10478,7 +10926,7 @@ def dashboard_index_html():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.17 Preview</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.18 Workflow</span></div>
     </div>
   </header>
 
@@ -10535,6 +10983,7 @@ def dashboard_index_html():
           <tr>
             <th>Priority</th>
             <th>Signal</th>
+              <th>Workflow</th>
             <th>Subject</th>
             <th>IP</th>
             <th>MAC</th>
@@ -12082,12 +12531,146 @@ def dashboard_index_html():
     }
 
 
+
+    function ticketWorkflowLabel(row) {
+      const status = String((row && row.ticket_status) || "OPEN").toUpperCase();
+
+      if (status === "IN_REVIEW") return "In Review";
+      if (status === "RESOLVED") return "Resolved";
+      if (status === "SUPPRESSED") return "Suppressed";
+      if (status === "OPEN") return "Open";
+
+      return status || "Open";
+    }
+
+    function ticketWorkflowClass(row) {
+      const status = String((row && row.ticket_status) || "OPEN").toUpperCase();
+
+      if (status === "IN_REVIEW") return "in-review";
+      if (status === "RESOLVED") return "resolved";
+      if (status === "SUPPRESSED") return "suppressed";
+      if (status === "OPEN") return "open";
+
+      return "unknown";
+    }
+
+    function ticketWorkflowBadge(row) {
+      return `<span class="ticket-workflow-badge ticket-workflow-${esc(ticketWorkflowClass(row))}">${esc(ticketWorkflowLabel(row))}</span>`;
+    }
+
+    function ticketWorkflowMeta(row) {
+      const analyst = (row && row.ticket_analyst) || "-";
+      const updated = (row && row.ticket_updated_at) || "-";
+      const note = (row && row.ticket_note) || "";
+
+      return `
+        <div><span>Workflow</span><strong>${ticketWorkflowBadge(row)}</strong></div>
+        <div><span>Analyst</span><strong>${esc(analyst)}</strong></div>
+        <div><span>Workflow updated</span><strong>${esc(updated)}</strong></div>
+        ${note ? `<div><span>Workflow note</span><strong>${esc(note)}</strong></div>` : ""}
+      `;
+    }
+
+
+    function ticketWorkflowActions(row) {
+      const subject = row && row.subject_key ? row.subject_key : "";
+      const current = String((row && row.ticket_status) || "OPEN").toUpperCase();
+
+      const actions = [
+        ["OPEN", "Open"],
+        ["IN_REVIEW", "In Review"],
+        ["RESOLVED", "Resolve"],
+        ["SUPPRESSED", "Suppress"]
+      ];
+
+      return `
+        <div class="siem-ticket-section ticket-workflow-actions">
+          <div class="label">Workflow actions</div>
+          <div class="ticket-action-buttons">
+            ${actions.map(([status, label]) => `
+              <button
+                class="small-action-button"
+                data-ticket-subject="${esc(subject)}"
+                data-ticket-status="${esc(status)}"
+                ${status === current ? "disabled" : ""}
+              >${esc(label)}</button>
+            `).join("")}
+          </div>
+          <div class="ticket-workflow-note">${esc(row.ticket_note || "")}</div>
+        </div>
+      `;
+    }
+
+    async function updateTicketWorkflow(button) {
+      const subject = button.dataset.ticketSubject || "";
+      const status = button.dataset.ticketStatus || "";
+
+      if (!subject || !status) return;
+
+      button.disabled = true;
+
+      try {
+        const response = await fetch(scopedPath("/api/ticket-status"), {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            subject_key: subject,
+            status,
+            analyst: "dashboard",
+            note: `Dashboard workflow action: ${status}`
+          })
+        });
+
+        const payload = await response.json();
+
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.message || payload.error || "Failed to update ticket workflow.");
+        }
+
+        if (payload.investigation_center) {
+          renderInvestigationCenter(payload.investigation_center);
+        }
+      } catch (error) {
+        alert(error && error.message ? error.message : String(error));
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    function bindTicketWorkflowActions(root) {
+      if (!root) return;
+
+      root.querySelectorAll("[data-ticket-subject][data-ticket-status]").forEach(button => {
+        if (button.dataset.boundTicketWorkflow === "true") return;
+
+        button.addEventListener("click", event => {
+          event.preventDefault();
+          updateTicketWorkflow(button);
+        });
+
+        button.dataset.boundTicketWorkflow = "true";
+      });
+    }
+
     function renderInvestigationCenter(payload) {
       const summaryBox = document.getElementById("investigation-center-summary");
       const tbody = document.getElementById("investigation-center-body");
       const ticketCards = document.getElementById("investigation-ticket-cards");
       const items = payload && Array.isArray(payload.items) ? payload.items : [];
       const summary = payload && payload.summary ? payload.summary : {};
+
+      const workflowSummary = items.reduce((counts, row) => {
+        const status = String((row && row.ticket_status) || "OPEN").toUpperCase();
+
+        if (status === "IN_REVIEW") counts.inReview += 1;
+        else if (status === "RESOLVED") counts.resolved += 1;
+        else if (status === "SUPPRESSED") counts.suppressed += 1;
+        else counts.open += 1;
+
+        return counts;
+      }, {open: 0, inReview: 0, resolved: 0, suppressed: 0});
 
       if (summaryBox) {
         summaryBox.innerHTML = [
@@ -12097,7 +12680,9 @@ def dashboard_index_html():
           ["With Open Alerts", summary.with_open_alerts || 0],
           ["With Port Behavior", summary.with_port_behavior || 0],
           ["Meaningful Changes", summary.meaningful_change || 0],
-          ["Baseline Context", summary.baseline_context || 0]
+          ["Baseline Context", summary.baseline_context || 0],
+          ["Workflow Open", workflowSummary.open],
+          ["In Review", workflowSummary.inReview]
         ].map(([label, value]) => `
           <div class="metric-card command-center-kpi">
             <div class="label">${esc(label)}</div>
@@ -12116,7 +12701,7 @@ def dashboard_index_html():
         }
 
         if (tbody) {
-          tbody.innerHTML = `<tr><td colspan="10" class="muted">${esc(message)}</td></tr>`;
+          tbody.innerHTML = `<tr><td colspan="11" class="muted">${esc(message)}</td></tr>`;
         }
 
         return;
@@ -12149,6 +12734,7 @@ def dashboard_index_html():
                 <div><span>MAC address</span><code>${esc(row.mac_address || "-")}</code></div>
                 <div><span>Role</span><strong>${esc(row.role || row.classification || "Unknown")}</strong></div>
                 <div><span>Identity</span><strong>${esc(row.identity_confidence || "Unknown")}</strong></div>
+                ${ticketWorkflowMeta(row)}
               </div>
 
               <div class="siem-ticket-section">
@@ -12166,6 +12752,8 @@ def dashboard_index_html():
                 <div class="siem-ticket-action">${esc(row.recommended_action || "-")}</div>
               </div>
 
+              ${ticketWorkflowActions(row)}
+
               <div class="siem-ticket-counts">
                 <span class="siem-count-pill">Alerts ${esc(row.open_alerts || 0)}</span>
                 <span class="siem-count-pill">Events ${esc(row.recent_events || 0)}</span>
@@ -12177,6 +12765,7 @@ def dashboard_index_html():
         }).join("");
 
         bindSubjectLinks(ticketCards);
+        bindTicketWorkflowActions(ticketCards);
       }
 
       if (!tbody) return;
@@ -12205,6 +12794,7 @@ def dashboard_index_html():
               <span class="muted">${esc(row.priority_score || 0)}</span>
             </td>
             <td>${ticketSignalBadge(row)}</td>
+            <td>${ticketWorkflowBadge(row)}</td>
             <td>${subjectButton(row.subject_key || "-")}</td>
             <td><code>${esc(row.ip_address || "-")}</code></td>
             <td><code>${esc(row.mac_address || "-")}</code></td>
@@ -12902,7 +13492,7 @@ def command_dashboard(args):
             if not self.require_auth():
                 return
 
-            if route != "/api/investigate-asset":
+            if route not in {"/api/investigate-asset", "/api/ticket-status"}:
                 dashboard_json_response(
                     self,
                     {
@@ -12954,6 +13544,59 @@ def command_dashboard(args):
                 )
                 return
 
+
+            if route == "/api/ticket-status":
+                subject_key = str(
+                    payload.get("subject_key")
+                    or payload.get("identifier")
+                    or ""
+                ).strip()
+                raw_scope = str(payload.get("scope") or "").strip()
+                status = str(payload.get("status") or "").strip()
+                note = str(payload.get("note") or payload.get("reason") or "").strip()
+                analyst = str(payload.get("analyst") or "dashboard").strip()
+
+                try:
+                    scope = optional_network_scope(raw_scope) if raw_scope else None
+                    connection = self.open_connection()
+
+                    try:
+                        state = set_ticket_state(
+                            connection,
+                            subject_key,
+                            status,
+                            analyst=analyst,
+                            note=note,
+                        )
+                        investigation_center = dashboard_investigation_center_payload(
+                            connection,
+                            limit=25,
+                            scope=scope,
+                        )
+
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": True,
+                                "ticket_state": state,
+                                "investigation_center": investigation_center,
+                            },
+                        )
+                    finally:
+                        connection.close()
+                except (DeltaAegisError, ValueError) as exc:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "ticket_status_failed",
+                            "message": str(exc),
+                        },
+                        status=400,
+                    )
+
+                return
+
             identifier = str(payload.get("identifier") or "").strip()
             raw_scope = str(payload.get("scope") or "").strip()
             status = str(payload.get("status") or "").strip()
@@ -12976,6 +13619,25 @@ def command_dashboard(args):
                         status,
                         reason,
                     )
+
+                    ticket_state = None
+                    workflow_status = (
+                        str(status or "")
+                        .strip()
+                        .upper()
+                        .replace("-", "_")
+                        .replace(" ", "_")
+                    )
+
+                    if workflow_status in TICKET_WORKFLOW_STATUSES:
+                        ticket_state = set_ticket_state(
+                            connection,
+                            asset_key,
+                            workflow_status,
+                            analyst="dashboard",
+                            note=reason,
+                        )
+
                     connection.commit()
 
                     detail = dashboard_asset_detail_payload(
@@ -12991,6 +13653,7 @@ def command_dashboard(args):
                             "asset_key": asset_key,
                             "scope": resolved_scope,
                             "investigation": record,
+                            "ticket_state": ticket_state,
                             "asset_detail": detail,
                         },
                     )
@@ -13036,7 +13699,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.17.0 Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.18.0 Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
@@ -13053,6 +13716,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--status", choices=sorted(SCAN_JOB_STATUSES))
     p.add_argument("--scope")
+    p = sub.add_parser("ticket-status", help="Show or update persistent investigation ticket workflow status")
+    p.add_argument("subject_key")
+    p.add_argument("--status", choices=["OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"])
+    p.add_argument("--analyst")
+    p.add_argument("--note")
+    p = sub.add_parser("ticket-history", help="Show workflow history for one investigation ticket")
+    p.add_argument("subject_key")
+    p.add_argument("--limit", type=int, default=20)
+    p = sub.add_parser("ticket-list", help="List persisted investigation ticket workflow states")
+    p.add_argument("--status", choices=["OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"])
+    p.add_argument("--limit", type=int, default=50)
     p = sub.add_parser("investigation-center", help="Show prioritized investigation command center queue")
     p.add_argument("--limit", type=int, default=25)
     p.add_argument("--scope")
@@ -13164,6 +13838,9 @@ def main() -> int:
         if args.command == "ingest": return command_ingest(args)
         if args.command == "scan-start": return command_scan_start(args)
         if args.command == "scan-jobs": return command_scan_jobs(args)
+        if args.command == "ticket-status": return command_ticket_status(args)
+        if args.command == "ticket-history": return command_ticket_history(args)
+        if args.command == "ticket-list": return command_ticket_list(args)
         if args.command == "investigation-center": return command_investigation_center(args)
         if args.command == "port-behavior": return command_port_behavior(args)
         if args.command == "summary": return command_summary(args)
