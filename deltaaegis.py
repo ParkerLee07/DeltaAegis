@@ -1965,6 +1965,290 @@ def print_netsniper_intelligence_host_detail(row: sqlite3.Row | None) -> None:
         print("  None recorded.")
 
 
+
+def access_parse_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+
+    text_value = str(value).strip()
+
+    if not text_value:
+        return None
+
+    if text_value.endswith("Z"):
+        text_value = text_value[:-1] + "+00:00"
+
+    try:
+        parsed = datetime.fromisoformat(text_value)
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    return parsed
+
+
+def access_token_is_expired(expires_at: str | None) -> bool:
+    parsed = access_parse_datetime(expires_at)
+
+    if not parsed:
+        return False
+
+    return parsed <= datetime.now(timezone.utc)
+
+
+def authenticate_access_api_token(
+    connection: sqlite3.Connection,
+    token: str,
+    required_role: str = "VIEWER",
+    update_last_used: bool = True,
+) -> dict[str, Any] | None:
+    ensure_enterprise_access_schema(connection)
+
+    supplied = str(token or "").strip()
+
+    if not supplied:
+        return None
+
+    token_hash = hash_access_api_token(supplied)
+    row = connection.execute(
+        "SELECT "
+        "t.token_id, "
+        "t.user_id, "
+        "t.token_name, "
+        "t.token_prefix, "
+        "t.role AS token_role, "
+        "t.is_active AS token_active, "
+        "t.created_at AS token_created_at, "
+        "t.updated_at AS token_updated_at, "
+        "t.last_used_at, "
+        "t.expires_at, "
+        "u.username, "
+        "u.display_name, "
+        "u.role AS user_role, "
+        "u.is_active AS user_active "
+        "FROM access_api_tokens t "
+        "JOIN access_users u ON u.user_id = t.user_id "
+        "WHERE t.token_hash = ?",
+        (token_hash,),
+    ).fetchone()
+
+    if not row:
+        return None
+
+    if not int(row["token_active"] or 0):
+        return None
+
+    if not int(row["user_active"] or 0):
+        return None
+
+    if access_token_is_expired(row["expires_at"]):
+        return None
+
+    token_role = normalize_access_role(row["token_role"])
+
+    if not access_role_allows(token_role, required_role):
+        return None
+
+    authenticated_at = utc_now()
+
+    if update_last_used:
+        connection.execute(
+            "UPDATE access_api_tokens "
+            "SET last_used_at = ?, updated_at = ? "
+            "WHERE token_id = ?",
+            (authenticated_at, authenticated_at, row["token_id"]),
+        )
+
+    return {
+        "auth_type": "api_token",
+        "token_id": row["token_id"],
+        "token_name": row["token_name"],
+        "token_prefix": row["token_prefix"],
+        "user_id": row["user_id"],
+        "username": row["username"],
+        "display_name": row["display_name"],
+        "role": token_role,
+        "user_role": row["user_role"],
+        "last_used_at": authenticated_at if update_last_used else row["last_used_at"],
+        "expires_at": row["expires_at"],
+        "authenticated_at": authenticated_at,
+    }
+
+
+def list_access_api_tokens(
+    connection: sqlite3.Connection,
+    include_inactive: bool = False,
+) -> list[dict[str, Any]]:
+    ensure_enterprise_access_schema(connection)
+
+    where = "" if include_inactive else "WHERE t.is_active = 1 AND u.is_active = 1"
+    rows = connection.execute(
+        "SELECT "
+        "t.token_id, "
+        "t.user_id, "
+        "u.username, "
+        "t.token_name, "
+        "t.token_prefix, "
+        "t.role, "
+        "t.is_active, "
+        "t.created_at, "
+        "t.updated_at, "
+        "t.last_used_at, "
+        "t.expires_at "
+        "FROM access_api_tokens t "
+        "JOIN access_users u ON u.user_id = t.user_id "
+        f"{where} "
+        "ORDER BY t.created_at DESC, t.token_name"
+    ).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def command_user_create(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        user = create_access_user(
+            connection,
+            username=args.username,
+            role=args.role,
+            password=args.password,
+            display_name=args.display_name,
+            is_active=not args.inactive,
+        )
+        record_access_audit_event(
+            connection,
+            action="ACCESS_USER_CREATE",
+            actor={
+                "username": args.actor or "system",
+                "role": "ADMIN",
+            },
+            target_type="access_user",
+            target_key=user["username"],
+            details={
+                "created_user_id": user["user_id"],
+                "created_username": user["username"],
+                "created_role": user["role"],
+                "is_active": user["is_active"],
+                "password_set": bool(args.password),
+            },
+        )
+
+    print("DeltaAegis access user created")
+    print("==============================")
+    print(f"Username:     {user['username']}")
+    print(f"Display name: {user.get('display_name') or '-'}")
+    print(f"Role:         {user['role']}")
+    print(f"Active:       {'yes' if user['is_active'] else 'no'}")
+    print(f"User ID:      {user['user_id']}")
+
+    if not args.password:
+        print("Password:     not set")
+
+    return 0
+
+
+def command_users(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        rows = list_access_users(connection, include_inactive=args.include_inactive)
+
+    print("DeltaAegis access users")
+    print("=======================")
+
+    if not rows:
+        print("No access users found.")
+        return 0
+
+    for row in rows:
+        active = "active" if int(row.get("is_active") or 0) else "inactive"
+        print(
+            f"{row['username']:<24} "
+            f"{row['role']:<8} "
+            f"{active:<8} "
+            f"updated={row.get('updated_at') or '-'} "
+            f"id={row['user_id']}"
+        )
+
+    return 0
+
+
+def command_api_token_create(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        user = access_user_by_username(connection, args.username)
+
+        if not user:
+            raise DeltaAegisError(f"access user not found: {args.username}")
+
+        if not int(user.get("is_active") or 0):
+            raise DeltaAegisError(f"access user is inactive: {user['username']}")
+
+        token = create_access_api_token(
+            connection,
+            user_id=user["user_id"],
+            token_name=args.name,
+            role=args.role,
+            expires_at=args.expires_at,
+        )
+        record_access_audit_event(
+            connection,
+            action="ACCESS_API_TOKEN_CREATE",
+            actor={
+                "username": args.actor or "system",
+                "role": "ADMIN",
+            },
+            target_type="access_api_token",
+            target_key=token["token_id"],
+            details={
+                "token_id": token["token_id"],
+                "token_name": token["token_name"],
+                "token_prefix": token["token_prefix"],
+                "username": token["username"],
+                "role": token["role"],
+                "expires_at": token["expires_at"],
+            },
+        )
+
+    print("DeltaAegis API token created")
+    print("============================")
+    print(f"Username:     {token['username']}")
+    print(f"Token name:   {token['token_name']}")
+    print(f"Role:         {token['role']}")
+    print(f"Token ID:     {token['token_id']}")
+    print(f"Token prefix: {token['token_prefix']}")
+    print(f"Expires at:   {token.get('expires_at') or '-'}")
+    print()
+    print("Copy this token now. It will not be shown again:")
+    print(token["token"])
+
+    return 0
+
+
+def command_api_tokens(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        rows = list_access_api_tokens(connection, include_inactive=args.include_inactive)
+
+    print("DeltaAegis API tokens")
+    print("=====================")
+
+    if not rows:
+        print("No API tokens found.")
+        return 0
+
+    for row in rows:
+        active = "active" if int(row.get("is_active") or 0) else "inactive"
+        expired = "expired" if access_token_is_expired(row.get("expires_at")) else "valid"
+        print(
+            f"{row['username']:<24} "
+            f"{row['role']:<8} "
+            f"{active:<8} "
+            f"{expired:<7} "
+            f"prefix={row.get('token_prefix') or '-'} "
+            f"last_used={row.get('last_used_at') or '-'} "
+            f"name={row.get('token_name') or '-'}"
+        )
+
+    return 0
+
 def command_intelligence_hosts(args: argparse.Namespace) -> int:
     connection = connect(args.db)
     rows = list_netsniper_intelligence_hosts(
@@ -16380,6 +16664,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reports-dir", type=Path, default=DEFAULT_REPORTS)
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("menu")
+    p = sub.add_parser("user-create", help="Create a local DeltaAegis access user")
+    p.add_argument("username")
+    p.add_argument("--role", choices=list(ACCESS_ROLES), default="VIEWER")
+    p.add_argument("--password", help="Initial password. For shared terminals, prefer setting this only during local setup.")
+    p.add_argument("--display-name")
+    p.add_argument("--inactive", action="store_true")
+    p.add_argument("--actor", default="system", help="Audit actor name for this administrative action")
+
+    p = sub.add_parser("users", help="List local DeltaAegis access users")
+    p.add_argument("--include-inactive", action="store_true")
+
+    p = sub.add_parser("api-token-create", help="Create a database-backed DeltaAegis API token")
+    p.add_argument("username")
+    p.add_argument("--name", default="DeltaAegis API Token")
+    p.add_argument("--role", choices=list(ACCESS_ROLES), default=None)
+    p.add_argument("--expires-at", help="Optional ISO-8601 expiration timestamp")
+    p.add_argument("--actor", default="system", help="Audit actor name for this administrative action")
+
+    p = sub.add_parser("api-tokens", help="List database-backed DeltaAegis API tokens")
+    p.add_argument("--include-inactive", action="store_true")
+
     sub.add_parser("ingest")
     p = sub.add_parser("scan-start", help="Run a safe NetSniper v1.8 headless scan job")
     p.add_argument("--target", required=True, help="Private IPv4 CIDR target, such as 192.168.5.0/24")
@@ -16522,6 +16827,10 @@ def main() -> int:
     args = build_parser().parse_args()
     try:
         if args.command in {None, "menu"}: return run_interactive_menu(args)
+        if args.command == "user-create": return command_user_create(args)
+        if args.command == "users": return command_users(args)
+        if args.command == "api-token-create": return command_api_token_create(args)
+        if args.command == "api-tokens": return command_api_tokens(args)
         if args.command == "ingest": return command_ingest(args)
         if args.command == "scan-start": return command_scan_start(args)
         if args.command == "scan-jobs": return command_scan_jobs(args)
