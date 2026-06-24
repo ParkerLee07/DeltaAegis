@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.16.0: Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
+"""DeltaAegis v0.17.0: Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -33,6 +33,7 @@ DEFAULT_EVENTS = Path.home() / "DeltaAegis" / "events" / "events.jsonl"
 DEFAULT_REPORTS = Path.home() / "DeltaAegis" / "reports"
 DELTAAEGIS_V0_14_COMPATIBILITY_NOTE = "DeltaAegis v0.14.0 — NetSniper Scan Orchestration compatibility retained."
 DELTAAEGIS_V0_15_COMPATIBILITY_NOTE = "DeltaAegis v0.15.0 — MAC-Port Behavior Correlation compatibility retained."
+DELTAAEGIS_V0_16_COMPATIBILITY_NOTE = "DeltaAegis v0.16.0 — Investigation Command Center compatibility retained."
 QUALITY_RATIO_THRESHOLD = 0.50
 IDENTITY_COVERAGE_THRESHOLD = 0.50
 IDENTITY_DROP_REVIEW_THRESHOLD = 0.25
@@ -5888,11 +5889,13 @@ def command_report(args):
         lookback=5,
     )
 
-    report_investigation_center_rows = investigation_center_rows(
-        connection,
-        limit=args.risk_limit,
-        scope=scope,
-    )
+    report_investigation_center_rows = tune_investigation_center_ticket_signals(
+        investigation_center_rows(
+            connection,
+            limit=max(args.risk_limit * 4, 50),
+            scope=scope,
+        )
+    )[:args.risk_limit]
 
     report_lifecycle_rows = report_asset_lifecycle_summary(
         connection,
@@ -9033,38 +9036,275 @@ def investigation_center_rows(connection, limit=25, scope=None):
     return rows[:limit]
 
 
+
+# v0.17 ticket signal tuning: separate baseline inventory context from meaningful change.
+TICKET_EXPECTED_PRINTER_PORTS = {80, 443, 515, 631, 9100}
+TICKET_HIGH_SIGNAL_PORTS = {
+    21, 22, 23, 139, 445, 1433, 1521, 2375, 2376, 3306, 3389,
+    5000, 5432, 5555, 5900, 5985, 5986, 6379, 6443, 7547, 8000,
+    8080, 8081, 8443, 8888, 9000, 9090, 9200, 9300, 9443, 10250,
+    10255, 27017,
+}
+
+
+def ticket_role_text(row):
+    values = [
+        row.get("device_type"),
+        row.get("classification"),
+        row.get("role"),
+    ]
+
+    return " ".join(str(value or "") for value in values).lower()
+
+
+def ticket_is_printer_like(row):
+    text = ticket_role_text(row)
+
+    return (
+        "printer" in text
+        or "multifunction" in text
+        or "print server" in text
+    )
+
+
+def ticket_port_numbers(row):
+    ports = set()
+
+    for item in row.get("open_ports") or []:
+        value = str(item or "")
+
+        if "/" in value:
+            value = value.rsplit("/", 1)[-1]
+
+        try:
+            ports.add(int(value))
+        except (TypeError, ValueError):
+            continue
+
+    return ports
+
+
+def ticket_has_meaningful_change(row):
+    triggers = {
+        str(trigger or "").upper()
+        for trigger in row.get("triggers") or []
+    }
+
+    if triggers & {"PORT_BEHAVIOR", "RECENT_EVENT"}:
+        return True
+
+    if risk_int(row.get("recent_events"), 0) > 0:
+        return True
+
+    if risk_int(row.get("port_behavior_count"), 0) > 0:
+        return True
+
+    return False
+
+
+def ticket_has_high_signal_exposure(row):
+    ports = ticket_port_numbers(row)
+
+    if ports & TICKET_HIGH_SIGNAL_PORTS:
+        return True
+
+    reason_text = " ".join(str(reason or "") for reason in row.get("reasons") or [])
+    reason_text += " " + str(row.get("primary_reason") or "")
+    reason_text = reason_text.lower()
+
+    return any(
+        token in reason_text
+        for token in [
+            "telnet",
+            "smb",
+            "rdp",
+            "database",
+            "docker",
+            "kubernetes",
+            "container",
+            "high-signal",
+            "contradict",
+        ]
+    )
+
+
+def ticket_expected_printer_baseline(row):
+    if not ticket_is_printer_like(row):
+        return False
+
+    if ticket_has_meaningful_change(row):
+        return False
+
+    if ticket_has_high_signal_exposure(row):
+        return False
+
+    ports = ticket_port_numbers(row)
+
+    if ports and not ports.issubset(TICKET_EXPECTED_PRINTER_PORTS):
+        return False
+
+    triggers = {
+        str(trigger or "").upper()
+        for trigger in row.get("triggers") or []
+    }
+
+    return not (triggers & {"PORT_BEHAVIOR", "RECENT_EVENT"})
+
+
+def tune_investigation_center_ticket_signal(row):
+    tuned = dict(row)
+    original_score = risk_int(tuned.get("priority_score"), 0)
+    tuned["raw_priority_score"] = original_score
+
+    if ticket_expected_printer_baseline(tuned):
+        new_score = min(original_score, 34)
+
+        tuned["priority_score"] = new_score
+        tuned["priority_level"] = risk_level(new_score)
+        tuned["ticket_signal_state"] = "BASELINE_CONTEXT"
+        tuned["signal_tuned"] = True
+        tuned["signal_tuning_reason"] = (
+            "Known printer-like asset has only baseline inventory/current-risk context; "
+            "no recent event, high-signal exposure, or MAC-port behavior change was detected."
+        )
+        tuned["primary_reason"] = tuned["signal_tuning_reason"]
+
+        action = (
+            "Treat this as inventory context unless ownership, location, or expected "
+            "printer services are unknown; investigate only if new services or behavior changes appear."
+        )
+
+        tuned["recommended_action"] = action
+
+        triggers = [
+            str(trigger or "").upper()
+            for trigger in tuned.get("triggers") or []
+        ]
+
+        if "BASELINE_CONTEXT" not in triggers:
+            triggers.append("BASELINE_CONTEXT")
+
+        tuned["triggers"] = triggers
+
+    elif ticket_is_printer_like(tuned) and ticket_has_meaningful_change(tuned) and not ticket_has_high_signal_exposure(tuned):
+        new_score = min(original_score, 74)
+
+        tuned["priority_score"] = new_score
+        tuned["priority_level"] = risk_level(new_score)
+        tuned["ticket_signal_state"] = "MEANINGFUL_CHANGE"
+        tuned["signal_tuned"] = True
+        tuned["signal_tuning_reason"] = (
+            "Printer-like asset has a behavior/event trigger, but no high-signal remote-access "
+            "or file-sharing exposure was detected."
+        )
+
+        if not str(tuned.get("primary_reason") or "").strip():
+            tuned["primary_reason"] = tuned["signal_tuning_reason"]
+
+    else:
+        tuned["ticket_signal_state"] = "ACTIONABLE"
+        tuned["signal_tuned"] = False
+
+    return tuned
+
+
+def tune_investigation_center_ticket_signals(rows):
+    tuned_rows = [
+        tune_investigation_center_ticket_signal(row)
+        for row in rows or []
+    ]
+
+    tuned_rows.sort(
+        key=lambda row: (
+            risk_int(row.get("priority_score"), 0),
+            risk_int(row.get("open_alerts"), 0),
+            risk_int(row.get("recent_events"), 0),
+            risk_int(row.get("port_behavior_count"), 0),
+            str(row.get("subject_key") or ""),
+        ),
+        reverse=True,
+    )
+
+    return tuned_rows
+
+
+def investigation_center_summary(rows):
+    summary = {
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "info": 0,
+        "with_open_alerts": 0,
+        "with_port_behavior": 0,
+        "baseline_context": 0,
+        "meaningful_change": 0,
+    }
+
+    for row in rows or []:
+        level = str(row.get("priority_level") or "INFO").upper()
+
+        if level == "CRITICAL":
+            summary["critical"] += 1
+        elif level == "HIGH":
+            summary["high"] += 1
+        elif level == "MEDIUM":
+            summary["medium"] += 1
+        elif level == "LOW":
+            summary["low"] += 1
+        else:
+            summary["info"] += 1
+
+        if risk_int(row.get("open_alerts"), 0) > 0:
+            summary["with_open_alerts"] += 1
+
+        if risk_int(row.get("port_behavior_count"), 0) > 0:
+            summary["with_port_behavior"] += 1
+
+        state = str(row.get("ticket_signal_state") or "").upper()
+
+        if state == "BASELINE_CONTEXT":
+            summary["baseline_context"] += 1
+        elif state == "MEANINGFUL_CHANGE":
+            summary["meaningful_change"] += 1
+
+    return summary
+
+
+
 def dashboard_investigation_center_payload(connection, limit=25, scope=None):
+    requested_limit = risk_int(limit, 25)
+
+    if requested_limit <= 0:
+        requested_limit = 25
+
+    query_limit = max(requested_limit * 4, 50)
+
     try:
-        items = investigation_center_rows(
+        rows = investigation_center_rows(
             connection,
-            limit=limit,
+            limit=query_limit,
             scope=scope,
         )
+        rows = tune_investigation_center_ticket_signals(rows)
+        rows = rows[:requested_limit]
 
         return {
             "available": True,
             "selected_scope": scope,
-            "item_count": len(items),
-            "items": items,
-            "summary": {
-                "critical": sum(1 for row in items if row.get("priority_level") == "CRITICAL"),
-                "high": sum(1 for row in items if row.get("priority_level") == "HIGH"),
-                "medium": sum(1 for row in items if row.get("priority_level") == "MEDIUM"),
-                "with_open_alerts": sum(1 for row in items if int(row.get("open_alerts") or 0) > 0),
-                "with_port_behavior": sum(1 for row in items if int(row.get("port_behavior_count") or 0) > 0),
-            },
+            "item_count": len(rows),
+            "summary": investigation_center_summary(rows),
+            "items": rows,
         }
     except Exception as exc:
         return {
             "available": False,
             "selected_scope": scope,
             "item_count": 0,
+            "summary": investigation_center_summary([]),
             "items": [],
-            "summary": {},
-            "error": f"Investigation Command Center unavailable: {exc}",
+            "error": str(exc),
         }
-
-
 
 def print_investigation_center_rows(payload):
     available = bool(payload.get("available", False))
@@ -9174,7 +9414,7 @@ def dashboard_index_html():
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>DeltaAegis Dashboard</title>
+  <title>DeltaAegis Executive SIEM Dashboard</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root {
@@ -9633,41 +9873,668 @@ def dashboard_index_html():
       color: #bbf7d0;
     }
 
+    /* v0.17 Executive SIEM Dashboard Refresh */
+    .dashboard-shell-refresh-v017 {
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 18% -10%, rgba(59, 130, 246, 0.22), transparent 34%),
+        radial-gradient(circle at 82% 0%, rgba(168, 85, 247, 0.16), transparent 32%),
+        linear-gradient(180deg, #020617 0%, #07111f 44%, #0b1020 100%);
+      color: var(--text);
+    }
+
+    .dashboard-shell-refresh-v017 .executive-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 22px;
+      align-items: center;
+      padding: 28px 32px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+      background:
+        linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(17, 24, 39, 0.86)),
+        radial-gradient(circle at top right, rgba(96, 165, 250, 0.2), transparent 35%);
+      box-shadow: 0 20px 55px rgba(0, 0, 0, 0.38);
+    }
+
+    .executive-kicker {
+      color: #67e8f9;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    .dashboard-shell-refresh-v017 header h1 {
+      margin-top: 6px;
+      font-size: clamp(30px, 4vw, 46px);
+      line-height: 1.02;
+      letter-spacing: -0.04em;
+    }
+
+    .dashboard-shell-refresh-v017 header p {
+      max-width: 820px;
+      color: #cbd5e1;
+      font-size: 15px;
+      line-height: 1.65;
+    }
+
+    .executive-status-grid {
+      display: grid;
+      gap: 10px;
+      min-width: 280px;
+    }
+
+    .executive-status-pill {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: 16px;
+      background: rgba(15, 23, 42, 0.64);
+      padding: 10px 12px;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+
+    .executive-status-pill span:first-child {
+      color: #94a3b8;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .executive-status-pill span:last-child {
+      color: #e0f2fe;
+      font-size: 12px;
+      font-weight: 800;
+      text-align: right;
+    }
+
+    .dashboard-shell-refresh-v017 .dashboard-main {
+      width: min(1540px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 22px 0 36px;
+      gap: 22px;
+    }
+
+    .executive-overview {
+      border: 1px solid rgba(96, 165, 250, 0.24);
+      border-radius: 24px;
+      background:
+        linear-gradient(135deg, rgba(30, 41, 59, 0.92), rgba(15, 23, 42, 0.92)),
+        radial-gradient(circle at 90% 12%, rgba(34, 211, 238, 0.14), transparent 32%);
+      padding: 22px;
+      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+    }
+
+    .executive-overview h2 {
+      margin: 6px 0 8px;
+      font-size: 26px;
+      letter-spacing: -0.03em;
+    }
+
+    .executive-overview p {
+      max-width: 860px;
+      color: #cbd5e1;
+      line-height: 1.65;
+    }
+
+    .executive-objectives {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .executive-objective {
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 18px;
+      background: rgba(2, 6, 23, 0.34);
+      padding: 14px;
+    }
+
+    .executive-objective strong {
+      display: block;
+      margin-bottom: 6px;
+      color: #e0f2fe;
+    }
+
+    .executive-objective span {
+      color: #94a3b8;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .dashboard-shell-refresh-v017 .executive-tabs {
+      top: 10px;
+      border-color: rgba(148, 163, 184, 0.22);
+      background: rgba(2, 6, 23, 0.72);
+      box-shadow: 0 16px 50px rgba(0, 0, 0, 0.3);
+    }
+
+    .dashboard-shell-refresh-v017 .tab-button {
+      background: rgba(15, 23, 42, 0.82);
+      border-color: rgba(148, 163, 184, 0.2);
+      color: #cbd5e1;
+      transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+    }
+
+    .dashboard-shell-refresh-v017 .tab-button:hover {
+      transform: translateY(-1px);
+      background: rgba(30, 41, 59, 0.95);
+    }
+
+    .dashboard-shell-refresh-v017 .tab-button.active {
+      border-color: rgba(34, 211, 238, 0.7);
+      background: linear-gradient(135deg, #1d4ed8, #0891b2);
+      box-shadow: 0 10px 28px rgba(8, 145, 178, 0.28);
+    }
+
+    .dashboard-shell-refresh-v017 .card {
+      border-color: rgba(148, 163, 184, 0.18);
+      border-radius: 20px;
+      background:
+        linear-gradient(180deg, rgba(15, 23, 42, 0.96), rgba(15, 23, 42, 0.84));
+      box-shadow: 0 16px 44px rgba(0, 0, 0, 0.26);
+      overflow-x: auto;
+    }
+
+    .dashboard-shell-refresh-v017 .card h2 {
+      color: #f8fafc;
+      letter-spacing: -0.02em;
+    }
+
+    .metric-card {
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 20px;
+      background:
+        linear-gradient(180deg, rgba(30, 41, 59, 0.94), rgba(15, 23, 42, 0.9));
+      padding: 16px;
+      box-shadow: 0 14px 38px rgba(0, 0, 0, 0.24);
+      min-height: 96px;
+    }
+
+    .metric-value {
+      margin-top: 8px;
+      color: #f8fafc;
+      font-size: 34px;
+      font-weight: 850;
+      letter-spacing: -0.05em;
+    }
+
+    .dashboard-shell-refresh-v017 .metric {
+      color: #f8fafc;
+      font-weight: 850;
+      letter-spacing: -0.05em;
+    }
+
+    .dashboard-shell-refresh-v017 table {
+      border-collapse: separate;
+      border-spacing: 0;
+    }
+
+    .dashboard-shell-refresh-v017 th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: rgba(15, 23, 42, 0.96);
+      color: #cbd5e1;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+    }
+
+    .dashboard-shell-refresh-v017 td {
+      border-bottom-color: rgba(148, 163, 184, 0.14);
+    }
+
+    .dashboard-shell-refresh-v017 tbody tr:hover {
+      background: rgba(96, 165, 250, 0.06);
+    }
+
+    .dashboard-shell-refresh-v017 .command-center-trigger {
+      border-color: rgba(34, 211, 238, 0.32);
+      background: rgba(8, 145, 178, 0.16);
+      color: #a5f3fc;
+    }
+
+    .dashboard-shell-refresh-v017 .severity-critical,
+    .dashboard-shell-refresh-v017 .CRITICAL {
+      color: #fecaca;
+      text-shadow: 0 0 14px rgba(239, 68, 68, 0.28);
+    }
+
+    .dashboard-shell-refresh-v017 .severity-high,
+    .dashboard-shell-refresh-v017 .HIGH {
+      color: #fed7aa;
+    }
+
+    .dashboard-shell-refresh-v017 .severity-medium,
+    .dashboard-shell-refresh-v017 .MEDIUM {
+      color: #fde68a;
+    }
+
+    .dashboard-shell-refresh-v017 .severity-low,
+    .dashboard-shell-refresh-v017 .LOW {
+      color: #bbf7d0;
+    }
+
+    @media (max-width: 860px) {
+      .dashboard-shell-refresh-v017 .executive-header {
+        grid-template-columns: 1fr;
+      }
+
+      .executive-status-grid {
+        min-width: 0;
+      }
+
+      .dashboard-shell-refresh-v017 .dashboard-main {
+        width: min(100vw - 18px, 1540px);
+      }
+    }
+
+    /* v0.17 SIEM-style executive chart panels */
+    .siem-analytics-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .siem-chart-panel {
+      min-height: 300px;
+    }
+
+    .siem-chart-panel h3 {
+      margin: 0 0 4px;
+      font-size: 15px;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      color: #e2e8f0;
+    }
+
+    .siem-chart-subtitle {
+      margin: 0 0 16px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .siem-bar-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .siem-bar-row {
+      display: grid;
+      grid-template-columns: minmax(110px, 180px) minmax(0, 1fr) 48px;
+      gap: 10px;
+      align-items: center;
+      font-size: 13px;
+    }
+
+    .siem-bar-label {
+      color: #dbeafe;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .siem-bar-track {
+      height: 12px;
+      overflow: hidden;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.86);
+    }
+
+    .siem-bar-fill {
+      height: 100%;
+      min-width: 4px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #22d3ee, #3b82f6);
+      box-shadow: 0 0 18px rgba(34, 211, 238, 0.24);
+    }
+
+    .siem-bar-value {
+      color: #f8fafc;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      font-weight: 800;
+    }
+
+    .siem-donut-wrap {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      gap: 18px;
+      align-items: center;
+    }
+
+    .siem-donut {
+      width: 150px;
+      height: 150px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: conic-gradient(#22d3ee 0deg, #22d3ee 120deg, #3b82f6 120deg, #3b82f6 210deg, #a855f7 210deg, #a855f7 290deg, #f59e0b 290deg, #f59e0b 360deg);
+      box-shadow: 0 0 30px rgba(34, 211, 238, 0.12);
+    }
+
+    .siem-donut::after {
+      content: "";
+      width: 82px;
+      height: 82px;
+      border-radius: 50%;
+      background: #0f172a;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+    }
+
+    .siem-legend {
+      display: grid;
+      gap: 8px;
+      font-size: 13px;
+    }
+
+    .siem-legend-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: #cbd5e1;
+    }
+
+    .siem-legend-row strong {
+      color: #f8fafc;
+      font-variant-numeric: tabular-nums;
+    }
+
+    @media (max-width: 1100px) {
+      .siem-analytics-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .siem-donut-wrap {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* v0.17 SIEM-style ticket queue */
+    .ticket-cards-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      gap: 14px;
+      margin: 18px 0;
+    }
+
+    .siem-ticket-card {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 20px;
+      background:
+        linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(2, 6, 23, 0.88));
+      padding: 16px;
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.22);
+    }
+
+    .siem-ticket-card::before {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 4px;
+      background: #64748b;
+    }
+
+    .siem-ticket-card.ticket-critical::before { background: #ef4444; }
+    .siem-ticket-card.ticket-high::before { background: #f97316; }
+    .siem-ticket-card.ticket-medium::before { background: #eab308; }
+    .siem-ticket-card.ticket-low::before { background: #22c55e; }
+
+    .siem-ticket-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .siem-ticket-title {
+      display: grid;
+      gap: 5px;
+      min-width: 0;
+    }
+
+    .siem-ticket-title strong {
+      color: #f8fafc;
+      font-size: 15px;
+    }
+
+    .siem-ticket-subject {
+      color: #bfdbfe;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+
+    .siem-priority-badge {
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: 16px;
+      background: rgba(15, 23, 42, 0.78);
+      padding: 8px 10px;
+      text-align: right;
+      min-width: 92px;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+
+    .siem-priority-badge .level {
+      display: block;
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .siem-priority-badge .score {
+      display: block;
+      margin-top: 2px;
+      color: #f8fafc;
+      font-size: 24px;
+      font-weight: 900;
+      letter-spacing: -0.05em;
+    }
+
+    .siem-ticket-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin: 12px 0;
+    }
+
+    .siem-ticket-meta div {
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      border-radius: 14px;
+      background: rgba(15, 23, 42, 0.5);
+      padding: 8px;
+      min-width: 0;
+    }
+
+    .siem-ticket-meta span {
+      display: block;
+      color: #94a3b8;
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .siem-ticket-meta code,
+    .siem-ticket-meta strong {
+      display: block;
+      margin-top: 4px;
+      overflow-wrap: anywhere;
+    }
+
+    .siem-ticket-section {
+      margin-top: 12px;
+    }
+
+    .siem-ticket-section .label {
+      margin-bottom: 6px;
+    }
+
+    .siem-ticket-reason {
+      color: #e2e8f0;
+      line-height: 1.55;
+    }
+
+    .siem-ticket-action {
+      color: #bbf7d0;
+      line-height: 1.55;
+    }
+
+    .siem-ticket-counts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .siem-count-pill {
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.72);
+      color: #dbeafe;
+      padding: 5px 9px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .siem-ticket-empty {
+      border: 1px dashed rgba(148, 163, 184, 0.25);
+      border-radius: 18px;
+      padding: 18px;
+      color: var(--muted);
+      background: rgba(15, 23, 42, 0.42);
+    }
+
+    .siem-ticket-table-note {
+      margin-top: 14px;
+      margin-bottom: 8px;
+    }
+
+    @media (max-width: 760px) {
+      .ticket-cards-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .siem-ticket-meta {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* v0.17 ticket signal state labels */
+    .ticket-signal-badge {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: 999px;
+      padding: 4px 9px;
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .ticket-signal-actionable {
+      border-color: rgba(248, 113, 113, 0.38);
+      background: rgba(127, 29, 29, 0.22);
+      color: #fecaca;
+    }
+
+    .ticket-signal-meaningful-change {
+      border-color: rgba(34, 211, 238, 0.38);
+      background: rgba(8, 145, 178, 0.18);
+      color: #a5f3fc;
+    }
+
+    .ticket-signal-baseline-context {
+      border-color: rgba(148, 163, 184, 0.28);
+      background: rgba(51, 65, 85, 0.24);
+      color: #cbd5e1;
+    }
+
+    .ticket-signal-unknown {
+      border-color: rgba(148, 163, 184, 0.2);
+      background: rgba(15, 23, 42, 0.55);
+      color: #94a3b8;
+    }
+
   </style>
 </head>
-<body>
-  <header>
-    <h1>DeltaAegis Dashboard</h1>
-    <p>Local investigation dashboard for network deltas, alerts, annotations, risk prioritization, and asset review workflow.</p>
+<body class="dashboard-shell-refresh-v017">
+  <header class="executive-header">
+    <div>
+      <div class="executive-kicker">DeltaAegis SIEM Console</div>
+      <h1>Executive Security Overview</h1>
+      <p>Analyst-focused network-state monitoring for current exposure, investigation priority, NetSniper intelligence, MAC-port behavior, alerts, and scan orchestration.</p>
+    </div>
+    <div class="executive-status-grid" aria-label="Dashboard status">
+      <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
+      <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.17 Preview</span></div>
+    </div>
   </header>
 
-  <main>
+  <main class="dashboard-main">
     <div id="error" class="error"></div>
 
-    <nav class="dashboard-tabs" aria-label="DeltaAegis dashboard sections">
-      <button type="button" class="tab-button" data-tab-target="overview">Overview</button>
-      <button type="button" class="tab-button" data-tab-target="command-center">Command Center</button>
+    <nav class="dashboard-tabs executive-tabs" aria-label="DeltaAegis dashboard sections">
+      <button type="button" class="tab-button" data-tab-target="overview">Executive</button>
+      <button type="button" class="tab-button" data-tab-target="command-center">Tickets</button>
       <button type="button" class="tab-button" data-tab-target="investigations">Investigations</button>
-      <button type="button" class="tab-button" data-tab-target="risk">Risk</button>
-      <button type="button" class="tab-button" data-tab-target="port-behavior">Port Behavior</button>
-      <button type="button" class="tab-button" data-tab-target="assets">Assets</button>
+      <button type="button" class="tab-button" data-tab-target="risk">Risk Analysis</button>
+      <button type="button" class="tab-button" data-tab-target="port-behavior">Network Activity</button>
+      <button type="button" class="tab-button" data-tab-target="assets">Taxonomy</button>
       <button type="button" class="tab-button" data-tab-target="intelligence">Intelligence</button>
-      <button type="button" class="tab-button" data-tab-target="events">Events</button>
-      <button type="button" class="tab-button" data-tab-target="alerts">Alerts</button>
-      <button type="button" class="tab-button" data-tab-target="scan-jobs">Scan Jobs</button>
+      <button type="button" class="tab-button" data-tab-target="events">Security Events</button>
+      <button type="button" class="tab-button" data-tab-target="alerts">Alarms</button>
+      <button type="button" class="tab-button" data-tab-target="scan-jobs">Data Sources</button>
     </nav>
 
+    <section class="executive-overview" data-tab-panel="overview">
+      <div class="executive-kicker">Executive Overview</div>
+      <h2>Network Investigation at a Glance</h2>
+      <p>
+        Start with the Command Center queue, then drill into risk, MAC-port behavior,
+        asset intelligence, alerts, events, and scan jobs without leaving the dashboard.
+      </p>
+      <div class="executive-objectives">
+        <div class="executive-objective">
+          <strong>Prioritize</strong>
+          <span>Identify the highest-impact subjects using current risk and open alert context.</span>
+        </div>
+        <div class="executive-objective">
+          <strong>Explain</strong>
+          <span>Show why a device matters through evidence, classification, and behavior changes.</span>
+        </div>
+        <div class="executive-objective">
+          <strong>Act</strong>
+          <span>Surface recommended next steps while preserving dashboard safety.</span>
+        </div>
+      </div>
+    </section>
+
     <section class="card" data-tab-panel="command-center">
-      <h2>Investigation Command Center</h2>
+      <h2>Tickets: Investigation Queue</h2>
       <p class="muted">
         Prioritized analyst queue combining current risk, MAC-port behavior, open alerts,
         recent delta events, asset identity, classification, and recommended next action.
       </p>
       <div id="investigation-center-summary" class="grid"></div>
-      <table>
+      <div id="investigation-ticket-cards" class="ticket-cards-grid"></div>
+      <p class="muted siem-ticket-table-note">Detailed queue table for sorting, copy/paste review, and compatibility with earlier DeltaAegis dashboard workflows.</p>
+      <table class="siem-ticket-table">
         <thead>
           <tr>
             <th>Priority</th>
+            <th>Signal</th>
             <th>Subject</th>
             <th>IP</th>
             <th>MAC</th>
@@ -9696,6 +10563,32 @@ def dashboard_index_html():
 
     <section class="grid" id="metrics" data-tab-panel="overview"></section>
 
+    <section class="siem-analytics-grid" data-tab-panel="overview">
+      <div class="card siem-chart-panel">
+        <h3>Security Events: Top Categories</h3>
+        <p class="siem-chart-subtitle">Recent delta-event categories in the selected dashboard scope.</p>
+        <div id="chart-event-categories"></div>
+      </div>
+
+      <div class="card siem-chart-panel">
+        <h3>Risk Analysis: Priority Distribution</h3>
+        <p class="siem-chart-subtitle">Current-risk level distribution from the latest accepted snapshot.</p>
+        <div id="chart-risk-levels"></div>
+      </div>
+
+      <div class="card siem-chart-panel">
+        <h3>Taxonomy: Asset Classification Mix</h3>
+        <p class="siem-chart-subtitle">Top observed device classifications from the current asset inventory.</p>
+        <div id="chart-classification-mix"></div>
+      </div>
+
+      <div class="card siem-chart-panel">
+        <h3>Network Activity: MAC-Port Behavior</h3>
+        <p class="siem-chart-subtitle">MAC-backed port behavior changes across accepted scans.</p>
+        <div id="chart-port-behavior"></div>
+      </div>
+    </section>
+
     <section class="card" data-tab-panel="overview">
       <h2>Network Scopes</h2>
       <p class="muted">Choose which subnet scope the dashboard should display. Deltas are only meaningful inside the same network scope.</p>
@@ -9717,7 +10610,7 @@ def dashboard_index_html():
 
 
     <section class="card" data-tab-panel="scan-jobs">
-      <h2>Scan Jobs</h2>
+      <h2>Data Sources: Scan Jobs</h2>
       <p class="muted">
         Read-only NetSniper scan orchestration history. Start scans from the CLI with
         <code>deltaaegis scan-start --target &lt;private-cidr&gt;</code>.
@@ -9739,7 +10632,7 @@ def dashboard_index_html():
     </section>
 
     <section class="card" data-tab-panel="assets">
-      <h2>Asset Inventory</h2>
+      <h2>Taxonomy: Asset Inventory</h2>
       <p class="muted">Current scoped asset lifecycle view. Use the scope selector above to isolate a subnet.</p>
       <table>
         <thead>
@@ -9822,7 +10715,7 @@ def dashboard_index_html():
     </section>
 
     <section class="card" data-tab-panel="events">
-      <h2>Recent Delta Events</h2>
+      <h2>Security Events</h2>
       <table>
         <thead>
           <tr><th>ID</th><th>Scan</th><th>Baseline</th><th>Severity</th><th>Type</th><th>Subject</th><th>IP</th><th>MAC</th><th>Identity</th><th>Created</th><th>Summary</th></tr>
@@ -9832,7 +10725,7 @@ def dashboard_index_html():
     </section>
 
     <section class="card" data-tab-panel="alerts">
-      <h2>Recent Alerts</h2>
+      <h2>Alarms</h2>
       <table>
         <thead>
           <tr><th>ID</th><th>Status</th><th>Severity</th><th>Subject</th><th>Type</th><th>IP</th><th>MAC</th><th>Identity</th><th>Summary</th></tr>
@@ -10081,7 +10974,7 @@ def dashboard_index_html():
 
 
     function metric(label, value) {
-      return `<div class="card"><div class="label">${esc(label)}</div><div class="metric">${esc(value)}</div></div>`;
+      return `<div class="metric-card"><div class="label">${esc(label)}</div><div class="metric-value">${esc(value)}</div></div>`;
     }
 
     function formatPercent(value) {
@@ -10089,6 +10982,128 @@ def dashboard_index_html():
       if (!Number.isFinite(number)) return "0%";
       return `${Math.round(number * 100)}%`;
     }
+
+
+    function countBy(items, keyFn) {
+      const counts = new Map();
+
+      (Array.isArray(items) ? items : []).forEach(item => {
+        const key = keyFn(item) || "Unknown";
+        counts.set(key, (counts.get(key) || 0) + 1);
+      });
+
+      return Array.from(counts.entries())
+        .map(([label, value]) => ({label, value}))
+        .sort((a, b) => b.value - a.value || String(a.label).localeCompare(String(b.label)));
+    }
+
+    function renderHorizontalBars(targetId, rows, emptyMessage, limit = 8) {
+      const target = document.getElementById(targetId);
+      if (!target) return;
+
+      const items = (Array.isArray(rows) ? rows : [])
+        .filter(row => Number(row.value || 0) > 0)
+        .slice(0, limit);
+
+      if (!items.length) {
+        target.innerHTML = `<p class="muted">${esc(emptyMessage || "No chart data available.")}</p>`;
+        return;
+      }
+
+      const maxValue = Math.max(...items.map(row => Number(row.value || 0)), 1);
+
+      target.innerHTML = `
+        <div class="siem-bar-list">
+          ${items.map(row => {
+            const value = Number(row.value || 0);
+            const width = Math.max(4, Math.round((value / maxValue) * 100));
+            return `
+              <div class="siem-bar-row">
+                <div class="siem-bar-label" title="${esc(row.label)}">${esc(row.label)}</div>
+                <div class="siem-bar-track">
+                  <div class="siem-bar-fill" style="width: ${width}%"></div>
+                </div>
+                <div class="siem-bar-value">${esc(value)}</div>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      `;
+    }
+
+    function renderDistributionPanel(targetId, rows, emptyMessage) {
+      const target = document.getElementById(targetId);
+      if (!target) return;
+
+      const items = (Array.isArray(rows) ? rows : [])
+        .filter(row => Number(row.value || 0) > 0)
+        .slice(0, 6);
+
+      if (!items.length) {
+        target.innerHTML = `<p class="muted">${esc(emptyMessage || "No distribution data available.")}</p>`;
+        return;
+      }
+
+      const total = items.reduce((sum, row) => sum + Number(row.value || 0), 0);
+
+      target.innerHTML = `
+        <div class="siem-donut-wrap">
+          <div class="siem-donut" aria-hidden="true"></div>
+          <div class="siem-legend">
+            ${items.map(row => {
+              const value = Number(row.value || 0);
+              const percent = total ? Math.round((value / total) * 100) : 0;
+              return `
+                <div class="siem-legend-row">
+                  <span>${esc(row.label)}</span>
+                  <strong>${esc(value)} · ${esc(percent)}%</strong>
+                </div>
+              `;
+            }).join("")}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderExecutiveCharts(summary, currentRisk, portBehavior, investigationCenter, assets, events, alerts) {
+      const eventRows = countBy(events, row => row.event_type || row.type || row.severity || "Unknown event");
+      const riskRows = countBy(currentRisk, row => row.level || "INFO");
+      const classificationRows = countBy(assets, row =>
+        row.classification_display_type ||
+        row.classification ||
+        row.device_type ||
+        "Unknown"
+      );
+      const portRows = countBy(portBehavior, row => row.behavior || row.severity || "No port behavior");
+
+      renderHorizontalBars(
+        "chart-event-categories",
+        eventRows,
+        "No recent security events matched this scope.",
+        8
+      );
+
+      renderDistributionPanel(
+        "chart-risk-levels",
+        riskRows,
+        "No current-risk subjects are available for this scope."
+      );
+
+      renderHorizontalBars(
+        "chart-classification-mix",
+        classificationRows,
+        "No asset classification data is available for this scope.",
+        8
+      );
+
+      renderHorizontalBars(
+        "chart-port-behavior",
+        portRows,
+        "No MAC-port behavior changes were detected for this scope.",
+        8
+      );
+    }
+
 
     function renderCurrentState(state) {
       const target = document.getElementById("current-state");
@@ -11041,9 +12056,36 @@ def dashboard_index_html():
 
 
 
+
+    function ticketSignalLabel(row) {
+      const state = String((row && row.ticket_signal_state) || "ACTIONABLE").toUpperCase();
+
+      if (state === "BASELINE_CONTEXT") return "Baseline context";
+      if (state === "MEANINGFUL_CHANGE") return "Meaningful change";
+      if (state === "ACTIONABLE") return "Actionable";
+
+      return "Unclassified";
+    }
+
+    function ticketSignalClass(row) {
+      const state = String((row && row.ticket_signal_state) || "ACTIONABLE").toUpperCase();
+
+      if (state === "BASELINE_CONTEXT") return "ticket-signal-baseline-context";
+      if (state === "MEANINGFUL_CHANGE") return "ticket-signal-meaningful-change";
+      if (state === "ACTIONABLE") return "ticket-signal-actionable";
+
+      return "ticket-signal-unknown";
+    }
+
+    function ticketSignalBadge(row) {
+      return `<span class="ticket-signal-badge ${ticketSignalClass(row)}">${esc(ticketSignalLabel(row))}</span>`;
+    }
+
+
     function renderInvestigationCenter(payload) {
       const summaryBox = document.getElementById("investigation-center-summary");
       const tbody = document.getElementById("investigation-center-body");
+      const ticketCards = document.getElementById("investigation-ticket-cards");
       const items = payload && Array.isArray(payload.items) ? payload.items : [];
       const summary = payload && payload.summary ? payload.summary : {};
 
@@ -11053,24 +12095,91 @@ def dashboard_index_html():
           ["Critical", summary.critical || 0],
           ["High", summary.high || 0],
           ["With Open Alerts", summary.with_open_alerts || 0],
-          ["With Port Behavior", summary.with_port_behavior || 0]
+          ["With Port Behavior", summary.with_port_behavior || 0],
+          ["Meaningful Changes", summary.meaningful_change || 0],
+          ["Baseline Context", summary.baseline_context || 0]
         ].map(([label, value]) => `
-          <div class="metric">
+          <div class="metric-card command-center-kpi">
             <div class="label">${esc(label)}</div>
-            <div class="value">${esc(value)}</div>
+            <div class="metric-value">${esc(value)}</div>
           </div>
         `).join("");
       }
-
-      if (!tbody) return;
 
       if (!items.length) {
         const message = payload && payload.available === false
           ? (payload.error || "Investigation Command Center is unavailable.")
           : "No investigation queue items matched the selected scope.";
-        tbody.innerHTML = `<tr><td colspan="9" class="muted">${esc(message)}</td></tr>`;
+
+        if (ticketCards) {
+          ticketCards.innerHTML = `<div class="siem-ticket-empty">${esc(message)}</div>`;
+        }
+
+        if (tbody) {
+          tbody.innerHTML = `<tr><td colspan="10" class="muted">${esc(message)}</td></tr>`;
+        }
+
         return;
       }
+
+      if (ticketCards) {
+        ticketCards.innerHTML = items.slice(0, 6).map(row => {
+          const level = String(row.priority_level || "INFO").toUpperCase();
+          const levelClass = level.toLowerCase().replace(/[^a-z0-9-]/g, "");
+          const triggers = Array.isArray(row.triggers) && row.triggers.length
+            ? row.triggers.map(trigger => `<span class="command-center-trigger">${esc(trigger)}</span>`).join(" ")
+            : `<span class="muted">No trigger context</span>`;
+
+          return `
+            <article class="siem-ticket-card ticket-${esc(levelClass)}">
+              <div class="siem-ticket-header">
+                <div class="siem-ticket-title">
+                  <strong>${esc(row.device_type || row.classification || row.role || "Unknown asset")}</strong>
+                  <div class="siem-ticket-subject">${subjectButton(row.subject_key || "-")}</div>
+                  ${ticketSignalBadge(row)}
+                </div>
+                <div class="siem-priority-badge severity-${esc(levelClass)}">
+                  <span class="level">${esc(level)}</span>
+                  <span class="score">${esc(row.priority_score || 0)}</span>
+                </div>
+              </div>
+
+              <div class="siem-ticket-meta">
+                <div><span>IP address</span><code>${esc(row.ip_address || "-")}</code></div>
+                <div><span>MAC address</span><code>${esc(row.mac_address || "-")}</code></div>
+                <div><span>Role</span><strong>${esc(row.role || row.classification || "Unknown")}</strong></div>
+                <div><span>Identity</span><strong>${esc(row.identity_confidence || "Unknown")}</strong></div>
+              </div>
+
+              <div class="siem-ticket-section">
+                <div class="label">Triggers</div>
+                <div>${triggers}</div>
+              </div>
+
+              <div class="siem-ticket-section">
+                <div class="label">Why review?</div>
+                <div class="siem-ticket-reason">${esc(row.primary_reason || "-")}</div>
+              </div>
+
+              <div class="siem-ticket-section">
+                <div class="label">Recommended action</div>
+                <div class="siem-ticket-action">${esc(row.recommended_action || "-")}</div>
+              </div>
+
+              <div class="siem-ticket-counts">
+                <span class="siem-count-pill">Alerts ${esc(row.open_alerts || 0)}</span>
+                <span class="siem-count-pill">Events ${esc(row.recent_events || 0)}</span>
+                <span class="siem-count-pill">Ports ${esc(row.port_behavior_count || 0)}</span>
+                <span class="siem-count-pill">Findings ${esc(row.current_finding_count || 0)}</span>
+              </div>
+            </article>
+          `;
+        }).join("");
+
+        bindSubjectLinks(ticketCards);
+      }
+
+      if (!tbody) return;
 
       tbody.innerHTML = items.map(row => {
         const triggers = Array.isArray(row.triggers) && row.triggers.length
@@ -11095,6 +12204,7 @@ def dashboard_index_html():
               ${esc(row.priority_level || "INFO")}<br>
               <span class="muted">${esc(row.priority_score || 0)}</span>
             </td>
+            <td>${ticketSignalBadge(row)}</td>
             <td>${subjectButton(row.subject_key || "-")}</td>
             <td><code>${esc(row.ip_address || "-")}</code></td>
             <td><code>${esc(row.mac_address || "-")}</code></td>
@@ -11548,6 +12658,7 @@ def dashboard_index_html():
         renderAnnotations(annotations);
         renderClassificationSummary(summary);
         renderRecommendations(summary, scanContext, historicalRisk);
+        renderExecutiveCharts(summary, currentRisk, portBehavior, investigationCenter, assets, events, alerts);
         applyDashboardTabState();
       } catch (error) {
         const box = document.getElementById("error");
@@ -11925,7 +13036,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.16.0 Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.17.0 Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)

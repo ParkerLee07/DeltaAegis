@@ -15,8 +15,11 @@ pass() {
 grep -q '^# DeltaAegis$' README.md \
   || fail "README title is missing or malformed"
 
+grep -q 'DeltaAegis v0.17.0 — Executive SIEM Dashboard Refresh' README.md \
+  || fail "README does not identify v0.17.0 as current release"
+
 grep -q 'DeltaAegis v0.16.0 — Investigation Command Center' README.md \
-  || fail "README does not identify v0.16.0 as current release"
+  || fail "README does not preserve the v0.16.0 feature baseline"
 
 grep -q 'DeltaAegis v0.15.0 — MAC-Port Behavior Correlation' README.md \
   || fail "README does not preserve the v0.15.0 feature baseline"
@@ -50,6 +53,18 @@ grep -q 'MAC-Port Behavior Changes' README.md \
 
 grep -q 'Investigation Command Center' README.md \
   || fail "README does not document Investigation Command Center report section"
+
+grep -q 'Executive SIEM Dashboard Refresh' README.md \
+  || fail "README does not document v0.17 executive dashboard refresh"
+
+grep -q 'Meaningful change' README.md \
+  || fail "README does not document Meaningful change ticket signal"
+
+grep -q 'Baseline context' README.md \
+  || fail "README does not document Baseline context ticket signal"
+
+grep -q 'Tickets' README.md \
+  || fail "README does not document SIEM-style Tickets label"
 
 grep -q 'v0.11.x — Intelligence Review Dashboard' README.md \
   || fail "README does not summarize v0.11.x"

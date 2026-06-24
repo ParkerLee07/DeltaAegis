@@ -1,3 +1,58 @@
+## v0.17.0 — Executive SIEM Dashboard Refresh
+
+### Added
+
+- Added executive SIEM-style dashboard shell.
+- Added SIEM-aligned dashboard labels:
+  - `Executive`
+  - `Tickets`
+  - `Risk Analysis`
+  - `Network Activity`
+  - `Taxonomy`
+  - `Security Events`
+  - `Alarms`
+  - `Data Sources`
+- Added executive analytics panels for:
+  - Security-event top categories
+  - Current-risk priority distribution
+  - Asset classification mix
+  - MAC-port behavior
+- Added ticket-style investigation queue cards.
+- Added ticket signal tuning for printer-like baseline inventory context.
+- Added visible ticket signal labels:
+  - `Actionable`
+  - `Meaningful change`
+  - `Baseline context`
+- Added v0.17 validators:
+  - `tools/validate_v0_17_dashboard_shell_theme.sh`
+  - `tools/validate_v0_17_siem_charts.sh`
+  - `tools/validate_v0_17_ticket_queue_layout.sh`
+  - `tools/validate_v0_17_ticket_signal_tuning.sh`
+  - `tools/validate_v0_17_ticket_signal_badges.sh`
+  - `tools/validate_v0_17_release.sh`
+
+### Changed
+
+- Reframed the dashboard around SIEM-familiar workflows.
+- Reduced stable printer inventory noise in the investigation queue.
+- Kept meaningful printer behavior changes visible.
+- Preserved v0.16 Investigation Command Center behavior.
+- Preserved v0.15 MAC-port behavior correlation.
+- Preserved v0.14 NetSniper scan orchestration.
+- Preserved v0.13 current-state/current-risk dashboard behavior.
+- Preserved v0.12 NetSniper intelligence drilldown behavior.
+- Updated README current-release metadata to v0.17.0.
+
+### Validation
+
+- Verified dashboard shell/theme HTML contract.
+- Verified SIEM chart panel HTML contract.
+- Verified ticket queue card layout.
+- Verified synthetic ticket signal tuning behavior.
+- Verified visible ticket signal badge behavior.
+- Verified v0.16, v0.15, v0.14, v0.13, and v0.12 regression gates.
+
+
 ## v0.16.0 — Investigation Command Center
 
 ### Added

@@ -21,7 +21,7 @@ python3 -m py_compile deltaaegis.py \
     || fail "deltaaegis.py does not compile"
 
 grep -q 'DeltaAegis v0.16.0 — Investigation Command Center' README.md \
-    || fail "README does not identify v0.16.0 as current release"
+    || fail "README no longer preserves v0.16.0 release text"
 
 grep -q 'DeltaAegis v0.15.0 — MAC-Port Behavior Correlation' README.md \
     || fail "README no longer preserves v0.15.0 release text"
@@ -30,7 +30,7 @@ grep -q 'v0.16.0 — Investigation Command Center' CHANGELOG.md \
     || fail "CHANGELOG does not mention v0.16.0"
 
 grep -q 'DeltaAegis v0.16.0' deltaaegis.py \
-    || fail "CLI/script metadata does not mention v0.16.0"
+    || fail "CLI/script metadata no longer preserves v0.16.0 compatibility text"
 
 grep -q 'DeltaAegis v0.15.0' deltaaegis.py \
     || fail "CLI/script metadata no longer preserves v0.15.0 compatibility text"

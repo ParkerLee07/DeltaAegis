@@ -25,8 +25,13 @@ python3 -m py_compile deltaaegis.py \
 grep -q 'def append_report_investigation_center_section' deltaaegis.py \
     || fail "report Investigation Command Center section helper is missing"
 
-grep -q 'report_investigation_center_rows = investigation_center_rows' deltaaegis.py \
-    || fail "report command does not build investigation center rows"
+if ! grep -q 'report_investigation_center_rows = investigation_center_rows' deltaaegis.py \
+   && ! grep -q 'report_investigation_center_rows = tune_investigation_center_ticket_signals' deltaaegis.py; then
+    fail "report command does not build investigation center rows"
+fi
+
+grep -q 'investigation_center_rows(' deltaaegis.py \
+    || fail "report command no longer calls investigation_center_rows"
 
 grep -q 'append_report_investigation_center_section(lines, report_investigation_center_rows)' deltaaegis.py \
     || fail "report command does not append investigation center section"
