@@ -9721,7 +9721,7 @@ def tune_investigation_center_ticket_signal(row):
         tuned["ticket_signal_state"] = "ACTIONABLE"
         tuned["signal_tuned"] = False
 
-    return tuned
+    return operator_triage_enrich_row(tuned)
 
 
 def tune_investigation_center_ticket_signals(rows):
@@ -9743,6 +9743,272 @@ def tune_investigation_center_ticket_signals(rows):
 
     return tuned_rows
 
+
+
+TRIAGE_BUCKETS = [
+    "CHANGED_SINCE_REVIEW",
+    "NEEDS_REVIEW",
+    "NEEDS_CONTEXT",
+    "STALE_CLOSED",
+    "BASELINE_CONTEXT",
+    "MONITOR",
+]
+
+
+def operator_triage_parse_datetime(value):
+    if value in (None, ""):
+        return None
+
+    from datetime import datetime as _datetime
+    from datetime import timezone as _timezone
+
+    if isinstance(value, _datetime):
+        parsed = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = _datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_timezone.utc)
+
+    return parsed.astimezone(_timezone.utc)
+
+
+def operator_triage_isoformat(value):
+    parsed = operator_triage_parse_datetime(value)
+    if parsed is None:
+        return None
+    return parsed.isoformat()
+
+
+def operator_triage_latest_datetime(row, keys):
+    values = []
+
+    for key in keys:
+        parsed = operator_triage_parse_datetime(row.get(key))
+        if parsed is not None:
+            values.append(parsed)
+
+    if not values:
+        return None
+
+    return max(values)
+
+
+def operator_triage_age_hours(value, now=None):
+    from datetime import datetime as _datetime
+    from datetime import timezone as _timezone
+
+    parsed = operator_triage_parse_datetime(value)
+    if parsed is None:
+        return None
+
+    current = operator_triage_parse_datetime(now)
+    if current is None:
+        current = _datetime.now(_timezone.utc)
+
+    seconds = max(0.0, (current - parsed).total_seconds())
+    return round(seconds / 3600.0, 2)
+
+
+def operator_triage_has_value(row, keys):
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, ""):
+            if str(value).strip() not in {"", "-", "UNKNOWN", "None", "none", "null"}:
+                return True
+    return False
+
+
+def operator_triage_bool(value):
+    return bool(value)
+
+
+def operator_triage_enrich_row(row, now=None):
+    enriched = dict(row or {})
+
+    status = str(enriched.get("ticket_status") or "OPEN").upper()
+    signal = str(enriched.get("ticket_signal_state") or enriched.get("ticket_signal") or "ACTIONABLE").upper()
+
+    priority_score = risk_int(
+        enriched.get("priority_score", enriched.get("score", 0)),
+        0,
+    )
+    priority_score = max(0, min(100, int(priority_score or 0)))
+
+    evidence_keys = [
+        "latest_alert_at",
+        "latest_event_at",
+        "identity_last_seen_at",
+        "last_seen_at",
+        "observed_at",
+        "created_at",
+    ]
+    review_keys = [
+        "ticket_updated_at",
+        "ticket_resolved_at",
+        "ticket_suppressed_at",
+        "status_updated_at",
+        "reviewed_at",
+    ]
+
+    last_evidence_at = operator_triage_latest_datetime(enriched, evidence_keys)
+    last_review_at = operator_triage_latest_datetime(enriched, review_keys)
+
+    evidence_age_hours = operator_triage_age_hours(last_evidence_at, now=now)
+    changed_since_review = (
+        last_evidence_at is not None
+        and last_review_at is not None
+        and last_evidence_at > last_review_at
+    )
+
+    missing_owner = not operator_triage_has_value(
+        enriched,
+        ["owner", "asset_owner", "annotation_owner"],
+    )
+    missing_context = not (
+        operator_triage_has_value(enriched, ["role", "asset_role", "annotation_role"])
+        and operator_triage_has_value(enriched, ["criticality", "asset_criticality"])
+    )
+
+    urgency_score = priority_score
+    reasons = []
+
+    if changed_since_review:
+        urgency_score += 25
+        reasons.append("Evidence changed after the last recorded ticket review.")
+
+    if signal == "MEANINGFUL_CHANGE":
+        urgency_score += 15
+        reasons.append("Ticket signal is MEANINGFUL_CHANGE.")
+    elif signal == "ACTIONABLE":
+        urgency_score += 8
+        reasons.append("Ticket signal is ACTIONABLE.")
+    elif signal == "BASELINE_CONTEXT":
+        reasons.append("Ticket currently appears to be baseline context.")
+
+    if status in {"OPEN", "IN_REVIEW"}:
+        urgency_score += 8
+        reasons.append(f"Workflow status is {status}.")
+    elif status in {"RESOLVED", "SUPPRESSED", "CLOSED"}:
+        reasons.append(f"Workflow status is {status}.")
+
+    if missing_owner:
+        urgency_score += 5
+        reasons.append("Asset owner is missing.")
+
+    if missing_context:
+        urgency_score += 5
+        reasons.append("Asset role or criticality context is missing.")
+
+    urgency_score = max(0, min(100, int(urgency_score)))
+
+    if urgency_score >= 85:
+        urgency_label = "IMMEDIATE"
+    elif urgency_score >= 65:
+        urgency_label = "HIGH"
+    elif urgency_score >= 35:
+        urgency_label = "NORMAL"
+    else:
+        urgency_label = "LOW"
+
+    if changed_since_review:
+        bucket = "CHANGED_SINCE_REVIEW"
+    elif status in {"OPEN", "IN_REVIEW"} and signal in {"MEANINGFUL_CHANGE", "ACTIONABLE"}:
+        bucket = "NEEDS_REVIEW"
+    elif status in {"OPEN", "IN_REVIEW"} and (missing_owner or missing_context):
+        bucket = "NEEDS_CONTEXT"
+    elif status in {"RESOLVED", "SUPPRESSED", "CLOSED"} and evidence_age_hours is not None and evidence_age_hours >= 168:
+        bucket = "STALE_CLOSED"
+    elif signal == "BASELINE_CONTEXT":
+        bucket = "BASELINE_CONTEXT"
+    else:
+        bucket = "MONITOR"
+
+    enriched["triage_bucket"] = bucket
+    enriched["triage_urgency_score"] = urgency_score
+    enriched["triage_urgency_label"] = urgency_label
+    enriched["triage_missing_owner"] = bool(missing_owner)
+    enriched["triage_missing_context"] = bool(missing_context)
+    enriched["triage_changed_since_review"] = bool(changed_since_review)
+    enriched["triage_last_evidence_at"] = (
+        last_evidence_at.isoformat() if last_evidence_at is not None else None
+    )
+    enriched["triage_last_review_at"] = (
+        last_review_at.isoformat() if last_review_at is not None else None
+    )
+    enriched["triage_evidence_age_hours"] = evidence_age_hours
+    enriched["triage_status"] = bucket
+    enriched["triage_reasons"] = reasons[:8]
+
+    return enriched
+
+
+def operator_triage_enrich_rows(rows, now=None):
+    return [
+        operator_triage_enrich_row(row, now=now)
+        for row in list(rows or [])
+    ]
+
+
+def operator_triage_summary(rows):
+    summary = {
+        "total": 0,
+        "changed_since_review": 0,
+        "needs_review": 0,
+        "needs_context": 0,
+        "stale_closed": 0,
+        "baseline_context": 0,
+        "monitor": 0,
+        "missing_owner": 0,
+        "missing_context": 0,
+        "immediate": 0,
+        "high": 0,
+        "normal": 0,
+        "low": 0,
+    }
+
+    for row in list(rows or []):
+        triaged = row if row.get("triage_bucket") else operator_triage_enrich_row(row)
+        bucket = str(triaged.get("triage_bucket") or "MONITOR").upper()
+        label = str(triaged.get("triage_urgency_label") or "LOW").upper()
+
+        summary["total"] += 1
+
+        if bucket == "CHANGED_SINCE_REVIEW":
+            summary["changed_since_review"] += 1
+        elif bucket == "NEEDS_REVIEW":
+            summary["needs_review"] += 1
+        elif bucket == "NEEDS_CONTEXT":
+            summary["needs_context"] += 1
+        elif bucket == "STALE_CLOSED":
+            summary["stale_closed"] += 1
+        elif bucket == "BASELINE_CONTEXT":
+            summary["baseline_context"] += 1
+        else:
+            summary["monitor"] += 1
+
+        if triaged.get("triage_missing_owner"):
+            summary["missing_owner"] += 1
+
+        if triaged.get("triage_missing_context"):
+            summary["missing_context"] += 1
+
+        if label == "IMMEDIATE":
+            summary["immediate"] += 1
+        elif label == "HIGH":
+            summary["high"] += 1
+        elif label == "NORMAL":
+            summary["normal"] += 1
+        else:
+            summary["low"] += 1
+
+    return summary
 
 def investigation_center_summary(rows):
     summary = {
