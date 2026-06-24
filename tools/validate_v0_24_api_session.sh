@@ -4,8 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-NETSNIPER_RUN_DIR="${1:-/home/parker/NetSniper/runs/20260623-123007}"
-
 fail() {
     echo "[FAIL] $*" >&2
     exit 1
@@ -152,8 +150,5 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 print("[PASS] synthetic v0.24 /api/session validated")
 PY2
-
-./tools/validate_v0_24_login_logout_routes.sh "$NETSNIPER_RUN_DIR" \
-    || fail "v0.24 login/logout route validation failed"
 
 pass "DeltaAegis v0.24 /api/session validation passed"
