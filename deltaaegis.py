@@ -5888,11 +5888,13 @@ def command_report(args):
         lookback=5,
     )
 
-    report_investigation_center_rows = investigation_center_rows(
-        connection,
-        limit=args.risk_limit,
-        scope=scope,
-    )
+    report_investigation_center_rows = tune_investigation_center_ticket_signals(
+        investigation_center_rows(
+            connection,
+            limit=max(args.risk_limit * 4, 50),
+            scope=scope,
+        )
+    )[:args.risk_limit]
 
     report_lifecycle_rows = report_asset_lifecycle_summary(
         connection,
@@ -9033,38 +9035,275 @@ def investigation_center_rows(connection, limit=25, scope=None):
     return rows[:limit]
 
 
+
+# v0.17 ticket signal tuning: separate baseline inventory context from meaningful change.
+TICKET_EXPECTED_PRINTER_PORTS = {80, 443, 515, 631, 9100}
+TICKET_HIGH_SIGNAL_PORTS = {
+    21, 22, 23, 139, 445, 1433, 1521, 2375, 2376, 3306, 3389,
+    5000, 5432, 5555, 5900, 5985, 5986, 6379, 6443, 7547, 8000,
+    8080, 8081, 8443, 8888, 9000, 9090, 9200, 9300, 9443, 10250,
+    10255, 27017,
+}
+
+
+def ticket_role_text(row):
+    values = [
+        row.get("device_type"),
+        row.get("classification"),
+        row.get("role"),
+    ]
+
+    return " ".join(str(value or "") for value in values).lower()
+
+
+def ticket_is_printer_like(row):
+    text = ticket_role_text(row)
+
+    return (
+        "printer" in text
+        or "multifunction" in text
+        or "print server" in text
+    )
+
+
+def ticket_port_numbers(row):
+    ports = set()
+
+    for item in row.get("open_ports") or []:
+        value = str(item or "")
+
+        if "/" in value:
+            value = value.rsplit("/", 1)[-1]
+
+        try:
+            ports.add(int(value))
+        except (TypeError, ValueError):
+            continue
+
+    return ports
+
+
+def ticket_has_meaningful_change(row):
+    triggers = {
+        str(trigger or "").upper()
+        for trigger in row.get("triggers") or []
+    }
+
+    if triggers & {"PORT_BEHAVIOR", "RECENT_EVENT"}:
+        return True
+
+    if risk_int(row.get("recent_events"), 0) > 0:
+        return True
+
+    if risk_int(row.get("port_behavior_count"), 0) > 0:
+        return True
+
+    return False
+
+
+def ticket_has_high_signal_exposure(row):
+    ports = ticket_port_numbers(row)
+
+    if ports & TICKET_HIGH_SIGNAL_PORTS:
+        return True
+
+    reason_text = " ".join(str(reason or "") for reason in row.get("reasons") or [])
+    reason_text += " " + str(row.get("primary_reason") or "")
+    reason_text = reason_text.lower()
+
+    return any(
+        token in reason_text
+        for token in [
+            "telnet",
+            "smb",
+            "rdp",
+            "database",
+            "docker",
+            "kubernetes",
+            "container",
+            "high-signal",
+            "contradict",
+        ]
+    )
+
+
+def ticket_expected_printer_baseline(row):
+    if not ticket_is_printer_like(row):
+        return False
+
+    if ticket_has_meaningful_change(row):
+        return False
+
+    if ticket_has_high_signal_exposure(row):
+        return False
+
+    ports = ticket_port_numbers(row)
+
+    if ports and not ports.issubset(TICKET_EXPECTED_PRINTER_PORTS):
+        return False
+
+    triggers = {
+        str(trigger or "").upper()
+        for trigger in row.get("triggers") or []
+    }
+
+    return not (triggers & {"PORT_BEHAVIOR", "RECENT_EVENT"})
+
+
+def tune_investigation_center_ticket_signal(row):
+    tuned = dict(row)
+    original_score = risk_int(tuned.get("priority_score"), 0)
+    tuned["raw_priority_score"] = original_score
+
+    if ticket_expected_printer_baseline(tuned):
+        new_score = min(original_score, 34)
+
+        tuned["priority_score"] = new_score
+        tuned["priority_level"] = risk_level(new_score)
+        tuned["ticket_signal_state"] = "BASELINE_CONTEXT"
+        tuned["signal_tuned"] = True
+        tuned["signal_tuning_reason"] = (
+            "Known printer-like asset has only baseline inventory/current-risk context; "
+            "no recent event, high-signal exposure, or MAC-port behavior change was detected."
+        )
+        tuned["primary_reason"] = tuned["signal_tuning_reason"]
+
+        action = (
+            "Treat this as inventory context unless ownership, location, or expected "
+            "printer services are unknown; investigate only if new services or behavior changes appear."
+        )
+
+        tuned["recommended_action"] = action
+
+        triggers = [
+            str(trigger or "").upper()
+            for trigger in tuned.get("triggers") or []
+        ]
+
+        if "BASELINE_CONTEXT" not in triggers:
+            triggers.append("BASELINE_CONTEXT")
+
+        tuned["triggers"] = triggers
+
+    elif ticket_is_printer_like(tuned) and ticket_has_meaningful_change(tuned) and not ticket_has_high_signal_exposure(tuned):
+        new_score = min(original_score, 74)
+
+        tuned["priority_score"] = new_score
+        tuned["priority_level"] = risk_level(new_score)
+        tuned["ticket_signal_state"] = "MEANINGFUL_CHANGE"
+        tuned["signal_tuned"] = True
+        tuned["signal_tuning_reason"] = (
+            "Printer-like asset has a behavior/event trigger, but no high-signal remote-access "
+            "or file-sharing exposure was detected."
+        )
+
+        if not str(tuned.get("primary_reason") or "").strip():
+            tuned["primary_reason"] = tuned["signal_tuning_reason"]
+
+    else:
+        tuned["ticket_signal_state"] = "ACTIONABLE"
+        tuned["signal_tuned"] = False
+
+    return tuned
+
+
+def tune_investigation_center_ticket_signals(rows):
+    tuned_rows = [
+        tune_investigation_center_ticket_signal(row)
+        for row in rows or []
+    ]
+
+    tuned_rows.sort(
+        key=lambda row: (
+            risk_int(row.get("priority_score"), 0),
+            risk_int(row.get("open_alerts"), 0),
+            risk_int(row.get("recent_events"), 0),
+            risk_int(row.get("port_behavior_count"), 0),
+            str(row.get("subject_key") or ""),
+        ),
+        reverse=True,
+    )
+
+    return tuned_rows
+
+
+def investigation_center_summary(rows):
+    summary = {
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "info": 0,
+        "with_open_alerts": 0,
+        "with_port_behavior": 0,
+        "baseline_context": 0,
+        "meaningful_change": 0,
+    }
+
+    for row in rows or []:
+        level = str(row.get("priority_level") or "INFO").upper()
+
+        if level == "CRITICAL":
+            summary["critical"] += 1
+        elif level == "HIGH":
+            summary["high"] += 1
+        elif level == "MEDIUM":
+            summary["medium"] += 1
+        elif level == "LOW":
+            summary["low"] += 1
+        else:
+            summary["info"] += 1
+
+        if risk_int(row.get("open_alerts"), 0) > 0:
+            summary["with_open_alerts"] += 1
+
+        if risk_int(row.get("port_behavior_count"), 0) > 0:
+            summary["with_port_behavior"] += 1
+
+        state = str(row.get("ticket_signal_state") or "").upper()
+
+        if state == "BASELINE_CONTEXT":
+            summary["baseline_context"] += 1
+        elif state == "MEANINGFUL_CHANGE":
+            summary["meaningful_change"] += 1
+
+    return summary
+
+
+
 def dashboard_investigation_center_payload(connection, limit=25, scope=None):
+    requested_limit = risk_int(limit, 25)
+
+    if requested_limit <= 0:
+        requested_limit = 25
+
+    query_limit = max(requested_limit * 4, 50)
+
     try:
-        items = investigation_center_rows(
+        rows = investigation_center_rows(
             connection,
-            limit=limit,
+            limit=query_limit,
             scope=scope,
         )
+        rows = tune_investigation_center_ticket_signals(rows)
+        rows = rows[:requested_limit]
 
         return {
             "available": True,
             "selected_scope": scope,
-            "item_count": len(items),
-            "items": items,
-            "summary": {
-                "critical": sum(1 for row in items if row.get("priority_level") == "CRITICAL"),
-                "high": sum(1 for row in items if row.get("priority_level") == "HIGH"),
-                "medium": sum(1 for row in items if row.get("priority_level") == "MEDIUM"),
-                "with_open_alerts": sum(1 for row in items if int(row.get("open_alerts") or 0) > 0),
-                "with_port_behavior": sum(1 for row in items if int(row.get("port_behavior_count") or 0) > 0),
-            },
+            "item_count": len(rows),
+            "summary": investigation_center_summary(rows),
+            "items": rows,
         }
     except Exception as exc:
         return {
             "available": False,
             "selected_scope": scope,
             "item_count": 0,
+            "summary": investigation_center_summary([]),
             "items": [],
-            "summary": {},
-            "error": f"Investigation Command Center unavailable: {exc}",
+            "error": str(exc),
         }
-
-
 
 def print_investigation_center_rows(payload):
     available = bool(payload.get("available", False))
