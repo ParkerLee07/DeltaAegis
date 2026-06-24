@@ -14,13 +14,18 @@ Markdown reports, MAC-port behavior correlation, and a local dashboard.
 
 ## Current Release
 
-**DeltaAegis v0.20.0 — Ticket Evidence Drilldown**
+**DeltaAegis v0.21.0 — Evidence Timeline Intelligence**
 
-v0.20.0 turns Investigation Center tickets into evidence-backed drilldowns. It adds a shared ticket evidence payload, a dashboard **View Evidence** panel, a `ticket-evidence` CLI command, report evidence appendices, and a v0.20 release gate that keeps the full ticket-evidence workflow validated.
+v0.21.0 improves ticket-evidence investigation context across the backend, CLI, reports, and dashboard. It balances evidence timelines so workflow history cannot crowd out security signals, adds deterministic **Why Now** summaries, polishes dashboard evidence category labels, and introduces a v0.21 release gate for the full checkpoint set.
 
-Current feature baseline: **DeltaAegis v0.20.0 — Ticket Evidence Drilldown**.
+Current feature baseline: **DeltaAegis v0.21.0 — Evidence Timeline Intelligence**.
 
-DeltaAegis v0.20.0 adds:
+DeltaAegis v0.21.0 adds:
+
+- Balanced ticket evidence timelines across current risk, alerts, delta events, MAC-port behavior, and workflow history.
+- Deterministic **Why Now** summaries shared through the ticket evidence payload, CLI output, dashboard panel, and report appendix.
+- Dashboard timeline polish with readable evidence category labels and a dedicated Why Now block.
+- v0.21 release validation covering the focused v0.21 checkpoints and v0.20 ticket-evidence compatibility.
 
 - Ticket evidence backend payloads that aggregate:
   - workflow state

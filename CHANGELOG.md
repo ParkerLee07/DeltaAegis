@@ -1,3 +1,24 @@
+## v0.21.0 — Evidence Timeline Intelligence
+
+DeltaAegis v0.21.0 improves ticket evidence so operators can quickly understand what matters, why it matters now, and which evidence categories support the ticket.
+
+### Added
+
+- Balanced ticket evidence timeline selection across current risk, alerts, delta events, MAC-port behavior, and ticket workflow history.
+- Deterministic `Why now` summaries in the shared ticket evidence payload.
+- CLI `ticket-evidence` output for `Why now`.
+- Report Ticket Evidence Appendix support for `Why now`.
+- Dashboard Ticket Evidence Drilldown polish with a dedicated **Why Now** block and readable timeline category labels.
+- v0.21 release validators for evidence timeline intelligence, why-now summaries, dashboard timeline polish, and release metadata.
+
+### Validation
+
+- `tools/validate_v0_21_balanced_evidence_timeline.sh`
+- `tools/validate_v0_21_why_now_summary.sh`
+- `tools/validate_v0_21_dashboard_timeline_polish.sh`
+- `tools/validate_v0_21_release_metadata.sh`
+- `tools/validate_v0_21_release.sh`
+
 ## v0.20.0 — Ticket Evidence Drilldown
 
 DeltaAegis v0.20.0 turns Investigation Center tickets into evidence-backed drilldowns across the backend, dashboard, CLI, and reports.
