@@ -11300,6 +11300,54 @@ def dashboard_index_html():
     .siem-ticket-card.ticket-medium::before { background: #eab308; }
     .siem-ticket-card.ticket-low::before { background: #22c55e; }
 
+    .evidence-drilldown-panel {
+      margin: 16px 0 22px;
+      border: 1px solid rgba(96, 165, 250, 0.22);
+      border-radius: 20px;
+      background:
+        linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(2, 6, 23, 0.92));
+      padding: 16px;
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.22);
+    }
+
+    .evidence-drilldown-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .evidence-drilldown-header h3 {
+      margin: 0;
+    }
+
+    .ticket-evidence-action {
+      border-color: rgba(96, 165, 250, 0.65);
+    }
+
+    .ticket-evidence-timeline {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .ticket-evidence-event {
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 14px;
+      padding: 10px 12px;
+      background: rgba(15, 23, 42, 0.72);
+    }
+
+    .ticket-evidence-event .event-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      color: #94a3b8;
+      font-size: 12px;
+      margin-bottom: 4px;
+    }
+
     .siem-ticket-header {
       display: flex;
       align-items: flex-start;
@@ -11657,6 +11705,14 @@ def dashboard_index_html():
         <button id="clear-ticket-filters" class="small-action-button">Clear filters</button>
       </div>
       <div id="investigation-center-summary" class="grid"></div>
+      <div id="ticket-evidence-panel" class="evidence-drilldown-panel">
+        <div class="evidence-drilldown-header">
+          <div>
+            <h3>Ticket Evidence Drilldown</h3>
+            <p class="muted">Select View Evidence on an Investigation Center ticket to inspect risk reasons, alerts, events, port behavior, ticket history, and recommended action context.</p>
+          </div>
+        </div>
+      </div>
       <div id="investigation-ticket-cards" class="ticket-cards-grid"></div>
       <p class="muted siem-ticket-table-note">Detailed queue table for sorting, copy/paste review, and compatibility with earlier DeltaAegis dashboard workflows.</p>
       <table class="siem-ticket-table">
@@ -13211,6 +13267,173 @@ def dashboard_index_html():
       return `<span class="ticket-signal-badge ${ticketSignalClass(row)}">${esc(ticketSignalLabel(row))}</span>`;
     }
 
+    function ticketEvidenceTimelineHtml(timeline) {
+      const items = Array.isArray(timeline) ? timeline : [];
+
+      if (!items.length) {
+        return `<p class="muted">No evidence timeline entries were found for this ticket.</p>`;
+      }
+
+      return `
+        <div class="ticket-evidence-timeline">
+          ${items.slice(0, 12).map(item => `
+            <div class="ticket-evidence-event">
+              <div class="event-meta">
+                <span>${esc(item.timestamp || "-")}</span>
+                <span>${esc(item.category || "evidence")}</span>
+                <span class="severity-${esc(String(item.severity || "info").toLowerCase())}">${esc(item.severity || "INFO")}</span>
+                <span>${esc(item.source || "-")}</span>
+              </div>
+              <div>${esc(item.summary || "-")}</div>
+            </div>
+          `).join("")}
+        </div>
+      `;
+    }
+
+    function renderTicketEvidence(payload) {
+      const panel = document.getElementById("ticket-evidence-panel");
+
+      if (!panel) return;
+
+      if (!payload || payload.available === false) {
+        panel.innerHTML = `
+          <div class="evidence-drilldown-header">
+            <div>
+              <h3>Ticket Evidence Drilldown</h3>
+              <p class="muted">${esc((payload && payload.error) || "Ticket evidence is unavailable.")}</p>
+            </div>
+          </div>
+        `;
+        return;
+      }
+
+      const summary = payload.summary || {};
+      const ticketState = payload.ticket_state || {};
+
+      panel.innerHTML = `
+        <div class="evidence-drilldown-header">
+          <div>
+            <h3>Ticket Evidence Drilldown</h3>
+            <p class="muted">Evidence package for <code>${esc(payload.subject_key || summary.subject_key || "-")}</code></p>
+          </div>
+          <div>
+            ${ticketWorkflowBadge({ticket_status: summary.ticket_status || ticketState.ticket_status || "OPEN"})}
+            ${ticketSignalBadge({ticket_signal_state: summary.ticket_signal || "ACTIONABLE"})}
+          </div>
+        </div>
+
+        <div class="detail-grid">
+          <div class="detail-box"><div class="label">Priority</div>${esc(summary.priority_level || "INFO")} / ${esc(summary.priority_score || 0)}</div>
+          <div class="detail-box"><div class="label">Workflow</div>${esc(summary.ticket_status || ticketState.ticket_status || "OPEN")}</div>
+          <div class="detail-box"><div class="label">Risk Records</div>${esc(summary.risk_count || 0)}</div>
+          <div class="detail-box"><div class="label">Alerts</div>${esc(summary.alert_count || 0)}</div>
+          <div class="detail-box"><div class="label">Events</div>${esc(summary.event_count || 0)}</div>
+          <div class="detail-box"><div class="label">Port Behavior</div>${esc(summary.port_behavior_count || 0)}</div>
+          <div class="detail-box"><div class="label">Ticket History</div>${esc(summary.ticket_history_count || 0)}</div>
+          <div class="detail-box"><div class="label">Timeline Entries</div>${esc(summary.timeline_count || 0)}</div>
+        </div>
+
+        <h4>Why this ticket exists</h4>
+        <p class="muted">${esc(summary.primary_reason || "No primary reason was recorded.")}</p>
+
+        <h4>Recommended next action</h4>
+        <p class="muted">${esc(summary.recommended_action || "Review the evidence package before changing workflow state.")}</p>
+
+        <h4>Evidence Timeline</h4>
+        ${ticketEvidenceTimelineHtml(payload.timeline || [])}
+
+        ${detailTable("Current Risk Evidence", payload.risk || [], [
+          {key: "level", label: "Level"},
+          {key: "score", label: "Score"},
+          {key: "subject_key", label: "Subject", code: true},
+          {key: "primary_reason", label: "Primary Reason"},
+          {key: "reasons", label: "Reasons"}
+        ])}
+
+        ${detailTable("Alerts", payload.alerts || [], [
+          {key: "alert_id", label: "ID"},
+          {key: "status", label: "Status"},
+          {key: "severity", label: "Severity"},
+          {key: "event_type", label: "Type"},
+          {key: "summary", label: "Summary"}
+        ])}
+
+        ${detailTable("Delta Events", payload.events || [], [
+          {key: "event_id", label: "ID"},
+          {key: "created_at", label: "Time"},
+          {key: "severity", label: "Severity"},
+          {key: "event_type", label: "Type"},
+          {key: "summary", label: "Summary"}
+        ])}
+
+        ${detailTable("MAC-Port Behavior", payload.port_behavior || [], [
+          {key: "severity", label: "Severity"},
+          {key: "behavior", label: "Behavior"},
+          {key: "protocol", label: "Protocol"},
+          {key: "port", label: "Port"},
+          {key: "reason", label: "Reason"}
+        ])}
+
+        ${detailTable("Ticket History", payload.ticket_history || [], [
+          {key: "created_at", label: "Time"},
+          {key: "previous_status", label: "Previous"},
+          {key: "new_status", label: "New"},
+          {key: "analyst", label: "Analyst"},
+          {key: "note", label: "Note"}
+        ])}
+      `;
+    }
+
+    async function loadTicketEvidence(subject) {
+      const panel = document.getElementById("ticket-evidence-panel");
+
+      if (panel) {
+        panel.innerHTML = `
+          <div class="evidence-drilldown-header">
+            <div>
+              <h3>Ticket Evidence Drilldown</h3>
+              <p class="muted">Loading evidence for <code>${esc(subject || "-")}</code>...</p>
+            </div>
+          </div>
+        `;
+      }
+
+      try {
+        const payload = await api(scopedPath(`/api/ticket-evidence?subject_key=${encodeURIComponent(subject)}&limit=10`));
+        renderTicketEvidence(payload);
+
+        if (panel) {
+          panel.scrollIntoView({behavior: "smooth", block: "start"});
+        }
+      } catch (error) {
+        renderTicketEvidence({
+          available: false,
+          error: error && error.message ? error.message : String(error)
+        });
+      }
+    }
+
+    function bindTicketEvidenceButtons(root) {
+      if (!root) return;
+
+      root.querySelectorAll("[data-ticket-evidence-subject]").forEach(button => {
+        if (button.dataset.boundTicketEvidence === "true") return;
+
+        button.addEventListener("click", event => {
+          event.preventDefault();
+
+          const subject = button.dataset.ticketEvidenceSubject;
+
+          if (subject) {
+            loadTicketEvidence(subject);
+          }
+        });
+
+        button.dataset.boundTicketEvidence = "true";
+      });
+    }
+
 
 
     function ticketWorkflowLabel(row) {
@@ -13268,6 +13491,11 @@ def dashboard_index_html():
         <div class="siem-ticket-section ticket-workflow-actions">
           <div class="label">Workflow actions</div>
           <div class="ticket-action-buttons">
+            <button
+              type="button"
+              class="ticket-evidence-action"
+              data-ticket-evidence-subject="${esc(subject)}"
+            >View Evidence</button>
             ${actions.map(([status, label]) => `
               <button
                 class="small-action-button"
@@ -13518,6 +13746,7 @@ def dashboard_index_html():
 
         bindSubjectLinks(ticketCards);
         bindTicketWorkflowActions(ticketCards);
+          bindTicketEvidenceButtons(ticketCards);
       }
 
       if (!tbody) return;
@@ -13560,6 +13789,7 @@ def dashboard_index_html():
       }).join("");
 
       bindSubjectLinks(tbody);
+          bindTicketEvidenceButtons(tbody);
     }
 
 
@@ -14190,6 +14420,16 @@ def command_dashboard(args):
                             identifier,
                         ),
                     )
+                elif route == "/api/ticket-evidence":
+                    subject_key = query.get("subject_key", [""])[0]
+                    evidence_limit = query.get("limit", ["10"])[0]
+                    payload = dashboard_ticket_evidence_payload(
+                        connection,
+                        subject_key=subject_key,
+                        scope=scope,
+                        limit=evidence_limit,
+                    )
+                    dashboard_json_response(self, payload)
                 elif route == "/api/investigation-center":
                     ticket_status = query.get("ticket_status", ["ALL"])[0]
                     ticket_signal = query.get("ticket_signal", ["ALL"])[0]
