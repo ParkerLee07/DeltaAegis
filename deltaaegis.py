@@ -5888,6 +5888,190 @@ def append_report_port_behavior_section(lines, port_behavior_rows):
     )
     lines.append("")
 
+
+def report_ticket_evidence_rows(
+    connection,
+    investigation_rows,
+    scope=None,
+    limit=5,
+    evidence_limit=5,
+):
+    evidence_rows = []
+
+    for row in list(investigation_rows or [])[:limit]:
+        subject_key = row.get("subject_key")
+
+        if not subject_key:
+            continue
+
+        payload = dashboard_ticket_evidence_payload(
+            connection,
+            subject_key=subject_key,
+            scope=scope,
+            limit=evidence_limit,
+        )
+
+        if payload.get("available", False):
+            evidence_rows.append(payload)
+
+    return evidence_rows
+
+
+def append_report_ticket_evidence_appendix(lines, evidence_payloads):
+    lines.append("## Ticket Evidence Appendix")
+    lines.append("")
+    lines.append(
+        "This appendix preserves the operator-facing evidence package behind top "
+        "Investigation Command Center tickets. Each entry ties workflow state, "
+        "risk reasoning, recent delta events, MAC-port behavior, and ticket history "
+        "back to the same subject key used by the dashboard and CLI."
+    )
+    lines.append("")
+
+    payloads = list(evidence_payloads or [])
+
+    if not payloads:
+        lines.append("No ticket evidence payloads were available for this report scope.")
+        lines.append("")
+        return
+
+    for index, payload in enumerate(payloads, start=1):
+        summary = payload.get("summary") or {}
+        ticket_state = payload.get("ticket_state") or {}
+        subject_key = payload.get("subject_key") or summary.get("subject_key") or "-"
+
+        lines.append(f"### Ticket Evidence {index}: `{safe_markdown(subject_key)}`")
+        lines.append("")
+        lines.append(f"- Workflow: **{safe_markdown(summary.get('ticket_status') or ticket_state.get('ticket_status') or 'OPEN')}**")
+        lines.append(f"- Signal: **{safe_markdown(summary.get('ticket_signal') or 'ACTIONABLE')}**")
+        lines.append(
+            f"- Priority: **{safe_markdown(summary.get('priority_level') or 'INFO')}** "
+            f"({safe_markdown(summary.get('priority_score') or 0)})"
+        )
+        lines.append(f"- Primary reason: {safe_markdown(summary.get('primary_reason') or '-')}")
+        lines.append(f"- Recommended action: {safe_markdown(summary.get('recommended_action') or '-')}")
+        lines.append(
+            "- Evidence counts: "
+            f"risk `{safe_markdown(summary.get('risk_count') or 0)}`, "
+            f"alerts `{safe_markdown(summary.get('alert_count') or 0)}`, "
+            f"events `{safe_markdown(summary.get('event_count') or 0)}`, "
+            f"ports `{safe_markdown(summary.get('port_behavior_count') or 0)}`, "
+            f"history `{safe_markdown(summary.get('ticket_history_count') or 0)}`, "
+            f"timeline `{safe_markdown(summary.get('timeline_count') or 0)}`"
+        )
+        lines.append("")
+
+        timeline = list(payload.get("timeline") or [])[:8]
+        lines.append("#### Evidence Timeline Sample")
+        lines.append("")
+
+        if not timeline:
+            lines.append("No timeline evidence was available for this ticket.")
+            lines.append("")
+        else:
+            lines.append("| Time | Category | Severity | Source | Summary |")
+            lines.append("|---|---|---|---|---|")
+            for item in timeline:
+                lines.append(
+                    "| "
+                    f"{safe_markdown(item.get('timestamp') or '-')} | "
+                    f"{safe_markdown(item.get('category') or '-')} | "
+                    f"{safe_markdown(item.get('severity') or '-')} | "
+                    f"{safe_markdown(item.get('source') or '-')} | "
+                    f"{safe_markdown(item.get('summary') or '-')} |"
+                )
+            lines.append("")
+
+        risk_rows = list(payload.get("risk") or [])[:3]
+        lines.append("#### Current Risk Evidence")
+        lines.append("")
+
+        if not risk_rows:
+            lines.append("No current risk rows were attached to this ticket evidence package.")
+            lines.append("")
+        else:
+            lines.append("| Level | Score | Subject | Primary Reason |")
+            lines.append("|---|---:|---|---|")
+            for risk in risk_rows:
+                reasons = risk.get("reasons") or []
+                primary_reason = risk.get("primary_reason") or (reasons[0] if reasons else "-")
+                lines.append(
+                    "| "
+                    f"{safe_markdown(risk.get('level') or '-')} | "
+                    f"{safe_markdown(risk.get('score') or 0)} | "
+                    f"`{safe_markdown(risk.get('subject_key') or subject_key)}` | "
+                    f"{safe_markdown(primary_reason)} |"
+                )
+            lines.append("")
+
+        event_rows = list(payload.get("events") or [])[:5]
+        lines.append("#### Delta Events")
+        lines.append("")
+
+        if not event_rows:
+            lines.append("No delta events were attached to this ticket evidence package.")
+            lines.append("")
+        else:
+            lines.append("| Event | Time | Severity | Type | Summary |")
+            lines.append("|---:|---|---|---|---|")
+            for event in event_rows:
+                lines.append(
+                    "| "
+                    f"{safe_markdown(event.get('event_id') or event.get('id') or '-')} | "
+                    f"{safe_markdown(event.get('created_at') or '-')} | "
+                    f"{safe_markdown(event.get('severity') or '-')} | "
+                    f"{safe_markdown(event.get('event_type') or event.get('type') or '-')} | "
+                    f"{safe_markdown(event.get('summary') or '-')} |"
+                )
+            lines.append("")
+
+        port_rows = list(payload.get("port_behavior") or [])[:5]
+        lines.append("#### MAC-Port Behavior")
+        lines.append("")
+
+        if not port_rows:
+            lines.append("No MAC-port behavior rows were attached to this ticket evidence package.")
+            lines.append("")
+        else:
+            lines.append("| Severity | Behavior | Port | Reason |")
+            lines.append("|---|---|---|---|")
+            for port in port_rows:
+                port_label = port.get("port_key")
+                if not port_label:
+                    proto = port.get("protocol") or "tcp"
+                    port_number = port.get("port") or "-"
+                    port_label = f"{proto}/{port_number}"
+
+                lines.append(
+                    "| "
+                    f"{safe_markdown(port.get('severity') or '-')} | "
+                    f"{safe_markdown(port.get('behavior') or '-')} | "
+                    f"`{safe_markdown(port_label)}` | "
+                    f"{safe_markdown(port.get('reason') or '-')} |"
+                )
+            lines.append("")
+
+        history_rows = list(payload.get("ticket_history") or [])[:5]
+        lines.append("#### Ticket History")
+        lines.append("")
+
+        if not history_rows:
+            lines.append("No ticket workflow history was attached to this evidence package.")
+            lines.append("")
+        else:
+            lines.append("| Time | Previous | New | Analyst | Note |")
+            lines.append("|---|---|---|---|---|")
+            for history in history_rows:
+                lines.append(
+                    "| "
+                    f"{safe_markdown(history.get('created_at') or '-')} | "
+                    f"{safe_markdown(history.get('previous_status') or '-')} | "
+                    f"{safe_markdown(history.get('new_status') or '-')} | "
+                    f"{safe_markdown(history.get('analyst') or '-')} | "
+                    f"{safe_markdown(history.get('note') or '-')} |"
+                )
+            lines.append("")
+
 def command_report(args):
     from collections import Counter
     from datetime import datetime, timezone
@@ -5958,6 +6142,14 @@ def command_report(args):
         )
     )[:args.risk_limit]
 
+    report_ticket_evidence_payloads = report_ticket_evidence_rows(
+        connection,
+        report_investigation_center_rows,
+        scope=scope,
+        limit=min(args.risk_limit, 5),
+        evidence_limit=5,
+    )
+
     report_lifecycle_rows = report_asset_lifecycle_summary(
         connection,
         scope=scope,
@@ -6026,6 +6218,7 @@ def command_report(args):
     append_report_classification_summary_section(lines, report_classification_summary)
     append_report_asset_inventory_section(lines, report_asset_rows, args.asset_limit)
     append_report_investigation_center_section(lines, report_investigation_center_rows)
+    append_report_ticket_evidence_appendix(lines, report_ticket_evidence_payloads)
     append_report_risk_section(lines, report_risk_rows)
     append_report_port_behavior_section(lines, report_port_behavior_rows)
     append_report_role_aware_recommendations_section(lines, report_risk_rows)
