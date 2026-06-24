@@ -11913,6 +11913,61 @@ def dashboard_index_html():
       border-color: rgba(96, 165, 250, 0.65);
     }
 
+    .ticket-evidence-why-now {
+      border: 1px solid rgba(34, 211, 238, 0.22);
+      background: rgba(8, 145, 178, 0.10);
+      border-radius: 14px;
+      padding: 12px;
+      margin: 10px 0 14px;
+    }
+
+    .ticket-evidence-why-now .label {
+      color: #a5f3fc;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      font-size: 0.75rem;
+      margin-bottom: 6px;
+    }
+
+    .ticket-evidence-category {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      background: rgba(148, 163, 184, 0.12);
+      color: #cbd5e1;
+    }
+
+    .ticket-evidence-category-current-risk {
+      background: rgba(248, 113, 113, 0.14);
+      color: #fecaca;
+    }
+
+    .ticket-evidence-category-alert {
+      background: rgba(251, 191, 36, 0.14);
+      color: #fde68a;
+    }
+
+    .ticket-evidence-category-delta-event {
+      background: rgba(96, 165, 250, 0.14);
+      color: #bfdbfe;
+    }
+
+    .ticket-evidence-category-port-behavior {
+      background: rgba(45, 212, 191, 0.14);
+      color: #99f6e4;
+    }
+
+    .ticket-evidence-category-ticket-history {
+      background: rgba(167, 139, 250, 0.14);
+      color: #ddd6fe;
+    }
+
     .ticket-evidence-timeline {
       display: grid;
       gap: 10px;
@@ -13854,6 +13909,29 @@ def dashboard_index_html():
       return `<span class="ticket-signal-badge ${ticketSignalClass(row)}">${esc(ticketSignalLabel(row))}</span>`;
     }
 
+    function ticketEvidenceCategoryLabel(category) {
+      const value = String(category || "").toLowerCase();
+
+      const labels = {
+        "current_risk": "Current Risk",
+        "alert": "Alert",
+        "delta_event": "Delta Event",
+        "port_behavior": "Port Behavior",
+        "ticket_history": "Workflow History",
+      };
+
+      return labels[value] || value.replaceAll("_", " ") || "Evidence";
+    }
+
+    function ticketEvidenceCategoryClass(category) {
+      const value = String(category || "unknown")
+        .toLowerCase()
+        .replaceAll("_", "-")
+        .replace(/[^a-z0-9-]/g, "");
+
+      return `ticket-evidence-category-${value || "unknown"}`;
+    }
+
     function ticketEvidenceTimelineHtml(timeline) {
       const items = Array.isArray(timeline) ? timeline : [];
 
@@ -13863,15 +13941,18 @@ def dashboard_index_html():
 
       return `
         <div class="ticket-evidence-timeline">
-          ${items.slice(0, 12).map(item => `
+          ${items.slice(0, 12).map((item, index) => `
             <div class="ticket-evidence-event">
               <div class="event-meta">
-                <span>${esc(item.timestamp || "-")}</span>
-                <span>${esc(item.category || "evidence")}</span>
-                <span class="severity-${esc(String(item.severity || "info").toLowerCase())}">${esc(item.severity || "INFO")}</span>
+                <span>#${esc(index + 1)}</span>
+                <span class="ticket-evidence-category ${ticketEvidenceCategoryClass(item.category)}">
+                  ${esc(ticketEvidenceCategoryLabel(item.category))}
+                </span>
+                <span>${esc(item.severity || "INFO")}</span>
+                <span>${esc(item.timestamp || "time unavailable")}</span>
                 <span>${esc(item.source || "-")}</span>
               </div>
-              <div>${esc(item.summary || "-")}</div>
+              <div class="event-summary">${esc(item.summary || "-")}</div>
             </div>
           `).join("")}
         </div>
@@ -13923,6 +14004,10 @@ def dashboard_index_html():
 
         <h4>Why this ticket exists</h4>
         <p class="muted">${esc(summary.primary_reason || "No primary reason was recorded.")}</p>
+        <div class="ticket-evidence-why-now">
+          <div class="label">Why Now</div>
+          <p class="muted">${esc(summary.why_now || "No why-now summary was generated for this ticket.")}</p>
+        </div>
 
         <h4>Recommended next action</h4>
         <p class="muted">${esc(summary.recommended_action || "Review the evidence package before changing workflow state.")}</p>
