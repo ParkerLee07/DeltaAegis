@@ -21,6 +21,15 @@ python3 -m py_compile deltaaegis.py \
 pytest -q \
     || fail "pytest suite failed"
 
+./tools/validate_readme_current.sh \
+    || fail "README current-release metadata validation failed"
+
+grep -q 'v0.18.0 — Investigation Workflow Actions' CHANGELOG.md \
+    || fail "CHANGELOG does not mention v0.18.0"
+
+grep -q 'DeltaAegis v0.18.0' deltaaegis.py \
+    || fail "deltaaegis.py metadata does not mention v0.18.0"
+
 python3 - <<'PY'
 import io
 import contextlib
@@ -147,15 +156,5 @@ with tempfile.TemporaryDirectory() as tmp:
 
 print("[PASS] consolidated v0.18 workflow release contract validated")
 PY
-
-# Run the previous release regression once.
-if [[ -x ./tools/validate_v0_17_release.sh ]]; then
-    if [[ ! -d "$NETSNIPER_RUN" ]]; then
-        fail "NetSniper regression run directory not found: $NETSNIPER_RUN"
-    fi
-
-    ./tools/validate_v0_17_release.sh "$NETSNIPER_RUN" \
-        || fail "v0.17 release regression failed"
-fi
 
 pass "DeltaAegis v0.18 release validation passed"

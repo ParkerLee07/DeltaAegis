@@ -1,3 +1,37 @@
+## v0.18.0 — Investigation Workflow Actions
+
+DeltaAegis v0.18.0 turns the SIEM ticket queue into a persistent analyst workflow.
+
+### Added
+
+- Persistent investigation ticket state model for `OPEN`, `IN_REVIEW`, `RESOLVED`, and `SUPPRESSED`.
+- Ticket workflow history with previous state, new state, analyst, note, and timestamp context.
+- CLI commands for ticket workflow review and updates:
+  - `ticket-status`
+  - `ticket-list`
+  - `ticket-history`
+- Dashboard workflow status badges in Investigation Center tickets.
+- Dashboard ticket-card workflow actions for Open, In Review, Resolve, and Suppress.
+- `/api/ticket-status` for dashboard-driven workflow updates.
+- Legacy `/api/investigate-asset` compatibility sync into ticket workflow state when statuses align.
+- No-op workflow guard to prevent repeated same-status audit noise.
+- Consolidated v0.18 release validator for the ticket workflow contract.
+
+### Fixed
+
+- Dashboard workflow tags now update after ticket workflow actions.
+- Repeated same-status ticket updates no longer create noisy history rows such as `RESOLVED -> RESOLVED`.
+
+### Validation
+
+- `tools/validate_v0_18_ticket_state_model.sh`
+- `tools/validate_v0_18_ticket_history.sh`
+- `tools/validate_v0_18_workflow_visibility.sh`
+- `tools/validate_v0_18_ticket_workflow_dashboard_actions.sh`
+- `tools/validate_v0_18_ticket_noop_guard.sh`
+- `tools/validate_v0_18_release.sh`
+
+
 ## v0.17.0 — Executive SIEM Dashboard Refresh
 
 ### Added
