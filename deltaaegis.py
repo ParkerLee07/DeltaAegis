@@ -335,6 +335,24 @@ CREATE TABLE IF NOT EXISTS asset_investigation_history (
 CREATE INDEX IF NOT EXISTS idx_asset_investigation_history_asset
 ON asset_investigation_history(network_scope, asset_key);
 
+
+CREATE TABLE IF NOT EXISTS investigation_ticket_state (
+    ticket_key TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'OPEN',
+    analyst TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT,
+    suppressed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_investigation_ticket_state_status
+    ON investigation_ticket_state(status);
+
+CREATE INDEX IF NOT EXISTS idx_investigation_ticket_state_updated_at
+    ON investigation_ticket_state(updated_at);
+
 CREATE TABLE IF NOT EXISTS scan_jobs (
     job_id TEXT PRIMARY KEY,
     target TEXT NOT NULL,
@@ -8811,6 +8829,202 @@ def investigation_center_add_priority(item, points):
     )
 
 
+
+# v0.18 ticket workflow state model: persistent analyst status for investigation tickets.
+TICKET_WORKFLOW_STATUSES = {"OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"}
+
+TICKET_WORKFLOW_SCHEMA_SQL = (
+    "CREATE TABLE IF NOT EXISTS investigation_ticket_state ("
+    " ticket_key TEXT PRIMARY KEY,"
+    " status TEXT NOT NULL DEFAULT 'OPEN',"
+    " analyst TEXT,"
+    " note TEXT,"
+    " created_at TEXT NOT NULL,"
+    " updated_at TEXT NOT NULL,"
+    " resolved_at TEXT,"
+    " suppressed_at TEXT"
+    ");"
+    " CREATE INDEX IF NOT EXISTS idx_investigation_ticket_state_status"
+    " ON investigation_ticket_state(status);"
+    " CREATE INDEX IF NOT EXISTS idx_investigation_ticket_state_updated_at"
+    " ON investigation_ticket_state(updated_at);"
+)
+
+
+def ensure_investigation_ticket_state_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(TICKET_WORKFLOW_SCHEMA_SQL)
+
+
+def normalize_ticket_workflow_status(status: str | None) -> str:
+    normalized = str(status or "OPEN").strip().upper().replace("-", "_").replace(" ", "_")
+    if normalized not in TICKET_WORKFLOW_STATUSES:
+        raise DeltaAegisError(
+            "invalid ticket status: "
+            f"{status!r}. Expected one of: "
+            + ", ".join(sorted(TICKET_WORKFLOW_STATUSES))
+        )
+    return normalized
+
+
+def stable_ticket_key(subject_key: str | None) -> str:
+    key = str(subject_key or "").strip()
+    if not key:
+        raise DeltaAegisError("ticket subject key is required")
+    if key.lower().startswith("mac:"):
+        return "mac:" + key[4:].lower()
+    if key.lower().startswith("ip:"):
+        return "ip:" + key[3:]
+    if key.lower().startswith("asset:"):
+        return "asset:" + key[6:]
+    return key
+
+
+def ticket_state_default(ticket_key: str) -> dict[str, Any]:
+    return {
+        "ticket_key": ticket_key,
+        "ticket_status": "OPEN",
+        "ticket_analyst": None,
+        "ticket_note": None,
+        "ticket_created_at": None,
+        "ticket_updated_at": None,
+        "ticket_resolved_at": None,
+        "ticket_suppressed_at": None,
+    }
+
+
+def ticket_state_record_from_row(row) -> dict[str, Any]:
+    ticket_key = str(row["ticket_key"])
+    return {
+        "ticket_key": ticket_key,
+        "ticket_status": str(row["status"] or "OPEN").upper(),
+        "ticket_analyst": row["analyst"],
+        "ticket_note": row["note"],
+        "ticket_created_at": row["created_at"],
+        "ticket_updated_at": row["updated_at"],
+        "ticket_resolved_at": row["resolved_at"],
+        "ticket_suppressed_at": row["suppressed_at"],
+    }
+
+
+def get_ticket_state(connection: sqlite3.Connection, subject_key: str | None) -> dict[str, Any]:
+    ensure_investigation_ticket_state_schema(connection)
+    ticket_key = stable_ticket_key(subject_key)
+    row = connection.execute(
+        "SELECT ticket_key, status, analyst, note, created_at, updated_at, resolved_at, suppressed_at "
+        "FROM investigation_ticket_state WHERE ticket_key = ?",
+        (ticket_key,),
+    ).fetchone()
+    if row is None:
+        return ticket_state_default(ticket_key)
+    return ticket_state_record_from_row(row)
+
+
+def set_ticket_state(
+    connection: sqlite3.Connection,
+    subject_key: str | None,
+    status: str,
+    analyst: str | None = None,
+    note: str | None = None,
+) -> dict[str, Any]:
+    ensure_investigation_ticket_state_schema(connection)
+    ticket_key = stable_ticket_key(subject_key)
+    normalized_status = normalize_ticket_workflow_status(status)
+    now = utc_now()
+    cleaned_analyst = str(analyst).strip() if analyst is not None and str(analyst).strip() else None
+    cleaned_note = str(note).strip() if note is not None and str(note).strip() else None
+    resolved_at = now if normalized_status == "RESOLVED" else None
+    suppressed_at = now if normalized_status == "SUPPRESSED" else None
+
+    connection.execute(
+        "INSERT INTO investigation_ticket_state ("
+        " ticket_key, status, analyst, note, created_at, updated_at, resolved_at, suppressed_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(ticket_key) DO UPDATE SET "
+        " status = excluded.status,"
+        " analyst = COALESCE(excluded.analyst, investigation_ticket_state.analyst),"
+        " note = COALESCE(excluded.note, investigation_ticket_state.note),"
+        " updated_at = excluded.updated_at,"
+        " resolved_at = excluded.resolved_at,"
+        " suppressed_at = excluded.suppressed_at",
+        (
+            ticket_key,
+            normalized_status,
+            cleaned_analyst,
+            cleaned_note,
+            now,
+            now,
+            resolved_at,
+            suppressed_at,
+        ),
+    )
+    connection.commit()
+    return get_ticket_state(connection, ticket_key)
+
+
+def list_ticket_states(
+    connection: sqlite3.Connection,
+    status: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    ensure_investigation_ticket_state_schema(connection)
+    safe_limit = max(1, int(limit or 50))
+    params: list[Any] = []
+    where = ""
+
+    if status:
+        where = "WHERE status = ?"
+        params.append(normalize_ticket_workflow_status(status))
+
+    params.append(safe_limit)
+    rows = connection.execute(
+        f"SELECT ticket_key, status, analyst, note, created_at, updated_at, resolved_at, suppressed_at "
+        f"FROM investigation_ticket_state {where} ORDER BY updated_at DESC, ticket_key ASC LIMIT ?",
+        params,
+    ).fetchall()
+    return [ticket_state_record_from_row(row) for row in rows]
+
+
+def apply_ticket_states_to_rows(
+    connection: sqlite3.Connection,
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    ensure_investigation_ticket_state_schema(connection)
+
+    if not rows:
+        return rows
+
+    ticket_keys = []
+    for row in rows:
+        try:
+            key = stable_ticket_key(row.get("subject_key"))
+        except DeltaAegisError:
+            key = ""
+        row["ticket_key"] = key
+        if key:
+            ticket_keys.append(key)
+
+    state_by_key: dict[str, dict[str, Any]] = {}
+    if ticket_keys:
+        unique_ticket_keys = list(dict.fromkeys(ticket_keys))
+        placeholders = ",".join("?" for _ in unique_ticket_keys)
+        db_rows = connection.execute(
+            f"SELECT ticket_key, status, analyst, note, created_at, updated_at, resolved_at, suppressed_at "
+            f"FROM investigation_ticket_state WHERE ticket_key IN ({placeholders})",
+            unique_ticket_keys,
+        ).fetchall()
+        state_by_key = {
+            str(db_row["ticket_key"]): ticket_state_record_from_row(db_row)
+            for db_row in db_rows
+        }
+
+    for row in rows:
+        key = str(row.get("ticket_key") or "")
+        state = state_by_key.get(key, ticket_state_default(key))
+        row.update(state)
+
+    return rows
+
+
 def investigation_center_rows(connection, limit=25, scope=None):
     current_risk_rows = build_current_risk_register(
         connection,
@@ -9287,6 +9501,7 @@ def dashboard_investigation_center_payload(connection, limit=25, scope=None):
             scope=scope,
         )
         rows = tune_investigation_center_ticket_signals(rows)
+        rows = apply_ticket_states_to_rows(connection, rows)
         rows = rows[:requested_limit]
 
         return {
@@ -9375,6 +9590,57 @@ def print_investigation_center_rows(payload):
             )
 
         print()
+
+
+
+def command_ticket_status(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+
+    if getattr(args, "status", None):
+        state = set_ticket_state(
+            connection,
+            args.subject_key,
+            args.status,
+            analyst=getattr(args, "analyst", None),
+            note=getattr(args, "note", None),
+        )
+        print(f"Ticket {state['ticket_key']} marked {state['ticket_status']}.")
+    else:
+        state = get_ticket_state(connection, args.subject_key)
+
+    print(f"Ticket:     {state['ticket_key']}")
+    print(f"Status:     {state['ticket_status']}")
+    print(f"Analyst:    {state['ticket_analyst'] or '-'}")
+    print(f"Note:       {state['ticket_note'] or '-'}")
+    print(f"Created:    {state['ticket_created_at'] or '-'}")
+    print(f"Updated:    {state['ticket_updated_at'] or '-'}")
+    print(f"Resolved:   {state['ticket_resolved_at'] or '-'}")
+    print(f"Suppressed: {state['ticket_suppressed_at'] or '-'}")
+    return 0
+
+
+def command_ticket_list(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    rows = list_ticket_states(
+        connection,
+        status=getattr(args, "status", None),
+        limit=getattr(args, "limit", 50),
+    )
+
+    if not rows:
+        print("No persisted ticket workflow states found.")
+        return 0
+
+    for row in rows:
+        print(
+            f"{row['ticket_status']:<11} "
+            f"{row['ticket_key']:<40} "
+            f"analyst={row['ticket_analyst'] or '-'} "
+            f"updated={row['ticket_updated_at'] or '-'}"
+        )
+        if row["ticket_note"]:
+            print(f"  Note: {row['ticket_note']}")
+    return 0
 
 
 def command_investigation_center(args):
@@ -13053,6 +13319,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--status", choices=sorted(SCAN_JOB_STATUSES))
     p.add_argument("--scope")
+    p = sub.add_parser("ticket-status", help="Show or update persistent investigation ticket workflow status")
+    p.add_argument("subject_key")
+    p.add_argument("--status", choices=["OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"])
+    p.add_argument("--analyst")
+    p.add_argument("--note")
+    p = sub.add_parser("ticket-list", help="List persisted investigation ticket workflow states")
+    p.add_argument("--status", choices=["OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"])
+    p.add_argument("--limit", type=int, default=50)
     p = sub.add_parser("investigation-center", help="Show prioritized investigation command center queue")
     p.add_argument("--limit", type=int, default=25)
     p.add_argument("--scope")
@@ -13164,6 +13438,8 @@ def main() -> int:
         if args.command == "ingest": return command_ingest(args)
         if args.command == "scan-start": return command_scan_start(args)
         if args.command == "scan-jobs": return command_scan_jobs(args)
+        if args.command == "ticket-status": return command_ticket_status(args)
+        if args.command == "ticket-list": return command_ticket_list(args)
         if args.command == "investigation-center": return command_investigation_center(args)
         if args.command == "port-behavior": return command_port_behavior(args)
         if args.command == "summary": return command_summary(args)
