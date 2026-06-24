@@ -16873,6 +16873,69 @@ def dashboard_session_payload(actor: dict[str, Any] | None) -> dict[str, Any]:
 
 
 
+
+def dashboard_admin_users_payload(connection: sqlite3.Connection) -> dict[str, Any]:
+    """Return safe, dashboard-ready access-user metadata for ADMIN users.
+
+    This intentionally does not expose password hashes, API token hashes,
+    raw token values, session token hashes, or cookie/session secrets.
+    """
+    if "ensure_access_schema" in globals():
+        ensure_access_schema(connection)
+
+    rows = connection.execute(
+        "SELECT "
+        "u.username, "
+        "u.display_name, "
+        "u.role, "
+        "u.is_active, "
+        "u.created_at, "
+        "u.updated_at, "
+        "CASE WHEN u.password_hash IS NOT NULL AND u.password_hash != '' "
+        "THEN 1 ELSE 0 END AS password_configured, "
+        "(SELECT COUNT(*) FROM access_api_tokens t "
+        " WHERE t.user_id = u.user_id AND t.is_active = 1) "
+        "AS active_token_count, "
+        "(SELECT MAX(t.last_used_at) FROM access_api_tokens t "
+        " WHERE t.user_id = u.user_id) "
+        "AS last_token_used_at "
+        "FROM access_users u "
+        "ORDER BY u.username"
+    ).fetchall()
+
+    users: list[dict[str, Any]] = []
+    role_counts: dict[str, int] = {role: 0 for role in ACCESS_ROLES}
+    enabled_count = 0
+
+    for row in rows:
+        role = normalize_access_role(row["role"])
+        enabled = bool(int(row["is_active"] or 0))
+        role_counts[role] = role_counts.get(role, 0) + 1
+        if enabled:
+            enabled_count += 1
+
+        users.append(
+            {
+                "username": row["username"],
+                "display_name": row["display_name"],
+                "role": role,
+                "enabled": enabled,
+                "password_configured": bool(int(row["password_configured"] or 0)),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "active_token_count": int(row["active_token_count"] or 0),
+                "last_token_used_at": row["last_token_used_at"],
+            }
+        )
+
+    return {
+        "users": users,
+        "count": len(users),
+        "enabled_count": enabled_count,
+        "role_counts": role_counts,
+        "roles": list(ACCESS_ROLES),
+    }
+
 def dashboard_has_active_password_users(connection: sqlite3.Connection) -> bool:
     ensure_dashboard_session_schema(connection)
 
@@ -17363,6 +17426,13 @@ def command_dashboard(args):
                     dashboard_json_response(self, dashboard_risk_payload(connection, limit, scope=scope))
                 elif route == "/api/annotations":
                     dashboard_json_response(self, dashboard_annotations_payload(connection, limit, scope=scope))
+                elif route == "/api/admin/users":
+                    if not self.require_auth(required_role="ADMIN"):
+                        return
+                    dashboard_json_response(
+                        self,
+                        dashboard_admin_users_payload(connection),
+                    )
                 elif route == "/api/access-audit":
                     action_filter = query.get("action", [""])[0].strip() or None
                     actor_filter = query.get("actor", [""])[0].strip() or None
