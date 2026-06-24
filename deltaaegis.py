@@ -9568,6 +9568,50 @@ def investigation_center_summary(rows):
 
 
 
+def investigation_center_workflow_summary(rows):
+    summary = {
+        "open": 0,
+        "in_review": 0,
+        "resolved": 0,
+        "suppressed": 0,
+    }
+
+    for row in rows or []:
+        status = str(row.get("ticket_status") or "OPEN").upper()
+
+        if status == "IN_REVIEW":
+            summary["in_review"] += 1
+        elif status == "RESOLVED":
+            summary["resolved"] += 1
+        elif status == "SUPPRESSED":
+            summary["suppressed"] += 1
+        else:
+            summary["open"] += 1
+
+    return summary
+
+
+def investigation_center_signal_summary(rows):
+    summary = {
+        "actionable": 0,
+        "meaningful_change": 0,
+        "baseline_context": 0,
+    }
+
+    for row in rows or []:
+        state = str(row.get("ticket_signal_state") or "ACTIONABLE").upper()
+
+        if state == "MEANINGFUL_CHANGE":
+            summary["meaningful_change"] += 1
+        elif state == "BASELINE_CONTEXT":
+            summary["baseline_context"] += 1
+        else:
+            summary["actionable"] += 1
+
+    return summary
+
+
+
 
 TICKET_SIGNAL_FILTER_STATES = {
     "ACTIONABLE",
@@ -9700,6 +9744,11 @@ def dashboard_investigation_center_payload(
         )
         rows = tune_investigation_center_ticket_signals(rows)
         rows = apply_ticket_states_to_rows(connection, rows)
+
+        total_item_count = len(rows)
+        workflow_summary = investigation_center_workflow_summary(rows)
+        signal_summary = investigation_center_signal_summary(rows)
+
         rows = filter_investigation_center_rows(
             rows,
             ticket_status=filters["ticket_status"],
@@ -9712,7 +9761,12 @@ def dashboard_investigation_center_payload(
             "selected_scope": scope,
             "filters": filters,
             "item_count": len(rows),
+            "total_item_count": total_item_count,
             "summary": investigation_center_summary(rows),
+            "workflow_summary": workflow_summary,
+            "signal_summary": signal_summary,
+            "view_workflow_summary": investigation_center_workflow_summary(rows),
+            "view_signal_summary": investigation_center_signal_summary(rows),
             "items": rows,
         }
     except Exception as exc:
@@ -9721,7 +9775,12 @@ def dashboard_investigation_center_payload(
             "selected_scope": scope,
             "filters": investigation_center_filter_payload(),
             "item_count": 0,
+            "total_item_count": 0,
             "summary": investigation_center_summary([]),
+            "workflow_summary": investigation_center_workflow_summary([]),
+            "signal_summary": investigation_center_signal_summary([]),
+            "view_workflow_summary": investigation_center_workflow_summary([]),
+            "view_signal_summary": investigation_center_signal_summary([]),
             "items": [],
             "error": str(exc),
         }
@@ -12916,29 +12975,26 @@ def dashboard_index_html():
       const ticketCards = document.getElementById("investigation-ticket-cards");
       const items = payload && Array.isArray(payload.items) ? payload.items : [];
       const summary = payload && payload.summary ? payload.summary : {};
-
-      const workflowSummary = items.reduce((counts, row) => {
-        const status = String((row && row.ticket_status) || "OPEN").toUpperCase();
-
-        if (status === "IN_REVIEW") counts.inReview += 1;
-        else if (status === "RESOLVED") counts.resolved += 1;
-        else if (status === "SUPPRESSED") counts.suppressed += 1;
-        else counts.open += 1;
-
-        return counts;
-      }, {open: 0, inReview: 0, resolved: 0, suppressed: 0});
+      const workflowSummary = payload && payload.workflow_summary
+        ? payload.workflow_summary
+        : {open: 0, in_review: 0, resolved: 0, suppressed: 0};
+      const signalSummary = payload && payload.signal_summary
+        ? payload.signal_summary
+        : {actionable: 0, meaningful_change: 0, baseline_context: 0};
 
       if (summaryBox) {
         summaryBox.innerHTML = [
-          ["Queue Items", payload && payload.item_count !== undefined ? payload.item_count : items.length],
-          ["Critical", summary.critical || 0],
-          ["High", summary.high || 0],
-          ["With Open Alerts", summary.with_open_alerts || 0],
-          ["With Port Behavior", summary.with_port_behavior || 0],
-          ["Meaningful Changes", summary.meaningful_change || 0],
-          ["Baseline Context", summary.baseline_context || 0],
-          ["Workflow Open", workflowSummary.open],
-          ["In Review", workflowSummary.inReview]
+          ["Visible Items", payload && payload.item_count !== undefined ? payload.item_count : items.length],
+          ["Total Queue", payload && payload.total_item_count !== undefined ? payload.total_item_count : items.length],
+          ["Critical in View", summary.critical || 0],
+          ["High in View", summary.high || 0],
+          ["Workflow Open", workflowSummary.open || 0],
+          ["In Review", workflowSummary.in_review || 0],
+          ["Resolved", workflowSummary.resolved || 0],
+          ["Suppressed", workflowSummary.suppressed || 0],
+          ["Actionable", signalSummary.actionable || 0],
+          ["Meaningful Change", signalSummary.meaningful_change || 0],
+          ["Baseline Context", signalSummary.baseline_context || 0]
         ].map(([label, value]) => `
           <div class="metric-card command-center-kpi">
             <div class="label">${esc(label)}</div>
