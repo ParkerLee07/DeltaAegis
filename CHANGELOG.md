@@ -1,3 +1,33 @@
+## DeltaAegis v0.24.0 — Dashboard Session Login
+
+DeltaAegis v0.24.0 replaces the failed browser API-token prompt direction with a proper enterprise-style dashboard login flow.
+
+### Added
+
+- Dashboard username/password login backed by the local `access_users` model.
+- Persistent `access_sessions` schema for dashboard sessions.
+- HttpOnly, SameSite=Lax dashboard session cookie support.
+- `/login` and `/logout` routes for browser operators.
+- `user-password` CLI command for setting or rotating access-user passwords.
+- `/api/session` endpoint exposing the authenticated operator identity, role, session id, expiration, and auth type.
+- Session audit events for successful login, failed login, logout, and expiration.
+
+### Preserved
+
+- API-token authentication remains available for automation through `X-DeltaAegis-Token`.
+- v0.23 enterprise access control, audit visibility, and dashboard token-auth behavior remain compatibility validated.
+- v0.22 operator triage behavior remains covered through the v0.23 compatibility gate.
+
+### Validation
+
+- Added `tools/validate_v0_24_session_model.sh`.
+- Added `tools/validate_v0_24_login_logout_routes.sh`.
+- Added `tools/validate_v0_24_api_session.sh`.
+- Added `tools/validate_v0_24_backward_compatibility.sh`.
+- Added `tools/validate_v0_24_release_metadata.sh`.
+- Added `tools/validate_v0_24_release.sh`.
+
+
 ## v0.23.0 — Enterprise Access Control
 
 DeltaAegis v0.23.0 introduces enterprise access-control foundations for multi-operator use. This release adds local users and roles, database-backed API tokens, dashboard database-token authentication, role-aware dashboard write controls, token usage tracking, and access audit visibility.

@@ -23,9 +23,10 @@ import uuid
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Iterable
+import html
 
 DEFAULT_DB = Path.home() / "DeltaAegis" / "data" / "deltaaegis.db"
 DEFAULT_RUNS = Path.home() / "NetSniper" / "runs"
@@ -52,6 +53,9 @@ ACCESS_ROLE_RANKS = {
 ACCESS_PASSWORD_ALGORITHM = "pbkdf2_sha256"
 ACCESS_PASSWORD_ITERATIONS = 260000
 ACCESS_API_TOKEN_PREFIX = "da"
+
+ACCESS_SESSION_COOKIE_NAME = "deltaaegis_session"
+ACCESS_SESSION_TTL_SECONDS = 8 * 60 * 60
 
 
 
@@ -915,6 +919,322 @@ def record_access_audit_event(
 
     return int(cursor.lastrowid)
 
+
+def ensure_dashboard_session_schema(connection: sqlite3.Connection) -> None:
+    ensure_enterprise_access_schema(connection)
+
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS access_sessions ("
+        "session_id TEXT PRIMARY KEY, "
+        "user_id TEXT NOT NULL, "
+        "session_token_hash TEXT NOT NULL UNIQUE, "
+        "role TEXT NOT NULL, "
+        "is_active INTEGER NOT NULL DEFAULT 1, "
+        "created_at TEXT NOT NULL, "
+        "last_seen_at TEXT, "
+        "expires_at TEXT NOT NULL, "
+        "source_ip TEXT, "
+        "user_agent TEXT, "
+        "ended_at TEXT, "
+        "end_reason TEXT, "
+        "FOREIGN KEY(user_id) REFERENCES access_users(user_id)"
+        ")"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_sessions_user_id "
+        "ON access_sessions(user_id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_sessions_token_hash "
+        "ON access_sessions(session_token_hash)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_sessions_expires_at "
+        "ON access_sessions(expires_at)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_sessions_active "
+        "ON access_sessions(is_active)"
+    )
+
+
+def generate_dashboard_session_token() -> str:
+    return "ds_" + secrets.token_urlsafe(32)
+
+
+def hash_dashboard_session_token(token: str) -> str:
+    return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+
+
+def dashboard_session_expiry(ttl_seconds: int = ACCESS_SESSION_TTL_SECONDS) -> str:
+    ttl = max(300, int(ttl_seconds or ACCESS_SESSION_TTL_SECONDS))
+    return (datetime.now(timezone.utc) + timedelta(seconds=ttl)).isoformat()
+
+
+def dashboard_user_login(
+    connection: sqlite3.Connection,
+    username: str,
+    password: str,
+    source_ip: str | None = None,
+    user_agent: str | None = None,
+) -> dict[str, Any] | None:
+    ensure_dashboard_session_schema(connection)
+
+    normalized_username = normalize_access_username(username)
+    user = access_user_by_username(connection, normalized_username)
+
+    if not user or not int(user.get("is_active") or 0):
+        record_access_audit_event(
+            connection,
+            action="LOGIN_FAILED",
+            actor={
+                "username": normalized_username or str(username or "").strip(),
+                "role": None,
+            },
+            target_type="access_user",
+            target_key=normalized_username or str(username or "").strip(),
+            source_ip=source_ip,
+            user_agent=user_agent,
+            details={"reason": "unknown_or_inactive_user"},
+        )
+        connection.commit()
+        return None
+
+    if not verify_access_password(password, user.get("password_hash") or ""):
+        record_access_audit_event(
+            connection,
+            action="LOGIN_FAILED",
+            actor={
+                "user_id": user.get("user_id"),
+                "username": user.get("username"),
+                "role": user.get("role"),
+            },
+            target_type="access_user",
+            target_key=user.get("username"),
+            source_ip=source_ip,
+            user_agent=user_agent,
+            details={"reason": "invalid_password"},
+        )
+        connection.commit()
+        return None
+
+    return create_dashboard_session(
+        connection,
+        user,
+        source_ip=source_ip,
+        user_agent=user_agent,
+    )
+
+
+def create_dashboard_session(
+    connection: sqlite3.Connection,
+    user: dict[str, Any],
+    source_ip: str | None = None,
+    user_agent: str | None = None,
+    ttl_seconds: int = ACCESS_SESSION_TTL_SECONDS,
+) -> dict[str, Any]:
+    ensure_dashboard_session_schema(connection)
+
+    session_id = str(uuid.uuid4())
+    session_token = generate_dashboard_session_token()
+    session_hash = hash_dashboard_session_token(session_token)
+    now = utc_now()
+    expires_at = dashboard_session_expiry(ttl_seconds)
+
+    role = normalize_access_role(user.get("role") or "VIEWER")
+
+    connection.execute(
+        "INSERT INTO access_sessions ("
+        "session_id, user_id, session_token_hash, role, is_active, "
+        "created_at, last_seen_at, expires_at, source_ip, user_agent"
+        ") VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
+        (
+            session_id,
+            user.get("user_id"),
+            session_hash,
+            role,
+            now,
+            now,
+            expires_at,
+            source_ip,
+            user_agent,
+        ),
+    )
+
+    actor = {
+        "user_id": user.get("user_id"),
+        "username": user.get("username"),
+        "role": role,
+    }
+
+    record_access_audit_event(
+        connection,
+        action="LOGIN_SUCCESS",
+        actor=actor,
+        target_type="access_session",
+        target_key=session_id,
+        source_ip=source_ip,
+        user_agent=user_agent,
+        details={
+            "session_id": session_id,
+            "expires_at": expires_at,
+            "role": role,
+        },
+    )
+    connection.commit()
+
+    return {
+        "session_id": session_id,
+        "session_token": session_token,
+        "session_token_hash": session_hash,
+        "user_id": user.get("user_id"),
+        "username": user.get("username"),
+        "display_name": user.get("display_name"),
+        "role": role,
+        "expires_at": expires_at,
+    }
+
+
+def session_is_expired(expires_at: str | None) -> bool:
+    if not expires_at:
+        return True
+
+    try:
+        expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+
+    return expiry <= datetime.now(timezone.utc)
+
+
+def authenticate_dashboard_session(
+    connection: sqlite3.Connection,
+    session_token: str,
+    required_role: str = "VIEWER",
+    update_last_seen: bool = True,
+) -> dict[str, Any] | None:
+    ensure_dashboard_session_schema(connection)
+
+    token = str(session_token or "").strip()
+
+    if not token:
+        return None
+
+    session_hash = hash_dashboard_session_token(token)
+
+    row = connection.execute(
+        "SELECT "
+        "s.session_id, "
+        "s.user_id, "
+        "s.role AS session_role, "
+        "s.is_active AS session_active, "
+        "s.created_at AS session_created_at, "
+        "s.last_seen_at, "
+        "s.expires_at, "
+        "u.username, "
+        "u.display_name, "
+        "u.role AS user_role, "
+        "u.is_active AS user_active "
+        "FROM access_sessions s "
+        "JOIN access_users u ON u.user_id = s.user_id "
+        "WHERE s.session_token_hash = ?",
+        (session_hash,),
+    ).fetchone()
+
+    if not row:
+        return None
+
+    actor = {
+        "auth_type": "dashboard_session",
+        "session_id": row["session_id"],
+        "user_id": row["user_id"],
+        "username": row["username"],
+        "display_name": row["display_name"],
+        "role": normalize_access_role(row["session_role"] or row["user_role"] or "VIEWER"),
+        "expires_at": row["expires_at"],
+    }
+
+    if not int(row["session_active"] or 0) or not int(row["user_active"] or 0):
+        return None
+
+    if session_is_expired(row["expires_at"]):
+        expire_dashboard_session(
+            connection,
+            token,
+            actor=actor,
+            reason="expired",
+            commit=True,
+        )
+        return None
+
+    if not access_role_allows(actor["role"], required_role):
+        return None
+
+    if update_last_seen:
+        now = utc_now()
+        connection.execute(
+            "UPDATE access_sessions "
+            "SET last_seen_at = ? "
+            "WHERE session_id = ?",
+            (now, row["session_id"]),
+        )
+        connection.commit()
+        actor["last_seen_at"] = now
+
+    return actor
+
+
+def expire_dashboard_session(
+    connection: sqlite3.Connection,
+    session_token: str,
+    actor: dict[str, Any] | None = None,
+    reason: str = "logout",
+    commit: bool = True,
+) -> bool:
+    ensure_dashboard_session_schema(connection)
+
+    token = str(session_token or "").strip()
+
+    if not token:
+        return False
+
+    session_hash = hash_dashboard_session_token(token)
+    now = utc_now()
+
+    row = connection.execute(
+        "SELECT session_id, user_id, role "
+        "FROM access_sessions "
+        "WHERE session_token_hash = ?",
+        (session_hash,),
+    ).fetchone()
+
+    if not row:
+        return False
+
+    connection.execute(
+        "UPDATE access_sessions "
+        "SET is_active = 0, ended_at = ?, end_reason = ? "
+        "WHERE session_id = ?",
+        (now, str(reason or "logout"), row["session_id"]),
+    )
+
+    record_access_audit_event(
+        connection,
+        action="LOGOUT" if str(reason or "").lower() == "logout" else "SESSION_EXPIRED",
+        actor=actor,
+        target_type="access_session",
+        target_key=row["session_id"],
+        details={"reason": reason},
+    )
+
+    if commit:
+        connection.commit()
+
+    return True
+
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(db_path)
@@ -958,6 +1278,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
     backfill_snapshot_network_scopes(connection)
     ensure_scoped_asset_lifecycle_schema(connection)
     ensure_enterprise_access_schema(connection)
+    ensure_dashboard_session_schema(connection)
     connection.commit()
     return connection
 
@@ -2169,6 +2490,48 @@ def command_users(args: argparse.Namespace) -> int:
             f"updated={row.get('updated_at') or '-'} "
             f"id={row['user_id']}"
         )
+
+    return 0
+
+
+
+def command_user_password(args: argparse.Namespace) -> int:
+    username = normalize_access_username(args.username)
+
+    with connect(args.db) as connection:
+        user = access_user_by_username(connection, username)
+
+        if not user:
+            raise DeltaAegisError(f"Access user not found: {username}")
+
+        password_hash = hash_access_password(args.password)
+        now = utc_now()
+
+        connection.execute(
+            "UPDATE access_users "
+            "SET password_hash = ?, updated_at = ? "
+            "WHERE user_id = ?",
+            (password_hash, now, user["user_id"]),
+        )
+
+        actor = {
+            "username": args.actor or "local_admin",
+            "role": "ADMIN",
+        }
+
+        record_access_audit_event(
+            connection,
+            action="ACCESS_USER_PASSWORD_SET",
+            actor=actor,
+            target_type="access_user",
+            target_key=username,
+            details={"username": username},
+        )
+        connection.commit()
+
+    print("DeltaAegis access user password updated")
+    print("=======================================")
+    print(f"Username: {username}")
 
     return 0
 
@@ -16423,12 +16786,163 @@ def dashboard_index_html():
 """
 
 
+
+
+def dashboard_session_payload(actor: dict[str, Any] | None) -> dict[str, Any]:
+    if not actor:
+        return {
+            "authenticated": False,
+            "user": None,
+            "role": None,
+            "session_id": None,
+            "expires_at": None,
+            "auth_type": None,
+        }
+
+    return {
+        "authenticated": True,
+        "user": {
+            "user_id": actor.get("user_id"),
+            "username": actor.get("username"),
+            "display_name": actor.get("display_name"),
+            "role": actor.get("role"),
+        },
+        "role": actor.get("role"),
+        "session_id": actor.get("session_id"),
+        "expires_at": actor.get("expires_at"),
+        "auth_type": actor.get("auth_type") or "dashboard_session",
+    }
+
+
+
+def dashboard_has_active_password_users(connection: sqlite3.Connection) -> bool:
+    ensure_dashboard_session_schema(connection)
+
+    row = connection.execute(
+        "SELECT COUNT(*) AS user_count "
+        "FROM access_users "
+        "WHERE is_active = 1 "
+        "AND password_hash IS NOT NULL "
+        "AND password_hash != ''"
+    ).fetchone()
+
+    return bool(row and int(row["user_count"] or 0) > 0)
+
+
+def dashboard_session_cookie_header(
+    session_token: str,
+    max_age: int = ACCESS_SESSION_TTL_SECONDS,
+) -> str:
+    return (
+        f"{ACCESS_SESSION_COOKIE_NAME}={session_token}; "
+        "Path=/; "
+        f"Max-Age={max(300, int(max_age or ACCESS_SESSION_TTL_SECONDS))}; "
+        "HttpOnly; "
+        "SameSite=Lax"
+    )
+
+
+def dashboard_clear_session_cookie_header() -> str:
+    return (
+        f"{ACCESS_SESSION_COOKIE_NAME}=; "
+        "Path=/; "
+        "Max-Age=0; "
+        "HttpOnly; "
+        "SameSite=Lax"
+    )
+
+
+def dashboard_redirect_response(
+    handler,
+    location: str,
+    cookie_header: str | None = None,
+) -> None:
+    handler.send_response(303)
+    handler.send_header("Location", location)
+    handler.send_header("Cache-Control", "no-store")
+
+    if cookie_header:
+        handler.send_header("Set-Cookie", cookie_header)
+
+    handler.end_headers()
+
+
+def dashboard_login_html(
+    message: str = "",
+    username: str = "",
+) -> str:
+    safe_message = html.escape(str(message or ""))
+    safe_username = html.escape(str(username or ""))
+
+    error_block = ""
+
+    if safe_message:
+        error_block = (
+            '<div class="login-error">'
+            + safe_message
+            + '</div>'
+        )
+
+    lines = [
+        '<!doctype html>',
+        '<html lang="en">',
+        '<head>',
+        '  <meta charset="utf-8">',
+        '  <meta name="viewport" content="width=device-width,initial-scale=1">',
+        '  <title>DeltaAegis Login</title>',
+        '  <style>',
+        '    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #020617; color: #e2e8f0; }',
+        '    body { min-height: 100vh; margin: 0; display: grid; place-items: center; background: radial-gradient(circle at top left, rgba(34, 211, 238, 0.14), transparent 34rem), radial-gradient(circle at bottom right, rgba(59, 130, 246, 0.14), transparent 34rem), #020617; }',
+        '    .login-shell { width: min(420px, calc(100vw - 32px)); border: 1px solid rgba(148, 163, 184, 0.24); border-radius: 24px; background: rgba(15, 23, 42, 0.94); box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42); padding: 28px; }',
+        '    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: 0.16em; text-transform: uppercase; }',
+        '    h1 { margin: 8px 0 8px; font-size: 30px; letter-spacing: -0.04em; }',
+        '    p { margin: 0 0 22px; color: #94a3b8; line-height: 1.55; }',
+        '    label { display: block; margin: 14px 0 6px; color: #cbd5e1; font-size: 13px; font-weight: 800; }',
+        '    input { width: 100%; box-sizing: border-box; border: 1px solid rgba(148, 163, 184, 0.28); border-radius: 14px; background: rgba(2, 6, 23, 0.82); color: #f8fafc; padding: 12px 13px; font-size: 15px; outline: none; }',
+        '    input:focus { border-color: rgba(34, 211, 238, 0.65); box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.12); }',
+        '    button { width: 100%; margin-top: 20px; border: 0; border-radius: 14px; background: linear-gradient(135deg, #06b6d4, #2563eb); color: white; padding: 12px 14px; font-size: 15px; font-weight: 900; cursor: pointer; }',
+        '    .login-error { margin: 14px 0 4px; border: 1px solid rgba(248, 113, 113, 0.34); border-radius: 14px; background: rgba(127, 29, 29, 0.28); color: #fecaca; padding: 10px 12px; font-size: 13px; font-weight: 700; }',
+        '    .login-note { margin-top: 16px; color: #64748b; font-size: 12px; line-height: 1.45; }',
+        '  </style>',
+        '</head>',
+        '<body>',
+        '  <main class="login-shell">',
+        '    <div class="eyebrow">DeltaAegis</div>',
+        '    <h1>Operator Login</h1>',
+        '    <p>Sign in with your local DeltaAegis username and password.</p>',
+        error_block,
+        '    <form method="post" action="/login" autocomplete="on">',
+        '      <label for="username">Username</label>',
+        '      <input id="username" name="username" value="' + safe_username + '" autocomplete="username" required autofocus>',
+        '      <label for="password">Password</label>',
+        '      <input id="password" name="password" type="password" autocomplete="current-password" required>',
+        '      <button type="submit">Sign in</button>',
+        '    </form>',
+        '    <div class="login-note">API tokens are still supported for automation through <code>X-DeltaAegis-Token</code>, but browser login uses sessions.</div>',
+        '  </main>',
+        '</body>',
+        '</html>',
+    ]
+
+    return "\n".join(lines)
+
+
+
 def command_dashboard(args):
+    from http.cookies import SimpleCookie
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import parse_qs, urlparse
 
     db_path = args.db
     token = args.token
+    login_required = bool(token or getattr(args, "require_login", False))
+
+    try:
+        with connect(db_path) as dashboard_auth_connection:
+            login_required = login_required or dashboard_has_active_password_users(dashboard_auth_connection)
+    except Exception:
+        login_required = bool(token or getattr(args, "require_login", False))
+
 
     class DeltaAegisDashboardHandler(BaseHTTPRequestHandler):
         server_version = "DeltaAegisDashboard/0.5.0"
@@ -16448,6 +16962,37 @@ def command_dashboard(args):
 
             return query.get("token", [""])[0].strip()
 
+
+        def dashboard_session_cookie_token(self):
+            raw_cookie = self.headers.get("Cookie", "")
+
+            if not raw_cookie:
+                return ""
+
+            cookie = SimpleCookie()
+
+            try:
+                cookie.load(raw_cookie)
+            except Exception:
+                return ""
+
+            morsel = cookie.get(ACCESS_SESSION_COOKIE_NAME)
+
+            if not morsel:
+                return ""
+
+            return str(morsel.value or "").strip()
+
+        def dashboard_login_redirect(self):
+            dashboard_redirect_response(self, "/login")
+
+        def dashboard_logout_redirect(self):
+            dashboard_redirect_response(
+                self,
+                "/login",
+                cookie_header=dashboard_clear_session_cookie_header(),
+            )
+
         def dashboard_legacy_actor(self, auth_type="dashboard_unauthenticated"):
             role = "ADMIN" if auth_type in {"legacy_dashboard_token", "dashboard_unauthenticated"} else "VIEWER"
 
@@ -16463,6 +17008,24 @@ def command_dashboard(args):
             required_role = normalize_access_role(required_role)
             supplied = self.dashboard_request_token()
             self.current_actor = None
+
+            session_token = self.dashboard_session_cookie_token()
+
+            if session_token:
+                connection = self.open_connection()
+
+                try:
+                    actor = authenticate_dashboard_session(
+                        connection,
+                        session_token,
+                        required_role=required_role,
+                    )
+                finally:
+                    connection.close()
+
+                if actor:
+                    self.current_actor = actor
+                    return True
 
             if token and supplied == token:
                 self.current_actor = self.dashboard_legacy_actor("legacy_dashboard_token")
@@ -16484,7 +17047,7 @@ def command_dashboard(args):
                     self.current_actor = actor
                     return True
 
-            if not token and not supplied:
+            if not token and not supplied and not login_required:
                 self.current_actor = self.dashboard_legacy_actor("dashboard_unauthenticated")
                 return True
 
@@ -16521,11 +17084,55 @@ def command_dashboard(args):
                 dashboard_text_response(self, "ok")
                 return
 
+            if route == "/login":
+                if self.authenticate_dashboard_request(required_role="VIEWER"):
+                    dashboard_redirect_response(self, "/")
+                    return
+
+                dashboard_html_response(self, dashboard_login_html())
+                return
+
+            if route == "/logout":
+                session_token = self.dashboard_session_cookie_token()
+
+                if session_token:
+                    connection = self.open_connection()
+
+                    try:
+                        actor = authenticate_dashboard_session(
+                            connection,
+                            session_token,
+                            required_role="VIEWER",
+                            update_last_seen=False,
+                        )
+                        expire_dashboard_session(
+                            connection,
+                            session_token,
+                            actor=actor,
+                            reason="logout",
+                        )
+                    finally:
+                        connection.close()
+
+                self.dashboard_logout_redirect()
+                return
+
             if route == "/":
+                if not self.authenticate_dashboard_request(required_role="VIEWER"):
+                    self.dashboard_login_redirect()
+                    return
+
                 dashboard_html_response(self, dashboard_index_html())
                 return
 
             if not self.require_auth():
+                return
+
+            if route == "/api/session":
+                dashboard_json_response(
+                    self,
+                    dashboard_session_payload(getattr(self, "current_actor", None)),
+                )
                 return
 
             try:
@@ -16723,6 +17330,73 @@ def command_dashboard(args):
         def do_POST(self):
             parsed = urlparse(self.path)
             route = parsed.path
+
+            if route == "/login":
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    content_length = 0
+
+                content_length = max(0, min(content_length, 16384))
+                raw_body = self.rfile.read(content_length).decode("utf-8", errors="replace")
+                form = parse_qs(raw_body)
+                username = form.get("username", [""])[0].strip()
+                password = form.get("password", [""])[0]
+
+                connection = self.open_connection()
+
+                try:
+                    session = dashboard_user_login(
+                        connection,
+                        username,
+                        password,
+                        source_ip=self.client_address[0] if self.client_address else None,
+                        user_agent=self.headers.get("User-Agent", ""),
+                    )
+                finally:
+                    connection.close()
+
+                if not session:
+                    dashboard_html_response(
+                        self,
+                        dashboard_login_html(
+                            message="Invalid username or password.",
+                            username=username,
+                        ),
+                    )
+                    return
+
+                dashboard_redirect_response(
+                    self,
+                    "/",
+                    cookie_header=dashboard_session_cookie_header(session["session_token"]),
+                )
+                return
+
+            if route == "/logout":
+                session_token = self.dashboard_session_cookie_token()
+
+                if session_token:
+                    connection = self.open_connection()
+
+                    try:
+                        actor = authenticate_dashboard_session(
+                            connection,
+                            session_token,
+                            required_role="VIEWER",
+                            update_last_seen=False,
+                        )
+                        expire_dashboard_session(
+                            connection,
+                            session_token,
+                            actor=actor,
+                            reason="logout",
+                        )
+                    finally:
+                        connection.close()
+
+                self.dashboard_logout_redirect()
+                return
 
             if not self.require_auth(required_role="ANALYST"):
                 return
@@ -16953,10 +17627,16 @@ def command_dashboard(args):
         print("Auth:     token required")
         print("Header:   X-DeltaAegis-Token")
         print("DB Tokens: accepted via X-DeltaAegis-Token")
+    elif login_required:
+        print("Auth:     username/password login required")
+        print("Login:    http://{host}:{port}/login".format(host=args.host, port=args.port))
+        print("Sessions: HttpOnly SameSite=Lax cookie")
+        print("DB Tokens: still accepted for automation via X-DeltaAegis-Token")
     else:
         print("Auth:     disabled")
         print("Warning:  bind to 127.0.0.1 unless you are using a trusted network")
         print("DB Tokens: accepted when supplied in X-DeltaAegis-Token")
+        print("Tip:      set a password on an active user to enable browser login")
 
     print()
     print("Press Ctrl+C to stop.")
@@ -16971,7 +17651,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.23.0 Enterprise Access Control, Operator Triage Intelligence, Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.24.0 Enterprise Access Control, Operator Triage Intelligence, Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
@@ -16988,6 +17668,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("users", help="List local DeltaAegis access users")
     p.add_argument("--include-inactive", action="store_true")
+
+    p = sub.add_parser("user-password", help="Set or update a local DeltaAegis access user password")
+    p.add_argument("username")
+    p.add_argument("--password", required=True)
+    p.add_argument("--actor", default="local_admin")
 
     p = sub.add_parser("api-token-create", help="Create a database-backed DeltaAegis API token")
     p.add_argument("username")
@@ -17119,6 +17804,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scope")
     p.add_argument("--quiet", action="store_true")
 
+    p.add_argument("--require-login", action="store_true", help="Require username/password dashboard login even if no password users exist")
     p = sub.add_parser("risk")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--subject")
@@ -17149,6 +17835,7 @@ def main() -> int:
         if args.command in {None, "menu"}: return run_interactive_menu(args)
         if args.command == "user-create": return command_user_create(args)
         if args.command == "users": return command_users(args)
+        if args.command == "user-password": return command_user_password(args)
         if args.command == "api-token-create": return command_api_token_create(args)
         if args.command == "api-tokens": return command_api_tokens(args)
         if args.command == "access-audit": return command_access_audit(args)

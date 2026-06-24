@@ -14,11 +14,11 @@ Markdown reports, MAC-port behavior correlation, and a local dashboard.
 
 ## Current Release
 
-**DeltaAegis v0.23.0 — Enterprise Access Control**
+**DeltaAegis v0.24.0 — Dashboard Session Login**
 
 v0.23.0 adds enterprise access-control foundations: local users, role-based access helpers, database-backed API tokens, dashboard token authentication, token usage tracking, and access audit visibility.
 
-Current feature baseline: **DeltaAegis v0.23.0 — Enterprise Access Control**.
+Current feature baseline: **DeltaAegis v0.24.0 — Dashboard Session Login**.
 
 DeltaAegis v0.23.0 adds:
 
