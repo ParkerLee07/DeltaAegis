@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.16.0: Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
+"""DeltaAegis v0.17.0: Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -33,6 +33,7 @@ DEFAULT_EVENTS = Path.home() / "DeltaAegis" / "events" / "events.jsonl"
 DEFAULT_REPORTS = Path.home() / "DeltaAegis" / "reports"
 DELTAAEGIS_V0_14_COMPATIBILITY_NOTE = "DeltaAegis v0.14.0 — NetSniper Scan Orchestration compatibility retained."
 DELTAAEGIS_V0_15_COMPATIBILITY_NOTE = "DeltaAegis v0.15.0 — MAC-Port Behavior Correlation compatibility retained."
+DELTAAEGIS_V0_16_COMPATIBILITY_NOTE = "DeltaAegis v0.16.0 — Investigation Command Center compatibility retained."
 QUALITY_RATIO_THRESHOLD = 0.50
 IDENTITY_COVERAGE_THRESHOLD = 0.50
 IDENTITY_DROP_REVIEW_THRESHOLD = 0.25
@@ -13035,7 +13036,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.16.0 Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.17.0 Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)

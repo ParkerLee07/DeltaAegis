@@ -14,28 +14,34 @@ Markdown reports, MAC-port behavior correlation, and a local dashboard.
 
 ## Current Release
 
-**DeltaAegis v0.16.0 — Investigation Command Center**
+**DeltaAegis v0.17.0 — Executive SIEM Dashboard Refresh**
 
-v0.16.0 adds a unified Investigation Command Center to DeltaAegis. It combines
-current risk, MAC-port behavior, open alerts, recent delta events, asset identity,
-NetSniper classification context, and role-aware recommended actions into one
-prioritized analyst queue.
+v0.17.0 refreshes DeltaAegis into a more familiar SIEM-style dashboard. It adds
+an executive overview, SIEM-aligned navigation labels, visual analytics panels,
+ticket-style investigation cards, and tuned ticket signal labels that separate
+actionable items from meaningful changes and baseline inventory context.
 
-Current feature baseline: **DeltaAegis v0.16.0 — Investigation Command Center**.
+Current feature baseline: **DeltaAegis v0.17.0 — Executive SIEM Dashboard Refresh**.
 
-DeltaAegis v0.16.0 adds:
+DeltaAegis v0.17.0 adds:
 
-- `/api/investigation-center` for a prioritized investigation queue.
-- Dashboard **Command Center** tab for analyst-first triage.
-- `investigation-center` CLI command for terminal review of the same queue.
-- Markdown report section named `Investigation Command Center`.
-- Queue triggers for `CURRENT_RISK`, `OPEN_ALERT`, `RECENT_EVENT`, and
-  `PORT_BEHAVIOR`.
-- v0.16 validators for API payloads, dashboard wiring, CLI output, report
-  generation, and release regression coverage.
+- Executive SIEM dashboard shell and navigation.
+- SIEM-style labels such as `Executive`, `Tickets`, `Risk Analysis`,
+  `Network Activity`, `Taxonomy`, `Security Events`, `Alarms`, and `Data Sources`.
+- Executive chart panels for security-event categories, current-risk distribution,
+  asset classification mix, and MAC-port behavior.
+- Ticket-style investigation queue cards.
+- Ticket signal tuning that reduces normal printer inventory noise.
+- Visible ticket signal labels:
+  - `Actionable`
+  - `Meaningful change`
+  - `Baseline context`
+- v0.17 validators for dashboard shell, chart panels, ticket layout, ticket signal
+  tuning, ticket signal labels, and release regression coverage.
 
 Compatibility retained:
 
+- DeltaAegis v0.16.0 — Investigation Command Center remains available.
 - DeltaAegis v0.15.0 — MAC-Port Behavior Correlation remains available.
 - DeltaAegis v0.14.0 — NetSniper Scan Orchestration remains available.
 - DeltaAegis v0.13.0 — Current-State SIEM Dashboard remains available.
@@ -508,6 +514,16 @@ pytest -q
 ---
 
 ## Version Highlights
+
+### v0.17.0 — Executive SIEM Dashboard Refresh
+
+- Adds an executive SIEM-style dashboard shell.
+- Adds SIEM-aligned visible navigation labels.
+- Adds executive analytics panels for events, risk, taxonomy, and network activity.
+- Adds ticket-style investigation cards.
+- Adds ticket signal tuning to reduce stable printer inventory noise.
+- Adds visible `Actionable`, `Meaningful change`, and `Baseline context` labels.
+- Preserves v0.16 Investigation Command Center APIs, CLI, and report behavior.
 
 ### v0.16.0 — Investigation Command Center
 
