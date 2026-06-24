@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.18.0: Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
+"""DeltaAegis v0.19.0: Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -5479,6 +5479,9 @@ def append_report_dashboard_usage_section(lines, scope=None):
     lines.append("- The dashboard remains read-only and is intended for local or trusted-access investigation.")
     lines.append("- Port behavior API: `/api/port-behavior?limit=25&lookback=5`")
     lines.append("- Investigation Center API: `/api/investigation-center?limit=25`")
+    lines.append("- Investigation Center workflow filter API: `/api/investigation-center?limit=25&ticket_status=OPEN`")
+    lines.append("- Investigation Center signal filter API: `/api/investigation-center?limit=25&ticket_signal=ACTIONABLE`")
+    lines.append("- Combined ticket filters are supported with `ticket_status` and `ticket_signal` query parameters.")
     lines.append("- Use the Asset Inventory table, asset selector, or clickable risk/event/alert subjects to open Asset Detail.")
     lines.append("")
 
@@ -5726,14 +5729,33 @@ def append_report_investigation_center_section(lines, investigation_rows):
     lines.append("")
 
     rows = list(investigation_rows or [])
+    workflow_summary = investigation_center_workflow_summary(rows)
+    signal_summary = investigation_center_signal_summary(rows)
+
+    lines.append("### Investigation Queue Operator Summary")
+    lines.append("")
+    lines.append(
+        "- Workflow states: "
+        f"OPEN={workflow_summary.get('open', 0)}, "
+        f"IN_REVIEW={workflow_summary.get('in_review', 0)}, "
+        f"RESOLVED={workflow_summary.get('resolved', 0)}, "
+        f"SUPPRESSED={workflow_summary.get('suppressed', 0)}"
+    )
+    lines.append(
+        "- Signal labels: "
+        f"ACTIONABLE={signal_summary.get('actionable', 0)}, "
+        f"MEANINGFUL_CHANGE={signal_summary.get('meaningful_change', 0)}, "
+        f"BASELINE_CONTEXT={signal_summary.get('baseline_context', 0)}"
+    )
+    lines.append("")
 
     if not rows:
         lines.append("No Investigation Command Center queue items matched this report scope.")
         lines.append("")
         return
 
-    lines.append("| Priority | Score | Subject | IP Address | MAC Address | Device / Role | Triggers | Why Review? | Recommended Action | Counts |")
-    lines.append("|---|---:|---|---|---|---|---|---|---|---|")
+    lines.append("| Priority | Score | Workflow | Signal | Subject | IP Address | MAC Address | Device / Role | Triggers | Why Review? | Recommended Action | Counts |")
+    lines.append("|---|---:|---|---|---|---|---|---|---|---|---|---|")
 
     for row in rows:
         role = row.get("role") or row.get("classification") or row.get("device_type") or "Unknown"
@@ -5745,6 +5767,8 @@ def append_report_investigation_center_section(lines, investigation_rows):
             device_role = role
 
         triggers = ", ".join(row.get("triggers") or []) or "-"
+        workflow = str(row.get("ticket_status") or "OPEN").upper()
+        signal = str(row.get("ticket_signal_state") or "ACTIONABLE").upper()
         counts = (
             f"alerts={int(row.get('open_alerts') or 0)}, "
             f"events={int(row.get('recent_events') or 0)}, "
@@ -5756,6 +5780,8 @@ def append_report_investigation_center_section(lines, investigation_rows):
             "| "
             f"{safe_markdown(row.get('priority_level') or 'INFO')} | "
             f"{safe_markdown(row.get('priority_score') or 0)} | "
+            f"{safe_markdown(workflow)} | "
+            f"{safe_markdown(signal)} | "
             f"`{safe_markdown(row.get('subject_key'))}` | "
             f"`{safe_markdown(row.get('ip_address') or '-')}` | "
             f"`{safe_markdown(row.get('mac_address') or '-')}` | "
@@ -9568,15 +9594,175 @@ def investigation_center_summary(rows):
 
 
 
-def dashboard_investigation_center_payload(connection, limit=25, scope=None):
+def investigation_center_workflow_summary(rows):
+    summary = {
+        "open": 0,
+        "in_review": 0,
+        "resolved": 0,
+        "suppressed": 0,
+    }
+
+    for row in rows or []:
+        status = str(row.get("ticket_status") or "OPEN").upper()
+
+        if status == "IN_REVIEW":
+            summary["in_review"] += 1
+        elif status == "RESOLVED":
+            summary["resolved"] += 1
+        elif status == "SUPPRESSED":
+            summary["suppressed"] += 1
+        else:
+            summary["open"] += 1
+
+    return summary
+
+
+def investigation_center_signal_summary(rows):
+    summary = {
+        "actionable": 0,
+        "meaningful_change": 0,
+        "baseline_context": 0,
+    }
+
+    for row in rows or []:
+        state = str(row.get("ticket_signal_state") or "ACTIONABLE").upper()
+
+        if state == "MEANINGFUL_CHANGE":
+            summary["meaningful_change"] += 1
+        elif state == "BASELINE_CONTEXT":
+            summary["baseline_context"] += 1
+        else:
+            summary["actionable"] += 1
+
+    return summary
+
+
+
+
+TICKET_SIGNAL_FILTER_STATES = {
+    "ACTIONABLE",
+    "MEANINGFUL_CHANGE",
+    "BASELINE_CONTEXT",
+}
+
+
+def normalize_ticket_status_filter(value):
+    if value is None:
+        return None
+
+    text = str(value).strip()
+
+    if not text:
+        return None
+
+    normalized = text.upper().replace("-", "_").replace(" ", "_")
+
+    if normalized in {"ALL", "ANY", "*"}:
+        return None
+
+    return normalize_ticket_workflow_status(normalized)
+
+
+def normalize_ticket_signal_filter(value):
+    if value is None:
+        return None
+
+    text = str(value).strip()
+
+    if not text:
+        return None
+
+    normalized = text.upper().replace("-", "_").replace(" ", "_")
+
+    aliases = {
+        "ALL": None,
+        "ANY": None,
+        "*": None,
+        "MEANINGFUL": "MEANINGFUL_CHANGE",
+        "MEANINGFUL_CHANGE": "MEANINGFUL_CHANGE",
+        "BASELINE": "BASELINE_CONTEXT",
+        "BASELINE_CONTEXT": "BASELINE_CONTEXT",
+        "ACTION": "ACTIONABLE",
+        "ACTIONABLE": "ACTIONABLE",
+    }
+
+    normalized = aliases.get(normalized, normalized)
+
+    if normalized is None:
+        return None
+
+    if normalized not in TICKET_SIGNAL_FILTER_STATES:
+        raise DeltaAegisError(
+            "Invalid ticket signal filter. "
+            "Use ACTIONABLE, MEANINGFUL_CHANGE, BASELINE_CONTEXT, or ALL."
+        )
+
+    return normalized
+
+
+def filter_investigation_center_rows(
+    rows,
+    ticket_status=None,
+    ticket_signal=None,
+):
+    status_filter = normalize_ticket_status_filter(ticket_status)
+    signal_filter = normalize_ticket_signal_filter(ticket_signal)
+
+    filtered = []
+
+    for row in rows:
+        if status_filter:
+            row_status = str(row.get("ticket_status") or "OPEN").upper()
+            if row_status != status_filter:
+                continue
+
+        if signal_filter:
+            row_signal = str(row.get("ticket_signal_state") or "ACTIONABLE").upper()
+            if row_signal != signal_filter:
+                continue
+
+        filtered.append(row)
+
+    return filtered
+
+
+def investigation_center_filter_payload(ticket_status=None, ticket_signal=None):
+    status_filter = normalize_ticket_status_filter(ticket_status)
+    signal_filter = normalize_ticket_signal_filter(ticket_signal)
+
+    return {
+        "ticket_status": status_filter or "ALL",
+        "ticket_signal": signal_filter or "ALL",
+        "ticket_statuses": ["ALL", "OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"],
+        "ticket_signals": ["ALL", "ACTIONABLE", "MEANINGFUL_CHANGE", "BASELINE_CONTEXT"],
+    }
+
+
+
+def dashboard_investigation_center_payload(
+    connection,
+    limit=25,
+    scope=None,
+    ticket_status=None,
+    ticket_signal=None,
+):
     requested_limit = risk_int(limit, 25)
 
     if requested_limit <= 0:
         requested_limit = 25
 
-    query_limit = max(requested_limit * 4, 50)
-
     try:
+        filters = investigation_center_filter_payload(
+            ticket_status=ticket_status,
+            ticket_signal=ticket_signal,
+        )
+        has_filter = (
+            filters["ticket_status"] != "ALL"
+            or filters["ticket_signal"] != "ALL"
+        )
+        query_limit = max(requested_limit * (12 if has_filter else 4), 50)
+        if has_filter:
+            query_limit = max(query_limit, 200)
         rows = investigation_center_rows(
             connection,
             limit=query_limit,
@@ -9584,21 +9770,43 @@ def dashboard_investigation_center_payload(connection, limit=25, scope=None):
         )
         rows = tune_investigation_center_ticket_signals(rows)
         rows = apply_ticket_states_to_rows(connection, rows)
+
+        total_item_count = len(rows)
+        workflow_summary = investigation_center_workflow_summary(rows)
+        signal_summary = investigation_center_signal_summary(rows)
+
+        rows = filter_investigation_center_rows(
+            rows,
+            ticket_status=filters["ticket_status"],
+            ticket_signal=filters["ticket_signal"],
+        )
         rows = rows[:requested_limit]
 
         return {
             "available": True,
             "selected_scope": scope,
+            "filters": filters,
             "item_count": len(rows),
+            "total_item_count": total_item_count,
             "summary": investigation_center_summary(rows),
+            "workflow_summary": workflow_summary,
+            "signal_summary": signal_summary,
+            "view_workflow_summary": investigation_center_workflow_summary(rows),
+            "view_signal_summary": investigation_center_signal_summary(rows),
             "items": rows,
         }
     except Exception as exc:
         return {
             "available": False,
             "selected_scope": scope,
+            "filters": investigation_center_filter_payload(),
             "item_count": 0,
+            "total_item_count": 0,
             "summary": investigation_center_summary([]),
+            "workflow_summary": investigation_center_workflow_summary([]),
+            "signal_summary": investigation_center_signal_summary([]),
+            "view_workflow_summary": investigation_center_workflow_summary([]),
+            "view_signal_summary": investigation_center_signal_summary([]),
             "items": [],
             "error": str(exc),
         }
@@ -9613,6 +9821,34 @@ def print_investigation_center_rows(payload):
 
     if scope:
         print(f"Network scope: {scope}")
+
+    filters = payload.get("filters") or investigation_center_filter_payload()
+    workflow_summary = payload.get("workflow_summary") or investigation_center_workflow_summary(rows)
+    signal_summary = payload.get("signal_summary") or investigation_center_signal_summary(rows)
+    total_item_count = payload.get("total_item_count", len(rows))
+
+    print(
+        "Filters: "
+        f"workflow={filters.get('ticket_status', 'ALL')}, "
+        f"signal={filters.get('ticket_signal', 'ALL')}"
+    )
+    print(
+        "Visible queue items: "
+        f"{len(rows)} of {total_item_count}"
+    )
+    print(
+        "Workflow summary: "
+        f"OPEN={workflow_summary.get('open', 0)}, "
+        f"IN_REVIEW={workflow_summary.get('in_review', 0)}, "
+        f"RESOLVED={workflow_summary.get('resolved', 0)}, "
+        f"SUPPRESSED={workflow_summary.get('suppressed', 0)}"
+    )
+    print(
+        "Signal summary: "
+        f"ACTIONABLE={signal_summary.get('actionable', 0)}, "
+        f"MEANINGFUL_CHANGE={signal_summary.get('meaningful_change', 0)}, "
+        f"BASELINE_CONTEXT={signal_summary.get('baseline_context', 0)}"
+    )
 
     print()
 
@@ -9776,6 +10012,8 @@ def command_investigation_center(args):
             connection,
             limit=args.limit,
             scope=scope,
+            ticket_status=args.ticket_status,
+            ticket_signal=args.ticket_signal,
         )
     finally:
         connection.close()
@@ -10843,6 +11081,40 @@ def dashboard_index_html():
     .ticket-workflow-unknown { color: #c4b5fd; }
 
 
+    .ticket-filter-panel {
+      align-items: end;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      margin: 1rem 0;
+      padding: 0.85rem;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 16px;
+      background: rgba(15, 23, 42, 0.35);
+    }
+
+    .ticket-filter-panel label {
+      color: var(--muted);
+      display: flex;
+      flex-direction: column;
+      font-size: 0.78rem;
+      font-weight: 800;
+      gap: 0.35rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .ticket-filter-panel select {
+      min-width: 190px;
+      border: 1px solid rgba(148, 163, 184, 0.24);
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.82);
+      color: var(--text);
+      font-size: 0.82rem;
+      font-weight: 750;
+      padding: 0.44rem 0.7rem;
+    }
+
     .ticket-action-buttons {
       display: flex;
       flex-wrap: wrap;
@@ -10926,7 +11198,7 @@ def dashboard_index_html():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.18 Workflow</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.19 Filters</span></div>
     </div>
   </header>
 
@@ -10975,6 +11247,29 @@ def dashboard_index_html():
         Prioritized analyst queue combining current risk, MAC-port behavior, open alerts,
         recent delta events, asset identity, classification, and recommended next action.
       </p>
+      <div id="investigation-center-filters" class="ticket-filter-panel">
+        <label>
+          Workflow
+          <select id="ticket-status-filter">
+            <option value="ALL">All workflow states</option>
+            <option value="OPEN">Open</option>
+            <option value="IN_REVIEW">In Review</option>
+            <option value="RESOLVED">Resolved</option>
+            <option value="SUPPRESSED">Suppressed</option>
+          </select>
+        </label>
+        <label>
+          Signal
+          <select id="ticket-signal-filter">
+            <option value="ALL">All signal labels</option>
+            <option value="ACTIONABLE">Actionable</option>
+            <option value="MEANINGFUL_CHANGE">Meaningful change</option>
+            <option value="BASELINE_CONTEXT">Baseline context</option>
+          </select>
+        </label>
+        <button id="apply-ticket-filters" class="small-action-button">Apply filters</button>
+        <button id="clear-ticket-filters" class="small-action-button">Clear filters</button>
+      </div>
       <div id="investigation-center-summary" class="grid"></div>
       <div id="investigation-ticket-cards" class="ticket-cards-grid"></div>
       <p class="muted siem-ticket-table-note">Detailed queue table for sorting, copy/paste review, and compatibility with earlier DeltaAegis dashboard workflows.</p>
@@ -12629,9 +12924,7 @@ def dashboard_index_html():
           throw new Error(payload.message || payload.error || "Failed to update ticket workflow.");
         }
 
-        if (payload.investigation_center) {
-          renderInvestigationCenter(payload.investigation_center);
-        }
+        await refreshInvestigationCenter();
       } catch (error) {
         alert(error && error.message ? error.message : String(error));
       } finally {
@@ -12654,35 +12947,108 @@ def dashboard_index_html():
       });
     }
 
+    function investigationCenterFilterValue(id) {
+      const element = document.getElementById(id);
+      const value = element ? String(element.value || "ALL").toUpperCase() : "ALL";
+
+      return value || "ALL";
+    }
+
+    function investigationCenterFilterPath() {
+      const params = new URLSearchParams();
+      const status = investigationCenterFilterValue("ticket-status-filter");
+      const signal = investigationCenterFilterValue("ticket-signal-filter");
+
+      params.set("limit", "25");
+
+      if (status && status !== "ALL") {
+        params.set("ticket_status", status);
+      }
+
+      if (signal && signal !== "ALL") {
+        params.set("ticket_signal", signal);
+      }
+
+      return scopedPath(`/api/investigation-center?${params.toString()}`);
+    }
+
+    function syncInvestigationCenterFilters(payload) {
+      const filters = payload && payload.filters ? payload.filters : {};
+      const status = String(filters.ticket_status || "ALL").toUpperCase();
+      const signal = String(filters.ticket_signal || "ALL").toUpperCase();
+      const statusElement = document.getElementById("ticket-status-filter");
+      const signalElement = document.getElementById("ticket-signal-filter");
+
+      if (statusElement && statusElement.value !== status) {
+        statusElement.value = status;
+      }
+
+      if (signalElement && signalElement.value !== signal) {
+        signalElement.value = signal;
+      }
+    }
+
+    async function refreshInvestigationCenter() {
+      const payload = await api(investigationCenterFilterPath());
+      renderInvestigationCenter(payload);
+    }
+
+    function bindInvestigationCenterFilters() {
+      const applyButton = document.getElementById("apply-ticket-filters");
+      const clearButton = document.getElementById("clear-ticket-filters");
+
+      if (applyButton && applyButton.dataset.boundTicketFilters !== "true") {
+        applyButton.addEventListener("click", event => {
+          event.preventDefault();
+          refreshInvestigationCenter();
+        });
+        applyButton.dataset.boundTicketFilters = "true";
+      }
+
+      if (clearButton && clearButton.dataset.boundTicketFilters !== "true") {
+        clearButton.addEventListener("click", event => {
+          event.preventDefault();
+
+          const statusElement = document.getElementById("ticket-status-filter");
+          const signalElement = document.getElementById("ticket-signal-filter");
+
+          if (statusElement) statusElement.value = "ALL";
+          if (signalElement) signalElement.value = "ALL";
+
+          refreshInvestigationCenter();
+        });
+        clearButton.dataset.boundTicketFilters = "true";
+      }
+    }
+
     function renderInvestigationCenter(payload) {
+      syncInvestigationCenterFilters(payload);
+
       const summaryBox = document.getElementById("investigation-center-summary");
       const tbody = document.getElementById("investigation-center-body");
       const ticketCards = document.getElementById("investigation-ticket-cards");
       const items = payload && Array.isArray(payload.items) ? payload.items : [];
       const summary = payload && payload.summary ? payload.summary : {};
-
-      const workflowSummary = items.reduce((counts, row) => {
-        const status = String((row && row.ticket_status) || "OPEN").toUpperCase();
-
-        if (status === "IN_REVIEW") counts.inReview += 1;
-        else if (status === "RESOLVED") counts.resolved += 1;
-        else if (status === "SUPPRESSED") counts.suppressed += 1;
-        else counts.open += 1;
-
-        return counts;
-      }, {open: 0, inReview: 0, resolved: 0, suppressed: 0});
+      const workflowSummary = payload && payload.workflow_summary
+        ? payload.workflow_summary
+        : {open: 0, in_review: 0, resolved: 0, suppressed: 0};
+      const signalSummary = payload && payload.signal_summary
+        ? payload.signal_summary
+        : {actionable: 0, meaningful_change: 0, baseline_context: 0};
 
       if (summaryBox) {
         summaryBox.innerHTML = [
-          ["Queue Items", payload && payload.item_count !== undefined ? payload.item_count : items.length],
-          ["Critical", summary.critical || 0],
-          ["High", summary.high || 0],
-          ["With Open Alerts", summary.with_open_alerts || 0],
-          ["With Port Behavior", summary.with_port_behavior || 0],
-          ["Meaningful Changes", summary.meaningful_change || 0],
-          ["Baseline Context", summary.baseline_context || 0],
-          ["Workflow Open", workflowSummary.open],
-          ["In Review", workflowSummary.inReview]
+          ["Visible Items", payload && payload.item_count !== undefined ? payload.item_count : items.length],
+          ["Total Queue", payload && payload.total_item_count !== undefined ? payload.total_item_count : items.length],
+          ["Critical in View", summary.critical || 0],
+          ["High in View", summary.high || 0],
+          ["Workflow Open", workflowSummary.open || 0],
+          ["In Review", workflowSummary.in_review || 0],
+          ["Resolved", workflowSummary.resolved || 0],
+          ["Suppressed", workflowSummary.suppressed || 0],
+          ["Actionable", signalSummary.actionable || 0],
+          ["Meaningful Change", signalSummary.meaningful_change || 0],
+          ["Baseline Context", signalSummary.baseline_context || 0]
         ].map(([label, value]) => `
           <div class="metric-card command-center-kpi">
             <div class="label">${esc(label)}</div>
@@ -13222,7 +13588,7 @@ def dashboard_index_html():
           api(scopedPath("/api/summary")),
           api(scopedPath("/api/scan-context")),
           api(scopedPath("/api/current-state")),
-          api(scopedPath("/api/investigation-center?limit=25")),
+          api(investigationCenterFilterPath()),
           api(scopedPath("/api/scan-jobs?limit=10")),
           api(scopedPath("/api/assets?limit=25")),
           api(scopedPath("/api/current-risk?limit=10")),
@@ -13237,6 +13603,7 @@ def dashboard_index_html():
         renderMetrics(summary);
         renderCurrentState(currentState);
         renderInvestigationCenter(investigationCenter);
+      bindInvestigationCenterFilters();
         renderScanContext(scanContext);
         renderScanJobs(scanJobs);
         renderAssets(assets);
@@ -13438,12 +13805,17 @@ def command_dashboard(args):
                         ),
                     )
                 elif route == "/api/investigation-center":
+                    ticket_status = query.get("ticket_status", ["ALL"])[0]
+                    ticket_signal = query.get("ticket_signal", ["ALL"])[0]
+
                     dashboard_json_response(
                         self,
                         dashboard_investigation_center_payload(
                             connection,
                             limit=limit,
                             scope=scope,
+                            ticket_status=ticket_status,
+                            ticket_signal=ticket_signal,
                         ),
                     )
                 elif route == "/api/events":
@@ -13699,7 +14071,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.18.0 Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.19.0 Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
@@ -13730,6 +14102,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("investigation-center", help="Show prioritized investigation command center queue")
     p.add_argument("--limit", type=int, default=25)
     p.add_argument("--scope")
+    p.add_argument("--ticket-status", choices=["ALL", "OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"], default="ALL", help="Filter Investigation Center tickets by workflow status")
+    p.add_argument("--ticket-signal", choices=["ALL", "ACTIONABLE", "MEANINGFUL_CHANGE", "BASELINE_CONTEXT"], default="ALL", help="Filter Investigation Center tickets by signal label")
+
     p = sub.add_parser("port-behavior", help="Show MAC-port behavior changes across accepted scans")
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--scope")
