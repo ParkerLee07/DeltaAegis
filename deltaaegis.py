@@ -5949,6 +5949,7 @@ def append_report_ticket_evidence_appendix(lines, evidence_payloads):
             f"({safe_markdown(summary.get('priority_score') or 0)})"
         )
         lines.append(f"- Primary reason: {safe_markdown(summary.get('primary_reason') or '-')}")
+        lines.append(f"- Why now: {safe_markdown(summary.get('why_now') or '-')}")
         lines.append(f"- Recommended action: {safe_markdown(summary.get('recommended_action') or '-')}")
         lines.append(
             "- Evidence counts: "
@@ -10281,6 +10282,142 @@ def ticket_evidence_build_timeline(
     return ticket_evidence_balance_timeline(timeline, limit=limit)
 
 
+
+def ticket_evidence_why_now_event_types(event_rows):
+    interesting = {
+        "ASSET_REAPPEARED",
+        "MONITORED_SERVICE_OPENED",
+        "NETSNIPER_FINDING_ADDED",
+        "DEVICE_CLASSIFICATION_CHANGED",
+        "CONFIDENCE_CHANGED",
+        "CONTRADICTION",
+    }
+
+    event_types = []
+
+    for row in event_rows or []:
+        event_type = str(row.get("event_type") or row.get("type") or "").upper()
+
+        if event_type in interesting and event_type not in event_types:
+            event_types.append(event_type)
+
+    return event_types
+
+
+def ticket_evidence_why_now_ports(port_behavior_rows):
+    ports = []
+
+    for row in port_behavior_rows or []:
+        port_key = row.get("port_key")
+        protocol = row.get("protocol")
+        port = row.get("port")
+
+        if port_key:
+            value = str(port_key)
+        elif protocol or port:
+            value = f"{protocol or '-'}/{port or '-'}"
+        else:
+            value = ""
+
+        if value and value not in ports:
+            ports.append(value)
+
+    return ports
+
+
+def ticket_evidence_why_now_summary(
+    risk_rows,
+    alert_rows,
+    event_rows,
+    port_behavior_rows,
+    ticket_history_rows=None,
+    ticket_state=None,
+    investigation_items=None,
+):
+    reasons = []
+    risk_items = list(risk_rows or [])
+    alert_items = list(alert_rows or [])
+    port_items = list(port_behavior_rows or [])
+    investigation_items = list(investigation_items or [])
+    ticket_state = ticket_state or {}
+
+    if investigation_items:
+        primary_item = investigation_items[0]
+        priority_level = str(
+            primary_item.get("priority_level")
+            or primary_item.get("level")
+            or "INFO"
+        ).upper()
+        priority_score = primary_item.get("priority_score") or primary_item.get("score")
+
+        if priority_score not in (None, ""):
+            reasons.append(
+                f"investigation priority is {priority_level} with score {priority_score}"
+            )
+        else:
+            reasons.append(f"investigation priority is {priority_level}")
+
+    if risk_items:
+        primary_risk = risk_items[0]
+        level = str(
+            primary_risk.get("level")
+            or primary_risk.get("severity")
+            or "INFO"
+        ).upper()
+        score = primary_risk.get("score")
+
+        if score not in (None, ""):
+            reasons.append(f"current risk context is {level} with score {score}")
+        else:
+            reasons.append(f"current risk context is {level}")
+
+    active_alerts = [
+        row for row in alert_items
+        if str(row.get("status") or row.get("state") or "OPEN").upper()
+        not in {"CLOSED", "RESOLVED", "SUPPRESSED"}
+    ]
+
+    if active_alerts:
+        severities = []
+        for row in active_alerts:
+            severity = str(row.get("severity") or "INFO").upper()
+            if severity not in severities:
+                severities.append(severity)
+
+        reasons.append(
+            f"{len(active_alerts)} active alert(s) include "
+            f"{', '.join(severities[:3])} severity"
+        )
+
+    event_types = ticket_evidence_why_now_event_types(event_rows)
+    if event_types:
+        reasons.append(
+            "recent delta evidence includes "
+            + ", ".join(event_types[:3])
+        )
+
+    ports = ticket_evidence_why_now_ports(port_items)
+    if ports:
+        reasons.append(
+            "MAC-port behavior changed on "
+            + ", ".join(ports[:4])
+        )
+    elif port_items:
+        reasons.append("MAC-port behavior changed")
+
+    ticket_status = str(ticket_state.get("ticket_status") or "OPEN").upper()
+    if ticket_status not in {"RESOLVED", "SUPPRESSED", "CLOSED"}:
+        reasons.append(f"workflow status is {ticket_status}")
+
+    if reasons:
+        return "This ticket matters now because " + "; ".join(reasons[:6]) + "."
+
+    return (
+        "This ticket is relevant because DeltaAegis found evidence linked to "
+        "this subject in the current investigation context."
+    )
+
+
 def dashboard_ticket_evidence_payload(
     connection,
     subject_key,
@@ -10405,6 +10542,16 @@ def dashboard_ticket_evidence_payload(
             limit=max(requested_limit * 3, 25),
         )
 
+        why_now = ticket_evidence_why_now_summary(
+            risk_rows,
+            alert_rows,
+            event_rows,
+            port_behavior_rows,
+            ticket_history,
+            ticket_state,
+            investigation_items,
+        )
+
         summary = {
             "subject_key": stable_subject,
             "selected_subject": str(subject_key),
@@ -10429,6 +10576,7 @@ def dashboard_ticket_evidence_payload(
             "timeline_count": len(timeline),
             "primary_reason": primary_reason,
             "recommended_action": recommended_action,
+            "why_now": why_now,
         }
 
         return {
@@ -10638,6 +10786,7 @@ def print_ticket_evidence_payload(payload):
     )
     print()
     print(f"Why:            {summary.get('primary_reason') or '-'}")
+    print(f"Why now:        {summary.get('why_now') or '-'}")
     print(f"Next action:    {summary.get('recommended_action') or '-'}")
     print()
     print(
