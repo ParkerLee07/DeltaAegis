@@ -10968,6 +10968,40 @@ def dashboard_index_html():
     .ticket-workflow-unknown { color: #c4b5fd; }
 
 
+    .ticket-filter-panel {
+      align-items: end;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      margin: 1rem 0;
+      padding: 0.85rem;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 16px;
+      background: rgba(15, 23, 42, 0.35);
+    }
+
+    .ticket-filter-panel label {
+      color: var(--muted);
+      display: flex;
+      flex-direction: column;
+      font-size: 0.78rem;
+      font-weight: 800;
+      gap: 0.35rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .ticket-filter-panel select {
+      min-width: 190px;
+      border: 1px solid rgba(148, 163, 184, 0.24);
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.82);
+      color: var(--text);
+      font-size: 0.82rem;
+      font-weight: 750;
+      padding: 0.44rem 0.7rem;
+    }
+
     .ticket-action-buttons {
       display: flex;
       flex-wrap: wrap;
@@ -11100,6 +11134,29 @@ def dashboard_index_html():
         Prioritized analyst queue combining current risk, MAC-port behavior, open alerts,
         recent delta events, asset identity, classification, and recommended next action.
       </p>
+      <div id="investigation-center-filters" class="ticket-filter-panel">
+        <label>
+          Workflow
+          <select id="ticket-status-filter">
+            <option value="ALL">All workflow states</option>
+            <option value="OPEN">Open</option>
+            <option value="IN_REVIEW">In Review</option>
+            <option value="RESOLVED">Resolved</option>
+            <option value="SUPPRESSED">Suppressed</option>
+          </select>
+        </label>
+        <label>
+          Signal
+          <select id="ticket-signal-filter">
+            <option value="ALL">All signal labels</option>
+            <option value="ACTIONABLE">Actionable</option>
+            <option value="MEANINGFUL_CHANGE">Meaningful change</option>
+            <option value="BASELINE_CONTEXT">Baseline context</option>
+          </select>
+        </label>
+        <button id="apply-ticket-filters" class="small-action-button">Apply filters</button>
+        <button id="clear-ticket-filters" class="small-action-button">Clear filters</button>
+      </div>
       <div id="investigation-center-summary" class="grid"></div>
       <div id="investigation-ticket-cards" class="ticket-cards-grid"></div>
       <p class="muted siem-ticket-table-note">Detailed queue table for sorting, copy/paste review, and compatibility with earlier DeltaAegis dashboard workflows.</p>
@@ -12754,9 +12811,7 @@ def dashboard_index_html():
           throw new Error(payload.message || payload.error || "Failed to update ticket workflow.");
         }
 
-        if (payload.investigation_center) {
-          renderInvestigationCenter(payload.investigation_center);
-        }
+        await refreshInvestigationCenter();
       } catch (error) {
         alert(error && error.message ? error.message : String(error));
       } finally {
@@ -12779,7 +12834,83 @@ def dashboard_index_html():
       });
     }
 
+    function investigationCenterFilterValue(id) {
+      const element = document.getElementById(id);
+      const value = element ? String(element.value || "ALL").toUpperCase() : "ALL";
+
+      return value || "ALL";
+    }
+
+    function investigationCenterFilterPath() {
+      const params = new URLSearchParams();
+      const status = investigationCenterFilterValue("ticket-status-filter");
+      const signal = investigationCenterFilterValue("ticket-signal-filter");
+
+      params.set("limit", "25");
+
+      if (status && status !== "ALL") {
+        params.set("ticket_status", status);
+      }
+
+      if (signal && signal !== "ALL") {
+        params.set("ticket_signal", signal);
+      }
+
+      return scopedPath(`/api/investigation-center?${params.toString()}`);
+    }
+
+    function syncInvestigationCenterFilters(payload) {
+      const filters = payload && payload.filters ? payload.filters : {};
+      const status = String(filters.ticket_status || "ALL").toUpperCase();
+      const signal = String(filters.ticket_signal || "ALL").toUpperCase();
+      const statusElement = document.getElementById("ticket-status-filter");
+      const signalElement = document.getElementById("ticket-signal-filter");
+
+      if (statusElement && statusElement.value !== status) {
+        statusElement.value = status;
+      }
+
+      if (signalElement && signalElement.value !== signal) {
+        signalElement.value = signal;
+      }
+    }
+
+    async function refreshInvestigationCenter() {
+      const payload = await api(investigationCenterFilterPath());
+      renderInvestigationCenter(payload);
+    }
+
+    function bindInvestigationCenterFilters() {
+      const applyButton = document.getElementById("apply-ticket-filters");
+      const clearButton = document.getElementById("clear-ticket-filters");
+
+      if (applyButton && applyButton.dataset.boundTicketFilters !== "true") {
+        applyButton.addEventListener("click", event => {
+          event.preventDefault();
+          refreshInvestigationCenter();
+        });
+        applyButton.dataset.boundTicketFilters = "true";
+      }
+
+      if (clearButton && clearButton.dataset.boundTicketFilters !== "true") {
+        clearButton.addEventListener("click", event => {
+          event.preventDefault();
+
+          const statusElement = document.getElementById("ticket-status-filter");
+          const signalElement = document.getElementById("ticket-signal-filter");
+
+          if (statusElement) statusElement.value = "ALL";
+          if (signalElement) signalElement.value = "ALL";
+
+          refreshInvestigationCenter();
+        });
+        clearButton.dataset.boundTicketFilters = "true";
+      }
+    }
+
     function renderInvestigationCenter(payload) {
+      syncInvestigationCenterFilters(payload);
+
       const summaryBox = document.getElementById("investigation-center-summary");
       const tbody = document.getElementById("investigation-center-body");
       const ticketCards = document.getElementById("investigation-ticket-cards");
@@ -13347,7 +13478,7 @@ def dashboard_index_html():
           api(scopedPath("/api/summary")),
           api(scopedPath("/api/scan-context")),
           api(scopedPath("/api/current-state")),
-          api(scopedPath("/api/investigation-center?limit=25")),
+          api(investigationCenterFilterPath()),
           api(scopedPath("/api/scan-jobs?limit=10")),
           api(scopedPath("/api/assets?limit=25")),
           api(scopedPath("/api/current-risk?limit=10")),
@@ -13362,6 +13493,7 @@ def dashboard_index_html():
         renderMetrics(summary);
         renderCurrentState(currentState);
         renderInvestigationCenter(investigationCenter);
+      bindInvestigationCenterFilters();
         renderScanContext(scanContext);
         renderScanJobs(scanJobs);
         renderAssets(assets);
@@ -13563,12 +13695,17 @@ def command_dashboard(args):
                         ),
                     )
                 elif route == "/api/investigation-center":
+                    ticket_status = query.get("ticket_status", ["ALL"])[0]
+                    ticket_signal = query.get("ticket_signal", ["ALL"])[0]
+
                     dashboard_json_response(
                         self,
                         dashboard_investigation_center_payload(
                             connection,
                             limit=limit,
                             scope=scope,
+                            ticket_status=ticket_status,
+                            ticket_signal=ticket_signal,
                         ),
                     )
                 elif route == "/api/events":
