@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import ipaddress
 import json
 import os
 import re
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -40,6 +42,17 @@ IDENTITY_DROP_REVIEW_THRESHOLD = 0.25
 REMOVAL_THRESHOLD = 3
 MAC_RE = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
 SCAN_JOB_STATUSES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED"}
+
+ACCESS_ROLES = ("ADMIN", "ANALYST", "VIEWER")
+ACCESS_ROLE_RANKS = {
+    "VIEWER": 10,
+    "ANALYST": 20,
+    "ADMIN": 30,
+}
+ACCESS_PASSWORD_ALGORITHM = "pbkdf2_sha256"
+ACCESS_PASSWORD_ITERATIONS = 260000
+ACCESS_API_TOKEN_PREFIX = "da"
+
 
 
 class DeltaAegisError(RuntimeError):
@@ -579,6 +592,329 @@ def ensure_scoped_asset_lifecycle_schema(connection: sqlite3.Connection) -> None
     connection.execute("DROP TABLE asset_lifecycle")
     connection.execute("ALTER TABLE asset_lifecycle_scoped_migration RENAME TO asset_lifecycle")
 
+
+def ensure_enterprise_access_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS access_users ("
+        "user_id TEXT PRIMARY KEY,"
+        "username TEXT NOT NULL UNIQUE,"
+        "display_name TEXT,"
+        "role TEXT NOT NULL DEFAULT 'VIEWER',"
+        "password_hash TEXT NOT NULL DEFAULT '',"
+        "is_active INTEGER NOT NULL DEFAULT 1,"
+        "created_at TEXT NOT NULL,"
+        "updated_at TEXT NOT NULL,"
+        "last_login_at TEXT,"
+        "CHECK (role IN ('ADMIN', 'ANALYST', 'VIEWER'))"
+        ")"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_users_username "
+        "ON access_users(username)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_users_role "
+        "ON access_users(role)"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS access_api_tokens ("
+        "token_id TEXT PRIMARY KEY,"
+        "user_id TEXT NOT NULL,"
+        "token_name TEXT NOT NULL,"
+        "token_hash TEXT NOT NULL UNIQUE,"
+        "token_prefix TEXT NOT NULL,"
+        "role TEXT NOT NULL DEFAULT 'VIEWER',"
+        "is_active INTEGER NOT NULL DEFAULT 1,"
+        "created_at TEXT NOT NULL,"
+        "updated_at TEXT NOT NULL,"
+        "last_used_at TEXT,"
+        "expires_at TEXT,"
+        "FOREIGN KEY (user_id) REFERENCES access_users(user_id) ON DELETE CASCADE,"
+        "CHECK (role IN ('ADMIN', 'ANALYST', 'VIEWER'))"
+        ")"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_api_tokens_user_id "
+        "ON access_api_tokens(user_id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_api_tokens_prefix "
+        "ON access_api_tokens(token_prefix)"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS access_audit_log ("
+        "audit_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "actor_user_id TEXT,"
+        "actor_username TEXT,"
+        "actor_role TEXT,"
+        "action TEXT NOT NULL,"
+        "target_type TEXT,"
+        "target_key TEXT,"
+        "source_ip TEXT,"
+        "user_agent TEXT,"
+        "detail_json TEXT NOT NULL DEFAULT '{}',"
+        "created_at TEXT NOT NULL,"
+        "FOREIGN KEY (actor_user_id) REFERENCES access_users(user_id) ON DELETE SET NULL"
+        ")"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_audit_log_created_at "
+        "ON access_audit_log(created_at)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_audit_log_action "
+        "ON access_audit_log(action)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_audit_log_actor_user_id "
+        "ON access_audit_log(actor_user_id)"
+    )
+
+
+def normalize_access_role(value: str | None, default: str = "VIEWER") -> str:
+    role = str(value or default or "VIEWER").strip().upper().replace("-", "_").replace(" ", "_")
+
+    if role not in ACCESS_ROLE_RANKS:
+        raise DeltaAegisError(f"unsupported access role: {value!r}")
+
+    return role
+
+
+def access_role_allows(role: str | None, required_role: str | None) -> bool:
+    actual = normalize_access_role(role)
+    required = normalize_access_role(required_role)
+
+    return ACCESS_ROLE_RANKS[actual] >= ACCESS_ROLE_RANKS[required]
+
+
+def normalize_access_username(username: str) -> str:
+    value = str(username or "").strip().lower()
+
+    if not value:
+        raise DeltaAegisError("username is required")
+
+    if not re.fullmatch(r"[a-z0-9_.@-]{3,64}", value):
+        raise DeltaAegisError(
+            "username must be 3-64 characters using letters, numbers, dot, underscore, at-sign, or dash"
+        )
+
+    return value
+
+
+def hash_access_password(password: str, salt: str | None = None, iterations: int = ACCESS_PASSWORD_ITERATIONS) -> str:
+    if not password:
+        raise DeltaAegisError("password is required")
+
+    if iterations < 100000:
+        raise DeltaAegisError("password hash iteration count is too low")
+
+    salt_value = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        str(password).encode("utf-8"),
+        salt_value.encode("utf-8"),
+        iterations,
+    ).hex()
+
+    return f"{ACCESS_PASSWORD_ALGORITHM}${iterations}${salt_value}${digest}"
+
+
+def verify_access_password(password: str, password_hash: str | None) -> bool:
+    if not password or not password_hash:
+        return False
+
+    try:
+        algorithm, iterations_text, salt, expected_digest = str(password_hash).split("$", 3)
+        iterations = int(iterations_text)
+    except (TypeError, ValueError):
+        return False
+
+    if algorithm != ACCESS_PASSWORD_ALGORITHM:
+        return False
+
+    candidate = hash_access_password(password, salt=salt, iterations=iterations)
+    candidate_digest = candidate.rsplit("$", 1)[-1]
+
+    return hmac.compare_digest(candidate_digest, expected_digest)
+
+
+def hash_access_api_token(token: str) -> str:
+    if not token:
+        raise DeltaAegisError("API token is required")
+
+    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+
+
+def generate_access_api_token() -> str:
+    return f"{ACCESS_API_TOKEN_PREFIX}_{secrets.token_urlsafe(32)}"
+
+
+def create_access_user(
+    connection: sqlite3.Connection,
+    username: str,
+    role: str = "VIEWER",
+    password: str | None = None,
+    display_name: str | None = None,
+    is_active: bool = True,
+) -> dict[str, Any]:
+    ensure_enterprise_access_schema(connection)
+
+    normalized_username = normalize_access_username(username)
+    normalized_role = normalize_access_role(role)
+    now = utc_now()
+    user_id = str(uuid.uuid4())
+    password_hash = hash_access_password(password) if password else ""
+
+    connection.execute(
+        "INSERT INTO access_users ("
+        "user_id, username, display_name, role, password_hash, is_active, created_at, updated_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            user_id,
+            normalized_username,
+            display_name,
+            normalized_role,
+            password_hash,
+            1 if is_active else 0,
+            now,
+            now,
+        ),
+    )
+
+    return {
+        "user_id": user_id,
+        "username": normalized_username,
+        "display_name": display_name,
+        "role": normalized_role,
+        "is_active": bool(is_active),
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def access_user_by_username(connection: sqlite3.Connection, username: str) -> dict[str, Any] | None:
+    ensure_enterprise_access_schema(connection)
+
+    normalized_username = normalize_access_username(username)
+    row = connection.execute(
+        "SELECT user_id, username, display_name, role, password_hash, is_active, "
+        "created_at, updated_at, last_login_at "
+        "FROM access_users WHERE username = ?",
+        (normalized_username,),
+    ).fetchone()
+
+    if not row:
+        return None
+
+    return dict(row)
+
+
+def list_access_users(connection: sqlite3.Connection, include_inactive: bool = False) -> list[dict[str, Any]]:
+    ensure_enterprise_access_schema(connection)
+
+    where = "" if include_inactive else "WHERE is_active = 1"
+    rows = connection.execute(
+        "SELECT user_id, username, display_name, role, is_active, created_at, updated_at, last_login_at "
+        f"FROM access_users {where} ORDER BY username"
+    ).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def create_access_api_token(
+    connection: sqlite3.Connection,
+    user_id: str,
+    token_name: str,
+    role: str | None = None,
+    expires_at: str | None = None,
+) -> dict[str, Any]:
+    ensure_enterprise_access_schema(connection)
+
+    user = connection.execute(
+        "SELECT user_id, username, role, is_active FROM access_users WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+
+    if not user:
+        raise DeltaAegisError(f"access user not found: {user_id}")
+
+    if not int(user["is_active"] or 0):
+        raise DeltaAegisError(f"access user is inactive: {user['username']}")
+
+    token_value = generate_access_api_token()
+    token_hash = hash_access_api_token(token_value)
+    token_id = str(uuid.uuid4())
+    now = utc_now()
+    token_role = normalize_access_role(role or user["role"])
+    token_prefix = token_value[:12]
+    clean_token_name = str(token_name or "DeltaAegis API Token").strip() or "DeltaAegis API Token"
+
+    connection.execute(
+        "INSERT INTO access_api_tokens ("
+        "token_id, user_id, token_name, token_hash, token_prefix, role, "
+        "is_active, created_at, updated_at, expires_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+        (
+            token_id,
+            user_id,
+            clean_token_name,
+            token_hash,
+            token_prefix,
+            token_role,
+            now,
+            now,
+            expires_at,
+        ),
+    )
+
+    return {
+        "token_id": token_id,
+        "user_id": user_id,
+        "username": user["username"],
+        "token_name": clean_token_name,
+        "token": token_value,
+        "token_prefix": token_prefix,
+        "role": token_role,
+        "created_at": now,
+        "expires_at": expires_at,
+    }
+
+
+def record_access_audit_event(
+    connection: sqlite3.Connection,
+    action: str,
+    actor: dict[str, Any] | None = None,
+    target_type: str | None = None,
+    target_key: str | None = None,
+    source_ip: str | None = None,
+    user_agent: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> int:
+    ensure_enterprise_access_schema(connection)
+
+    actor = actor or {}
+    now = utc_now()
+    cursor = connection.execute(
+        "INSERT INTO access_audit_log ("
+        "actor_user_id, actor_username, actor_role, action, target_type, target_key, "
+        "source_ip, user_agent, detail_json, created_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            actor.get("user_id"),
+            actor.get("username"),
+            actor.get("role"),
+            str(action or "").strip().upper() or "UNKNOWN",
+            target_type,
+            target_key,
+            source_ip,
+            user_agent,
+            json.dumps(details or {}, sort_keys=True),
+            now,
+        ),
+    )
+
+    return int(cursor.lastrowid)
+
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(db_path)
@@ -621,6 +957,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
     backfill_snapshot_network_scopes(connection)
     ensure_scoped_asset_lifecycle_schema(connection)
+    ensure_enterprise_access_schema(connection)
     connection.commit()
     return connection
 
