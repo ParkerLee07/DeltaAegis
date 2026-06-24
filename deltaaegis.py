@@ -9637,6 +9637,19 @@ def print_investigation_center_rows(payload):
 
         triggers = row.get("triggers") or []
         print(f"    Triggers: {', '.join(triggers) if triggers else '-'}")
+        workflow_status = row.get("ticket_status") or "OPEN"
+        workflow_analyst = row.get("ticket_analyst") or "-"
+        workflow_updated = row.get("ticket_updated_at") or "-"
+        workflow_note = row.get("ticket_note") or ""
+        print(f"    Workflow: {workflow_status}")
+        if workflow_analyst != "-" or workflow_updated != "-":
+            print(
+                "    Analyst:  "
+                f"{workflow_analyst} "
+                f"(updated={workflow_updated})"
+            )
+        if workflow_note:
+            print(f"    Note:     {workflow_note}")
         print(f"    Why:      {row.get('primary_reason') or '-'}")
         print(f"    Action:   {row.get('recommended_action') or '-'}")
         print(
@@ -10801,6 +10814,64 @@ def dashboard_index_html():
     }
 
     /* v0.17 ticket signal state labels */
+
+    /* v0.18 investigation workflow visibility */
+    .ticket-workflow-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      border: 1px solid rgba(148, 163, 184, 0.24);
+      background: rgba(15, 23, 42, 0.42);
+      color: #dbeafe;
+      width: fit-content;
+    }
+
+    .ticket-workflow-open { color: #e2e8f0; }
+    .ticket-workflow-in-review { color: #fde68a; }
+    .ticket-workflow-resolved { color: #bbf7d0; }
+    .ticket-workflow-suppressed { color: #cbd5e1; }
+    .ticket-workflow-unknown { color: #c4b5fd; }
+
+
+    .ticket-action-buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      margin-top: 0.35rem;
+    }
+
+    .small-action-button {
+      border: 1px solid rgba(148, 163, 184, 0.24);
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.52);
+      color: var(--text);
+      cursor: pointer;
+      font-size: 0.75rem;
+      font-weight: 800;
+      padding: 0.28rem 0.62rem;
+    }
+
+    .small-action-button:hover {
+      border-color: rgba(96, 165, 250, 0.72);
+    }
+
+    .small-action-button:disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
+    }
+
+    .ticket-workflow-note {
+      color: var(--muted);
+      font-size: 0.82rem;
+      margin-top: 0.25rem;
+    }
+
     .ticket-signal-badge {
       display: inline-flex;
       align-items: center;
@@ -10908,6 +10979,7 @@ def dashboard_index_html():
           <tr>
             <th>Priority</th>
             <th>Signal</th>
+              <th>Workflow</th>
             <th>Subject</th>
             <th>IP</th>
             <th>MAC</th>
@@ -12455,12 +12527,146 @@ def dashboard_index_html():
     }
 
 
+
+    function ticketWorkflowLabel(row) {
+      const status = String((row && row.ticket_status) || "OPEN").toUpperCase();
+
+      if (status === "IN_REVIEW") return "In Review";
+      if (status === "RESOLVED") return "Resolved";
+      if (status === "SUPPRESSED") return "Suppressed";
+      if (status === "OPEN") return "Open";
+
+      return status || "Open";
+    }
+
+    function ticketWorkflowClass(row) {
+      const status = String((row && row.ticket_status) || "OPEN").toUpperCase();
+
+      if (status === "IN_REVIEW") return "in-review";
+      if (status === "RESOLVED") return "resolved";
+      if (status === "SUPPRESSED") return "suppressed";
+      if (status === "OPEN") return "open";
+
+      return "unknown";
+    }
+
+    function ticketWorkflowBadge(row) {
+      return `<span class="ticket-workflow-badge ticket-workflow-${esc(ticketWorkflowClass(row))}">${esc(ticketWorkflowLabel(row))}</span>`;
+    }
+
+    function ticketWorkflowMeta(row) {
+      const analyst = (row && row.ticket_analyst) || "-";
+      const updated = (row && row.ticket_updated_at) || "-";
+      const note = (row && row.ticket_note) || "";
+
+      return `
+        <div><span>Workflow</span><strong>${ticketWorkflowBadge(row)}</strong></div>
+        <div><span>Analyst</span><strong>${esc(analyst)}</strong></div>
+        <div><span>Workflow updated</span><strong>${esc(updated)}</strong></div>
+        ${note ? `<div><span>Workflow note</span><strong>${esc(note)}</strong></div>` : ""}
+      `;
+    }
+
+
+    function ticketWorkflowActions(row) {
+      const subject = row && row.subject_key ? row.subject_key : "";
+      const current = String((row && row.ticket_status) || "OPEN").toUpperCase();
+
+      const actions = [
+        ["OPEN", "Open"],
+        ["IN_REVIEW", "In Review"],
+        ["RESOLVED", "Resolve"],
+        ["SUPPRESSED", "Suppress"]
+      ];
+
+      return `
+        <div class="siem-ticket-section ticket-workflow-actions">
+          <div class="label">Workflow actions</div>
+          <div class="ticket-action-buttons">
+            ${actions.map(([status, label]) => `
+              <button
+                class="small-action-button"
+                data-ticket-subject="${esc(subject)}"
+                data-ticket-status="${esc(status)}"
+                ${status === current ? "disabled" : ""}
+              >${esc(label)}</button>
+            `).join("")}
+          </div>
+          <div class="ticket-workflow-note">${esc(row.ticket_note || "")}</div>
+        </div>
+      `;
+    }
+
+    async function updateTicketWorkflow(button) {
+      const subject = button.dataset.ticketSubject || "";
+      const status = button.dataset.ticketStatus || "";
+
+      if (!subject || !status) return;
+
+      button.disabled = true;
+
+      try {
+        const response = await fetch(scopedPath("/api/ticket-status"), {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            subject_key: subject,
+            status,
+            analyst: "dashboard",
+            note: `Dashboard workflow action: ${status}`
+          })
+        });
+
+        const payload = await response.json();
+
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.message || payload.error || "Failed to update ticket workflow.");
+        }
+
+        if (payload.investigation_center) {
+          renderInvestigationCenter(payload.investigation_center);
+        }
+      } catch (error) {
+        alert(error && error.message ? error.message : String(error));
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    function bindTicketWorkflowActions(root) {
+      if (!root) return;
+
+      root.querySelectorAll("[data-ticket-subject][data-ticket-status]").forEach(button => {
+        if (button.dataset.boundTicketWorkflow === "true") return;
+
+        button.addEventListener("click", event => {
+          event.preventDefault();
+          updateTicketWorkflow(button);
+        });
+
+        button.dataset.boundTicketWorkflow = "true";
+      });
+    }
+
     function renderInvestigationCenter(payload) {
       const summaryBox = document.getElementById("investigation-center-summary");
       const tbody = document.getElementById("investigation-center-body");
       const ticketCards = document.getElementById("investigation-ticket-cards");
       const items = payload && Array.isArray(payload.items) ? payload.items : [];
       const summary = payload && payload.summary ? payload.summary : {};
+
+      const workflowSummary = items.reduce((counts, row) => {
+        const status = String((row && row.ticket_status) || "OPEN").toUpperCase();
+
+        if (status === "IN_REVIEW") counts.inReview += 1;
+        else if (status === "RESOLVED") counts.resolved += 1;
+        else if (status === "SUPPRESSED") counts.suppressed += 1;
+        else counts.open += 1;
+
+        return counts;
+      }, {open: 0, inReview: 0, resolved: 0, suppressed: 0});
 
       if (summaryBox) {
         summaryBox.innerHTML = [
@@ -12470,7 +12676,9 @@ def dashboard_index_html():
           ["With Open Alerts", summary.with_open_alerts || 0],
           ["With Port Behavior", summary.with_port_behavior || 0],
           ["Meaningful Changes", summary.meaningful_change || 0],
-          ["Baseline Context", summary.baseline_context || 0]
+          ["Baseline Context", summary.baseline_context || 0],
+          ["Workflow Open", workflowSummary.open],
+          ["In Review", workflowSummary.inReview]
         ].map(([label, value]) => `
           <div class="metric-card command-center-kpi">
             <div class="label">${esc(label)}</div>
@@ -12489,7 +12697,7 @@ def dashboard_index_html():
         }
 
         if (tbody) {
-          tbody.innerHTML = `<tr><td colspan="10" class="muted">${esc(message)}</td></tr>`;
+          tbody.innerHTML = `<tr><td colspan="11" class="muted">${esc(message)}</td></tr>`;
         }
 
         return;
@@ -12522,6 +12730,7 @@ def dashboard_index_html():
                 <div><span>MAC address</span><code>${esc(row.mac_address || "-")}</code></div>
                 <div><span>Role</span><strong>${esc(row.role || row.classification || "Unknown")}</strong></div>
                 <div><span>Identity</span><strong>${esc(row.identity_confidence || "Unknown")}</strong></div>
+                ${ticketWorkflowMeta(row)}
               </div>
 
               <div class="siem-ticket-section">
@@ -12539,6 +12748,8 @@ def dashboard_index_html():
                 <div class="siem-ticket-action">${esc(row.recommended_action || "-")}</div>
               </div>
 
+              ${ticketWorkflowActions(row)}
+
               <div class="siem-ticket-counts">
                 <span class="siem-count-pill">Alerts ${esc(row.open_alerts || 0)}</span>
                 <span class="siem-count-pill">Events ${esc(row.recent_events || 0)}</span>
@@ -12550,6 +12761,7 @@ def dashboard_index_html():
         }).join("");
 
         bindSubjectLinks(ticketCards);
+        bindTicketWorkflowActions(ticketCards);
       }
 
       if (!tbody) return;
@@ -12578,6 +12790,7 @@ def dashboard_index_html():
               <span class="muted">${esc(row.priority_score || 0)}</span>
             </td>
             <td>${ticketSignalBadge(row)}</td>
+            <td>${ticketWorkflowBadge(row)}</td>
             <td>${subjectButton(row.subject_key || "-")}</td>
             <td><code>${esc(row.ip_address || "-")}</code></td>
             <td><code>${esc(row.mac_address || "-")}</code></td>
@@ -13275,7 +13488,7 @@ def command_dashboard(args):
             if not self.require_auth():
                 return
 
-            if route != "/api/investigate-asset":
+            if route not in {"/api/investigate-asset", "/api/ticket-status"}:
                 dashboard_json_response(
                     self,
                     {
@@ -13327,6 +13540,59 @@ def command_dashboard(args):
                 )
                 return
 
+
+            if route == "/api/ticket-status":
+                subject_key = str(
+                    payload.get("subject_key")
+                    or payload.get("identifier")
+                    or ""
+                ).strip()
+                raw_scope = str(payload.get("scope") or "").strip()
+                status = str(payload.get("status") or "").strip()
+                note = str(payload.get("note") or payload.get("reason") or "").strip()
+                analyst = str(payload.get("analyst") or "dashboard").strip()
+
+                try:
+                    scope = optional_network_scope(raw_scope) if raw_scope else None
+                    connection = self.open_connection()
+
+                    try:
+                        state = set_ticket_state(
+                            connection,
+                            subject_key,
+                            status,
+                            analyst=analyst,
+                            note=note,
+                        )
+                        investigation_center = dashboard_investigation_center_payload(
+                            connection,
+                            limit=25,
+                            scope=scope,
+                        )
+
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": True,
+                                "ticket_state": state,
+                                "investigation_center": investigation_center,
+                            },
+                        )
+                    finally:
+                        connection.close()
+                except (DeltaAegisError, ValueError) as exc:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "ticket_status_failed",
+                            "message": str(exc),
+                        },
+                        status=400,
+                    )
+
+                return
+
             identifier = str(payload.get("identifier") or "").strip()
             raw_scope = str(payload.get("scope") or "").strip()
             status = str(payload.get("status") or "").strip()
@@ -13349,6 +13615,25 @@ def command_dashboard(args):
                         status,
                         reason,
                     )
+
+                    ticket_state = None
+                    workflow_status = (
+                        str(status or "")
+                        .strip()
+                        .upper()
+                        .replace("-", "_")
+                        .replace(" ", "_")
+                    )
+
+                    if workflow_status in TICKET_WORKFLOW_STATUSES:
+                        ticket_state = set_ticket_state(
+                            connection,
+                            asset_key,
+                            workflow_status,
+                            analyst="dashboard",
+                            note=reason,
+                        )
+
                     connection.commit()
 
                     detail = dashboard_asset_detail_payload(
@@ -13364,6 +13649,7 @@ def command_dashboard(args):
                             "asset_key": asset_key,
                             "scope": resolved_scope,
                             "investigation": record,
+                            "ticket_state": ticket_state,
                             "asset_detail": detail,
                         },
                     )
