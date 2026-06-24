@@ -12573,7 +12573,7 @@ def dashboard_risk_payload(connection, limit, scope=None):
             }
         ]
 
-def dashboard_index_html():
+def dashboard_index_html_base_v025_operator_link():
     return """<!doctype html>
 <html lang="en">
 <head>
@@ -16787,6 +16787,44 @@ def dashboard_index_html():
 
 
 
+
+
+
+def dashboard_index_html(*args, **kwargs) -> str:
+    html_text = dashboard_index_html_base_v025_operator_link(*args, **kwargs)
+
+    operator_link = """
+<style id="deltaaegis-operator-link-style">
+  .operator-session-link {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    z-index: 9999;
+    border: 1px solid rgba(34, 211, 238, 0.34);
+    border-radius: 999px;
+    background: rgba(15, 23, 42, 0.92);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.32);
+    color: #67e8f9;
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 900;
+    letter-spacing: 0.02em;
+    text-decoration: none;
+  }
+  .operator-session-link:hover {
+    background: rgba(8, 145, 178, 0.22);
+  }
+</style>
+<a id="operator-session-link" class="operator-session-link" href="/operator" title="Open operator session page">Operator</a>
+"""
+
+    if 'id="operator-session-link"' in html_text:
+        return html_text
+
+    if "</body>" in html_text:
+        return html_text.replace("</body>", operator_link + "\n</body>", 1)
+
+    return html_text + operator_link
 
 
 def dashboard_operator_session_shell_html() -> str:

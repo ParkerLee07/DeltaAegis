@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+NETSNIPER_RUN_DIR="${1:-/home/parker/NetSniper/runs/20260623-123007}"
+
+fail() {
+    echo "[FAIL] $*" >&2
+    exit 1
+}
+
+pass() {
+    echo "[PASS] $*"
+}
+
+python3 -m py_compile deltaaegis.py \
+    || fail "deltaaegis.py does not compile"
+
+for needle in \
+    'def dashboard_index_html_base_v025_operator_link' \
+    'def dashboard_index_html(*args, **kwargs)' \
+    'operator-session-link' \
+    'href="/operator"' \
+    'Open operator session page'
+do
+    grep -Fq -- "$needle" deltaaegis.py || fail "missing v0.25 dashboard operator link marker: $needle"
+done
+
+python3 - <<'PY2'
+from pathlib import Path
+import http.client
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+
+import deltaaegis as da
+
+
+def free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def request(port: int, method: str, path: str, body: str | None = None, cookie: str | None = None):
+    headers = {}
+
+    if body is not None:
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+        headers["Content-Length"] = str(len(body.encode("utf-8")))
+
+    if cookie:
+        headers["Cookie"] = cookie
+
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+
+    try:
+        conn.request(method, path, body=body, headers=headers)
+        response = conn.getresponse()
+        data = response.read().decode("utf-8", errors="replace")
+        headers_out = {key.lower(): value for key, value in response.getheaders()}
+        return response.status, headers_out, data
+    finally:
+        conn.close()
+
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    db_path = Path(tmpdir) / "deltaaegis-v025-dashboard-link.db"
+
+    with da.connect(db_path) as connection:
+        da.create_access_user(
+            connection,
+            "dashboard.operator",
+            role="ADMIN",
+            password="dashboard-password",
+            display_name="Dashboard Operator",
+        )
+
+    port = free_port()
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "deltaaegis.py",
+            "--db",
+            str(db_path),
+            "dashboard",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--quiet",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    try:
+        for _ in range(50):
+            try:
+                status, headers, body = request(port, "GET", "/healthz")
+                if status == 200:
+                    break
+            except OSError:
+                time.sleep(0.1)
+        else:
+            raise AssertionError("dashboard did not start")
+
+        status, headers, body = request(
+            port,
+            "POST",
+            "/login",
+            body="username=dashboard.operator&password=dashboard-password",
+        )
+        assert status == 303, (status, headers, body)
+        session_cookie = headers.get("set-cookie", "").split(";", 1)[0]
+
+        status, headers, body = request(port, "GET", "/", cookie=session_cookie)
+        assert status == 200, (status, headers, body)
+        assert 'id="operator-session-link"' in body, body
+        assert 'href="/operator"' in body, body
+        assert "Operator" in body, body
+
+        status, headers, body = request(port, "GET", "/operator", cookie=session_cookie)
+        assert status == 200, (status, headers, body)
+        assert "Operator Session" in body, body
+
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+print("[PASS] synthetic v0.25 dashboard operator link validated")
+PY2
+
+./tools/validate_v0_25_operator_session_page.sh "$NETSNIPER_RUN_DIR" \
+    || fail "v0.25 operator session page validation failed"
+
+pass "DeltaAegis v0.25 dashboard operator link validation passed"
