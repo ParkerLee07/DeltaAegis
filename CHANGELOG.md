@@ -1,3 +1,26 @@
+# Changelog
+
+## DeltaAegis v0.25.0 — Dashboard Session UX
+
+### Added
+
+- Protected `/operator` page that loads authenticated operator identity from `/api/session`.
+- Dashboard `Operator` link for easier access to the operator session page.
+- Client-side `Refresh session` action on the operator page.
+- Client-side `Copy /api/session JSON` action on the operator page.
+- v0.25 release gate and single-purpose validators.
+
+### Preserved
+
+- Username/password login, logout, session cookies, and `/api/session` from v0.24.
+- API-token automation support through `X-DeltaAegis-Token`.
+- v0.23 access model and v0.22 triage marker coverage.
+
+### Security Notes
+
+- v0.25 does not add a new backend endpoint for session data.
+- Operator identity data continues to come from the protected `/api/session` route.
+
 ## DeltaAegis v0.24.0 — Dashboard Session Login
 
 DeltaAegis v0.24.0 replaces the failed browser API-token prompt direction with a proper enterprise-style dashboard login flow.

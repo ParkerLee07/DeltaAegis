@@ -12573,7 +12573,7 @@ def dashboard_risk_payload(connection, limit, scope=None):
             }
         ]
 
-def dashboard_index_html():
+def dashboard_index_html_base_v025_operator_link():
     return """<!doctype html>
 <html lang="en">
 <head>
@@ -16788,6 +16788,64 @@ def dashboard_index_html():
 
 
 
+
+
+def dashboard_index_html(*args, **kwargs) -> str:
+    html_text = dashboard_index_html_base_v025_operator_link(*args, **kwargs)
+
+    operator_link = """
+<style id="deltaaegis-operator-link-style">
+  .operator-session-link {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    z-index: 9999;
+    border: 1px solid rgba(34, 211, 238, 0.34);
+    border-radius: 999px;
+    background: rgba(15, 23, 42, 0.92);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.32);
+    color: #67e8f9;
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 900;
+    letter-spacing: 0.02em;
+    text-decoration: none;
+  }
+  .operator-session-link:hover {
+    background: rgba(8, 145, 178, 0.22);
+  }
+</style>
+<a id="operator-session-link" class="operator-session-link" href="/operator" title="Open operator session page">Operator</a>
+"""
+
+    if 'id="operator-session-link"' in html_text:
+        return html_text
+
+    if "</body>" in html_text:
+        return html_text.replace("</body>", operator_link + "\n</body>", 1)
+
+    return html_text + operator_link
+
+
+def dashboard_operator_session_shell_html_base_v025_actions() -> str:
+    return '<!doctype html>\n<html lang="en">\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-width,initial-scale=1">\n  <title>DeltaAegis Operator Session</title>\n  <style>\n    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #020617; color: #e2e8f0; }\n    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, rgba(34, 211, 238, 0.13), transparent 34rem), #020617; }\n    main { width: min(900px, calc(100vw - 32px)); margin: 0 auto; padding: 44px 0; }\n    .panel { border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 24px; background: rgba(15, 23, 42, 0.92); box-shadow: 0 24px 80px rgba(0, 0, 0, 0.34); padding: 28px; }\n    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: 0.16em; text-transform: uppercase; }\n    h1 { margin: 8px 0 8px; font-size: 32px; letter-spacing: -0.04em; }\n    p { margin: 0 0 24px; color: #94a3b8; line-height: 1.55; }\n    table { width: 100%; border-collapse: collapse; margin: 22px 0; overflow: hidden; border-radius: 16px; }\n    th, td { border-bottom: 1px solid rgba(148, 163, 184, 0.14); padding: 13px 14px; text-align: left; }\n    th { width: 180px; color: #94a3b8; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }\n    td { color: #f8fafc; font-weight: 700; }\n    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }\n    a { border: 1px solid rgba(34, 211, 238, 0.28); border-radius: 999px; color: #67e8f9; padding: 9px 13px; text-decoration: none; font-size: 13px; font-weight: 900; }\n    a.logout { border-color: rgba(248, 113, 113, 0.34); color: #fecaca; }\n    .status { border: 1px solid rgba(148, 163, 184, 0.18); border-radius: 16px; background: rgba(2, 6, 23, 0.38); color: #cbd5e1; margin-top: 18px; padding: 12px 14px; font-weight: 700; }\n  </style>\n</head>\n<body>\n  <main>\n    <section class="panel">\n      <div class="eyebrow">DeltaAegis</div>\n      <h1>Operator Session</h1>\n      <p>This page loads the current operator identity from the protected <code>/api/session</code> endpoint.</p>\n      <div class="status" id="operator-session-status">Loading session…</div>\n      <table id="operator-session-table" hidden>\n        <tbody>\n          <tr><th>Username</th><td id="operator-session-username">—</td></tr>\n          <tr><th>Display name</th><td id="operator-session-display-name">—</td></tr>\n          <tr><th>Role</th><td id="operator-session-role">—</td></tr>\n          <tr><th>Auth type</th><td id="operator-session-auth-type">—</td></tr>\n          <tr><th>Session ID</th><td id="operator-session-id">—</td></tr>\n          <tr><th>Expires at</th><td id="operator-session-expires-at">—</td></tr>\n        </tbody>\n      </table>\n      <div class="actions">\n        <a href="/">Back to dashboard</a>\n        <a href="/api/session">View raw /api/session JSON</a>\n        <a class="logout" href="/logout">Logout</a>\n      </div>\n    </section>\n  </main>\n  <script>\n    function setText(id, value) {\n      const element = document.getElementById(id);\n      if (element) { element.textContent = value || "—"; }\n    }\n    async function loadOperatorSession() {\n      const status = document.getElementById("operator-session-status");\n      const table = document.getElementById("operator-session-table");\n      try {\n        const response = await fetch("/api/session", { credentials: "same-origin", cache: "no-store" });\n        if (response.status === 401 || response.status === 403) { window.location.href = "/login"; return; }\n        if (!response.ok) { status.textContent = "Session lookup failed."; return; }\n        const session = await response.json();\n        const user = session.user || {};\n        setText("operator-session-username", user.username);\n        setText("operator-session-display-name", user.display_name);\n        setText("operator-session-role", user.role || session.role);\n        setText("operator-session-auth-type", session.auth_type);\n        setText("operator-session-id", session.session_id);\n        setText("operator-session-expires-at", session.expires_at);\n        status.textContent = "Session loaded.";\n        table.hidden = false;\n      } catch (error) {\n        status.textContent = "Session lookup failed.";\n      }\n    }\n    loadOperatorSession();\n  </script>\n</body>\n</html>'
+
+
+
+
+def dashboard_operator_session_shell_html() -> str:
+    html_text = dashboard_operator_session_shell_html_base_v025_actions()
+
+    actions = '<style id="deltaaegis-operator-actions-style">\n  .operator-action-button {\n    border: 1px solid rgba(34, 211, 238, 0.28);\n    border-radius: 999px;\n    background: rgba(8, 145, 178, 0.14);\n    color: #67e8f9;\n    cursor: pointer;\n    padding: 9px 13px;\n    font-size: 13px;\n    font-weight: 900;\n  }\n  .operator-action-button:hover {\n    background: rgba(8, 145, 178, 0.26);\n  }\n  .operator-action-output {\n    border: 1px solid rgba(148, 163, 184, 0.18);\n    border-radius: 16px;\n    background: rgba(2, 6, 23, 0.55);\n    color: #cbd5e1;\n    margin-top: 18px;\n    max-height: 260px;\n    overflow: auto;\n    padding: 14px;\n    white-space: pre-wrap;\n    word-break: break-word;\n    font-size: 12px;\n  }\n</style>\n<script id="deltaaegis-operator-actions-script">\n(function () {\n  function ensureActionControls() {\n    const actions = document.querySelector(".actions");\n\n    if (!actions || document.getElementById("operator-refresh-session")) {\n      return;\n    }\n\n    const refreshButton = document.createElement("button");\n    refreshButton.id = "operator-refresh-session";\n    refreshButton.className = "operator-action-button";\n    refreshButton.type = "button";\n    refreshButton.textContent = "Refresh session";\n\n    const copyButton = document.createElement("button");\n    copyButton.id = "operator-copy-session-json";\n    copyButton.className = "operator-action-button";\n    copyButton.type = "button";\n    copyButton.textContent = "Copy /api/session JSON";\n\n    actions.insertBefore(copyButton, actions.firstChild);\n    actions.insertBefore(refreshButton, actions.firstChild);\n\n    const output = document.createElement("pre");\n    output.id = "operator-session-json-output";\n    output.className = "operator-action-output";\n    output.hidden = true;\n    actions.parentNode.insertBefore(output, actions.nextSibling);\n\n    refreshButton.addEventListener("click", function () {\n      if (typeof loadOperatorSession === "function") {\n        loadOperatorSession();\n      }\n    });\n\n    copyButton.addEventListener("click", async function () {\n      const response = await fetch("/api/session", {\n        credentials: "same-origin",\n        cache: "no-store"\n      });\n\n      if (response.status === 401 || response.status === 403) {\n        window.location.href = "/login";\n        return;\n      }\n\n      const session = await response.json();\n      const jsonText = JSON.stringify(session, null, 2);\n      output.textContent = jsonText;\n      output.hidden = false;\n\n      try {\n        await navigator.clipboard.writeText(jsonText);\n        copyButton.textContent = "Copied /api/session JSON";\n        window.setTimeout(function () {\n          copyButton.textContent = "Copy /api/session JSON";\n        }, 1600);\n      } catch (error) {\n        copyButton.textContent = "Copy unavailable";\n        window.setTimeout(function () {\n          copyButton.textContent = "Copy /api/session JSON";\n        }, 1600);\n      }\n    });\n  }\n\n  if (document.readyState === "loading") {\n    document.addEventListener("DOMContentLoaded", ensureActionControls);\n  } else {\n    ensureActionControls();\n  }\n})();\n</script>'
+
+    if 'id="deltaaegis-operator-actions-script"' in html_text:
+        return html_text
+
+    if "</body>" in html_text:
+        return html_text.replace("</body>", actions + "\n</body>", 1)
+
+    return html_text + actions
+
 def dashboard_session_payload(actor: dict[str, Any] | None) -> dict[str, Any]:
     if not actor:
         return {
@@ -17076,6 +17134,11 @@ def command_dashboard(args):
             return connect(db_path)
 
         def do_GET(self):
+            operator_route = self.path.split("?", 1)[0]
+            if operator_route == "/operator":
+                dashboard_html_response(self, dashboard_operator_session_shell_html())
+                return
+
             parsed = urlparse(self.path)
             route = parsed.path
             query = parse_qs(parsed.query)
@@ -17651,7 +17714,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.24.0 Enterprise Access Control, Operator Triage Intelligence, Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.25.0 — Dashboard Session UX Enterprise Access Control, Operator Triage Intelligence, Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)

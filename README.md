@@ -1,5 +1,19 @@
 # DeltaAegis
 
+## Current Release — v0.25.0
+
+DeltaAegis v0.25.0 — Dashboard Session UX adds a visible operator session experience on top of the v0.24 username/password login foundation.
+
+### v0.25.0 Highlights
+
+- Protected `/operator` session shell page.
+- Dashboard `Operator` link for opening the session page.
+- Client-side session refresh action.
+- Client-side copy action for the existing protected `/api/session` JSON.
+- No new backend session-data endpoint added.
+- v0.24 dashboard session login compatibility preserved.
+
+
 **Self-hosted, delta-first network-state monitoring and investigation console powered by NetSniper
 telemetry.**
 
