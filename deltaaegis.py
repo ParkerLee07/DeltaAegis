@@ -23,7 +23,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -52,6 +52,9 @@ ACCESS_ROLE_RANKS = {
 ACCESS_PASSWORD_ALGORITHM = "pbkdf2_sha256"
 ACCESS_PASSWORD_ITERATIONS = 260000
 ACCESS_API_TOKEN_PREFIX = "da"
+
+ACCESS_SESSION_COOKIE_NAME = "deltaaegis_session"
+ACCESS_SESSION_TTL_SECONDS = 8 * 60 * 60
 
 
 
@@ -915,6 +918,322 @@ def record_access_audit_event(
 
     return int(cursor.lastrowid)
 
+
+def ensure_dashboard_session_schema(connection: sqlite3.Connection) -> None:
+    ensure_enterprise_access_schema(connection)
+
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS access_sessions ("
+        "session_id TEXT PRIMARY KEY, "
+        "user_id TEXT NOT NULL, "
+        "session_token_hash TEXT NOT NULL UNIQUE, "
+        "role TEXT NOT NULL, "
+        "is_active INTEGER NOT NULL DEFAULT 1, "
+        "created_at TEXT NOT NULL, "
+        "last_seen_at TEXT, "
+        "expires_at TEXT NOT NULL, "
+        "source_ip TEXT, "
+        "user_agent TEXT, "
+        "ended_at TEXT, "
+        "end_reason TEXT, "
+        "FOREIGN KEY(user_id) REFERENCES access_users(user_id)"
+        ")"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_sessions_user_id "
+        "ON access_sessions(user_id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_sessions_token_hash "
+        "ON access_sessions(session_token_hash)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_sessions_expires_at "
+        "ON access_sessions(expires_at)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_sessions_active "
+        "ON access_sessions(is_active)"
+    )
+
+
+def generate_dashboard_session_token() -> str:
+    return "ds_" + secrets.token_urlsafe(32)
+
+
+def hash_dashboard_session_token(token: str) -> str:
+    return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+
+
+def dashboard_session_expiry(ttl_seconds: int = ACCESS_SESSION_TTL_SECONDS) -> str:
+    ttl = max(300, int(ttl_seconds or ACCESS_SESSION_TTL_SECONDS))
+    return (datetime.now(timezone.utc) + timedelta(seconds=ttl)).isoformat()
+
+
+def dashboard_user_login(
+    connection: sqlite3.Connection,
+    username: str,
+    password: str,
+    source_ip: str | None = None,
+    user_agent: str | None = None,
+) -> dict[str, Any] | None:
+    ensure_dashboard_session_schema(connection)
+
+    normalized_username = normalize_access_username(username)
+    user = access_user_by_username(connection, normalized_username)
+
+    if not user or not int(user.get("is_active") or 0):
+        record_access_audit_event(
+            connection,
+            action="LOGIN_FAILED",
+            actor={
+                "username": normalized_username or str(username or "").strip(),
+                "role": None,
+            },
+            target_type="access_user",
+            target_key=normalized_username or str(username or "").strip(),
+            source_ip=source_ip,
+            user_agent=user_agent,
+            details={"reason": "unknown_or_inactive_user"},
+        )
+        connection.commit()
+        return None
+
+    if not verify_access_password(password, user.get("password_hash") or ""):
+        record_access_audit_event(
+            connection,
+            action="LOGIN_FAILED",
+            actor={
+                "user_id": user.get("user_id"),
+                "username": user.get("username"),
+                "role": user.get("role"),
+            },
+            target_type="access_user",
+            target_key=user.get("username"),
+            source_ip=source_ip,
+            user_agent=user_agent,
+            details={"reason": "invalid_password"},
+        )
+        connection.commit()
+        return None
+
+    return create_dashboard_session(
+        connection,
+        user,
+        source_ip=source_ip,
+        user_agent=user_agent,
+    )
+
+
+def create_dashboard_session(
+    connection: sqlite3.Connection,
+    user: dict[str, Any],
+    source_ip: str | None = None,
+    user_agent: str | None = None,
+    ttl_seconds: int = ACCESS_SESSION_TTL_SECONDS,
+) -> dict[str, Any]:
+    ensure_dashboard_session_schema(connection)
+
+    session_id = str(uuid.uuid4())
+    session_token = generate_dashboard_session_token()
+    session_hash = hash_dashboard_session_token(session_token)
+    now = utc_now()
+    expires_at = dashboard_session_expiry(ttl_seconds)
+
+    role = normalize_access_role(user.get("role") or "VIEWER")
+
+    connection.execute(
+        "INSERT INTO access_sessions ("
+        "session_id, user_id, session_token_hash, role, is_active, "
+        "created_at, last_seen_at, expires_at, source_ip, user_agent"
+        ") VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
+        (
+            session_id,
+            user.get("user_id"),
+            session_hash,
+            role,
+            now,
+            now,
+            expires_at,
+            source_ip,
+            user_agent,
+        ),
+    )
+
+    actor = {
+        "user_id": user.get("user_id"),
+        "username": user.get("username"),
+        "role": role,
+    }
+
+    record_access_audit_event(
+        connection,
+        action="LOGIN_SUCCESS",
+        actor=actor,
+        target_type="access_session",
+        target_key=session_id,
+        source_ip=source_ip,
+        user_agent=user_agent,
+        details={
+            "session_id": session_id,
+            "expires_at": expires_at,
+            "role": role,
+        },
+    )
+    connection.commit()
+
+    return {
+        "session_id": session_id,
+        "session_token": session_token,
+        "session_token_hash": session_hash,
+        "user_id": user.get("user_id"),
+        "username": user.get("username"),
+        "display_name": user.get("display_name"),
+        "role": role,
+        "expires_at": expires_at,
+    }
+
+
+def session_is_expired(expires_at: str | None) -> bool:
+    if not expires_at:
+        return True
+
+    try:
+        expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+
+    return expiry <= datetime.now(timezone.utc)
+
+
+def authenticate_dashboard_session(
+    connection: sqlite3.Connection,
+    session_token: str,
+    required_role: str = "VIEWER",
+    update_last_seen: bool = True,
+) -> dict[str, Any] | None:
+    ensure_dashboard_session_schema(connection)
+
+    token = str(session_token or "").strip()
+
+    if not token:
+        return None
+
+    session_hash = hash_dashboard_session_token(token)
+
+    row = connection.execute(
+        "SELECT "
+        "s.session_id, "
+        "s.user_id, "
+        "s.role AS session_role, "
+        "s.is_active AS session_active, "
+        "s.created_at AS session_created_at, "
+        "s.last_seen_at, "
+        "s.expires_at, "
+        "u.username, "
+        "u.display_name, "
+        "u.role AS user_role, "
+        "u.is_active AS user_active "
+        "FROM access_sessions s "
+        "JOIN access_users u ON u.user_id = s.user_id "
+        "WHERE s.session_token_hash = ?",
+        (session_hash,),
+    ).fetchone()
+
+    if not row:
+        return None
+
+    actor = {
+        "auth_type": "dashboard_session",
+        "session_id": row["session_id"],
+        "user_id": row["user_id"],
+        "username": row["username"],
+        "display_name": row["display_name"],
+        "role": normalize_access_role(row["session_role"] or row["user_role"] or "VIEWER"),
+        "expires_at": row["expires_at"],
+    }
+
+    if not int(row["session_active"] or 0) or not int(row["user_active"] or 0):
+        return None
+
+    if session_is_expired(row["expires_at"]):
+        expire_dashboard_session(
+            connection,
+            token,
+            actor=actor,
+            reason="expired",
+            commit=True,
+        )
+        return None
+
+    if not access_role_allows(actor["role"], required_role):
+        return None
+
+    if update_last_seen:
+        now = utc_now()
+        connection.execute(
+            "UPDATE access_sessions "
+            "SET last_seen_at = ? "
+            "WHERE session_id = ?",
+            (now, row["session_id"]),
+        )
+        connection.commit()
+        actor["last_seen_at"] = now
+
+    return actor
+
+
+def expire_dashboard_session(
+    connection: sqlite3.Connection,
+    session_token: str,
+    actor: dict[str, Any] | None = None,
+    reason: str = "logout",
+    commit: bool = True,
+) -> bool:
+    ensure_dashboard_session_schema(connection)
+
+    token = str(session_token or "").strip()
+
+    if not token:
+        return False
+
+    session_hash = hash_dashboard_session_token(token)
+    now = utc_now()
+
+    row = connection.execute(
+        "SELECT session_id, user_id, role "
+        "FROM access_sessions "
+        "WHERE session_token_hash = ?",
+        (session_hash,),
+    ).fetchone()
+
+    if not row:
+        return False
+
+    connection.execute(
+        "UPDATE access_sessions "
+        "SET is_active = 0, ended_at = ?, end_reason = ? "
+        "WHERE session_id = ?",
+        (now, str(reason or "logout"), row["session_id"]),
+    )
+
+    record_access_audit_event(
+        connection,
+        action="LOGOUT" if str(reason or "").lower() == "logout" else "SESSION_EXPIRED",
+        actor=actor,
+        target_type="access_session",
+        target_key=row["session_id"],
+        details={"reason": reason},
+    )
+
+    if commit:
+        connection.commit()
+
+    return True
+
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(db_path)
@@ -958,6 +1277,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
     backfill_snapshot_network_scopes(connection)
     ensure_scoped_asset_lifecycle_schema(connection)
     ensure_enterprise_access_schema(connection)
+    ensure_dashboard_session_schema(connection)
     connection.commit()
     return connection
 
