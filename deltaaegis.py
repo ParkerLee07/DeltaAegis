@@ -9568,15 +9568,131 @@ def investigation_center_summary(rows):
 
 
 
-def dashboard_investigation_center_payload(connection, limit=25, scope=None):
+
+TICKET_SIGNAL_FILTER_STATES = {
+    "ACTIONABLE",
+    "MEANINGFUL_CHANGE",
+    "BASELINE_CONTEXT",
+}
+
+
+def normalize_ticket_status_filter(value):
+    if value is None:
+        return None
+
+    text = str(value).strip()
+
+    if not text:
+        return None
+
+    normalized = text.upper().replace("-", "_").replace(" ", "_")
+
+    if normalized in {"ALL", "ANY", "*"}:
+        return None
+
+    return normalize_ticket_workflow_status(normalized)
+
+
+def normalize_ticket_signal_filter(value):
+    if value is None:
+        return None
+
+    text = str(value).strip()
+
+    if not text:
+        return None
+
+    normalized = text.upper().replace("-", "_").replace(" ", "_")
+
+    aliases = {
+        "ALL": None,
+        "ANY": None,
+        "*": None,
+        "MEANINGFUL": "MEANINGFUL_CHANGE",
+        "MEANINGFUL_CHANGE": "MEANINGFUL_CHANGE",
+        "BASELINE": "BASELINE_CONTEXT",
+        "BASELINE_CONTEXT": "BASELINE_CONTEXT",
+        "ACTION": "ACTIONABLE",
+        "ACTIONABLE": "ACTIONABLE",
+    }
+
+    normalized = aliases.get(normalized, normalized)
+
+    if normalized is None:
+        return None
+
+    if normalized not in TICKET_SIGNAL_FILTER_STATES:
+        raise DeltaAegisError(
+            "Invalid ticket signal filter. "
+            "Use ACTIONABLE, MEANINGFUL_CHANGE, BASELINE_CONTEXT, or ALL."
+        )
+
+    return normalized
+
+
+def filter_investigation_center_rows(
+    rows,
+    ticket_status=None,
+    ticket_signal=None,
+):
+    status_filter = normalize_ticket_status_filter(ticket_status)
+    signal_filter = normalize_ticket_signal_filter(ticket_signal)
+
+    filtered = []
+
+    for row in rows:
+        if status_filter:
+            row_status = str(row.get("ticket_status") or "OPEN").upper()
+            if row_status != status_filter:
+                continue
+
+        if signal_filter:
+            row_signal = str(row.get("ticket_signal_state") or "ACTIONABLE").upper()
+            if row_signal != signal_filter:
+                continue
+
+        filtered.append(row)
+
+    return filtered
+
+
+def investigation_center_filter_payload(ticket_status=None, ticket_signal=None):
+    status_filter = normalize_ticket_status_filter(ticket_status)
+    signal_filter = normalize_ticket_signal_filter(ticket_signal)
+
+    return {
+        "ticket_status": status_filter or "ALL",
+        "ticket_signal": signal_filter or "ALL",
+        "ticket_statuses": ["ALL", "OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"],
+        "ticket_signals": ["ALL", "ACTIONABLE", "MEANINGFUL_CHANGE", "BASELINE_CONTEXT"],
+    }
+
+
+
+def dashboard_investigation_center_payload(
+    connection,
+    limit=25,
+    scope=None,
+    ticket_status=None,
+    ticket_signal=None,
+):
     requested_limit = risk_int(limit, 25)
 
     if requested_limit <= 0:
         requested_limit = 25
 
-    query_limit = max(requested_limit * 4, 50)
-
     try:
+        filters = investigation_center_filter_payload(
+            ticket_status=ticket_status,
+            ticket_signal=ticket_signal,
+        )
+        has_filter = (
+            filters["ticket_status"] != "ALL"
+            or filters["ticket_signal"] != "ALL"
+        )
+        query_limit = max(requested_limit * (12 if has_filter else 4), 50)
+        if has_filter:
+            query_limit = max(query_limit, 200)
         rows = investigation_center_rows(
             connection,
             limit=query_limit,
@@ -9584,11 +9700,17 @@ def dashboard_investigation_center_payload(connection, limit=25, scope=None):
         )
         rows = tune_investigation_center_ticket_signals(rows)
         rows = apply_ticket_states_to_rows(connection, rows)
+        rows = filter_investigation_center_rows(
+            rows,
+            ticket_status=filters["ticket_status"],
+            ticket_signal=filters["ticket_signal"],
+        )
         rows = rows[:requested_limit]
 
         return {
             "available": True,
             "selected_scope": scope,
+            "filters": filters,
             "item_count": len(rows),
             "summary": investigation_center_summary(rows),
             "items": rows,
@@ -9597,6 +9719,7 @@ def dashboard_investigation_center_payload(connection, limit=25, scope=None):
         return {
             "available": False,
             "selected_scope": scope,
+            "filters": investigation_center_filter_payload(),
             "item_count": 0,
             "summary": investigation_center_summary([]),
             "items": [],
@@ -9776,6 +9899,8 @@ def command_investigation_center(args):
             connection,
             limit=args.limit,
             scope=scope,
+        ticket_status=args.ticket_status,
+        ticket_signal=args.ticket_signal,
         )
     finally:
         connection.close()
@@ -13730,6 +13855,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("investigation-center", help="Show prioritized investigation command center queue")
     p.add_argument("--limit", type=int, default=25)
     p.add_argument("--scope")
+    p.add_argument("--ticket-status", choices=["ALL", "OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"], default="ALL", help="Filter Investigation Center tickets by workflow status")
+    p.add_argument("--ticket-signal", choices=["ALL", "ACTIONABLE", "MEANINGFUL_CHANGE", "BASELINE_CONTEXT"], default="ALL", help="Filter Investigation Center tickets by signal label")
+
     p = sub.add_parser("port-behavior", help="Show MAC-port behavior changes across accepted scans")
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--scope")
