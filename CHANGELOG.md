@@ -1,3 +1,47 @@
+## v0.19.0 — Workflow Filters and Operator Views
+
+DeltaAegis v0.19.0 makes the v0.18 investigation workflow easier to operate by adding workflow filters, signal filters, total-vs-visible counters, CLI operator context, and report workflow summaries.
+
+### Added
+
+- Investigation Center backend filters for workflow status:
+  - `ALL`
+  - `OPEN`
+  - `IN_REVIEW`
+  - `RESOLVED`
+  - `SUPPRESSED`
+- Investigation Center backend filters for ticket signal:
+  - `ALL`
+  - `ACTIONABLE`
+  - `MEANINGFUL_CHANGE`
+  - `BASELINE_CONTEXT`
+- Dashboard filter controls for workflow state and signal label.
+- Filter-aware `/api/investigation-center` query parameters:
+  - `ticket_status`
+  - `ticket_signal`
+- Dashboard counters for visible filtered items and total queue items.
+- Full-queue workflow summary counters.
+- Full-queue signal summary counters.
+- CLI operator context showing active filters, visible-vs-total counts, workflow summary, and signal summary.
+- Markdown report Investigation Queue Operator Summary.
+- Workflow and Signal columns in the report Investigation Command Center table.
+- v0.19 release validator covering backend filters, dashboard filters, workflow counters, operator views, and release validation.
+
+### Changed
+
+- Investigation Center dashboard summaries now distinguish the current filtered view from the total queue.
+- Ticket workflow actions refresh the current filtered Investigation Center view.
+- Report dashboard usage notes now document ticket filter API parameters.
+
+### Validation
+
+- `tools/validate_v0_19_backend_filters.sh`
+- `tools/validate_v0_19_dashboard_filters.sh`
+- `tools/validate_v0_19_workflow_counters.sh`
+- `tools/validate_v0_19_operator_views.sh`
+- `tools/validate_v0_19_release.sh`
+
+
 ## v0.18.0 — Investigation Workflow Actions
 
 DeltaAegis v0.18.0 turns the SIEM ticket queue into a persistent analyst workflow.

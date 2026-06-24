@@ -14,36 +14,42 @@ Markdown reports, MAC-port behavior correlation, and a local dashboard.
 
 ## Current Release
 
-**DeltaAegis v0.18.0 — Investigation Workflow Actions**
+**DeltaAegis v0.19.0 — Workflow Filters and Operator Views**
 
-v0.18.0 turns the v0.17 SIEM ticket queue into a persistent analyst workflow.
-It adds ticket state persistence, ticket history, dashboard workflow controls,
-CLI workflow commands, no-op history protection, and a consolidated release gate
-for the new workflow contract.
+v0.19.0 makes the v0.18 investigation workflow easier to operate day to day.
+It adds workflow and signal filters, dashboard filter controls, total-vs-visible
+queue counters, CLI operator context, report workflow summaries, and a v0.19
+release gate for the operator-view workflow.
 
-Current feature baseline: **DeltaAegis v0.18.0 — Investigation Workflow Actions**.
+Current feature baseline: **DeltaAegis v0.19.0 — Workflow Filters and Operator Views**.
 
-DeltaAegis v0.18.0 adds:
+DeltaAegis v0.19.0 adds:
 
-- Persistent investigation ticket states:
+- Investigation Center backend filters for workflow status:
+  - `ALL`
   - `OPEN`
   - `IN_REVIEW`
   - `RESOLVED`
   - `SUPPRESSED`
-- Ticket workflow history with previous state, new state, analyst, note, and timestamp context.
-- CLI workflow commands:
-  - `ticket-status`
-  - `ticket-list`
-  - `ticket-history`
-- Dashboard ticket workflow badges and ticket-card actions for Open, In Review, Resolve, and Suppress.
-- `/api/ticket-status` for dashboard-driven ticket workflow updates.
-- Compatibility sync from legacy asset investigation status updates into ticket workflow state when statuses align.
-- No-op workflow protection so repeated same-status clicks do not create noisy `RESOLVED -> RESOLVED` audit rows.
-- Consolidated v0.18 release validation for the ticket workflow contract.
+- Investigation Center backend filters for ticket signal:
+  - `ALL`
+  - `ACTIONABLE`
+  - `MEANINGFUL_CHANGE`
+  - `BASELINE_CONTEXT`
+- Dashboard filter controls for workflow state and signal label.
+- Filter-aware Investigation Center API query parameters:
+  - `ticket_status`
+  - `ticket_signal`
+- Dashboard counters that separate visible filtered items from the total queue.
+- Workflow and signal summary counters across the full queue.
+- CLI operator context showing active filters, visible-vs-total counts, workflow summary, and signal summary.
+- Markdown report operator summaries with Workflow and Signal columns.
+- v0.19 validators for backend filters, dashboard filters, workflow counters, operator views, and release validation.
 
 Compatibility retained:
 
 - DeltaAegis v0.18.0 — Investigation Workflow Actions remains available.
+- DeltaAegis v0.17.0 — Executive SIEM Dashboard Refresh remains available.
 - DeltaAegis v0.16.0 — Investigation Command Center remains available.
 - DeltaAegis v0.15.0 — MAC-Port Behavior Correlation remains available.
 - DeltaAegis v0.14.0 — NetSniper Scan Orchestration remains available.
@@ -119,6 +125,8 @@ fact.
 - Supports persistent investigation ticket states with `OPEN`, `IN_REVIEW`, `RESOLVED`, and `SUPPRESSED` workflow states.
 - Records ticket workflow history with analyst notes and protects against repeated same-status audit noise.
 - Supports dashboard and CLI-driven ticket workflow updates through `/api/ticket-status`, `ticket-status`, `ticket-list`, and `ticket-history`.
+- Supports operator filters for workflow status and signal label in the Investigation Center API, CLI, and dashboard.
+- Separates visible filtered queue counts from total workflow and signal summaries.
 
 ### NetSniper Intelligence
 
@@ -181,6 +189,8 @@ Dashboard features include:
 - asset investigation panel
 - investigation status controls
 - ticket workflow badges and action buttons
+- ticket workflow and signal filter controls
+- total queue, visible queue, workflow-state, and signal-label counters
 - NetSniper intelligence summary
 - NetSniper v1.7 host evidence drilldown
 
@@ -207,6 +217,18 @@ DeltaAegis does not require a separate database server.
 
 
 ## Recent Releases
+
+### v0.19.0 — Workflow Filters and Operator Views
+
+- Adds Investigation Center backend filters for workflow status and ticket signal.
+- Adds dashboard filter controls for workflow state and signal label.
+- Adds filter-aware `/api/investigation-center` query parameters: `ticket_status` and `ticket_signal`.
+- Adds total queue versus visible filtered queue counters.
+- Adds workflow and signal summary counters.
+- Adds CLI operator context showing active filters, visible-vs-total counts, workflow summary, and signal summary.
+- Adds report operator summaries with Workflow and Signal columns.
+- Adds v0.19 release validation for backend filters, dashboard filters, workflow counters, and operator views.
+
 
 ### v0.18.0 — Investigation Workflow Actions
 
@@ -532,6 +554,17 @@ pytest -q
 ---
 
 ## Version Highlights
+
+### v0.19.0 — Workflow Filters and Operator Views
+
+- Adds Investigation Center backend filters for workflow status and ticket signal.
+- Adds dashboard filter controls for workflow state and signal label.
+- Adds filter-aware `/api/investigation-center` query parameters: `ticket_status` and `ticket_signal`.
+- Adds total queue versus visible filtered queue counters.
+- Adds workflow and signal summary counters.
+- Adds CLI operator context showing active filters, visible-vs-total counts, workflow summary, and signal summary.
+- Adds report operator summaries with Workflow and Signal columns.
+- Adds v0.19 release validation for backend filters, dashboard filters, workflow counters, and operator views.
 
 ### v0.18.0 — Investigation Workflow Actions
 

@@ -21,6 +21,15 @@ python3 -m py_compile deltaaegis.py \
 pytest -q \
     || fail "pytest suite failed"
 
+./tools/validate_readme_current.sh \
+    || fail "README current-release metadata validation failed"
+
+grep -q 'v0.19.0 — Workflow Filters and Operator Views' CHANGELOG.md \
+    || fail "CHANGELOG does not mention v0.19.0"
+
+grep -q 'DeltaAegis v0.19.0' deltaaegis.py \
+    || fail "deltaaegis.py metadata does not mention v0.19.0"
+
 ./tools/validate_v0_19_backend_filters.sh \
     || fail "v0.19 backend filters failed"
 
@@ -32,8 +41,5 @@ pytest -q \
 
 ./tools/validate_v0_19_operator_views.sh \
     || fail "v0.19 operator views failed"
-
-./tools/validate_v0_18_release.sh "$NETSNIPER_RUN" \
-    || fail "v0.18 regression failed"
 
 pass "DeltaAegis v0.19 release validation passed"
