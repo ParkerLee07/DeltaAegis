@@ -26,6 +26,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Iterable
+import html
 
 DEFAULT_DB = Path.home() / "DeltaAegis" / "data" / "deltaaegis.db"
 DEFAULT_RUNS = Path.home() / "NetSniper" / "runs"
@@ -2489,6 +2490,48 @@ def command_users(args: argparse.Namespace) -> int:
             f"updated={row.get('updated_at') or '-'} "
             f"id={row['user_id']}"
         )
+
+    return 0
+
+
+
+def command_user_password(args: argparse.Namespace) -> int:
+    username = normalize_access_username(args.username)
+
+    with connect(args.db) as connection:
+        user = access_user_by_username(connection, username)
+
+        if not user:
+            raise DeltaAegisError(f"Access user not found: {username}")
+
+        password_hash = hash_access_password(args.password)
+        now = utc_now()
+
+        connection.execute(
+            "UPDATE access_users "
+            "SET password_hash = ?, updated_at = ? "
+            "WHERE user_id = ?",
+            (password_hash, now, user["user_id"]),
+        )
+
+        actor = {
+            "username": args.actor or "local_admin",
+            "role": "ADMIN",
+        }
+
+        record_access_audit_event(
+            connection,
+            action="ACCESS_USER_PASSWORD_SET",
+            actor=actor,
+            target_type="access_user",
+            target_key=username,
+            details={"username": username},
+        )
+        connection.commit()
+
+    print("DeltaAegis access user password updated")
+    print("=======================================")
+    print(f"Username: {username}")
 
     return 0
 
@@ -16743,12 +16786,135 @@ def dashboard_index_html():
 """
 
 
+
+def dashboard_has_active_password_users(connection: sqlite3.Connection) -> bool:
+    ensure_dashboard_session_schema(connection)
+
+    row = connection.execute(
+        "SELECT COUNT(*) AS user_count "
+        "FROM access_users "
+        "WHERE is_active = 1 "
+        "AND password_hash IS NOT NULL "
+        "AND password_hash != ''"
+    ).fetchone()
+
+    return bool(row and int(row["user_count"] or 0) > 0)
+
+
+def dashboard_session_cookie_header(
+    session_token: str,
+    max_age: int = ACCESS_SESSION_TTL_SECONDS,
+) -> str:
+    return (
+        f"{ACCESS_SESSION_COOKIE_NAME}={session_token}; "
+        "Path=/; "
+        f"Max-Age={max(300, int(max_age or ACCESS_SESSION_TTL_SECONDS))}; "
+        "HttpOnly; "
+        "SameSite=Lax"
+    )
+
+
+def dashboard_clear_session_cookie_header() -> str:
+    return (
+        f"{ACCESS_SESSION_COOKIE_NAME}=; "
+        "Path=/; "
+        "Max-Age=0; "
+        "HttpOnly; "
+        "SameSite=Lax"
+    )
+
+
+def dashboard_redirect_response(
+    handler,
+    location: str,
+    cookie_header: str | None = None,
+) -> None:
+    handler.send_response(303)
+    handler.send_header("Location", location)
+    handler.send_header("Cache-Control", "no-store")
+
+    if cookie_header:
+        handler.send_header("Set-Cookie", cookie_header)
+
+    handler.end_headers()
+
+
+def dashboard_login_html(
+    message: str = "",
+    username: str = "",
+) -> str:
+    safe_message = html.escape(str(message or ""))
+    safe_username = html.escape(str(username or ""))
+
+    error_block = ""
+
+    if safe_message:
+        error_block = (
+            '<div class="login-error">'
+            + safe_message
+            + '</div>'
+        )
+
+    lines = [
+        '<!doctype html>',
+        '<html lang="en">',
+        '<head>',
+        '  <meta charset="utf-8">',
+        '  <meta name="viewport" content="width=device-width,initial-scale=1">',
+        '  <title>DeltaAegis Login</title>',
+        '  <style>',
+        '    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #020617; color: #e2e8f0; }',
+        '    body { min-height: 100vh; margin: 0; display: grid; place-items: center; background: radial-gradient(circle at top left, rgba(34, 211, 238, 0.14), transparent 34rem), radial-gradient(circle at bottom right, rgba(59, 130, 246, 0.14), transparent 34rem), #020617; }',
+        '    .login-shell { width: min(420px, calc(100vw - 32px)); border: 1px solid rgba(148, 163, 184, 0.24); border-radius: 24px; background: rgba(15, 23, 42, 0.94); box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42); padding: 28px; }',
+        '    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: 0.16em; text-transform: uppercase; }',
+        '    h1 { margin: 8px 0 8px; font-size: 30px; letter-spacing: -0.04em; }',
+        '    p { margin: 0 0 22px; color: #94a3b8; line-height: 1.55; }',
+        '    label { display: block; margin: 14px 0 6px; color: #cbd5e1; font-size: 13px; font-weight: 800; }',
+        '    input { width: 100%; box-sizing: border-box; border: 1px solid rgba(148, 163, 184, 0.28); border-radius: 14px; background: rgba(2, 6, 23, 0.82); color: #f8fafc; padding: 12px 13px; font-size: 15px; outline: none; }',
+        '    input:focus { border-color: rgba(34, 211, 238, 0.65); box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.12); }',
+        '    button { width: 100%; margin-top: 20px; border: 0; border-radius: 14px; background: linear-gradient(135deg, #06b6d4, #2563eb); color: white; padding: 12px 14px; font-size: 15px; font-weight: 900; cursor: pointer; }',
+        '    .login-error { margin: 14px 0 4px; border: 1px solid rgba(248, 113, 113, 0.34); border-radius: 14px; background: rgba(127, 29, 29, 0.28); color: #fecaca; padding: 10px 12px; font-size: 13px; font-weight: 700; }',
+        '    .login-note { margin-top: 16px; color: #64748b; font-size: 12px; line-height: 1.45; }',
+        '  </style>',
+        '</head>',
+        '<body>',
+        '  <main class="login-shell">',
+        '    <div class="eyebrow">DeltaAegis</div>',
+        '    <h1>Operator Login</h1>',
+        '    <p>Sign in with your local DeltaAegis username and password.</p>',
+        error_block,
+        '    <form method="post" action="/login" autocomplete="on">',
+        '      <label for="username">Username</label>',
+        '      <input id="username" name="username" value="' + safe_username + '" autocomplete="username" required autofocus>',
+        '      <label for="password">Password</label>',
+        '      <input id="password" name="password" type="password" autocomplete="current-password" required>',
+        '      <button type="submit">Sign in</button>',
+        '    </form>',
+        '    <div class="login-note">API tokens are still supported for automation through <code>X-DeltaAegis-Token</code>, but browser login uses sessions.</div>',
+        '  </main>',
+        '</body>',
+        '</html>',
+    ]
+
+    return "\n".join(lines)
+
+
+
 def command_dashboard(args):
+    from http.cookies import SimpleCookie
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import parse_qs, urlparse
 
     db_path = args.db
     token = args.token
+    login_required = bool(token or getattr(args, "require_login", False))
+
+    try:
+        with connect(db_path) as dashboard_auth_connection:
+            login_required = login_required or dashboard_has_active_password_users(dashboard_auth_connection)
+    except Exception:
+        login_required = bool(token or getattr(args, "require_login", False))
+
 
     class DeltaAegisDashboardHandler(BaseHTTPRequestHandler):
         server_version = "DeltaAegisDashboard/0.5.0"
@@ -16768,6 +16934,37 @@ def command_dashboard(args):
 
             return query.get("token", [""])[0].strip()
 
+
+        def dashboard_session_cookie_token(self):
+            raw_cookie = self.headers.get("Cookie", "")
+
+            if not raw_cookie:
+                return ""
+
+            cookie = SimpleCookie()
+
+            try:
+                cookie.load(raw_cookie)
+            except Exception:
+                return ""
+
+            morsel = cookie.get(ACCESS_SESSION_COOKIE_NAME)
+
+            if not morsel:
+                return ""
+
+            return str(morsel.value or "").strip()
+
+        def dashboard_login_redirect(self):
+            dashboard_redirect_response(self, "/login")
+
+        def dashboard_logout_redirect(self):
+            dashboard_redirect_response(
+                self,
+                "/login",
+                cookie_header=dashboard_clear_session_cookie_header(),
+            )
+
         def dashboard_legacy_actor(self, auth_type="dashboard_unauthenticated"):
             role = "ADMIN" if auth_type in {"legacy_dashboard_token", "dashboard_unauthenticated"} else "VIEWER"
 
@@ -16783,6 +16980,24 @@ def command_dashboard(args):
             required_role = normalize_access_role(required_role)
             supplied = self.dashboard_request_token()
             self.current_actor = None
+
+            session_token = self.dashboard_session_cookie_token()
+
+            if session_token:
+                connection = self.open_connection()
+
+                try:
+                    actor = authenticate_dashboard_session(
+                        connection,
+                        session_token,
+                        required_role=required_role,
+                    )
+                finally:
+                    connection.close()
+
+                if actor:
+                    self.current_actor = actor
+                    return True
 
             if token and supplied == token:
                 self.current_actor = self.dashboard_legacy_actor("legacy_dashboard_token")
@@ -16804,7 +17019,7 @@ def command_dashboard(args):
                     self.current_actor = actor
                     return True
 
-            if not token and not supplied:
+            if not token and not supplied and not login_required:
                 self.current_actor = self.dashboard_legacy_actor("dashboard_unauthenticated")
                 return True
 
@@ -16841,7 +17056,44 @@ def command_dashboard(args):
                 dashboard_text_response(self, "ok")
                 return
 
+            if route == "/login":
+                if self.authenticate_dashboard_request(required_role="VIEWER"):
+                    dashboard_redirect_response(self, "/")
+                    return
+
+                dashboard_html_response(self, dashboard_login_html())
+                return
+
+            if route == "/logout":
+                session_token = self.dashboard_session_cookie_token()
+
+                if session_token:
+                    connection = self.open_connection()
+
+                    try:
+                        actor = authenticate_dashboard_session(
+                            connection,
+                            session_token,
+                            required_role="VIEWER",
+                            update_last_seen=False,
+                        )
+                        expire_dashboard_session(
+                            connection,
+                            session_token,
+                            actor=actor,
+                            reason="logout",
+                        )
+                    finally:
+                        connection.close()
+
+                self.dashboard_logout_redirect()
+                return
+
             if route == "/":
+                if not self.authenticate_dashboard_request(required_role="VIEWER"):
+                    self.dashboard_login_redirect()
+                    return
+
                 dashboard_html_response(self, dashboard_index_html())
                 return
 
@@ -17043,6 +17295,73 @@ def command_dashboard(args):
         def do_POST(self):
             parsed = urlparse(self.path)
             route = parsed.path
+
+            if route == "/login":
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    content_length = 0
+
+                content_length = max(0, min(content_length, 16384))
+                raw_body = self.rfile.read(content_length).decode("utf-8", errors="replace")
+                form = parse_qs(raw_body)
+                username = form.get("username", [""])[0].strip()
+                password = form.get("password", [""])[0]
+
+                connection = self.open_connection()
+
+                try:
+                    session = dashboard_user_login(
+                        connection,
+                        username,
+                        password,
+                        source_ip=self.client_address[0] if self.client_address else None,
+                        user_agent=self.headers.get("User-Agent", ""),
+                    )
+                finally:
+                    connection.close()
+
+                if not session:
+                    dashboard_html_response(
+                        self,
+                        dashboard_login_html(
+                            message="Invalid username or password.",
+                            username=username,
+                        ),
+                    )
+                    return
+
+                dashboard_redirect_response(
+                    self,
+                    "/",
+                    cookie_header=dashboard_session_cookie_header(session["session_token"]),
+                )
+                return
+
+            if route == "/logout":
+                session_token = self.dashboard_session_cookie_token()
+
+                if session_token:
+                    connection = self.open_connection()
+
+                    try:
+                        actor = authenticate_dashboard_session(
+                            connection,
+                            session_token,
+                            required_role="VIEWER",
+                            update_last_seen=False,
+                        )
+                        expire_dashboard_session(
+                            connection,
+                            session_token,
+                            actor=actor,
+                            reason="logout",
+                        )
+                    finally:
+                        connection.close()
+
+                self.dashboard_logout_redirect()
+                return
 
             if not self.require_auth(required_role="ANALYST"):
                 return
@@ -17273,10 +17592,16 @@ def command_dashboard(args):
         print("Auth:     token required")
         print("Header:   X-DeltaAegis-Token")
         print("DB Tokens: accepted via X-DeltaAegis-Token")
+    elif login_required:
+        print("Auth:     username/password login required")
+        print("Login:    http://{host}:{port}/login".format(host=args.host, port=args.port))
+        print("Sessions: HttpOnly SameSite=Lax cookie")
+        print("DB Tokens: still accepted for automation via X-DeltaAegis-Token")
     else:
         print("Auth:     disabled")
         print("Warning:  bind to 127.0.0.1 unless you are using a trusted network")
         print("DB Tokens: accepted when supplied in X-DeltaAegis-Token")
+        print("Tip:      set a password on an active user to enable browser login")
 
     print()
     print("Press Ctrl+C to stop.")
@@ -17308,6 +17633,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("users", help="List local DeltaAegis access users")
     p.add_argument("--include-inactive", action="store_true")
+
+    p = sub.add_parser("user-password", help="Set or update a local DeltaAegis access user password")
+    p.add_argument("username")
+    p.add_argument("--password", required=True)
+    p.add_argument("--actor", default="local_admin")
 
     p = sub.add_parser("api-token-create", help="Create a database-backed DeltaAegis API token")
     p.add_argument("username")
@@ -17439,6 +17769,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scope")
     p.add_argument("--quiet", action="store_true")
 
+    p.add_argument("--require-login", action="store_true", help="Require username/password dashboard login even if no password users exist")
     p = sub.add_parser("risk")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--subject")
@@ -17469,6 +17800,7 @@ def main() -> int:
         if args.command in {None, "menu"}: return run_interactive_menu(args)
         if args.command == "user-create": return command_user_create(args)
         if args.command == "users": return command_users(args)
+        if args.command == "user-password": return command_user_password(args)
         if args.command == "api-token-create": return command_api_token_create(args)
         if args.command == "api-tokens": return command_api_tokens(args)
         if args.command == "access-audit": return command_access_audit(args)
