@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.21.0: Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
+"""DeltaAegis v0.22.0: Operator Triage Intelligence, Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -5724,13 +5724,15 @@ def append_report_investigation_center_section(lines, investigation_rows):
     lines.append("")
     lines.append(
         "Queue priority combines current risk, open alerts, recent delta events, "
-        "MAC-port behavior, identity context, classification context, and recommended actions."
+        "MAC-port behavior, identity context, classification context, recommended actions, "
+        "and v0.22 operator triage state."
     )
     lines.append("")
 
     rows = list(investigation_rows or [])
     workflow_summary = investigation_center_workflow_summary(rows)
     signal_summary = investigation_center_signal_summary(rows)
+    triage_summary = operator_triage_summary(rows)
 
     lines.append("### Investigation Queue Operator Summary")
     lines.append("")
@@ -5747,6 +5749,27 @@ def append_report_investigation_center_section(lines, investigation_rows):
         f"MEANINGFUL_CHANGE={signal_summary.get('meaningful_change', 0)}, "
         f"BASELINE_CONTEXT={signal_summary.get('baseline_context', 0)}"
     )
+    lines.append(
+        "- Operator triage buckets: "
+        f"NEEDS_REVIEW={triage_summary.get('needs_review', 0)}, "
+        f"CHANGED_SINCE_REVIEW={triage_summary.get('changed_since_review', 0)}, "
+        f"NEEDS_CONTEXT={triage_summary.get('needs_context', 0)}, "
+        f"STALE_CLOSED={triage_summary.get('stale_closed', 0)}, "
+        f"BASELINE_CONTEXT={triage_summary.get('baseline_context', 0)}, "
+        f"MONITOR={triage_summary.get('monitor', 0)}"
+    )
+    lines.append(
+        "- Operator triage urgency: "
+        f"IMMEDIATE={triage_summary.get('immediate', 0)}, "
+        f"HIGH={triage_summary.get('high', 0)}, "
+        f"NORMAL={triage_summary.get('normal', 0)}, "
+        f"LOW={triage_summary.get('low', 0)}"
+    )
+    lines.append(
+        "- Missing context flags: "
+        f"owner={triage_summary.get('missing_owner', 0)}, "
+        f"role_or_criticality={triage_summary.get('missing_context', 0)}"
+    )
     lines.append("")
 
     if not rows:
@@ -5754,8 +5777,12 @@ def append_report_investigation_center_section(lines, investigation_rows):
         lines.append("")
         return
 
-    lines.append("| Priority | Score | Workflow | Signal | Subject | IP Address | MAC Address | Device / Role | Triggers | Why Review? | Recommended Action | Counts |")
-    lines.append("|---|---:|---|---|---|---|---|---|---|---|---|---|")
+    lines.append(
+        "| Priority | Score | Workflow | Signal | Subject | Triage | Triage Score | "
+        "IP Address | MAC Address | Device / Role | Triggers | Why Review? | "
+        "Recommended Action | Counts |"
+    )
+    lines.append("|---|---:|---|---|---|---|---:|---|---|---|---|---|---|---|")
 
     for row in rows:
         role = row.get("role") or row.get("classification") or row.get("device_type") or "Unknown"
@@ -5769,6 +5796,10 @@ def append_report_investigation_center_section(lines, investigation_rows):
         triggers = ", ".join(row.get("triggers") or []) or "-"
         workflow = str(row.get("ticket_status") or "OPEN").upper()
         signal = str(row.get("ticket_signal_state") or "ACTIONABLE").upper()
+        triage_bucket = str(row.get("triage_bucket") or "MONITOR").upper()
+        triage_label = str(row.get("triage_urgency_label") or "LOW").upper()
+        triage_score = int(row.get("triage_urgency_score") or 0)
+        triage_display = f"{triage_bucket} / {triage_label}"
         counts = (
             f"alerts={int(row.get('open_alerts') or 0)}, "
             f"events={int(row.get('recent_events') or 0)}, "
@@ -5783,6 +5814,8 @@ def append_report_investigation_center_section(lines, investigation_rows):
             f"{safe_markdown(workflow)} | "
             f"{safe_markdown(signal)} | "
             f"`{safe_markdown(row.get('subject_key'))}` | "
+            f"{safe_markdown(triage_display)} | "
+            f"{safe_markdown(triage_score)} | "
             f"`{safe_markdown(row.get('ip_address') or '-')}` | "
             f"`{safe_markdown(row.get('mac_address') or '-')}` | "
             f"{safe_markdown(device_role)} | "
@@ -5795,11 +5828,10 @@ def append_report_investigation_center_section(lines, investigation_rows):
     lines.append("")
     lines.append(
         "Use this queue as the starting point for review. The detailed Risk, "
-        "MAC-Port Behavior, Active Alerts, Delta Events, and Asset Inventory sections "
-        "provide supporting evidence for each item."
+        "MAC-Port Behavior, Active Alerts, Delta Events, Ticket Evidence, and Asset "
+        "Inventory sections provide supporting evidence for each item."
     )
     lines.append("")
-
 
 def append_report_risk_section(lines, risk_rows):
     lines.append("## Top Risk Subjects")
@@ -16004,7 +16036,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.21.0 Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.22.0 Operator Triage Intelligence, Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)

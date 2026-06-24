@@ -14,44 +14,21 @@ Markdown reports, MAC-port behavior correlation, and a local dashboard.
 
 ## Current Release
 
-**DeltaAegis v0.21.0 — Evidence Timeline Intelligence**
+**DeltaAegis v0.22.0 — Operator Triage Intelligence**
 
-v0.21.0 improves ticket-evidence investigation context across the backend, CLI, reports, and dashboard. It balances evidence timelines so workflow history cannot crowd out security signals, adds deterministic **Why Now** summaries, polishes dashboard evidence category labels, and introduces a v0.21 release gate for the full checkpoint set.
+v0.22.0 turns the Investigation Center into a more operator-focused triage queue. It adds deterministic triage state, triage urgency scoring, triage bucket filters, dashboard triage controls, triage summary cards, row-level triage badges, and report-level triage summaries.
 
-Current feature baseline: **DeltaAegis v0.21.0 — Evidence Timeline Intelligence**.
+Current feature baseline: **DeltaAegis v0.22.0 — Operator Triage Intelligence**.
 
-DeltaAegis v0.21.0 adds:
+DeltaAegis v0.22.0 adds:
 
-- Balanced ticket evidence timelines across current risk, alerts, delta events, MAC-port behavior, and workflow history.
-- Deterministic **Why Now** summaries shared through the ticket evidence payload, CLI output, dashboard panel, and report appendix.
-- Dashboard timeline polish with readable evidence category labels and a dedicated Why Now block.
-- v0.21 release validation covering the focused v0.21 checkpoints and v0.20 ticket-evidence compatibility.
-
-- Ticket evidence backend payloads that aggregate:
-  - workflow state
-  - ticket history
-  - current risk reasoning
-  - recent delta events
-  - open alerts
-  - MAC-port behavior
-  - asset identity and classification context
-- `/api/ticket-evidence` for dashboard evidence drilldown.
-- Dashboard **View Evidence** actions on Investigation Center tickets.
-- A Ticket Evidence Drilldown panel with priority, workflow, evidence counts, timeline samples, current risk, alerts, delta events, MAC-port behavior, and ticket history.
-- `ticket-evidence` CLI command for terminal-based investigation.
-- Markdown report **Ticket Evidence Appendix** entries for top Investigation Center subjects.
-- v0.20 validators for payload, dashboard, CLI, report appendix, and release validation.
-
-Compatibility retained:
-
-- DeltaAegis v0.19.0 — Workflow Filters and Operator Views remains available.
-- DeltaAegis v0.18.0 — Investigation Workflow Actions remains available.
-- DeltaAegis v0.17.0 — Executive SIEM Dashboard Refresh remains available.
-- DeltaAegis v0.16.0 — Investigation Command Center remains available.
-- DeltaAegis v0.15.0 — MAC-Port Behavior Correlation remains available.
-- DeltaAegis v0.14.0 — NetSniper Scan Orchestration remains available.
-- DeltaAegis v0.13.0 — Current-State SIEM Dashboard remains available.
-- DeltaAegis v0.12.0 — Intelligence Drilldown remains available.
+- Operator triage state for Investigation Center queue items.
+- Triage buckets such as `NEEDS_REVIEW`, `CHANGED_SINCE_REVIEW`, `NEEDS_CONTEXT`, `STALE_CLOSED`, `BASELINE_CONTEXT`, and `MONITOR`.
+- Triage urgency labels: `IMMEDIATE`, `HIGH`, `NORMAL`, and `LOW`.
+- CLI and dashboard API filters for `triage_bucket` and `triage_urgency`.
+- Dashboard triage summary cards and ticket-row triage badges.
+- Report Investigation Command Center triage summaries.
+- v0.22 release validators for triage model, API/CLI filters, dashboard triage UI, report output, and release metadata.
 
 ## What DeltaAegis Does
 

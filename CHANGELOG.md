@@ -1,3 +1,33 @@
+## v0.22.0 — Operator Triage Intelligence
+
+DeltaAegis v0.22.0 improves Investigation Center operator workflow by adding deterministic triage state, triage urgency, triage filters, dashboard triage controls, and report-level triage summaries.
+
+### Added
+
+- Operator triage state model for Investigation Center queue rows.
+- Triage buckets for review prioritization:
+  - `CHANGED_SINCE_REVIEW`
+  - `NEEDS_REVIEW`
+  - `NEEDS_CONTEXT`
+  - `STALE_CLOSED`
+  - `BASELINE_CONTEXT`
+  - `MONITOR`
+- Triage urgency labels:
+  - `IMMEDIATE`
+  - `HIGH`
+  - `NORMAL`
+  - `LOW`
+- CLI and dashboard API filters for `triage_bucket` and `triage_urgency`.
+- Dashboard triage summary cards and row-level triage badges.
+- Report Investigation Command Center triage summary and triage columns.
+- v0.22 validators for triage state, triage queue API/CLI, dashboard triage panel, report triage summary, and release metadata.
+
+### Compatibility
+
+- Keeps the v0.21 ticket evidence workflow compatible.
+- Keeps v0.20 ticket evidence payload, CLI, dashboard, and report compatibility validators in the v0.22 release gate.
+- No NetSniper bundle format change is required.
+
 ## v0.21.0 — Evidence Timeline Intelligence
 
 DeltaAegis v0.21.0 improves ticket evidence so operators can quickly understand what matters, why it matters now, and which evidence categories support the ticket.
