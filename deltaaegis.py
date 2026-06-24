@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.21.0: Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
+"""DeltaAegis v0.22.0: Operator Triage Intelligence, Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -5724,13 +5724,15 @@ def append_report_investigation_center_section(lines, investigation_rows):
     lines.append("")
     lines.append(
         "Queue priority combines current risk, open alerts, recent delta events, "
-        "MAC-port behavior, identity context, classification context, and recommended actions."
+        "MAC-port behavior, identity context, classification context, recommended actions, "
+        "and v0.22 operator triage state."
     )
     lines.append("")
 
     rows = list(investigation_rows or [])
     workflow_summary = investigation_center_workflow_summary(rows)
     signal_summary = investigation_center_signal_summary(rows)
+    triage_summary = operator_triage_summary(rows)
 
     lines.append("### Investigation Queue Operator Summary")
     lines.append("")
@@ -5747,6 +5749,27 @@ def append_report_investigation_center_section(lines, investigation_rows):
         f"MEANINGFUL_CHANGE={signal_summary.get('meaningful_change', 0)}, "
         f"BASELINE_CONTEXT={signal_summary.get('baseline_context', 0)}"
     )
+    lines.append(
+        "- Operator triage buckets: "
+        f"NEEDS_REVIEW={triage_summary.get('needs_review', 0)}, "
+        f"CHANGED_SINCE_REVIEW={triage_summary.get('changed_since_review', 0)}, "
+        f"NEEDS_CONTEXT={triage_summary.get('needs_context', 0)}, "
+        f"STALE_CLOSED={triage_summary.get('stale_closed', 0)}, "
+        f"BASELINE_CONTEXT={triage_summary.get('baseline_context', 0)}, "
+        f"MONITOR={triage_summary.get('monitor', 0)}"
+    )
+    lines.append(
+        "- Operator triage urgency: "
+        f"IMMEDIATE={triage_summary.get('immediate', 0)}, "
+        f"HIGH={triage_summary.get('high', 0)}, "
+        f"NORMAL={triage_summary.get('normal', 0)}, "
+        f"LOW={triage_summary.get('low', 0)}"
+    )
+    lines.append(
+        "- Missing context flags: "
+        f"owner={triage_summary.get('missing_owner', 0)}, "
+        f"role_or_criticality={triage_summary.get('missing_context', 0)}"
+    )
     lines.append("")
 
     if not rows:
@@ -5754,8 +5777,12 @@ def append_report_investigation_center_section(lines, investigation_rows):
         lines.append("")
         return
 
-    lines.append("| Priority | Score | Workflow | Signal | Subject | IP Address | MAC Address | Device / Role | Triggers | Why Review? | Recommended Action | Counts |")
-    lines.append("|---|---:|---|---|---|---|---|---|---|---|---|---|")
+    lines.append(
+        "| Priority | Score | Workflow | Signal | Subject | Triage | Triage Score | "
+        "IP Address | MAC Address | Device / Role | Triggers | Why Review? | "
+        "Recommended Action | Counts |"
+    )
+    lines.append("|---|---:|---|---|---|---|---:|---|---|---|---|---|---|---|")
 
     for row in rows:
         role = row.get("role") or row.get("classification") or row.get("device_type") or "Unknown"
@@ -5769,6 +5796,10 @@ def append_report_investigation_center_section(lines, investigation_rows):
         triggers = ", ".join(row.get("triggers") or []) or "-"
         workflow = str(row.get("ticket_status") or "OPEN").upper()
         signal = str(row.get("ticket_signal_state") or "ACTIONABLE").upper()
+        triage_bucket = str(row.get("triage_bucket") or "MONITOR").upper()
+        triage_label = str(row.get("triage_urgency_label") or "LOW").upper()
+        triage_score = int(row.get("triage_urgency_score") or 0)
+        triage_display = f"{triage_bucket} / {triage_label}"
         counts = (
             f"alerts={int(row.get('open_alerts') or 0)}, "
             f"events={int(row.get('recent_events') or 0)}, "
@@ -5783,6 +5814,8 @@ def append_report_investigation_center_section(lines, investigation_rows):
             f"{safe_markdown(workflow)} | "
             f"{safe_markdown(signal)} | "
             f"`{safe_markdown(row.get('subject_key'))}` | "
+            f"{safe_markdown(triage_display)} | "
+            f"{safe_markdown(triage_score)} | "
             f"`{safe_markdown(row.get('ip_address') or '-')}` | "
             f"`{safe_markdown(row.get('mac_address') or '-')}` | "
             f"{safe_markdown(device_role)} | "
@@ -5795,11 +5828,10 @@ def append_report_investigation_center_section(lines, investigation_rows):
     lines.append("")
     lines.append(
         "Use this queue as the starting point for review. The detailed Risk, "
-        "MAC-Port Behavior, Active Alerts, Delta Events, and Asset Inventory sections "
-        "provide supporting evidence for each item."
+        "MAC-Port Behavior, Active Alerts, Delta Events, Ticket Evidence, and Asset "
+        "Inventory sections provide supporting evidence for each item."
     )
     lines.append("")
-
 
 def append_report_risk_section(lines, risk_rows):
     lines.append("## Top Risk Subjects")
@@ -9721,7 +9753,7 @@ def tune_investigation_center_ticket_signal(row):
         tuned["ticket_signal_state"] = "ACTIONABLE"
         tuned["signal_tuned"] = False
 
-    return tuned
+    return operator_triage_enrich_row(tuned)
 
 
 def tune_investigation_center_ticket_signals(rows):
@@ -9743,6 +9775,383 @@ def tune_investigation_center_ticket_signals(rows):
 
     return tuned_rows
 
+
+
+TRIAGE_BUCKETS = [
+    "CHANGED_SINCE_REVIEW",
+    "NEEDS_REVIEW",
+    "NEEDS_CONTEXT",
+    "STALE_CLOSED",
+    "BASELINE_CONTEXT",
+    "MONITOR",
+]
+
+
+def operator_triage_parse_datetime(value):
+    if value in (None, ""):
+        return None
+
+    from datetime import datetime as _datetime
+    from datetime import timezone as _timezone
+
+    if isinstance(value, _datetime):
+        parsed = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = _datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_timezone.utc)
+
+    return parsed.astimezone(_timezone.utc)
+
+
+def operator_triage_isoformat(value):
+    parsed = operator_triage_parse_datetime(value)
+    if parsed is None:
+        return None
+    return parsed.isoformat()
+
+
+def operator_triage_latest_datetime(row, keys):
+    values = []
+
+    for key in keys:
+        parsed = operator_triage_parse_datetime(row.get(key))
+        if parsed is not None:
+            values.append(parsed)
+
+    if not values:
+        return None
+
+    return max(values)
+
+
+def operator_triage_age_hours(value, now=None):
+    from datetime import datetime as _datetime
+    from datetime import timezone as _timezone
+
+    parsed = operator_triage_parse_datetime(value)
+    if parsed is None:
+        return None
+
+    current = operator_triage_parse_datetime(now)
+    if current is None:
+        current = _datetime.now(_timezone.utc)
+
+    seconds = max(0.0, (current - parsed).total_seconds())
+    return round(seconds / 3600.0, 2)
+
+
+def operator_triage_has_value(row, keys):
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, ""):
+            if str(value).strip() not in {"", "-", "UNKNOWN", "None", "none", "null"}:
+                return True
+    return False
+
+
+def operator_triage_bool(value):
+    return bool(value)
+
+
+def operator_triage_enrich_row(row, now=None):
+    enriched = dict(row or {})
+
+    status = str(enriched.get("ticket_status") or "OPEN").upper()
+    signal = str(enriched.get("ticket_signal_state") or enriched.get("ticket_signal") or "ACTIONABLE").upper()
+
+    priority_score = risk_int(
+        enriched.get("priority_score", enriched.get("score", 0)),
+        0,
+    )
+    priority_score = max(0, min(100, int(priority_score or 0)))
+
+    evidence_keys = [
+        "latest_alert_at",
+        "latest_event_at",
+        "identity_last_seen_at",
+        "last_seen_at",
+        "observed_at",
+        "created_at",
+    ]
+    review_keys = [
+        "ticket_updated_at",
+        "ticket_resolved_at",
+        "ticket_suppressed_at",
+        "status_updated_at",
+        "reviewed_at",
+    ]
+
+    last_evidence_at = operator_triage_latest_datetime(enriched, evidence_keys)
+    last_review_at = operator_triage_latest_datetime(enriched, review_keys)
+
+    evidence_age_hours = operator_triage_age_hours(last_evidence_at, now=now)
+    changed_since_review = (
+        last_evidence_at is not None
+        and last_review_at is not None
+        and last_evidence_at > last_review_at
+    )
+
+    missing_owner = not operator_triage_has_value(
+        enriched,
+        ["owner", "asset_owner", "annotation_owner"],
+    )
+    missing_context = not (
+        operator_triage_has_value(enriched, ["role", "asset_role", "annotation_role"])
+        and operator_triage_has_value(enriched, ["criticality", "asset_criticality"])
+    )
+
+    urgency_score = priority_score
+    reasons = []
+
+    if changed_since_review:
+        urgency_score += 25
+        reasons.append("Evidence changed after the last recorded ticket review.")
+
+    if signal == "MEANINGFUL_CHANGE":
+        urgency_score += 15
+        reasons.append("Ticket signal is MEANINGFUL_CHANGE.")
+    elif signal == "ACTIONABLE":
+        urgency_score += 8
+        reasons.append("Ticket signal is ACTIONABLE.")
+    elif signal == "BASELINE_CONTEXT":
+        reasons.append("Ticket currently appears to be baseline context.")
+
+    if status in {"OPEN", "IN_REVIEW"}:
+        urgency_score += 8
+        reasons.append(f"Workflow status is {status}.")
+    elif status in {"RESOLVED", "SUPPRESSED", "CLOSED"}:
+        reasons.append(f"Workflow status is {status}.")
+
+    if missing_owner:
+        urgency_score += 5
+        reasons.append("Asset owner is missing.")
+
+    if missing_context:
+        urgency_score += 5
+        reasons.append("Asset role or criticality context is missing.")
+
+    urgency_score = max(0, min(100, int(urgency_score)))
+
+    if urgency_score >= 85:
+        urgency_label = "IMMEDIATE"
+    elif urgency_score >= 65:
+        urgency_label = "HIGH"
+    elif urgency_score >= 35:
+        urgency_label = "NORMAL"
+    else:
+        urgency_label = "LOW"
+
+    if changed_since_review:
+        bucket = "CHANGED_SINCE_REVIEW"
+    elif status in {"OPEN", "IN_REVIEW"} and signal in {"MEANINGFUL_CHANGE", "ACTIONABLE"}:
+        bucket = "NEEDS_REVIEW"
+    elif status in {"OPEN", "IN_REVIEW"} and (missing_owner or missing_context):
+        bucket = "NEEDS_CONTEXT"
+    elif status in {"RESOLVED", "SUPPRESSED", "CLOSED"} and evidence_age_hours is not None and evidence_age_hours >= 168:
+        bucket = "STALE_CLOSED"
+    elif signal == "BASELINE_CONTEXT":
+        bucket = "BASELINE_CONTEXT"
+    else:
+        bucket = "MONITOR"
+
+    enriched["triage_bucket"] = bucket
+    enriched["triage_urgency_score"] = urgency_score
+    enriched["triage_urgency_label"] = urgency_label
+    enriched["triage_missing_owner"] = bool(missing_owner)
+    enriched["triage_missing_context"] = bool(missing_context)
+    enriched["triage_changed_since_review"] = bool(changed_since_review)
+    enriched["triage_last_evidence_at"] = (
+        last_evidence_at.isoformat() if last_evidence_at is not None else None
+    )
+    enriched["triage_last_review_at"] = (
+        last_review_at.isoformat() if last_review_at is not None else None
+    )
+    enriched["triage_evidence_age_hours"] = evidence_age_hours
+    enriched["triage_status"] = bucket
+    enriched["triage_reasons"] = reasons[:8]
+
+    return enriched
+
+
+def operator_triage_enrich_rows(rows, now=None):
+    return [
+        operator_triage_enrich_row(row, now=now)
+        for row in list(rows or [])
+    ]
+
+
+def operator_triage_summary(rows):
+    summary = {
+        "total": 0,
+        "changed_since_review": 0,
+        "needs_review": 0,
+        "needs_context": 0,
+        "stale_closed": 0,
+        "baseline_context": 0,
+        "monitor": 0,
+        "missing_owner": 0,
+        "missing_context": 0,
+        "immediate": 0,
+        "high": 0,
+        "normal": 0,
+        "low": 0,
+    }
+
+    for row in list(rows or []):
+        triaged = row if row.get("triage_bucket") else operator_triage_enrich_row(row)
+        bucket = str(triaged.get("triage_bucket") or "MONITOR").upper()
+        label = str(triaged.get("triage_urgency_label") or "LOW").upper()
+
+        summary["total"] += 1
+
+        if bucket == "CHANGED_SINCE_REVIEW":
+            summary["changed_since_review"] += 1
+        elif bucket == "NEEDS_REVIEW":
+            summary["needs_review"] += 1
+        elif bucket == "NEEDS_CONTEXT":
+            summary["needs_context"] += 1
+        elif bucket == "STALE_CLOSED":
+            summary["stale_closed"] += 1
+        elif bucket == "BASELINE_CONTEXT":
+            summary["baseline_context"] += 1
+        else:
+            summary["monitor"] += 1
+
+        if triaged.get("triage_missing_owner"):
+            summary["missing_owner"] += 1
+
+        if triaged.get("triage_missing_context"):
+            summary["missing_context"] += 1
+
+        if label == "IMMEDIATE":
+            summary["immediate"] += 1
+        elif label == "HIGH":
+            summary["high"] += 1
+        elif label == "NORMAL":
+            summary["normal"] += 1
+        else:
+            summary["low"] += 1
+
+    return summary
+
+
+TRIAGE_URGENCY_LABELS = [
+    "IMMEDIATE",
+    "HIGH",
+    "NORMAL",
+    "LOW",
+]
+
+
+def normalize_triage_bucket_filter(value):
+    if value in (None, "", "ALL", "*"):
+        return None
+
+    normalized = str(value).strip().upper().replace("-", "_").replace(" ", "_")
+
+    if normalized in set(TRIAGE_BUCKETS):
+        return normalized
+
+    return None
+
+
+def normalize_triage_urgency_filter(value):
+    if value in (None, "", "ALL", "*"):
+        return None
+
+    normalized = str(value).strip().upper().replace("-", "_").replace(" ", "_")
+
+    if normalized in set(TRIAGE_URGENCY_LABELS):
+        return normalized
+
+    return None
+
+
+def operator_triage_queue_sort_key(row):
+    triaged = row if row.get("triage_bucket") else operator_triage_enrich_row(row)
+
+    bucket_order = {
+        "CHANGED_SINCE_REVIEW": 0,
+        "NEEDS_REVIEW": 1,
+        "NEEDS_CONTEXT": 2,
+        "STALE_CLOSED": 3,
+        "BASELINE_CONTEXT": 4,
+        "MONITOR": 5,
+    }
+    urgency_order = {
+        "IMMEDIATE": 0,
+        "HIGH": 1,
+        "NORMAL": 2,
+        "LOW": 3,
+    }
+
+    bucket = str(triaged.get("triage_bucket") or "MONITOR").upper()
+    urgency = str(triaged.get("triage_urgency_label") or "LOW").upper()
+
+    return (
+        bucket_order.get(bucket, 99),
+        urgency_order.get(urgency, 99),
+        -risk_int(triaged.get("triage_urgency_score"), 0),
+        -risk_int(triaged.get("priority_score"), 0),
+        str(triaged.get("subject_key") or ""),
+    )
+
+
+def filter_operator_triage_rows(rows, triage_bucket=None, triage_urgency=None):
+    bucket_filter = normalize_triage_bucket_filter(triage_bucket)
+    urgency_filter = normalize_triage_urgency_filter(triage_urgency)
+
+    filtered = []
+
+    for row in list(rows or []):
+        triaged = row if row.get("triage_bucket") else operator_triage_enrich_row(row)
+        bucket = str(triaged.get("triage_bucket") or "MONITOR").upper()
+        urgency = str(triaged.get("triage_urgency_label") or "LOW").upper()
+
+        if bucket_filter and bucket != bucket_filter:
+            continue
+
+        if urgency_filter and urgency != urgency_filter:
+            continue
+
+        filtered.append(triaged)
+
+    return filtered
+
+
+def operator_triage_filter_payload(
+    ticket_status=None,
+    ticket_signal=None,
+    triage_bucket=None,
+    triage_urgency=None,
+):
+    status_filter = normalize_ticket_status_filter(ticket_status)
+    signal_filter = normalize_ticket_signal_filter(ticket_signal)
+    triage_bucket_filter = normalize_triage_bucket_filter(triage_bucket)
+    triage_urgency_filter = normalize_triage_urgency_filter(triage_urgency)
+    bucket_filter = normalize_triage_bucket_filter(triage_bucket)
+    urgency_filter = normalize_triage_urgency_filter(triage_urgency)
+
+    return {
+        "ticket_status": status_filter or "ALL",
+        "ticket_signal": signal_filter or "ALL",
+        "triage_bucket": triage_bucket_filter or "ALL",
+        "triage_urgency": triage_urgency_filter or "ALL",
+        "triage_bucket": bucket_filter or "ALL",
+        "triage_urgency": urgency_filter or "ALL",
+        "ticket_statuses": ["ALL", "OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"],
+        "ticket_signals": ["ALL", "ACTIONABLE", "MEANINGFUL_CHANGE", "BASELINE_CONTEXT"],
+        "triage_buckets": ["ALL"] + list(TRIAGE_BUCKETS),
+        "triage_urgencies": ["ALL"] + list(TRIAGE_URGENCY_LABELS),
+    }
 
 def investigation_center_summary(rows):
     summary = {
@@ -9920,18 +10329,27 @@ def filter_investigation_center_rows(
     return filtered
 
 
-def investigation_center_filter_payload(ticket_status=None, ticket_signal=None):
+def investigation_center_filter_payload(
+    ticket_status=None,
+    ticket_signal=None,
+    triage_bucket=None,
+    triage_urgency=None,
+):
     status_filter = normalize_ticket_status_filter(ticket_status)
     signal_filter = normalize_ticket_signal_filter(ticket_signal)
+    triage_bucket_filter = normalize_triage_bucket_filter(triage_bucket)
+    triage_urgency_filter = normalize_triage_urgency_filter(triage_urgency)
 
     return {
         "ticket_status": status_filter or "ALL",
         "ticket_signal": signal_filter or "ALL",
+        "triage_bucket": triage_bucket_filter or "ALL",
+        "triage_urgency": triage_urgency_filter or "ALL",
         "ticket_statuses": ["ALL", "OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"],
         "ticket_signals": ["ALL", "ACTIONABLE", "MEANINGFUL_CHANGE", "BASELINE_CONTEXT"],
+        "triage_buckets": ["ALL"] + list(TRIAGE_BUCKETS),
+        "triage_urgencies": ["ALL"] + list(TRIAGE_URGENCY_LABELS),
     }
-
-
 
 def dashboard_investigation_center_payload(
     connection,
@@ -9939,6 +10357,8 @@ def dashboard_investigation_center_payload(
     scope=None,
     ticket_status=None,
     ticket_signal=None,
+    triage_bucket=None,
+    triage_urgency=None,
 ):
     requested_limit = risk_int(limit, 25)
 
@@ -9949,6 +10369,8 @@ def dashboard_investigation_center_payload(
         filters = investigation_center_filter_payload(
             ticket_status=ticket_status,
             ticket_signal=ticket_signal,
+            triage_bucket=triage_bucket,
+            triage_urgency=triage_urgency,
         )
         has_filter = (
             filters["ticket_status"] != "ALL"
@@ -9974,6 +10396,12 @@ def dashboard_investigation_center_payload(
             ticket_status=filters["ticket_status"],
             ticket_signal=filters["ticket_signal"],
         )
+        rows = filter_operator_triage_rows(
+            rows,
+            triage_bucket=filters["triage_bucket"],
+            triage_urgency=filters["triage_urgency"],
+        )
+        rows = sorted(rows, key=operator_triage_queue_sort_key)
         rows = rows[:requested_limit]
 
         return {
@@ -9985,6 +10413,7 @@ def dashboard_investigation_center_payload(
             "summary": investigation_center_summary(rows),
             "workflow_summary": workflow_summary,
             "signal_summary": signal_summary,
+            "triage_summary": operator_triage_summary(rows),
             "view_workflow_summary": investigation_center_workflow_summary(rows),
             "view_signal_summary": investigation_center_signal_summary(rows),
             "items": rows,
@@ -10691,6 +11120,10 @@ def print_investigation_center_rows(payload):
         workflow_updated = row.get("ticket_updated_at") or "-"
         workflow_note = row.get("ticket_note") or ""
         print(f"    Workflow: {workflow_status}")
+        triage_bucket = row.get("triage_bucket") or "MONITOR"
+        triage_label = row.get("triage_urgency_label") or "LOW"
+        triage_score = row.get("triage_urgency_score") or 0
+        print(f"    Triage:  {triage_bucket} / {triage_label} ({triage_score})")
         if workflow_analyst != "-" or workflow_updated != "-":
             print(
                 "    Analyst:  "
@@ -10987,6 +11420,8 @@ def command_investigation_center(args):
             scope=scope,
             ticket_status=args.ticket_status,
             ticket_signal=args.ticket_signal,
+            triage_bucket=getattr(args, "triage_bucket", "ALL"),
+            triage_urgency=getattr(args, "triage_urgency", "ALL"),
         )
     finally:
         connection.close()
@@ -11921,6 +12356,89 @@ def dashboard_index_html():
       margin: 10px 0 14px;
     }
 
+
+    .triage-summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+      gap: 10px;
+      margin: 10px 0 14px;
+    }
+
+    .triage-summary-card {
+      border: 1px solid rgba(34, 211, 238, 0.2);
+      border-radius: 16px;
+      background:
+        linear-gradient(135deg, rgba(15, 23, 42, 0.92), rgba(30, 41, 59, 0.72)),
+        radial-gradient(circle at top right, rgba(34, 211, 238, 0.10), transparent 45%);
+      padding: 12px;
+      min-height: 84px;
+    }
+
+    .triage-summary-card .label {
+      color: #94a3b8;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .triage-summary-card .value {
+      color: #f8fafc;
+      display: block;
+      font-size: 24px;
+      font-weight: 850;
+      letter-spacing: -0.03em;
+      margin-top: 4px;
+    }
+
+    .triage-summary-card .hint {
+      color: #94a3b8;
+      display: block;
+      font-size: 12px;
+      line-height: 1.45;
+      margin-top: 4px;
+    }
+
+    .ticket-triage-badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 3px 9px;
+      margin-left: 6px;
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      border: 1px solid rgba(148, 163, 184, 0.24);
+      background: rgba(148, 163, 184, 0.12);
+      color: #cbd5e1;
+      white-space: nowrap;
+    }
+
+    .ticket-triage-immediate {
+      background: rgba(248, 113, 113, 0.14);
+      border-color: rgba(248, 113, 113, 0.34);
+      color: #fecaca;
+    }
+
+    .ticket-triage-high {
+      background: rgba(251, 191, 36, 0.14);
+      border-color: rgba(251, 191, 36, 0.34);
+      color: #fde68a;
+    }
+
+    .ticket-triage-normal {
+      background: rgba(96, 165, 250, 0.14);
+      border-color: rgba(96, 165, 250, 0.34);
+      color: #bfdbfe;
+    }
+
+    .ticket-triage-low {
+      background: rgba(148, 163, 184, 0.12);
+      border-color: rgba(148, 163, 184, 0.22);
+      color: #cbd5e1;
+    }
+
     .ticket-evidence-why-now .label {
       color: #a5f3fc;
       font-weight: 700;
@@ -12343,10 +12861,23 @@ def dashboard_index_html():
             <option value="BASELINE_CONTEXT">Baseline context</option>
           </select>
         </label>
+        <label>
+          Triage Bucket
+          <select id="triage-bucket-filter">
+            <option value="ALL">All buckets</option>
+          </select>
+        </label>
+        <label>
+          Triage Urgency
+          <select id="triage-urgency-filter">
+            <option value="ALL">All urgencies</option>
+          </select>
+        </label>
         <button id="apply-ticket-filters" class="small-action-button">Apply filters</button>
         <button id="clear-ticket-filters" class="small-action-button">Clear filters</button>
       </div>
       <div id="investigation-center-summary" class="grid"></div>
+      <div id="investigation-triage-summary" class="triage-summary-grid"></div>
       <div id="ticket-evidence-panel" class="evidence-drilldown-panel">
         <div class="evidence-drilldown-header">
           <div>
@@ -13909,6 +14440,121 @@ def dashboard_index_html():
       return `<span class="ticket-signal-badge ${ticketSignalClass(row)}">${esc(ticketSignalLabel(row))}</span>`;
     }
 
+
+    function triageBucketLabel(value) {
+      const bucket = String(value || "MONITOR").toUpperCase();
+
+      const labels = {
+        "CHANGED_SINCE_REVIEW": "Changed Since Review",
+        "NEEDS_REVIEW": "Needs Review",
+        "NEEDS_CONTEXT": "Needs Context",
+        "STALE_CLOSED": "Stale Closed",
+        "BASELINE_CONTEXT": "Baseline Context",
+        "MONITOR": "Monitor",
+        "ALL": "All Buckets",
+      };
+
+      return labels[bucket] || bucket.replaceAll("_", " ");
+    }
+
+    function triageUrgencyLabel(value) {
+      const urgency = String(value || "LOW").toUpperCase();
+
+      const labels = {
+        "IMMEDIATE": "Immediate",
+        "HIGH": "High",
+        "NORMAL": "Normal",
+        "LOW": "Low",
+        "ALL": "All Urgencies",
+      };
+
+      return labels[urgency] || urgency.replaceAll("_", " ");
+    }
+
+    function ticketTriageClass(row) {
+      const urgency = String((row && row.triage_urgency_label) || "LOW")
+        .toLowerCase()
+        .replace(/[^a-z0-9-]/g, "");
+
+      if (["immediate", "high", "normal", "low"].includes(urgency)) {
+        return `ticket-triage-${urgency}`;
+      }
+
+      return "ticket-triage-low";
+    }
+
+    function ticketTriageBadge(row) {
+      const bucket = triageBucketLabel(row && row.triage_bucket);
+      const urgency = triageUrgencyLabel(row && row.triage_urgency_label);
+      const score = row && row.triage_urgency_score !== undefined
+        ? row.triage_urgency_score
+        : 0;
+
+      return `<span class="ticket-triage-badge ${ticketTriageClass(row)}">${esc(bucket)} / ${esc(urgency)} (${esc(score)})</span>`;
+    }
+
+    function triageSummaryCard(label, value, hint) {
+      return `
+        <div class="triage-summary-card">
+          <span class="label">${esc(label)}</span>
+          <span class="value">${esc(value ?? 0)}</span>
+          <span class="hint">${esc(hint || "")}</span>
+        </div>
+      `;
+    }
+
+    function renderTriageSummaryPanel(payload) {
+      const root = document.getElementById("investigation-triage-summary");
+
+      if (!root) return;
+
+      const summary = payload && payload.triage_summary ? payload.triage_summary : {};
+      const filters = payload && payload.filters ? payload.filters : {};
+
+      root.innerHTML = `
+        ${triageSummaryCard("Needs Review", summary.needs_review || 0, "Actionable or meaningful-change tickets")}
+        ${triageSummaryCard("Changed", summary.changed_since_review || 0, "New evidence after review")}
+        ${triageSummaryCard("Needs Context", summary.needs_context || 0, "Missing owner, role, or criticality")}
+        ${triageSummaryCard("Immediate", summary.immediate || 0, "Highest urgency queue items")}
+        ${triageSummaryCard("High", summary.high || 0, "High urgency queue items")}
+        ${triageSummaryCard("Selected Bucket", filters.triage_bucket || "ALL", "Current triage bucket filter")}
+      `;
+    }
+
+    function populateTriageSelect(id, values, selected) {
+      const element = document.getElementById(id);
+
+      if (!element) return;
+
+      const options = Array.isArray(values) && values.length ? values : ["ALL"];
+      const current = String(selected || element.value || "ALL").toUpperCase();
+
+      element.innerHTML = options.map(value => {
+        const raw = String(value || "ALL").toUpperCase();
+        const label = id === "triage-urgency-filter"
+          ? triageUrgencyLabel(raw)
+          : triageBucketLabel(raw);
+
+        return `<option value="${esc(raw)}" ${raw === current ? "selected" : ""}>${esc(label)}</option>`;
+      }).join("");
+    }
+
+    function renderTriageFilterOptions(payload) {
+      const filters = payload && payload.filters ? payload.filters : {};
+
+      populateTriageSelect(
+        "triage-bucket-filter",
+        filters.triage_buckets || ["ALL", "CHANGED_SINCE_REVIEW", "NEEDS_REVIEW", "NEEDS_CONTEXT", "STALE_CLOSED", "BASELINE_CONTEXT", "MONITOR"],
+        filters.triage_bucket || "ALL"
+      );
+
+      populateTriageSelect(
+        "triage-urgency-filter",
+        filters.triage_urgencies || ["ALL", "IMMEDIATE", "HIGH", "NORMAL", "LOW"],
+        filters.triage_urgency || "ALL"
+      );
+    }
+
     function ticketEvidenceCategoryLabel(category) {
       const value = String(category || "").toLowerCase();
 
@@ -14244,6 +14890,8 @@ def dashboard_index_html():
       const params = new URLSearchParams();
       const status = investigationCenterFilterValue("ticket-status-filter");
       const signal = investigationCenterFilterValue("ticket-signal-filter");
+      const triageBucket = investigationCenterFilterValue("triage-bucket-filter");
+      const triageUrgency = investigationCenterFilterValue("triage-urgency-filter");
 
       params.set("limit", "25");
 
@@ -14253,6 +14901,12 @@ def dashboard_index_html():
 
       if (signal && signal !== "ALL") {
         params.set("ticket_signal", signal);
+      }
+      if (triageBucket && triageBucket !== "ALL") {
+        params.set("triage_bucket", triageBucket);
+      }
+      if (triageUrgency && triageUrgency !== "ALL") {
+        params.set("triage_urgency", triageUrgency);
       }
 
       return scopedPath(`/api/investigation-center?${params.toString()}`);
@@ -14277,6 +14931,8 @@ def dashboard_index_html():
     async function refreshInvestigationCenter() {
       const payload = await api(investigationCenterFilterPath());
       renderInvestigationCenter(payload);
+      renderTriageFilterOptions(payload);
+      renderTriageSummaryPanel(payload);
     }
 
     function bindInvestigationCenterFilters() {
@@ -14297,9 +14953,13 @@ def dashboard_index_html():
 
           const statusElement = document.getElementById("ticket-status-filter");
           const signalElement = document.getElementById("ticket-signal-filter");
+          const triageBucketElement = document.getElementById("triage-bucket-filter");
+          const triageUrgencyElement = document.getElementById("triage-urgency-filter");
 
           if (statusElement) statusElement.value = "ALL";
           if (signalElement) signalElement.value = "ALL";
+          if (triageBucketElement) triageBucketElement.value = "ALL";
+          if (triageUrgencyElement) triageUrgencyElement.value = "ALL";
 
           refreshInvestigationCenter();
         });
@@ -14374,6 +15034,7 @@ def dashboard_index_html():
                   <strong>${esc(row.device_type || row.classification || row.role || "Unknown asset")}</strong>
                   <div class="siem-ticket-subject">${subjectButton(row.subject_key || "-")}</div>
                   ${ticketSignalBadge(row)}
+                  ${ticketTriageBadge(row)}
                 </div>
                 <div class="siem-priority-badge severity-${esc(levelClass)}">
                   <span class="level">${esc(level)}</span>
@@ -14891,6 +15552,8 @@ def dashboard_index_html():
         renderMetrics(summary);
         renderCurrentState(currentState);
         renderInvestigationCenter(investigationCenter);
+        renderTriageFilterOptions(investigationCenter);
+        renderTriageSummaryPanel(investigationCenter);
       bindInvestigationCenterFilters();
         renderScanContext(scanContext);
         renderScanJobs(scanJobs);
@@ -15105,6 +15768,8 @@ def command_dashboard(args):
                 elif route == "/api/investigation-center":
                     ticket_status = query.get("ticket_status", ["ALL"])[0]
                     ticket_signal = query.get("ticket_signal", ["ALL"])[0]
+                    triage_bucket = query.get("triage_bucket", ["ALL"])[0]
+                    triage_urgency = query.get("triage_urgency", ["ALL"])[0]
 
                     dashboard_json_response(
                         self,
@@ -15114,6 +15779,8 @@ def command_dashboard(args):
                             scope=scope,
                             ticket_status=ticket_status,
                             ticket_signal=ticket_signal,
+                            triage_bucket=triage_bucket,
+                            triage_urgency=triage_urgency,
                         ),
                     )
                 elif route == "/api/events":
@@ -15369,7 +16036,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.21.0 Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.22.0 Operator Triage Intelligence, Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
@@ -15391,6 +16058,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--status", choices=["OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"])
     p.add_argument("--analyst")
     p.add_argument("--note")
+    p.add_argument("--triage-bucket", default="ALL", help="Filter by triage bucket: ALL, CHANGED_SINCE_REVIEW, NEEDS_REVIEW, NEEDS_CONTEXT, STALE_CLOSED, BASELINE_CONTEXT, MONITOR")
+    p.add_argument("--triage-urgency", default="ALL", help="Filter by triage urgency: ALL, IMMEDIATE, HIGH, NORMAL, LOW")
+
     p = sub.add_parser("ticket-evidence", help="Show evidence package for one investigation ticket")
     p.add_argument("--subject", dest="subject_key", required=True, help="Ticket subject key such as mac:aa:bb:cc:dd:ee:ff")
     p.add_argument("--scope", help="Optional network scope filter")
@@ -15407,6 +16077,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scope")
     p.add_argument("--ticket-status", choices=["ALL", "OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"], default="ALL", help="Filter Investigation Center tickets by workflow status")
     p.add_argument("--ticket-signal", choices=["ALL", "ACTIONABLE", "MEANINGFUL_CHANGE", "BASELINE_CONTEXT"], default="ALL", help="Filter Investigation Center tickets by signal label")
+    p.add_argument("--triage-bucket", default="ALL", help="Filter by triage bucket: ALL, CHANGED_SINCE_REVIEW, NEEDS_REVIEW, NEEDS_CONTEXT, STALE_CLOSED, BASELINE_CONTEXT, MONITOR")
+    p.add_argument("--triage-urgency", default="ALL", help="Filter by triage urgency: ALL, IMMEDIATE, HIGH, NORMAL, LOW")
 
     p = sub.add_parser("port-behavior", help="Show MAC-port behavior changes across accepted scans")
     p.add_argument("--limit", type=int, default=50)
