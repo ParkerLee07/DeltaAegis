@@ -9001,6 +9001,10 @@ def set_ticket_state(
     now = utc_now()
     cleaned_analyst = str(analyst).strip() if analyst is not None and str(analyst).strip() else None
     cleaned_note = str(note).strip() if note is not None and str(note).strip() else None
+
+    if previous_state.get("ticket_status") == normalized_status:
+        return previous_state
+
     resolved_at = now if normalized_status == "RESOLVED" else None
     suppressed_at = now if normalized_status == "SUPPRESSED" else None
 
