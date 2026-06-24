@@ -2060,6 +2060,7 @@ def authenticate_access_api_token(
             "WHERE token_id = ?",
             (authenticated_at, authenticated_at, row["token_id"]),
         )
+        connection.commit()
 
     return {
         "auth_type": "api_token",
@@ -16218,29 +16219,72 @@ def command_dashboard(args):
             if not args.quiet:
                 super().log_message(fmt, *handler_args)
 
-        def authorized(self):
-            if not token:
-                return True
+        def dashboard_request_token(self):
+            supplied = self.headers.get("X-DeltaAegis-Token", "").strip()
 
-            supplied = self.headers.get("X-DeltaAegis-Token", "")
-
-            if supplied == token:
-                return True
+            if supplied:
+                return supplied
 
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
 
-            return query.get("token", [""])[0] == token
+            return query.get("token", [""])[0].strip()
 
-        def require_auth(self):
-            if self.authorized():
+        def dashboard_legacy_actor(self, auth_type="dashboard_unauthenticated"):
+            role = "ADMIN" if auth_type in {"legacy_dashboard_token", "dashboard_unauthenticated"} else "VIEWER"
+
+            return {
+                "auth_type": auth_type,
+                "user_id": None,
+                "username": "dashboard",
+                "display_name": "DeltaAegis Dashboard",
+                "role": role,
+            }
+
+        def authenticate_dashboard_request(self, required_role="VIEWER"):
+            required_role = normalize_access_role(required_role)
+            supplied = self.dashboard_request_token()
+            self.current_actor = None
+
+            if token and supplied == token:
+                self.current_actor = self.dashboard_legacy_actor("legacy_dashboard_token")
+                return True
+
+            if supplied:
+                connection = self.open_connection()
+
+                try:
+                    actor = authenticate_access_api_token(
+                        connection,
+                        supplied,
+                        required_role=required_role,
+                    )
+                finally:
+                    connection.close()
+
+                if actor:
+                    self.current_actor = actor
+                    return True
+
+            if not token and not supplied:
+                self.current_actor = self.dashboard_legacy_actor("dashboard_unauthenticated")
+                return True
+
+            return False
+
+        def authorized(self):
+            return self.authenticate_dashboard_request(required_role="VIEWER")
+
+        def require_auth(self, required_role="VIEWER"):
+            if self.authenticate_dashboard_request(required_role=required_role):
                 return True
 
             dashboard_json_response(
                 self,
                 {
                     "error": "unauthorized",
-                    "message": "Provide X-DeltaAegis-Token header or ?token=TOKEN.",
+                    "message": "Provide a valid X-DeltaAegis-Token header or ?token=TOKEN. Database-backed API tokens are supported.",
+                    "required_role": normalize_access_role(required_role),
                 },
                 status=401,
             )
@@ -16447,7 +16491,7 @@ def command_dashboard(args):
             parsed = urlparse(self.path)
             route = parsed.path
 
-            if not self.require_auth():
+            if not self.require_auth(required_role="ANALYST"):
                 return
 
             if route not in {"/api/investigate-asset", "/api/ticket-status"}:
@@ -16526,6 +16570,23 @@ def command_dashboard(args):
                             analyst=analyst,
                             note=note,
                         )
+                        record_access_audit_event(
+                            connection,
+                            action="DASHBOARD_TICKET_STATUS_UPDATE",
+                            actor=getattr(self, "current_actor", None),
+                            target_type="investigation_ticket",
+                            target_key=state.get("ticket_key") or subject_key,
+                            source_ip=self.client_address[0] if self.client_address else None,
+                            user_agent=self.headers.get("User-Agent", ""),
+                            details={
+                                "subject_key": subject_key,
+                                "scope": raw_scope,
+                                "status": status,
+                                "analyst": analyst,
+                                "note_present": bool(note),
+                            },
+                        )
+                        connection.commit()
                         investigation_center = dashboard_investigation_center_payload(
                             connection,
                             limit=25,
@@ -16577,6 +16638,24 @@ def command_dashboard(args):
                         status,
                         reason,
                     )
+
+                    record_access_audit_event(
+                        connection,
+                        action="DASHBOARD_ASSET_INVESTIGATION_UPDATE",
+                        actor=getattr(self, "current_actor", None),
+                        target_type="asset_investigation",
+                        target_key=asset_key,
+                        source_ip=self.client_address[0] if self.client_address else None,
+                        user_agent=self.headers.get("User-Agent", ""),
+                        details={
+                            "identifier": identifier,
+                            "asset_key": asset_key,
+                            "scope": resolved_scope,
+                            "status": status,
+                            "reason_present": bool(reason),
+                        },
+                    )
+                    connection.commit()
 
                     ticket_state = None
                     workflow_status = (
@@ -16640,9 +16719,11 @@ def command_dashboard(args):
     if token:
         print("Auth:     token required")
         print("Header:   X-DeltaAegis-Token")
+        print("DB Tokens: accepted via X-DeltaAegis-Token")
     else:
         print("Auth:     disabled")
         print("Warning:  bind to 127.0.0.1 unless you are using a trusted network")
+        print("DB Tokens: accepted when supplied in X-DeltaAegis-Token")
 
     print()
     print("Press Ctrl+C to stop.")
