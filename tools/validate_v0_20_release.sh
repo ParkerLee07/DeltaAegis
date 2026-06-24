@@ -33,8 +33,26 @@ pytest -q \
 ./tools/validate_v0_20_report_ticket_evidence.sh \
     || fail "v0.20 report ticket evidence validation failed"
 
-./tools/validate_v0_19_release.sh "$NETSNIPER_RUN" \
-    || fail "v0.19 release regression failed"
+for gate in \
+    ./tools/validate_v0_19_backend_filters.sh \
+    ./tools/validate_v0_19_dashboard_filters.sh \
+    ./tools/validate_v0_19_workflow_counters.sh \
+    ./tools/validate_v0_19_operator_views.sh
+do
+    if [ ! -x "$gate" ]; then
+        fail "required v0.19 compatibility gate is missing or not executable: $gate"
+    fi
+    "$gate" || fail "v0.19 compatibility gate failed: $gate"
+done
+
+grep -q 'DeltaAegis v0.20.0 — Ticket Evidence Drilldown' README.md \
+    || fail "README current release is not v0.20.0 Ticket Evidence Drilldown"
+
+head -1 CHANGELOG.md | grep -q '## v0.20.0 — Ticket Evidence Drilldown' \
+    || fail "CHANGELOG does not start with v0.20.0 Ticket Evidence Drilldown"
+
+grep -q 'DeltaAegis v0.20.0: Ticket Evidence Drilldown' deltaaegis.py \
+    || fail "deltaaegis.py top metadata is not v0.20.0"
 
 grep -q 'def dashboard_ticket_evidence_payload' deltaaegis.py \
     || fail "v0.20 backend evidence payload missing"

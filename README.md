@@ -14,40 +14,32 @@ Markdown reports, MAC-port behavior correlation, and a local dashboard.
 
 ## Current Release
 
-**DeltaAegis v0.19.0 — Workflow Filters and Operator Views**
+**DeltaAegis v0.20.0 — Ticket Evidence Drilldown**
 
-v0.19.0 makes the v0.18 investigation workflow easier to operate day to day.
-It adds workflow and signal filters, dashboard filter controls, total-vs-visible
-queue counters, CLI operator context, report workflow summaries, and a v0.19
-release gate for the operator-view workflow.
+v0.20.0 turns Investigation Center tickets into evidence-backed drilldowns. It adds a shared ticket evidence payload, a dashboard **View Evidence** panel, a `ticket-evidence` CLI command, report evidence appendices, and a v0.20 release gate that keeps the full ticket-evidence workflow validated.
 
-Current feature baseline: **DeltaAegis v0.19.0 — Workflow Filters and Operator Views**.
+Current feature baseline: **DeltaAegis v0.20.0 — Ticket Evidence Drilldown**.
 
-DeltaAegis v0.19.0 adds:
+DeltaAegis v0.20.0 adds:
 
-- Investigation Center backend filters for workflow status:
-  - `ALL`
-  - `OPEN`
-  - `IN_REVIEW`
-  - `RESOLVED`
-  - `SUPPRESSED`
-- Investigation Center backend filters for ticket signal:
-  - `ALL`
-  - `ACTIONABLE`
-  - `MEANINGFUL_CHANGE`
-  - `BASELINE_CONTEXT`
-- Dashboard filter controls for workflow state and signal label.
-- Filter-aware Investigation Center API query parameters:
-  - `ticket_status`
-  - `ticket_signal`
-- Dashboard counters that separate visible filtered items from the total queue.
-- Workflow and signal summary counters across the full queue.
-- CLI operator context showing active filters, visible-vs-total counts, workflow summary, and signal summary.
-- Markdown report operator summaries with Workflow and Signal columns.
-- v0.19 validators for backend filters, dashboard filters, workflow counters, operator views, and release validation.
+- Ticket evidence backend payloads that aggregate:
+  - workflow state
+  - ticket history
+  - current risk reasoning
+  - recent delta events
+  - open alerts
+  - MAC-port behavior
+  - asset identity and classification context
+- `/api/ticket-evidence` for dashboard evidence drilldown.
+- Dashboard **View Evidence** actions on Investigation Center tickets.
+- A Ticket Evidence Drilldown panel with priority, workflow, evidence counts, timeline samples, current risk, alerts, delta events, MAC-port behavior, and ticket history.
+- `ticket-evidence` CLI command for terminal-based investigation.
+- Markdown report **Ticket Evidence Appendix** entries for top Investigation Center subjects.
+- v0.20 validators for payload, dashboard, CLI, report appendix, and release validation.
 
 Compatibility retained:
 
+- DeltaAegis v0.19.0 — Workflow Filters and Operator Views remains available.
 - DeltaAegis v0.18.0 — Investigation Workflow Actions remains available.
 - DeltaAegis v0.17.0 — Executive SIEM Dashboard Refresh remains available.
 - DeltaAegis v0.16.0 — Investigation Command Center remains available.
@@ -69,6 +61,7 @@ DeltaAegis answers:
 - Which NetSniper classifications are strong, weak, contradictory, or review-only?
 - Did the same MAC-backed device unexpectedly expose a new or volatile port?
 - Why did DeltaAegis assign risk or review priority to a subject?
+- Which evidence supports an Investigation Center ticket?
 
 Basic flow:
 
@@ -217,6 +210,17 @@ DeltaAegis does not require a separate database server.
 
 
 ## Recent Releases
+
+### v0.20.0 — Ticket Evidence Drilldown
+
+DeltaAegis v0.20.0 adds evidence drilldown across the Investigation Center workflow.
+
+- Added ticket evidence backend payloads that combine workflow state, history, current risk, alerts, events, port behavior, and asset detail.
+- Added `/api/ticket-evidence` for dashboard-driven ticket evidence review.
+- Added dashboard **View Evidence** actions and a Ticket Evidence Drilldown panel.
+- Added `ticket-evidence` CLI output for terminal-based investigation.
+- Added Markdown report **Ticket Evidence Appendix** entries for top Investigation Center tickets.
+- Added v0.20 release validation covering payload, dashboard, CLI, report appendix, and compatibility regression gates.
 
 ### v0.19.0 — Workflow Filters and Operator Views
 

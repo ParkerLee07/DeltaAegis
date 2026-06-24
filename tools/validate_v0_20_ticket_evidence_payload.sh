@@ -188,6 +188,16 @@ finally:
 print("[PASS] synthetic v0.20 ticket evidence payload validated")
 PY
 
-./tools/validate_v0_19_release.sh /home/parker/NetSniper/runs/20260623-123007     || fail "v0.19 regression failed"
+for gate in \
+    ./tools/validate_v0_19_backend_filters.sh \
+    ./tools/validate_v0_19_dashboard_filters.sh \
+    ./tools/validate_v0_19_workflow_counters.sh \
+    ./tools/validate_v0_19_operator_views.sh
+do
+    if [ ! -x "$gate" ]; then
+        fail "required v0.19 compatibility gate is missing or not executable: $gate"
+    fi
+    "$gate" || fail "v0.19 compatibility gate failed: $gate"
+done
 
 pass "DeltaAegis v0.20 ticket evidence payload validation passed"
