@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.19.0: Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
+"""DeltaAegis v0.20.0: Ticket Evidence Drilldown, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -5888,6 +5888,190 @@ def append_report_port_behavior_section(lines, port_behavior_rows):
     )
     lines.append("")
 
+
+def report_ticket_evidence_rows(
+    connection,
+    investigation_rows,
+    scope=None,
+    limit=5,
+    evidence_limit=5,
+):
+    evidence_rows = []
+
+    for row in list(investigation_rows or [])[:limit]:
+        subject_key = row.get("subject_key")
+
+        if not subject_key:
+            continue
+
+        payload = dashboard_ticket_evidence_payload(
+            connection,
+            subject_key=subject_key,
+            scope=scope,
+            limit=evidence_limit,
+        )
+
+        if payload.get("available", False):
+            evidence_rows.append(payload)
+
+    return evidence_rows
+
+
+def append_report_ticket_evidence_appendix(lines, evidence_payloads):
+    lines.append("## Ticket Evidence Appendix")
+    lines.append("")
+    lines.append(
+        "This appendix preserves the operator-facing evidence package behind top "
+        "Investigation Command Center tickets. Each entry ties workflow state, "
+        "risk reasoning, recent delta events, MAC-port behavior, and ticket history "
+        "back to the same subject key used by the dashboard and CLI."
+    )
+    lines.append("")
+
+    payloads = list(evidence_payloads or [])
+
+    if not payloads:
+        lines.append("No ticket evidence payloads were available for this report scope.")
+        lines.append("")
+        return
+
+    for index, payload in enumerate(payloads, start=1):
+        summary = payload.get("summary") or {}
+        ticket_state = payload.get("ticket_state") or {}
+        subject_key = payload.get("subject_key") or summary.get("subject_key") or "-"
+
+        lines.append(f"### Ticket Evidence {index}: `{safe_markdown(subject_key)}`")
+        lines.append("")
+        lines.append(f"- Workflow: **{safe_markdown(summary.get('ticket_status') or ticket_state.get('ticket_status') or 'OPEN')}**")
+        lines.append(f"- Signal: **{safe_markdown(summary.get('ticket_signal') or 'ACTIONABLE')}**")
+        lines.append(
+            f"- Priority: **{safe_markdown(summary.get('priority_level') or 'INFO')}** "
+            f"({safe_markdown(summary.get('priority_score') or 0)})"
+        )
+        lines.append(f"- Primary reason: {safe_markdown(summary.get('primary_reason') or '-')}")
+        lines.append(f"- Recommended action: {safe_markdown(summary.get('recommended_action') or '-')}")
+        lines.append(
+            "- Evidence counts: "
+            f"risk `{safe_markdown(summary.get('risk_count') or 0)}`, "
+            f"alerts `{safe_markdown(summary.get('alert_count') or 0)}`, "
+            f"events `{safe_markdown(summary.get('event_count') or 0)}`, "
+            f"ports `{safe_markdown(summary.get('port_behavior_count') or 0)}`, "
+            f"history `{safe_markdown(summary.get('ticket_history_count') or 0)}`, "
+            f"timeline `{safe_markdown(summary.get('timeline_count') or 0)}`"
+        )
+        lines.append("")
+
+        timeline = list(payload.get("timeline") or [])[:8]
+        lines.append("#### Evidence Timeline Sample")
+        lines.append("")
+
+        if not timeline:
+            lines.append("No timeline evidence was available for this ticket.")
+            lines.append("")
+        else:
+            lines.append("| Time | Category | Severity | Source | Summary |")
+            lines.append("|---|---|---|---|---|")
+            for item in timeline:
+                lines.append(
+                    "| "
+                    f"{safe_markdown(item.get('timestamp') or '-')} | "
+                    f"{safe_markdown(item.get('category') or '-')} | "
+                    f"{safe_markdown(item.get('severity') or '-')} | "
+                    f"{safe_markdown(item.get('source') or '-')} | "
+                    f"{safe_markdown(item.get('summary') or '-')} |"
+                )
+            lines.append("")
+
+        risk_rows = list(payload.get("risk") or [])[:3]
+        lines.append("#### Current Risk Evidence")
+        lines.append("")
+
+        if not risk_rows:
+            lines.append("No current risk rows were attached to this ticket evidence package.")
+            lines.append("")
+        else:
+            lines.append("| Level | Score | Subject | Primary Reason |")
+            lines.append("|---|---:|---|---|")
+            for risk in risk_rows:
+                reasons = risk.get("reasons") or []
+                primary_reason = risk.get("primary_reason") or (reasons[0] if reasons else "-")
+                lines.append(
+                    "| "
+                    f"{safe_markdown(risk.get('level') or '-')} | "
+                    f"{safe_markdown(risk.get('score') or 0)} | "
+                    f"`{safe_markdown(risk.get('subject_key') or subject_key)}` | "
+                    f"{safe_markdown(primary_reason)} |"
+                )
+            lines.append("")
+
+        event_rows = list(payload.get("events") or [])[:5]
+        lines.append("#### Delta Events")
+        lines.append("")
+
+        if not event_rows:
+            lines.append("No delta events were attached to this ticket evidence package.")
+            lines.append("")
+        else:
+            lines.append("| Event | Time | Severity | Type | Summary |")
+            lines.append("|---:|---|---|---|---|")
+            for event in event_rows:
+                lines.append(
+                    "| "
+                    f"{safe_markdown(event.get('event_id') or event.get('id') or '-')} | "
+                    f"{safe_markdown(event.get('created_at') or '-')} | "
+                    f"{safe_markdown(event.get('severity') or '-')} | "
+                    f"{safe_markdown(event.get('event_type') or event.get('type') or '-')} | "
+                    f"{safe_markdown(event.get('summary') or '-')} |"
+                )
+            lines.append("")
+
+        port_rows = list(payload.get("port_behavior") or [])[:5]
+        lines.append("#### MAC-Port Behavior")
+        lines.append("")
+
+        if not port_rows:
+            lines.append("No MAC-port behavior rows were attached to this ticket evidence package.")
+            lines.append("")
+        else:
+            lines.append("| Severity | Behavior | Port | Reason |")
+            lines.append("|---|---|---|---|")
+            for port in port_rows:
+                port_label = port.get("port_key")
+                if not port_label:
+                    proto = port.get("protocol") or "tcp"
+                    port_number = port.get("port") or "-"
+                    port_label = f"{proto}/{port_number}"
+
+                lines.append(
+                    "| "
+                    f"{safe_markdown(port.get('severity') or '-')} | "
+                    f"{safe_markdown(port.get('behavior') or '-')} | "
+                    f"`{safe_markdown(port_label)}` | "
+                    f"{safe_markdown(port.get('reason') or '-')} |"
+                )
+            lines.append("")
+
+        history_rows = list(payload.get("ticket_history") or [])[:5]
+        lines.append("#### Ticket History")
+        lines.append("")
+
+        if not history_rows:
+            lines.append("No ticket workflow history was attached to this evidence package.")
+            lines.append("")
+        else:
+            lines.append("| Time | Previous | New | Analyst | Note |")
+            lines.append("|---|---|---|---|---|")
+            for history in history_rows:
+                lines.append(
+                    "| "
+                    f"{safe_markdown(history.get('created_at') or '-')} | "
+                    f"{safe_markdown(history.get('previous_status') or '-')} | "
+                    f"{safe_markdown(history.get('new_status') or '-')} | "
+                    f"{safe_markdown(history.get('analyst') or '-')} | "
+                    f"{safe_markdown(history.get('note') or '-')} |"
+                )
+            lines.append("")
+
 def command_report(args):
     from collections import Counter
     from datetime import datetime, timezone
@@ -5958,6 +6142,14 @@ def command_report(args):
         )
     )[:args.risk_limit]
 
+    report_ticket_evidence_payloads = report_ticket_evidence_rows(
+        connection,
+        report_investigation_center_rows,
+        scope=scope,
+        limit=min(args.risk_limit, 5),
+        evidence_limit=5,
+    )
+
     report_lifecycle_rows = report_asset_lifecycle_summary(
         connection,
         scope=scope,
@@ -6026,6 +6218,7 @@ def command_report(args):
     append_report_classification_summary_section(lines, report_classification_summary)
     append_report_asset_inventory_section(lines, report_asset_rows, args.asset_limit)
     append_report_investigation_center_section(lines, report_investigation_center_rows)
+    append_report_ticket_evidence_appendix(lines, report_ticket_evidence_payloads)
     append_report_risk_section(lines, report_risk_rows)
     append_report_port_behavior_section(lines, report_port_behavior_rows)
     append_report_role_aware_recommendations_section(lines, report_risk_rows)
@@ -9811,6 +10004,392 @@ def dashboard_investigation_center_payload(
             "error": str(exc),
         }
 
+
+def ticket_evidence_row_dict(row):
+    if row is None:
+        return {}
+
+    if isinstance(row, dict):
+        return dict(row)
+
+    try:
+        return {key: row[key] for key in row.keys()}
+    except Exception:
+        try:
+            return dict(row)
+        except Exception:
+            return {}
+
+
+def ticket_evidence_subject_tokens(subject_key):
+    tokens = set()
+
+    def add(value):
+        if value is None:
+            return
+
+        text = str(value).strip()
+
+        if not text:
+            return
+
+        lower = text.lower()
+        tokens.add(lower)
+
+        if lower.startswith("mac:"):
+            tokens.add(lower[4:])
+        elif lower.startswith("ip:"):
+            tokens.add(lower[3:])
+
+    add(subject_key)
+    add(stable_ticket_key(subject_key))
+
+    return tokens
+
+
+def ticket_evidence_row_matches_subject(row, subject_key):
+    tokens = ticket_evidence_subject_tokens(subject_key)
+
+    if not tokens:
+        return False
+
+    row_dict = ticket_evidence_row_dict(row)
+
+    for key in (
+        "subject_key",
+        "ticket_key",
+        "asset_key",
+        "identity_key",
+        "mac_address",
+        "ip_address",
+        "ip",
+        "mac",
+    ):
+        value = row_dict.get(key)
+
+        if value is None:
+            continue
+
+        text = str(value).strip().lower()
+
+        if text in tokens:
+            return True
+
+        if text.startswith("mac:") and text[4:] in tokens:
+            return True
+
+        if text.startswith("ip:") and text[3:] in tokens:
+            return True
+
+    return False
+
+
+def ticket_evidence_filter_rows(rows, subject_key, limit=10):
+    filtered = []
+
+    for row in rows or []:
+        row_dict = ticket_evidence_row_dict(row)
+
+        if ticket_evidence_row_matches_subject(row_dict, subject_key):
+            filtered.append(row_dict)
+
+        if len(filtered) >= limit:
+            break
+
+    return filtered
+
+
+def ticket_evidence_timeline_entry(category, source, summary, severity=None, timestamp=None, row=None):
+    return {
+        "category": category,
+        "source": source,
+        "severity": severity or "INFO",
+        "timestamp": timestamp,
+        "summary": summary or "-",
+        "row": ticket_evidence_row_dict(row),
+    }
+
+
+def ticket_evidence_build_timeline(
+    risk_rows,
+    alert_rows,
+    event_rows,
+    port_behavior_rows,
+    ticket_history_rows,
+    limit=25,
+):
+    timeline = []
+
+    for row in risk_rows or []:
+        reasons = row.get("reasons") or []
+        primary_reason = reasons[0] if reasons else "Current risk context is present."
+        timeline.append(
+            ticket_evidence_timeline_entry(
+                "current_risk",
+                "risk_register",
+                primary_reason,
+                severity=row.get("level") or row.get("severity") or "INFO",
+                timestamp=row.get("updated_at") or row.get("created_at"),
+                row=row,
+            )
+        )
+
+    for row in alert_rows or []:
+        timeline.append(
+            ticket_evidence_timeline_entry(
+                "alert",
+                "alerts",
+                row.get("summary") or row.get("event_type") or "Alert context is present.",
+                severity=row.get("severity") or "INFO",
+                timestamp=row.get("last_seen_at") or row.get("opened_at") or row.get("created_at"),
+                row=row,
+            )
+        )
+
+    for row in event_rows or []:
+        timeline.append(
+            ticket_evidence_timeline_entry(
+                "delta_event",
+                "delta_events",
+                row.get("summary") or row.get("event_type") or "Delta event context is present.",
+                severity=row.get("severity") or "INFO",
+                timestamp=row.get("created_at"),
+                row=row,
+            )
+        )
+
+    for row in port_behavior_rows or []:
+        protocol = row.get("protocol") or "-"
+        port = row.get("port") or "-"
+        behavior = row.get("behavior") or row.get("signal") or "PORT_BEHAVIOR"
+        timeline.append(
+            ticket_evidence_timeline_entry(
+                "port_behavior",
+                "mac_port_behavior",
+                f"{behavior} {protocol}/{port}",
+                severity=row.get("severity") or "INFO",
+                timestamp=(
+                    row.get("last_seen_at")
+                    or row.get("observed_at")
+                    or row.get("created_at")
+                ),
+                row=row,
+            )
+        )
+
+    for row in ticket_history_rows or []:
+        previous_status = row.get("previous_status") or "-"
+        new_status = row.get("new_status") or row.get("ticket_status") or "-"
+        timeline.append(
+            ticket_evidence_timeline_entry(
+                "ticket_history",
+                "investigation_ticket_history",
+                f"Ticket workflow changed from {previous_status} to {new_status}.",
+                severity="INFO",
+                timestamp=row.get("created_at") or row.get("updated_at"),
+                row=row,
+            )
+        )
+
+    timeline.sort(
+        key=lambda item: str(item.get("timestamp") or ""),
+        reverse=True,
+    )
+
+    return timeline[:limit]
+
+
+def dashboard_ticket_evidence_payload(
+    connection,
+    subject_key,
+    scope=None,
+    limit=10,
+):
+    requested_limit = risk_int(limit, 10)
+
+    if requested_limit <= 0:
+        requested_limit = 10
+
+    if not subject_key:
+        return {
+            "available": False,
+            "subject_key": None,
+            "error": "subject_key is required",
+            "summary": {},
+            "ticket_state": {},
+            "ticket_history": [],
+            "asset_detail": {},
+            "risk": [],
+            "alerts": [],
+            "events": [],
+            "port_behavior": [],
+            "investigation_items": [],
+            "timeline": [],
+        }
+
+    stable_subject = stable_ticket_key(subject_key)
+
+    try:
+        ticket_state = get_ticket_state(connection, subject_key)
+        ticket_history = list_ticket_history(
+            connection,
+            subject_key,
+            limit=max(requested_limit, 10),
+        )
+
+        risk_rows = ticket_evidence_filter_rows(
+            build_risk_register(
+                connection,
+                max(requested_limit * 8, 50),
+                scope=scope,
+            ),
+            subject_key,
+            limit=requested_limit,
+        )
+
+        try:
+            asset_detail = dashboard_asset_detail_payload(
+                connection,
+                subject_key,
+                scope=scope,
+                limit=requested_limit,
+            )
+        except Exception as exc:
+            asset_detail = {
+                "available": False,
+                "error": str(exc),
+            }
+
+        alert_rows = ticket_evidence_filter_rows(
+            dashboard_alerts_payload(
+                connection,
+                max(requested_limit * 8, 50),
+                scope=scope,
+            ),
+            subject_key,
+            limit=requested_limit,
+        )
+
+        event_rows = ticket_evidence_filter_rows(
+            dashboard_events_payload(
+                connection,
+                max(requested_limit * 8, 50),
+                scope=scope,
+            ),
+            subject_key,
+            limit=requested_limit,
+        )
+
+        port_behavior_rows = ticket_evidence_filter_rows(
+            dashboard_port_behavior_payload(
+                connection,
+                max(requested_limit * 8, 50),
+                scope=scope,
+            ),
+            subject_key,
+            limit=requested_limit,
+        )
+
+        investigation_payload = dashboard_investigation_center_payload(
+            connection,
+            limit=max(requested_limit * 8, 50),
+            scope=scope,
+        )
+        investigation_items = ticket_evidence_filter_rows(
+            investigation_payload.get("items") or [],
+            subject_key,
+            limit=requested_limit,
+        )
+
+        primary_investigation_item = investigation_items[0] if investigation_items else {}
+        primary_risk = risk_rows[0] if risk_rows else {}
+        primary_reason = (
+            primary_investigation_item.get("primary_reason")
+            or ((primary_risk.get("reasons") or [None])[0])
+            or "No primary evidence reason was found for this ticket."
+        )
+        recommended_action = (
+            primary_investigation_item.get("recommended_action")
+            or primary_risk.get("recommended_action")
+            or "Review asset identity, risk context, alerts, events, port behavior, and ticket history before closing this ticket."
+        )
+
+        timeline = ticket_evidence_build_timeline(
+            risk_rows,
+            alert_rows,
+            event_rows,
+            port_behavior_rows,
+            ticket_history,
+            limit=max(requested_limit * 3, 25),
+        )
+
+        summary = {
+            "subject_key": stable_subject,
+            "selected_subject": str(subject_key),
+            "scope": scope,
+            "ticket_status": ticket_state.get("ticket_status") or "OPEN",
+            "ticket_signal": primary_investigation_item.get("ticket_signal_state") or "ACTIONABLE",
+            "priority_level": (
+                primary_investigation_item.get("priority_level")
+                or primary_risk.get("level")
+                or "INFO"
+            ),
+            "priority_score": (
+                primary_investigation_item.get("priority_score")
+                or primary_risk.get("score")
+                or 0
+            ),
+            "risk_count": len(risk_rows),
+            "alert_count": len(alert_rows),
+            "event_count": len(event_rows),
+            "port_behavior_count": len(port_behavior_rows),
+            "ticket_history_count": len(ticket_history),
+            "timeline_count": len(timeline),
+            "primary_reason": primary_reason,
+            "recommended_action": recommended_action,
+        }
+
+        return {
+            "available": True,
+            "subject_key": stable_subject,
+            "selected_subject": str(subject_key),
+            "selected_scope": scope,
+            "summary": summary,
+            "ticket_state": ticket_state,
+            "ticket_history": ticket_history,
+            "asset_detail": asset_detail,
+            "risk": risk_rows[:requested_limit],
+            "alerts": alert_rows[:requested_limit],
+            "events": event_rows[:requested_limit],
+            "port_behavior": port_behavior_rows[:requested_limit],
+            "investigation_items": investigation_items[:requested_limit],
+            "timeline": timeline,
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "subject_key": stable_subject,
+            "selected_subject": str(subject_key),
+            "selected_scope": scope,
+            "error": str(exc),
+            "summary": {
+                "subject_key": stable_subject,
+                "selected_subject": str(subject_key),
+                "scope": scope,
+            },
+            "ticket_state": {},
+            "ticket_history": [],
+            "asset_detail": {},
+            "risk": [],
+            "alerts": [],
+            "events": [],
+            "port_behavior": [],
+            "investigation_items": [],
+            "timeline": [],
+        }
+
+
+
 def print_investigation_center_rows(payload):
     available = bool(payload.get("available", False))
     scope = payload.get("selected_scope")
@@ -9921,6 +10500,169 @@ def print_investigation_center_rows(payload):
             )
 
         print()
+
+
+
+
+def print_ticket_evidence_section(title, rows, fields, limit=5):
+    items = list(rows or [])[:limit]
+
+    print()
+    print(title)
+    print("-" * len(title))
+
+    if not items:
+        print("  None.")
+        return
+
+    for index, row in enumerate(items, start=1):
+        print(f"{index:>2}.")
+        for field, label in fields:
+            value = row.get(field)
+
+            if isinstance(value, list):
+                value = ", ".join(str(item) for item in value[:6])
+
+            if isinstance(value, dict):
+                value = ", ".join(f"{key}={item}" for key, item in list(value.items())[:6])
+
+            if value in (None, ""):
+                value = "-"
+
+            print(f"    {label:<14} {value}")
+
+
+def print_ticket_evidence_payload(payload):
+    available = bool(payload.get("available", False))
+    summary = payload.get("summary") or {}
+    ticket_state = payload.get("ticket_state") or {}
+
+    print("DeltaAegis Ticket Evidence")
+    print("==========================")
+
+    if not available:
+        print(payload.get("error") or "Ticket evidence is unavailable.")
+        return
+
+    print(f"Subject:        {payload.get('subject_key') or summary.get('subject_key') or '-'}")
+    print(f"Selected:       {payload.get('selected_subject') or '-'}")
+    print(f"Scope:          {payload.get('selected_scope') or summary.get('scope') or '-'}")
+    print(f"Workflow:       {summary.get('ticket_status') or ticket_state.get('ticket_status') or 'OPEN'}")
+    print(f"Signal:         {summary.get('ticket_signal') or 'ACTIONABLE'}")
+    print(
+        "Priority:       "
+        f"{summary.get('priority_level') or 'INFO'} / "
+        f"{int(summary.get('priority_score') or 0)}"
+    )
+    print()
+    print(f"Why:            {summary.get('primary_reason') or '-'}")
+    print(f"Next action:    {summary.get('recommended_action') or '-'}")
+    print()
+    print(
+        "Evidence counts: "
+        f"risk={int(summary.get('risk_count') or 0)}, "
+        f"alerts={int(summary.get('alert_count') or 0)}, "
+        f"events={int(summary.get('event_count') or 0)}, "
+        f"ports={int(summary.get('port_behavior_count') or 0)}, "
+        f"history={int(summary.get('ticket_history_count') or 0)}, "
+        f"timeline={int(summary.get('timeline_count') or 0)}"
+    )
+
+    print_ticket_evidence_section(
+        "Evidence Timeline",
+        payload.get("timeline") or [],
+        [
+            ("timestamp", "Time"),
+            ("category", "Category"),
+            ("severity", "Severity"),
+            ("source", "Source"),
+            ("summary", "Summary"),
+        ],
+        limit=10,
+    )
+
+    print_ticket_evidence_section(
+        "Current Risk Evidence",
+        payload.get("risk") or [],
+        [
+            ("level", "Level"),
+            ("score", "Score"),
+            ("subject_key", "Subject"),
+            ("reasons", "Reasons"),
+        ],
+        limit=5,
+    )
+
+    print_ticket_evidence_section(
+        "Alerts",
+        payload.get("alerts") or [],
+        [
+            ("alert_id", "Alert"),
+            ("status", "Status"),
+            ("severity", "Severity"),
+            ("event_type", "Type"),
+            ("summary", "Summary"),
+        ],
+        limit=5,
+    )
+
+    print_ticket_evidence_section(
+        "Delta Events",
+        payload.get("events") or [],
+        [
+            ("event_id", "Event"),
+            ("created_at", "Time"),
+            ("severity", "Severity"),
+            ("event_type", "Type"),
+            ("summary", "Summary"),
+        ],
+        limit=5,
+    )
+
+    print_ticket_evidence_section(
+        "MAC-Port Behavior",
+        payload.get("port_behavior") or [],
+        [
+            ("severity", "Severity"),
+            ("behavior", "Behavior"),
+            ("protocol", "Protocol"),
+            ("port", "Port"),
+            ("reason", "Reason"),
+        ],
+        limit=5,
+    )
+
+    print_ticket_evidence_section(
+        "Ticket History",
+        payload.get("ticket_history") or [],
+        [
+            ("created_at", "Time"),
+            ("previous_status", "Previous"),
+            ("new_status", "New"),
+            ("analyst", "Analyst"),
+            ("note", "Note"),
+        ],
+        limit=10,
+    )
+
+
+def command_ticket_evidence(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    scope = optional_network_scope(getattr(args, "scope", None))
+
+    try:
+        payload = dashboard_ticket_evidence_payload(
+            connection,
+            subject_key=args.subject_key,
+            scope=scope,
+            limit=getattr(args, "limit", 10),
+        )
+    finally:
+        connection.close()
+
+    print_ticket_evidence_payload(payload)
+
+    return 0 if payload.get("available", False) else 1
 
 
 
@@ -10914,6 +11656,54 @@ def dashboard_index_html():
     .siem-ticket-card.ticket-medium::before { background: #eab308; }
     .siem-ticket-card.ticket-low::before { background: #22c55e; }
 
+    .evidence-drilldown-panel {
+      margin: 16px 0 22px;
+      border: 1px solid rgba(96, 165, 250, 0.22);
+      border-radius: 20px;
+      background:
+        linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(2, 6, 23, 0.92));
+      padding: 16px;
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.22);
+    }
+
+    .evidence-drilldown-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .evidence-drilldown-header h3 {
+      margin: 0;
+    }
+
+    .ticket-evidence-action {
+      border-color: rgba(96, 165, 250, 0.65);
+    }
+
+    .ticket-evidence-timeline {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .ticket-evidence-event {
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 14px;
+      padding: 10px 12px;
+      background: rgba(15, 23, 42, 0.72);
+    }
+
+    .ticket-evidence-event .event-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      color: #94a3b8;
+      font-size: 12px;
+      margin-bottom: 4px;
+    }
+
     .siem-ticket-header {
       display: flex;
       align-items: flex-start;
@@ -11271,6 +12061,14 @@ def dashboard_index_html():
         <button id="clear-ticket-filters" class="small-action-button">Clear filters</button>
       </div>
       <div id="investigation-center-summary" class="grid"></div>
+      <div id="ticket-evidence-panel" class="evidence-drilldown-panel">
+        <div class="evidence-drilldown-header">
+          <div>
+            <h3>Ticket Evidence Drilldown</h3>
+            <p class="muted">Select View Evidence on an Investigation Center ticket to inspect risk reasons, alerts, events, port behavior, ticket history, and recommended action context.</p>
+          </div>
+        </div>
+      </div>
       <div id="investigation-ticket-cards" class="ticket-cards-grid"></div>
       <p class="muted siem-ticket-table-note">Detailed queue table for sorting, copy/paste review, and compatibility with earlier DeltaAegis dashboard workflows.</p>
       <table class="siem-ticket-table">
@@ -12825,6 +13623,173 @@ def dashboard_index_html():
       return `<span class="ticket-signal-badge ${ticketSignalClass(row)}">${esc(ticketSignalLabel(row))}</span>`;
     }
 
+    function ticketEvidenceTimelineHtml(timeline) {
+      const items = Array.isArray(timeline) ? timeline : [];
+
+      if (!items.length) {
+        return `<p class="muted">No evidence timeline entries were found for this ticket.</p>`;
+      }
+
+      return `
+        <div class="ticket-evidence-timeline">
+          ${items.slice(0, 12).map(item => `
+            <div class="ticket-evidence-event">
+              <div class="event-meta">
+                <span>${esc(item.timestamp || "-")}</span>
+                <span>${esc(item.category || "evidence")}</span>
+                <span class="severity-${esc(String(item.severity || "info").toLowerCase())}">${esc(item.severity || "INFO")}</span>
+                <span>${esc(item.source || "-")}</span>
+              </div>
+              <div>${esc(item.summary || "-")}</div>
+            </div>
+          `).join("")}
+        </div>
+      `;
+    }
+
+    function renderTicketEvidence(payload) {
+      const panel = document.getElementById("ticket-evidence-panel");
+
+      if (!panel) return;
+
+      if (!payload || payload.available === false) {
+        panel.innerHTML = `
+          <div class="evidence-drilldown-header">
+            <div>
+              <h3>Ticket Evidence Drilldown</h3>
+              <p class="muted">${esc((payload && payload.error) || "Ticket evidence is unavailable.")}</p>
+            </div>
+          </div>
+        `;
+        return;
+      }
+
+      const summary = payload.summary || {};
+      const ticketState = payload.ticket_state || {};
+
+      panel.innerHTML = `
+        <div class="evidence-drilldown-header">
+          <div>
+            <h3>Ticket Evidence Drilldown</h3>
+            <p class="muted">Evidence package for <code>${esc(payload.subject_key || summary.subject_key || "-")}</code></p>
+          </div>
+          <div>
+            ${ticketWorkflowBadge({ticket_status: summary.ticket_status || ticketState.ticket_status || "OPEN"})}
+            ${ticketSignalBadge({ticket_signal_state: summary.ticket_signal || "ACTIONABLE"})}
+          </div>
+        </div>
+
+        <div class="detail-grid">
+          <div class="detail-box"><div class="label">Priority</div>${esc(summary.priority_level || "INFO")} / ${esc(summary.priority_score || 0)}</div>
+          <div class="detail-box"><div class="label">Workflow</div>${esc(summary.ticket_status || ticketState.ticket_status || "OPEN")}</div>
+          <div class="detail-box"><div class="label">Risk Records</div>${esc(summary.risk_count || 0)}</div>
+          <div class="detail-box"><div class="label">Alerts</div>${esc(summary.alert_count || 0)}</div>
+          <div class="detail-box"><div class="label">Events</div>${esc(summary.event_count || 0)}</div>
+          <div class="detail-box"><div class="label">Port Behavior</div>${esc(summary.port_behavior_count || 0)}</div>
+          <div class="detail-box"><div class="label">Ticket History</div>${esc(summary.ticket_history_count || 0)}</div>
+          <div class="detail-box"><div class="label">Timeline Entries</div>${esc(summary.timeline_count || 0)}</div>
+        </div>
+
+        <h4>Why this ticket exists</h4>
+        <p class="muted">${esc(summary.primary_reason || "No primary reason was recorded.")}</p>
+
+        <h4>Recommended next action</h4>
+        <p class="muted">${esc(summary.recommended_action || "Review the evidence package before changing workflow state.")}</p>
+
+        <h4>Evidence Timeline</h4>
+        ${ticketEvidenceTimelineHtml(payload.timeline || [])}
+
+        ${detailTable("Current Risk Evidence", payload.risk || [], [
+          {key: "level", label: "Level"},
+          {key: "score", label: "Score"},
+          {key: "subject_key", label: "Subject", code: true},
+          {key: "primary_reason", label: "Primary Reason"},
+          {key: "reasons", label: "Reasons"}
+        ])}
+
+        ${detailTable("Alerts", payload.alerts || [], [
+          {key: "alert_id", label: "ID"},
+          {key: "status", label: "Status"},
+          {key: "severity", label: "Severity"},
+          {key: "event_type", label: "Type"},
+          {key: "summary", label: "Summary"}
+        ])}
+
+        ${detailTable("Delta Events", payload.events || [], [
+          {key: "event_id", label: "ID"},
+          {key: "created_at", label: "Time"},
+          {key: "severity", label: "Severity"},
+          {key: "event_type", label: "Type"},
+          {key: "summary", label: "Summary"}
+        ])}
+
+        ${detailTable("MAC-Port Behavior", payload.port_behavior || [], [
+          {key: "severity", label: "Severity"},
+          {key: "behavior", label: "Behavior"},
+          {key: "protocol", label: "Protocol"},
+          {key: "port", label: "Port"},
+          {key: "reason", label: "Reason"}
+        ])}
+
+        ${detailTable("Ticket History", payload.ticket_history || [], [
+          {key: "created_at", label: "Time"},
+          {key: "previous_status", label: "Previous"},
+          {key: "new_status", label: "New"},
+          {key: "analyst", label: "Analyst"},
+          {key: "note", label: "Note"}
+        ])}
+      `;
+    }
+
+    async function loadTicketEvidence(subject) {
+      const panel = document.getElementById("ticket-evidence-panel");
+
+      if (panel) {
+        panel.innerHTML = `
+          <div class="evidence-drilldown-header">
+            <div>
+              <h3>Ticket Evidence Drilldown</h3>
+              <p class="muted">Loading evidence for <code>${esc(subject || "-")}</code>...</p>
+            </div>
+          </div>
+        `;
+      }
+
+      try {
+        const payload = await api(scopedPath(`/api/ticket-evidence?subject_key=${encodeURIComponent(subject)}&limit=10`));
+        renderTicketEvidence(payload);
+
+        if (panel) {
+          panel.scrollIntoView({behavior: "smooth", block: "start"});
+        }
+      } catch (error) {
+        renderTicketEvidence({
+          available: false,
+          error: error && error.message ? error.message : String(error)
+        });
+      }
+    }
+
+    function bindTicketEvidenceButtons(root) {
+      if (!root) return;
+
+      root.querySelectorAll("[data-ticket-evidence-subject]").forEach(button => {
+        if (button.dataset.boundTicketEvidence === "true") return;
+
+        button.addEventListener("click", event => {
+          event.preventDefault();
+
+          const subject = button.dataset.ticketEvidenceSubject;
+
+          if (subject) {
+            loadTicketEvidence(subject);
+          }
+        });
+
+        button.dataset.boundTicketEvidence = "true";
+      });
+    }
+
 
 
     function ticketWorkflowLabel(row) {
@@ -12882,6 +13847,11 @@ def dashboard_index_html():
         <div class="siem-ticket-section ticket-workflow-actions">
           <div class="label">Workflow actions</div>
           <div class="ticket-action-buttons">
+            <button
+              type="button"
+              class="ticket-evidence-action"
+              data-ticket-evidence-subject="${esc(subject)}"
+            >View Evidence</button>
             ${actions.map(([status, label]) => `
               <button
                 class="small-action-button"
@@ -13132,6 +14102,7 @@ def dashboard_index_html():
 
         bindSubjectLinks(ticketCards);
         bindTicketWorkflowActions(ticketCards);
+          bindTicketEvidenceButtons(ticketCards);
       }
 
       if (!tbody) return;
@@ -13174,6 +14145,7 @@ def dashboard_index_html():
       }).join("");
 
       bindSubjectLinks(tbody);
+          bindTicketEvidenceButtons(tbody);
     }
 
 
@@ -13804,6 +14776,16 @@ def command_dashboard(args):
                             identifier,
                         ),
                     )
+                elif route == "/api/ticket-evidence":
+                    subject_key = query.get("subject_key", [""])[0]
+                    evidence_limit = query.get("limit", ["10"])[0]
+                    payload = dashboard_ticket_evidence_payload(
+                        connection,
+                        subject_key=subject_key,
+                        scope=scope,
+                        limit=evidence_limit,
+                    )
+                    dashboard_json_response(self, payload)
                 elif route == "/api/investigation-center":
                     ticket_status = query.get("ticket_status", ["ALL"])[0]
                     ticket_signal = query.get("ticket_signal", ["ALL"])[0]
@@ -14071,7 +15053,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.19.0 Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.20.0 Ticket Evidence Drilldown, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
@@ -14093,6 +15075,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--status", choices=["OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"])
     p.add_argument("--analyst")
     p.add_argument("--note")
+    p = sub.add_parser("ticket-evidence", help="Show evidence package for one investigation ticket")
+    p.add_argument("--subject", dest="subject_key", required=True, help="Ticket subject key such as mac:aa:bb:cc:dd:ee:ff")
+    p.add_argument("--scope", help="Optional network scope filter")
+    p.add_argument("--limit", type=int, default=10, help="Maximum evidence rows per section")
+
     p = sub.add_parser("ticket-history", help="Show workflow history for one investigation ticket")
     p.add_argument("subject_key")
     p.add_argument("--limit", type=int, default=20)
@@ -14214,6 +15201,7 @@ def main() -> int:
         if args.command == "scan-start": return command_scan_start(args)
         if args.command == "scan-jobs": return command_scan_jobs(args)
         if args.command == "ticket-status": return command_ticket_status(args)
+        if args.command == "ticket-evidence": return command_ticket_evidence(args)
         if args.command == "ticket-history": return command_ticket_history(args)
         if args.command == "ticket-list": return command_ticket_list(args)
         if args.command == "investigation-center": return command_investigation_center(args)

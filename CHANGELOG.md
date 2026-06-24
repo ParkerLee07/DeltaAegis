@@ -1,3 +1,31 @@
+## v0.20.0 — Ticket Evidence Drilldown
+
+DeltaAegis v0.20.0 turns Investigation Center tickets into evidence-backed drilldowns across the backend, dashboard, CLI, and reports.
+
+### Added
+
+- Ticket evidence backend payloads that aggregate workflow state, ticket history, current risk reasoning, recent delta events, open alerts, MAC-port behavior, and asset identity context.
+- `/api/ticket-evidence` dashboard API endpoint.
+- Dashboard **View Evidence** action on Investigation Center tickets.
+- Ticket Evidence Drilldown panel with evidence counts, timeline samples, current risk, alerts, events, port behavior, and ticket history.
+- `ticket-evidence` CLI command for terminal-based investigation.
+- Markdown report **Ticket Evidence Appendix** for top Investigation Center subjects.
+- v0.20 release validator covering payload, dashboard, CLI, report appendix, and compatibility regression gates.
+
+### Changed
+
+- Investigation Center tickets now have a shared evidence model that can be reused consistently by dashboard, CLI, and Markdown reports.
+- Markdown reports now preserve the supporting evidence behind top ticket priorities instead of only listing queue summaries.
+
+### Validation
+
+- `tools/validate_v0_20_ticket_evidence_payload.sh`
+- `tools/validate_v0_20_dashboard_ticket_evidence.sh`
+- `tools/validate_v0_20_ticket_evidence_cli.sh`
+- `tools/validate_v0_20_report_ticket_evidence.sh`
+- `tools/validate_v0_20_release.sh`
+
+
 ## v0.19.0 — Workflow Filters and Operator Views
 
 DeltaAegis v0.19.0 makes the v0.18 investigation workflow easier to operate by adding workflow filters, signal filters, total-vs-visible counters, CLI operator context, and report workflow summaries.
