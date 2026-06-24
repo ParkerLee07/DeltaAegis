@@ -16787,6 +16787,34 @@ def dashboard_index_html():
 
 
 
+
+def dashboard_session_payload(actor: dict[str, Any] | None) -> dict[str, Any]:
+    if not actor:
+        return {
+            "authenticated": False,
+            "user": None,
+            "role": None,
+            "session_id": None,
+            "expires_at": None,
+            "auth_type": None,
+        }
+
+    return {
+        "authenticated": True,
+        "user": {
+            "user_id": actor.get("user_id"),
+            "username": actor.get("username"),
+            "display_name": actor.get("display_name"),
+            "role": actor.get("role"),
+        },
+        "role": actor.get("role"),
+        "session_id": actor.get("session_id"),
+        "expires_at": actor.get("expires_at"),
+        "auth_type": actor.get("auth_type") or "dashboard_session",
+    }
+
+
+
 def dashboard_has_active_password_users(connection: sqlite3.Connection) -> bool:
     ensure_dashboard_session_schema(connection)
 
@@ -17098,6 +17126,13 @@ def command_dashboard(args):
                 return
 
             if not self.require_auth():
+                return
+
+            if route == "/api/session":
+                dashboard_json_response(
+                    self,
+                    dashboard_session_payload(getattr(self, "current_actor", None)),
+                )
                 return
 
             try:
