@@ -353,6 +353,23 @@ CREATE INDEX IF NOT EXISTS idx_investigation_ticket_state_status
 CREATE INDEX IF NOT EXISTS idx_investigation_ticket_state_updated_at
     ON investigation_ticket_state(updated_at);
 
+
+CREATE TABLE IF NOT EXISTS investigation_ticket_history (
+    history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_key TEXT NOT NULL,
+    previous_status TEXT,
+    new_status TEXT NOT NULL,
+    analyst TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_investigation_ticket_history_ticket_key
+    ON investigation_ticket_history(ticket_key);
+
+CREATE INDEX IF NOT EXISTS idx_investigation_ticket_history_created_at
+    ON investigation_ticket_history(created_at);
+
 CREATE TABLE IF NOT EXISTS scan_jobs (
     job_id TEXT PRIMARY KEY,
     target TEXT NOT NULL,
@@ -8919,6 +8936,57 @@ def get_ticket_state(connection: sqlite3.Connection, subject_key: str | None) ->
     return ticket_state_record_from_row(row)
 
 
+
+def ticket_history_record_from_row(row) -> dict[str, Any]:
+    return {
+        "history_id": row["history_id"],
+        "ticket_key": row["ticket_key"],
+        "previous_status": row["previous_status"],
+        "new_status": row["new_status"],
+        "analyst": row["analyst"],
+        "note": row["note"],
+        "created_at": row["created_at"],
+    }
+
+
+def add_ticket_history_event(
+    connection: sqlite3.Connection,
+    ticket_key: str,
+    previous_status: str | None,
+    new_status: str,
+    analyst: str | None,
+    note: str | None,
+    created_at: str,
+) -> None:
+    ensure_investigation_ticket_state_schema(connection)
+    connection.execute(
+        "INSERT INTO investigation_ticket_history ("
+        " ticket_key, previous_status, new_status, analyst, note, created_at"
+        ") VALUES (?, ?, ?, ?, ?, ?)",
+        (ticket_key, previous_status, new_status, analyst, note, created_at),
+    )
+
+
+def list_ticket_history(
+    connection: sqlite3.Connection,
+    subject_key: str | None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    ensure_investigation_ticket_state_schema(connection)
+    ticket_key = stable_ticket_key(subject_key)
+    safe_limit = max(1, int(limit or 20))
+    rows = connection.execute(
+        "SELECT history_id, ticket_key, previous_status, new_status, analyst, note, created_at "
+        "FROM investigation_ticket_history "
+        "WHERE ticket_key = ? "
+        "ORDER BY created_at DESC, history_id DESC "
+        "LIMIT ?",
+        (ticket_key, safe_limit),
+    ).fetchall()
+    return [ticket_history_record_from_row(row) for row in rows]
+
+
+
 def set_ticket_state(
     connection: sqlite3.Connection,
     subject_key: str | None,
@@ -8928,6 +8996,7 @@ def set_ticket_state(
 ) -> dict[str, Any]:
     ensure_investigation_ticket_state_schema(connection)
     ticket_key = stable_ticket_key(subject_key)
+    previous_state = get_ticket_state(connection, ticket_key)
     normalized_status = normalize_ticket_workflow_status(status)
     now = utc_now()
     cleaned_analyst = str(analyst).strip() if analyst is not None and str(analyst).strip() else None
@@ -9616,6 +9685,35 @@ def command_ticket_status(args: argparse.Namespace) -> int:
     print(f"Updated:    {state['ticket_updated_at'] or '-'}")
     print(f"Resolved:   {state['ticket_resolved_at'] or '-'}")
     print(f"Suppressed: {state['ticket_suppressed_at'] or '-'}")
+    return 0
+
+
+
+def command_ticket_history(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    ticket_key = stable_ticket_key(args.subject_key)
+    rows = list_ticket_history(
+        connection,
+        args.subject_key,
+        limit=getattr(args, "limit", 20),
+    )
+
+    print(f"Ticket: {ticket_key}")
+    if not rows:
+        print("No ticket workflow history found.")
+        return 0
+
+    for row in rows:
+        previous_status = row["previous_status"] or "-"
+        analyst = row["analyst"] or "-"
+        note = row["note"] or "-"
+        print(
+            f"{row['created_at']}  "
+            f"{previous_status} -> {row['new_status']}  "
+            f"analyst={analyst}"
+        )
+        if note != "-":
+            print(f"  Note: {note}")
     return 0
 
 
@@ -13324,6 +13422,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--status", choices=["OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"])
     p.add_argument("--analyst")
     p.add_argument("--note")
+    p = sub.add_parser("ticket-history", help="Show workflow history for one investigation ticket")
+    p.add_argument("subject_key")
+    p.add_argument("--limit", type=int, default=20)
     p = sub.add_parser("ticket-list", help="List persisted investigation ticket workflow states")
     p.add_argument("--status", choices=["OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"])
     p.add_argument("--limit", type=int, default=50)
@@ -13439,6 +13540,7 @@ def main() -> int:
         if args.command == "scan-start": return command_scan_start(args)
         if args.command == "scan-jobs": return command_scan_jobs(args)
         if args.command == "ticket-status": return command_ticket_status(args)
+        if args.command == "ticket-history": return command_ticket_history(args)
         if args.command == "ticket-list": return command_ticket_list(args)
         if args.command == "investigation-center": return command_investigation_center(args)
         if args.command == "port-behavior": return command_port_behavior(args)
