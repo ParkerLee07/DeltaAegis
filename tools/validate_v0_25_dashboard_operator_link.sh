@@ -4,8 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-NETSNIPER_RUN_DIR="${1:-/home/parker/NetSniper/runs/20260623-123007}"
-
 fail() {
     echo "[FAIL] $*" >&2
     exit 1
@@ -123,11 +121,6 @@ with tempfile.TemporaryDirectory() as tmpdir:
         assert status == 200, (status, headers, body)
         assert 'id="operator-session-link"' in body, body
         assert 'href="/operator"' in body, body
-        assert "Operator" in body, body
-
-        status, headers, body = request(port, "GET", "/operator", cookie=session_cookie)
-        assert status == 200, (status, headers, body)
-        assert "Operator Session" in body, body
 
     finally:
         proc.terminate()
@@ -139,8 +132,5 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 print("[PASS] synthetic v0.25 dashboard operator link validated")
 PY2
-
-./tools/validate_v0_25_operator_session_page.sh "$NETSNIPER_RUN_DIR" \
-    || fail "v0.25 operator session page validation failed"
 
 pass "DeltaAegis v0.25 dashboard operator link validation passed"

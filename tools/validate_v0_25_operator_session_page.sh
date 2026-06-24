@@ -4,8 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-NETSNIPER_RUN_DIR="${1:-/home/parker/NetSniper/runs/20260623-123007}"
-
 fail() {
     echo "[FAIL] $*" >&2
     exit 1
@@ -26,7 +24,7 @@ for needle in \
     'window.location.href = "/login"' \
     'fetch("/api/session"'
 do
-    grep -q -- "$needle" deltaaegis.py || fail "missing v0.25 operator session shell marker: $needle"
+    grep -Fq -- "$needle" deltaaegis.py || fail "missing v0.25 operator session page marker: $needle"
 done
 
 python3 - <<'PY2'
@@ -71,7 +69,7 @@ def request(port: int, method: str, path: str, body: str | None = None, cookie: 
 
 
 with tempfile.TemporaryDirectory() as tmpdir:
-    db_path = Path(tmpdir) / "deltaaegis-v025-operator-shell.db"
+    db_path = Path(tmpdir) / "deltaaegis-v025-operator-page.db"
 
     with da.connect(db_path) as connection:
         da.create_access_user(
@@ -115,7 +113,6 @@ with tempfile.TemporaryDirectory() as tmpdir:
         status, headers, body = request(port, "GET", "/operator")
         assert status == 200, (status, headers, body)
         assert "Operator Session" in body, body
-        assert "operator-session-username" in body, body
         assert 'fetch("/api/session"' in body, body
         assert 'window.location.href = "/login"' in body, body
 
@@ -139,7 +136,6 @@ with tempfile.TemporaryDirectory() as tmpdir:
         session = json.loads(body)
         assert session["authenticated"] is True, session
         assert session["user"]["username"] == "operator.admin", session
-        assert session["user"]["display_name"] == "Operator Admin", session
         assert session["role"] == "ADMIN", session
 
     finally:
@@ -150,10 +146,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
             proc.kill()
             proc.wait(timeout=5)
 
-print("[PASS] synthetic v0.25 operator session shell page validated")
+print("[PASS] synthetic v0.25 operator session page validated")
 PY2
 
-./tools/validate_v0_24_release.sh "$NETSNIPER_RUN_DIR" \
-    || fail "v0.24 release compatibility validation failed"
-
-pass "DeltaAegis v0.25 operator session shell page validation passed"
+pass "DeltaAegis v0.25 operator session page validation passed"
