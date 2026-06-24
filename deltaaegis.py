@@ -5479,6 +5479,9 @@ def append_report_dashboard_usage_section(lines, scope=None):
     lines.append("- The dashboard remains read-only and is intended for local or trusted-access investigation.")
     lines.append("- Port behavior API: `/api/port-behavior?limit=25&lookback=5`")
     lines.append("- Investigation Center API: `/api/investigation-center?limit=25`")
+    lines.append("- Investigation Center workflow filter API: `/api/investigation-center?limit=25&ticket_status=OPEN`")
+    lines.append("- Investigation Center signal filter API: `/api/investigation-center?limit=25&ticket_signal=ACTIONABLE`")
+    lines.append("- Combined ticket filters are supported with `ticket_status` and `ticket_signal` query parameters.")
     lines.append("- Use the Asset Inventory table, asset selector, or clickable risk/event/alert subjects to open Asset Detail.")
     lines.append("")
 
@@ -5726,14 +5729,33 @@ def append_report_investigation_center_section(lines, investigation_rows):
     lines.append("")
 
     rows = list(investigation_rows or [])
+    workflow_summary = investigation_center_workflow_summary(rows)
+    signal_summary = investigation_center_signal_summary(rows)
+
+    lines.append("### Investigation Queue Operator Summary")
+    lines.append("")
+    lines.append(
+        "- Workflow states: "
+        f"OPEN={workflow_summary.get('open', 0)}, "
+        f"IN_REVIEW={workflow_summary.get('in_review', 0)}, "
+        f"RESOLVED={workflow_summary.get('resolved', 0)}, "
+        f"SUPPRESSED={workflow_summary.get('suppressed', 0)}"
+    )
+    lines.append(
+        "- Signal labels: "
+        f"ACTIONABLE={signal_summary.get('actionable', 0)}, "
+        f"MEANINGFUL_CHANGE={signal_summary.get('meaningful_change', 0)}, "
+        f"BASELINE_CONTEXT={signal_summary.get('baseline_context', 0)}"
+    )
+    lines.append("")
 
     if not rows:
         lines.append("No Investigation Command Center queue items matched this report scope.")
         lines.append("")
         return
 
-    lines.append("| Priority | Score | Subject | IP Address | MAC Address | Device / Role | Triggers | Why Review? | Recommended Action | Counts |")
-    lines.append("|---|---:|---|---|---|---|---|---|---|---|")
+    lines.append("| Priority | Score | Workflow | Signal | Subject | IP Address | MAC Address | Device / Role | Triggers | Why Review? | Recommended Action | Counts |")
+    lines.append("|---|---:|---|---|---|---|---|---|---|---|---|---|")
 
     for row in rows:
         role = row.get("role") or row.get("classification") or row.get("device_type") or "Unknown"
@@ -5745,6 +5767,8 @@ def append_report_investigation_center_section(lines, investigation_rows):
             device_role = role
 
         triggers = ", ".join(row.get("triggers") or []) or "-"
+        workflow = str(row.get("ticket_status") or "OPEN").upper()
+        signal = str(row.get("ticket_signal_state") or "ACTIONABLE").upper()
         counts = (
             f"alerts={int(row.get('open_alerts') or 0)}, "
             f"events={int(row.get('recent_events') or 0)}, "
@@ -5756,6 +5780,8 @@ def append_report_investigation_center_section(lines, investigation_rows):
             "| "
             f"{safe_markdown(row.get('priority_level') or 'INFO')} | "
             f"{safe_markdown(row.get('priority_score') or 0)} | "
+            f"{safe_markdown(workflow)} | "
+            f"{safe_markdown(signal)} | "
             f"`{safe_markdown(row.get('subject_key'))}` | "
             f"`{safe_markdown(row.get('ip_address') or '-')}` | "
             f"`{safe_markdown(row.get('mac_address') or '-')}` | "
@@ -9796,6 +9822,34 @@ def print_investigation_center_rows(payload):
     if scope:
         print(f"Network scope: {scope}")
 
+    filters = payload.get("filters") or investigation_center_filter_payload()
+    workflow_summary = payload.get("workflow_summary") or investigation_center_workflow_summary(rows)
+    signal_summary = payload.get("signal_summary") or investigation_center_signal_summary(rows)
+    total_item_count = payload.get("total_item_count", len(rows))
+
+    print(
+        "Filters: "
+        f"workflow={filters.get('ticket_status', 'ALL')}, "
+        f"signal={filters.get('ticket_signal', 'ALL')}"
+    )
+    print(
+        "Visible queue items: "
+        f"{len(rows)} of {total_item_count}"
+    )
+    print(
+        "Workflow summary: "
+        f"OPEN={workflow_summary.get('open', 0)}, "
+        f"IN_REVIEW={workflow_summary.get('in_review', 0)}, "
+        f"RESOLVED={workflow_summary.get('resolved', 0)}, "
+        f"SUPPRESSED={workflow_summary.get('suppressed', 0)}"
+    )
+    print(
+        "Signal summary: "
+        f"ACTIONABLE={signal_summary.get('actionable', 0)}, "
+        f"MEANINGFUL_CHANGE={signal_summary.get('meaningful_change', 0)}, "
+        f"BASELINE_CONTEXT={signal_summary.get('baseline_context', 0)}"
+    )
+
     print()
 
     if not available:
@@ -9958,8 +10012,8 @@ def command_investigation_center(args):
             connection,
             limit=args.limit,
             scope=scope,
-        ticket_status=args.ticket_status,
-        ticket_signal=args.ticket_signal,
+            ticket_status=args.ticket_status,
+            ticket_signal=args.ticket_signal,
         )
     finally:
         connection.close()
