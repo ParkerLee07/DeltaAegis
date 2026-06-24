@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.20.0: Ticket Evidence Drilldown, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
+"""DeltaAegis v0.21.0: Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -5949,6 +5949,7 @@ def append_report_ticket_evidence_appendix(lines, evidence_payloads):
             f"({safe_markdown(summary.get('priority_score') or 0)})"
         )
         lines.append(f"- Primary reason: {safe_markdown(summary.get('primary_reason') or '-')}")
+        lines.append(f"- Why now: {safe_markdown(summary.get('why_now') or '-')}")
         lines.append(f"- Recommended action: {safe_markdown(summary.get('recommended_action') or '-')}")
         lines.append(
             "- Evidence counts: "
@@ -10110,6 +10111,93 @@ def ticket_evidence_timeline_entry(category, source, summary, severity=None, tim
     }
 
 
+
+def ticket_evidence_timeline_category_order():
+    return [
+        "current_risk",
+        "alert",
+        "delta_event",
+        "port_behavior",
+        "ticket_history",
+    ]
+
+
+def ticket_evidence_timeline_sort_key(item):
+    category_rank = {
+        category: index
+        for index, category in enumerate(ticket_evidence_timeline_category_order())
+    }
+    severity_rank = {
+        "CRITICAL": 5,
+        "HIGH": 4,
+        "MEDIUM": 3,
+        "LOW": 2,
+        "INFO": 1,
+    }
+
+    category = str(item.get("category") or "")
+    severity = str(item.get("severity") or "INFO").upper()
+
+    return (
+        str(item.get("timestamp") or ""),
+        severity_rank.get(severity, 0),
+        -category_rank.get(category, len(category_rank)),
+        str(item.get("source") or ""),
+        str(item.get("summary") or ""),
+    )
+
+
+def ticket_evidence_sort_timeline_entries(entries):
+    return sorted(
+        list(entries or []),
+        key=ticket_evidence_timeline_sort_key,
+        reverse=True,
+    )
+
+
+def ticket_evidence_balance_timeline(timeline, limit=25):
+    requested_limit = risk_int(limit, 25)
+
+    if requested_limit <= 0:
+        return []
+
+    sorted_entries = ticket_evidence_sort_timeline_entries(timeline)
+    category_order = ticket_evidence_timeline_category_order()
+    by_category = {category: [] for category in category_order}
+
+    for entry in sorted_entries:
+        category = entry.get("category")
+        if category in by_category:
+            by_category[category].append(entry)
+
+    selected = []
+    selected_ids = set()
+
+    for category in category_order:
+        if len(selected) >= requested_limit:
+            break
+
+        category_entries = by_category.get(category) or []
+        if not category_entries:
+            continue
+
+        entry = category_entries[0]
+        selected.append(entry)
+        selected_ids.add(id(entry))
+
+    for entry in sorted_entries:
+        if len(selected) >= requested_limit:
+            break
+
+        if id(entry) in selected_ids:
+            continue
+
+        selected.append(entry)
+        selected_ids.add(id(entry))
+
+    return selected[:requested_limit]
+
+
 def ticket_evidence_build_timeline(
     risk_rows,
     alert_rows,
@@ -10191,12 +10279,143 @@ def ticket_evidence_build_timeline(
             )
         )
 
-    timeline.sort(
-        key=lambda item: str(item.get("timestamp") or ""),
-        reverse=True,
-    )
+    return ticket_evidence_balance_timeline(timeline, limit=limit)
 
-    return timeline[:limit]
+
+
+def ticket_evidence_why_now_event_types(event_rows):
+    interesting = {
+        "ASSET_REAPPEARED",
+        "MONITORED_SERVICE_OPENED",
+        "NETSNIPER_FINDING_ADDED",
+        "DEVICE_CLASSIFICATION_CHANGED",
+        "CONFIDENCE_CHANGED",
+        "CONTRADICTION",
+    }
+
+    event_types = []
+
+    for row in event_rows or []:
+        event_type = str(row.get("event_type") or row.get("type") or "").upper()
+
+        if event_type in interesting and event_type not in event_types:
+            event_types.append(event_type)
+
+    return event_types
+
+
+def ticket_evidence_why_now_ports(port_behavior_rows):
+    ports = []
+
+    for row in port_behavior_rows or []:
+        port_key = row.get("port_key")
+        protocol = row.get("protocol")
+        port = row.get("port")
+
+        if port_key:
+            value = str(port_key)
+        elif protocol or port:
+            value = f"{protocol or '-'}/{port or '-'}"
+        else:
+            value = ""
+
+        if value and value not in ports:
+            ports.append(value)
+
+    return ports
+
+
+def ticket_evidence_why_now_summary(
+    risk_rows,
+    alert_rows,
+    event_rows,
+    port_behavior_rows,
+    ticket_history_rows=None,
+    ticket_state=None,
+    investigation_items=None,
+):
+    reasons = []
+    risk_items = list(risk_rows or [])
+    alert_items = list(alert_rows or [])
+    port_items = list(port_behavior_rows or [])
+    investigation_items = list(investigation_items or [])
+    ticket_state = ticket_state or {}
+
+    if investigation_items:
+        primary_item = investigation_items[0]
+        priority_level = str(
+            primary_item.get("priority_level")
+            or primary_item.get("level")
+            or "INFO"
+        ).upper()
+        priority_score = primary_item.get("priority_score") or primary_item.get("score")
+
+        if priority_score not in (None, ""):
+            reasons.append(
+                f"investigation priority is {priority_level} with score {priority_score}"
+            )
+        else:
+            reasons.append(f"investigation priority is {priority_level}")
+
+    if risk_items:
+        primary_risk = risk_items[0]
+        level = str(
+            primary_risk.get("level")
+            or primary_risk.get("severity")
+            or "INFO"
+        ).upper()
+        score = primary_risk.get("score")
+
+        if score not in (None, ""):
+            reasons.append(f"current risk context is {level} with score {score}")
+        else:
+            reasons.append(f"current risk context is {level}")
+
+    active_alerts = [
+        row for row in alert_items
+        if str(row.get("status") or row.get("state") or "OPEN").upper()
+        not in {"CLOSED", "RESOLVED", "SUPPRESSED"}
+    ]
+
+    if active_alerts:
+        severities = []
+        for row in active_alerts:
+            severity = str(row.get("severity") or "INFO").upper()
+            if severity not in severities:
+                severities.append(severity)
+
+        reasons.append(
+            f"{len(active_alerts)} active alert(s) include "
+            f"{', '.join(severities[:3])} severity"
+        )
+
+    event_types = ticket_evidence_why_now_event_types(event_rows)
+    if event_types:
+        reasons.append(
+            "recent delta evidence includes "
+            + ", ".join(event_types[:3])
+        )
+
+    ports = ticket_evidence_why_now_ports(port_items)
+    if ports:
+        reasons.append(
+            "MAC-port behavior changed on "
+            + ", ".join(ports[:4])
+        )
+    elif port_items:
+        reasons.append("MAC-port behavior changed")
+
+    ticket_status = str(ticket_state.get("ticket_status") or "OPEN").upper()
+    if ticket_status not in {"RESOLVED", "SUPPRESSED", "CLOSED"}:
+        reasons.append(f"workflow status is {ticket_status}")
+
+    if reasons:
+        return "This ticket matters now because " + "; ".join(reasons[:6]) + "."
+
+    return (
+        "This ticket is relevant because DeltaAegis found evidence linked to "
+        "this subject in the current investigation context."
+    )
 
 
 def dashboard_ticket_evidence_payload(
@@ -10323,6 +10542,16 @@ def dashboard_ticket_evidence_payload(
             limit=max(requested_limit * 3, 25),
         )
 
+        why_now = ticket_evidence_why_now_summary(
+            risk_rows,
+            alert_rows,
+            event_rows,
+            port_behavior_rows,
+            ticket_history,
+            ticket_state,
+            investigation_items,
+        )
+
         summary = {
             "subject_key": stable_subject,
             "selected_subject": str(subject_key),
@@ -10347,6 +10576,7 @@ def dashboard_ticket_evidence_payload(
             "timeline_count": len(timeline),
             "primary_reason": primary_reason,
             "recommended_action": recommended_action,
+            "why_now": why_now,
         }
 
         return {
@@ -10556,6 +10786,7 @@ def print_ticket_evidence_payload(payload):
     )
     print()
     print(f"Why:            {summary.get('primary_reason') or '-'}")
+    print(f"Why now:        {summary.get('why_now') or '-'}")
     print(f"Next action:    {summary.get('recommended_action') or '-'}")
     print()
     print(
@@ -11680,6 +11911,61 @@ def dashboard_index_html():
 
     .ticket-evidence-action {
       border-color: rgba(96, 165, 250, 0.65);
+    }
+
+    .ticket-evidence-why-now {
+      border: 1px solid rgba(34, 211, 238, 0.22);
+      background: rgba(8, 145, 178, 0.10);
+      border-radius: 14px;
+      padding: 12px;
+      margin: 10px 0 14px;
+    }
+
+    .ticket-evidence-why-now .label {
+      color: #a5f3fc;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      font-size: 0.75rem;
+      margin-bottom: 6px;
+    }
+
+    .ticket-evidence-category {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      background: rgba(148, 163, 184, 0.12);
+      color: #cbd5e1;
+    }
+
+    .ticket-evidence-category-current-risk {
+      background: rgba(248, 113, 113, 0.14);
+      color: #fecaca;
+    }
+
+    .ticket-evidence-category-alert {
+      background: rgba(251, 191, 36, 0.14);
+      color: #fde68a;
+    }
+
+    .ticket-evidence-category-delta-event {
+      background: rgba(96, 165, 250, 0.14);
+      color: #bfdbfe;
+    }
+
+    .ticket-evidence-category-port-behavior {
+      background: rgba(45, 212, 191, 0.14);
+      color: #99f6e4;
+    }
+
+    .ticket-evidence-category-ticket-history {
+      background: rgba(167, 139, 250, 0.14);
+      color: #ddd6fe;
     }
 
     .ticket-evidence-timeline {
@@ -13623,6 +13909,29 @@ def dashboard_index_html():
       return `<span class="ticket-signal-badge ${ticketSignalClass(row)}">${esc(ticketSignalLabel(row))}</span>`;
     }
 
+    function ticketEvidenceCategoryLabel(category) {
+      const value = String(category || "").toLowerCase();
+
+      const labels = {
+        "current_risk": "Current Risk",
+        "alert": "Alert",
+        "delta_event": "Delta Event",
+        "port_behavior": "Port Behavior",
+        "ticket_history": "Workflow History",
+      };
+
+      return labels[value] || value.replaceAll("_", " ") || "Evidence";
+    }
+
+    function ticketEvidenceCategoryClass(category) {
+      const value = String(category || "unknown")
+        .toLowerCase()
+        .replaceAll("_", "-")
+        .replace(/[^a-z0-9-]/g, "");
+
+      return `ticket-evidence-category-${value || "unknown"}`;
+    }
+
     function ticketEvidenceTimelineHtml(timeline) {
       const items = Array.isArray(timeline) ? timeline : [];
 
@@ -13632,15 +13941,18 @@ def dashboard_index_html():
 
       return `
         <div class="ticket-evidence-timeline">
-          ${items.slice(0, 12).map(item => `
+          ${items.slice(0, 12).map((item, index) => `
             <div class="ticket-evidence-event">
               <div class="event-meta">
-                <span>${esc(item.timestamp || "-")}</span>
-                <span>${esc(item.category || "evidence")}</span>
-                <span class="severity-${esc(String(item.severity || "info").toLowerCase())}">${esc(item.severity || "INFO")}</span>
+                <span>#${esc(index + 1)}</span>
+                <span class="ticket-evidence-category ${ticketEvidenceCategoryClass(item.category)}">
+                  ${esc(ticketEvidenceCategoryLabel(item.category))}
+                </span>
+                <span>${esc(item.severity || "INFO")}</span>
+                <span>${esc(item.timestamp || "time unavailable")}</span>
                 <span>${esc(item.source || "-")}</span>
               </div>
-              <div>${esc(item.summary || "-")}</div>
+              <div class="event-summary">${esc(item.summary || "-")}</div>
             </div>
           `).join("")}
         </div>
@@ -13692,6 +14004,10 @@ def dashboard_index_html():
 
         <h4>Why this ticket exists</h4>
         <p class="muted">${esc(summary.primary_reason || "No primary reason was recorded.")}</p>
+        <div class="ticket-evidence-why-now">
+          <div class="label">Why Now</div>
+          <p class="muted">${esc(summary.why_now || "No why-now summary was generated for this ticket.")}</p>
+        </div>
 
         <h4>Recommended next action</h4>
         <p class="muted">${esc(summary.recommended_action || "Review the evidence package before changing workflow state.")}</p>
@@ -15053,7 +15369,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.20.0 Ticket Evidence Drilldown, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.21.0 Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
