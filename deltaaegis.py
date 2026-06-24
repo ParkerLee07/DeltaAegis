@@ -9026,6 +9026,15 @@ def set_ticket_state(
             suppressed_at,
         ),
     )
+    add_ticket_history_event(
+        connection,
+        ticket_key,
+        previous_state.get("ticket_status"),
+        normalized_status,
+        cleaned_analyst,
+        cleaned_note,
+        now,
+    )
     connection.commit()
     return get_ticket_state(connection, ticket_key)
 
