@@ -2250,6 +2250,149 @@ def command_api_tokens(args: argparse.Namespace) -> int:
 
     return 0
 
+
+def list_access_audit_events(
+    connection: sqlite3.Connection,
+    limit: int = 50,
+    action: str | None = None,
+    actor: str | None = None,
+    target_type: str | None = None,
+) -> list[dict[str, Any]]:
+    ensure_enterprise_access_schema(connection)
+
+    requested_limit = max(1, min(int(limit or 50), 500))
+    clauses = []
+    values: list[Any] = []
+
+    if action:
+        clauses.append("action = ?")
+        values.append(str(action).strip().upper())
+
+    if actor:
+        clauses.append("(actor_username = ? OR actor_user_id = ?)")
+        values.extend([str(actor).strip(), str(actor).strip()])
+
+    if target_type:
+        clauses.append("target_type = ?")
+        values.append(str(target_type).strip())
+
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+
+    rows = connection.execute(
+        "SELECT "
+        "audit_id, "
+        "actor_user_id, "
+        "actor_username, "
+        "actor_role, "
+        "action, "
+        "target_type, "
+        "target_key, "
+        "source_ip, "
+        "user_agent, "
+        "detail_json, "
+        "created_at "
+        "FROM access_audit_log "
+        f"{where} "
+        "ORDER BY audit_id DESC "
+        "LIMIT ?",
+        (*values, requested_limit),
+    ).fetchall()
+
+    events: list[dict[str, Any]] = []
+
+    for row in rows:
+        detail_json = row["detail_json"] or "{}"
+
+        try:
+            details = json.loads(detail_json)
+        except json.JSONDecodeError:
+            details = {"raw": detail_json}
+
+        event = dict(row)
+        event["details"] = details
+        events.append(event)
+
+    return events
+
+
+def access_audit_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    action_counts = Counter(str(row.get("action") or "UNKNOWN") for row in rows)
+    actor_counts = Counter(str(row.get("actor_username") or "system") for row in rows)
+
+    return {
+        "event_count": len(rows),
+        "action_counts": dict(action_counts),
+        "actor_counts": dict(actor_counts),
+    }
+
+
+def dashboard_access_audit_payload(
+    connection: sqlite3.Connection,
+    limit: int = 25,
+    action: str | None = None,
+    actor: str | None = None,
+    target_type: str | None = None,
+) -> dict[str, Any]:
+    rows = list_access_audit_events(
+        connection,
+        limit=limit,
+        action=action,
+        actor=actor,
+        target_type=target_type,
+    )
+
+    return {
+        "available": True,
+        "items": rows,
+        "item_count": len(rows),
+        "summary": access_audit_summary(rows),
+        "filters": {
+            "action": str(action or "").strip().upper() or "ALL",
+            "actor": str(actor or "").strip() or "ALL",
+            "target_type": str(target_type or "").strip() or "ALL",
+        },
+    }
+
+
+def command_access_audit(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        rows = list_access_audit_events(
+            connection,
+            limit=args.limit,
+            action=args.action,
+            actor=args.actor,
+            target_type=args.target_type,
+        )
+
+    print("DeltaAegis access audit log")
+    print("===========================")
+
+    if args.action:
+        print(f"Action filter: {str(args.action).strip().upper()}")
+
+    if args.actor:
+        print(f"Actor filter:  {args.actor}")
+
+    if args.target_type:
+        print(f"Target filter: {args.target_type}")
+
+    if not rows:
+        print("No access audit events found.")
+        return 0
+
+    for row in rows:
+        print(
+            f"{row.get('audit_id'):>5} "
+            f"{row.get('created_at') or '-'} "
+            f"{row.get('action') or '-':<36} "
+            f"actor={row.get('actor_username') or '-'} "
+            f"role={row.get('actor_role') or '-'} "
+            f"target={row.get('target_type') or '-'}:{row.get('target_key') or '-'} "
+            f"source={row.get('source_ip') or '-'}"
+        )
+
+    return 0
+
 def command_intelligence_hosts(args: argparse.Namespace) -> int:
     connection = connect(args.db)
     rows = list_netsniper_intelligence_hosts(
@@ -16094,6 +16237,79 @@ def dashboard_index_html():
       bindIntelligenceHostLinks(section);
     }
 
+
+    function renderAccessAudit(payload) {
+      let section = document.getElementById("access-audit-panel");
+
+      if (!section) {
+        section = document.createElement("section");
+        section.id = "access-audit-panel";
+        section.dataset.tabPanel = "investigations";
+
+        const investigationCenter = document.getElementById("investigation-center-body");
+        const anchor = investigationCenter ? investigationCenter.closest("section") : null;
+
+        if (anchor && anchor.parentNode) {
+          anchor.parentNode.insertBefore(section, anchor.nextSibling);
+        } else {
+          document.body.appendChild(section);
+        }
+      }
+
+      const items = payload && Array.isArray(payload.items) ? payload.items : [];
+      const summary = payload && payload.summary ? payload.summary : {};
+      const actionCounts = summary.action_counts || {};
+
+      const summaryText = Object.keys(actionCounts).length
+        ? Object.entries(actionCounts)
+            .map(([action, count]) => `${esc(action)}=${esc(count)}`)
+            .join(", ")
+        : "No audit actions observed yet.";
+
+      const rows = items.length
+        ? items.map(row => `
+            <tr>
+              <td><code>${esc(row.created_at || "-")}</code></td>
+              <td>${esc(row.action || "-")}</td>
+              <td>${esc(row.actor_username || "-")}</td>
+              <td>${esc(row.actor_role || "-")}</td>
+              <td>${esc(row.target_type || "-")}</td>
+              <td><code>${esc(row.target_key || "-")}</code></td>
+              <td>${esc(row.source_ip || "-")}</td>
+            </tr>
+          `).join("")
+        : `<tr><td colspan="7">No access audit events found.</td></tr>`;
+
+      section.innerHTML = `
+        <h2>Access Audit Trail</h2>
+        <p class="muted">Recent operator, token, and dashboard workflow actions recorded by the v0.23 Enterprise Access Control layer.</p>
+        <div class="cards">
+          <div class="card">
+            <div class="label">Audit Events</div>
+            <strong>${esc(summary.event_count || items.length || 0)}</strong>
+          </div>
+          <div class="card">
+            <div class="label">Action Summary</div>
+            <strong>${summaryText}</strong>
+          </div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Action</th>
+              <th>Actor</th>
+              <th>Role</th>
+              <th>Target Type</th>
+              <th>Target</th>
+              <th>Source</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    }
+
     function renderRecommendations(summary, scanContext, riskRows) {
       const steps = [];
       const latest = scanContext && scanContext.latest_scan ? scanContext.latest_scan : null;
@@ -16154,7 +16370,7 @@ def dashboard_index_html():
       try {
         setupDashboardTabs();
 
-        const [scopes, summary, scanContext, currentState, investigationCenter, scanJobs, assets, currentRisk, historicalRisk, portBehavior, events, alerts, annotations] = await Promise.all([
+        const [scopes, summary, scanContext, currentState, investigationCenter, scanJobs, assets, currentRisk, historicalRisk, portBehavior, events, alerts, annotations, accessAudit] = await Promise.all([
           api("/api/scopes"),
           api(scopedPath("/api/summary")),
           api(scopedPath("/api/scan-context")),
@@ -16167,7 +16383,8 @@ def dashboard_index_html():
           api(scopedPath("/api/port-behavior?limit=25&lookback=5")),
           api(scopedPath("/api/events?limit=20")),
           api(scopedPath("/api/alerts?limit=20")),
-          api(scopedPath("/api/annotations?limit=20"))
+          api(scopedPath("/api/annotations?limit=20")),
+          api(scopedPath("/api/access-audit?limit=20"))
         ]);
 
         renderScopes(scopes);
@@ -16186,6 +16403,7 @@ def dashboard_index_html():
         renderEvents(events);
         renderAlerts(alerts);
         renderAnnotations(annotations);
+        renderAccessAudit(accessAudit);
         renderClassificationSummary(summary);
         renderRecommendations(summary, scanContext, historicalRisk);
         renderExecutiveCharts(summary, currentRisk, portBehavior, investigationCenter, assets, events, alerts);
@@ -16475,6 +16693,21 @@ def command_dashboard(args):
                     dashboard_json_response(self, dashboard_risk_payload(connection, limit, scope=scope))
                 elif route == "/api/annotations":
                     dashboard_json_response(self, dashboard_annotations_payload(connection, limit, scope=scope))
+                elif route == "/api/access-audit":
+                    action_filter = query.get("action", [""])[0].strip() or None
+                    actor_filter = query.get("actor", [""])[0].strip() or None
+                    target_type_filter = query.get("target_type", [""])[0].strip() or None
+
+                    dashboard_json_response(
+                        self,
+                        dashboard_access_audit_payload(
+                            connection,
+                            limit=limit,
+                            action=action_filter,
+                            actor=actor_filter,
+                            target_type=target_type_filter,
+                        ),
+                    )
                 else:
                     dashboard_json_response(
                         self,
@@ -16738,7 +16971,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.22.0 Operator Triage Intelligence, Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.23.0 Enterprise Access Control, Operator Triage Intelligence, Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
@@ -16765,6 +16998,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("api-tokens", help="List database-backed DeltaAegis API tokens")
     p.add_argument("--include-inactive", action="store_true")
+
+    p = sub.add_parser("access-audit", help="List DeltaAegis access audit events")
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--action")
+    p.add_argument("--actor")
+    p.add_argument("--target-type")
 
     sub.add_parser("ingest")
     p = sub.add_parser("scan-start", help="Run a safe NetSniper v1.8 headless scan job")
@@ -16912,6 +17151,7 @@ def main() -> int:
         if args.command == "users": return command_users(args)
         if args.command == "api-token-create": return command_api_token_create(args)
         if args.command == "api-tokens": return command_api_tokens(args)
+        if args.command == "access-audit": return command_access_audit(args)
         if args.command == "ingest": return command_ingest(args)
         if args.command == "scan-start": return command_scan_start(args)
         if args.command == "scan-jobs": return command_scan_jobs(args)

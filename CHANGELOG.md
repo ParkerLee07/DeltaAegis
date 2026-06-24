@@ -1,3 +1,24 @@
+## v0.23.0 — Enterprise Access Control
+
+DeltaAegis v0.23.0 introduces enterprise access-control foundations for multi-operator use. This release adds local users and roles, database-backed API tokens, dashboard database-token authentication, role-aware dashboard write controls, token usage tracking, and access audit visibility.
+
+### Added
+
+- Access user model with `ADMIN`, `ANALYST`, and `VIEWER` roles.
+- API token model with hashed token storage, token prefixes, active state, optional expiration, and last-used timestamps.
+- CLI commands for `user-create`, `users`, `api-token-create`, `api-tokens`, and `access-audit`.
+- Dashboard database-backed token authentication through `X-DeltaAegis-Token`.
+- Role-aware dashboard authorization for workflow write actions.
+- Access audit log entries for user creation, token creation, ticket workflow updates, and asset investigation updates.
+- Dashboard `/api/access-audit` endpoint and audit visibility panel.
+- v0.23 release validators for access schema, CLI/token workflows, dashboard auth, audit visibility, metadata, and compatibility.
+
+### Compatibility
+
+- Retains legacy dashboard `--token` authentication.
+- Keeps v0.22 operator triage behavior compatible.
+- Keeps v0.21, v0.20, and v0.19 compatibility gates in the v0.23 release validator.
+
 ## v0.22.0 — Operator Triage Intelligence
 
 DeltaAegis v0.22.0 improves Investigation Center operator workflow by adding deterministic triage state, triage urgency, triage filters, dashboard triage controls, and report-level triage summaries.

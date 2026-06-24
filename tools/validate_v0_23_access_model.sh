@@ -140,7 +140,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 print("[PASS] synthetic v0.23 enterprise access model validated")
 PY
 
-./tools/validate_v0_22_release.sh "$NETSNIPER_RUN_DIR" \
-    || fail "v0.22 release compatibility gate failed"
+./tools/validate_v0_23_backward_compatibility.sh "$NETSNIPER_RUN_DIR" \
+    || fail "v0.23 backward compatibility gate failed"
 
 pass "DeltaAegis v0.23 enterprise access model validation passed"

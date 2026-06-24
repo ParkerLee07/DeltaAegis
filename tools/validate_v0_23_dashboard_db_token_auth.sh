@@ -212,7 +212,7 @@ PY
 ./tools/validate_v0_23_access_model.sh "$NETSNIPER_RUN_DIR" \
     || fail "v0.23 access model compatibility gate failed"
 
-./tools/validate_v0_22_release.sh "$NETSNIPER_RUN_DIR" \
-    || fail "v0.22 release compatibility gate failed"
+./tools/validate_v0_23_backward_compatibility.sh "$NETSNIPER_RUN_DIR" \
+    || fail "v0.23 backward compatibility gate failed"
 
 pass "DeltaAegis v0.23 dashboard DB-token auth validation passed"
