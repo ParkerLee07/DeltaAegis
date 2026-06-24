@@ -10110,6 +10110,93 @@ def ticket_evidence_timeline_entry(category, source, summary, severity=None, tim
     }
 
 
+
+def ticket_evidence_timeline_category_order():
+    return [
+        "current_risk",
+        "alert",
+        "delta_event",
+        "port_behavior",
+        "ticket_history",
+    ]
+
+
+def ticket_evidence_timeline_sort_key(item):
+    category_rank = {
+        category: index
+        for index, category in enumerate(ticket_evidence_timeline_category_order())
+    }
+    severity_rank = {
+        "CRITICAL": 5,
+        "HIGH": 4,
+        "MEDIUM": 3,
+        "LOW": 2,
+        "INFO": 1,
+    }
+
+    category = str(item.get("category") or "")
+    severity = str(item.get("severity") or "INFO").upper()
+
+    return (
+        str(item.get("timestamp") or ""),
+        severity_rank.get(severity, 0),
+        -category_rank.get(category, len(category_rank)),
+        str(item.get("source") or ""),
+        str(item.get("summary") or ""),
+    )
+
+
+def ticket_evidence_sort_timeline_entries(entries):
+    return sorted(
+        list(entries or []),
+        key=ticket_evidence_timeline_sort_key,
+        reverse=True,
+    )
+
+
+def ticket_evidence_balance_timeline(timeline, limit=25):
+    requested_limit = risk_int(limit, 25)
+
+    if requested_limit <= 0:
+        return []
+
+    sorted_entries = ticket_evidence_sort_timeline_entries(timeline)
+    category_order = ticket_evidence_timeline_category_order()
+    by_category = {category: [] for category in category_order}
+
+    for entry in sorted_entries:
+        category = entry.get("category")
+        if category in by_category:
+            by_category[category].append(entry)
+
+    selected = []
+    selected_ids = set()
+
+    for category in category_order:
+        if len(selected) >= requested_limit:
+            break
+
+        category_entries = by_category.get(category) or []
+        if not category_entries:
+            continue
+
+        entry = category_entries[0]
+        selected.append(entry)
+        selected_ids.add(id(entry))
+
+    for entry in sorted_entries:
+        if len(selected) >= requested_limit:
+            break
+
+        if id(entry) in selected_ids:
+            continue
+
+        selected.append(entry)
+        selected_ids.add(id(entry))
+
+    return selected[:requested_limit]
+
+
 def ticket_evidence_build_timeline(
     risk_rows,
     alert_rows,
@@ -10191,12 +10278,7 @@ def ticket_evidence_build_timeline(
             )
         )
 
-    timeline.sort(
-        key=lambda item: str(item.get("timestamp") or ""),
-        reverse=True,
-    )
-
-    return timeline[:limit]
+    return ticket_evidence_balance_timeline(timeline, limit=limit)
 
 
 def dashboard_ticket_evidence_payload(
