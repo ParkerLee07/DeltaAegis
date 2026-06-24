@@ -10381,6 +10381,7 @@ def dashboard_investigation_center_payload(
             "summary": investigation_center_summary(rows),
             "workflow_summary": workflow_summary,
             "signal_summary": signal_summary,
+            "triage_summary": operator_triage_summary(rows),
             "view_workflow_summary": investigation_center_workflow_summary(rows),
             "view_signal_summary": investigation_center_signal_summary(rows),
             "items": rows,
@@ -12323,6 +12324,89 @@ def dashboard_index_html():
       margin: 10px 0 14px;
     }
 
+
+    .triage-summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+      gap: 10px;
+      margin: 10px 0 14px;
+    }
+
+    .triage-summary-card {
+      border: 1px solid rgba(34, 211, 238, 0.2);
+      border-radius: 16px;
+      background:
+        linear-gradient(135deg, rgba(15, 23, 42, 0.92), rgba(30, 41, 59, 0.72)),
+        radial-gradient(circle at top right, rgba(34, 211, 238, 0.10), transparent 45%);
+      padding: 12px;
+      min-height: 84px;
+    }
+
+    .triage-summary-card .label {
+      color: #94a3b8;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .triage-summary-card .value {
+      color: #f8fafc;
+      display: block;
+      font-size: 24px;
+      font-weight: 850;
+      letter-spacing: -0.03em;
+      margin-top: 4px;
+    }
+
+    .triage-summary-card .hint {
+      color: #94a3b8;
+      display: block;
+      font-size: 12px;
+      line-height: 1.45;
+      margin-top: 4px;
+    }
+
+    .ticket-triage-badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 3px 9px;
+      margin-left: 6px;
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      border: 1px solid rgba(148, 163, 184, 0.24);
+      background: rgba(148, 163, 184, 0.12);
+      color: #cbd5e1;
+      white-space: nowrap;
+    }
+
+    .ticket-triage-immediate {
+      background: rgba(248, 113, 113, 0.14);
+      border-color: rgba(248, 113, 113, 0.34);
+      color: #fecaca;
+    }
+
+    .ticket-triage-high {
+      background: rgba(251, 191, 36, 0.14);
+      border-color: rgba(251, 191, 36, 0.34);
+      color: #fde68a;
+    }
+
+    .ticket-triage-normal {
+      background: rgba(96, 165, 250, 0.14);
+      border-color: rgba(96, 165, 250, 0.34);
+      color: #bfdbfe;
+    }
+
+    .ticket-triage-low {
+      background: rgba(148, 163, 184, 0.12);
+      border-color: rgba(148, 163, 184, 0.22);
+      color: #cbd5e1;
+    }
+
     .ticket-evidence-why-now .label {
       color: #a5f3fc;
       font-weight: 700;
@@ -12745,10 +12829,23 @@ def dashboard_index_html():
             <option value="BASELINE_CONTEXT">Baseline context</option>
           </select>
         </label>
+        <label>
+          Triage Bucket
+          <select id="triage-bucket-filter">
+            <option value="ALL">All buckets</option>
+          </select>
+        </label>
+        <label>
+          Triage Urgency
+          <select id="triage-urgency-filter">
+            <option value="ALL">All urgencies</option>
+          </select>
+        </label>
         <button id="apply-ticket-filters" class="small-action-button">Apply filters</button>
         <button id="clear-ticket-filters" class="small-action-button">Clear filters</button>
       </div>
       <div id="investigation-center-summary" class="grid"></div>
+      <div id="investigation-triage-summary" class="triage-summary-grid"></div>
       <div id="ticket-evidence-panel" class="evidence-drilldown-panel">
         <div class="evidence-drilldown-header">
           <div>
@@ -14311,6 +14408,121 @@ def dashboard_index_html():
       return `<span class="ticket-signal-badge ${ticketSignalClass(row)}">${esc(ticketSignalLabel(row))}</span>`;
     }
 
+
+    function triageBucketLabel(value) {
+      const bucket = String(value || "MONITOR").toUpperCase();
+
+      const labels = {
+        "CHANGED_SINCE_REVIEW": "Changed Since Review",
+        "NEEDS_REVIEW": "Needs Review",
+        "NEEDS_CONTEXT": "Needs Context",
+        "STALE_CLOSED": "Stale Closed",
+        "BASELINE_CONTEXT": "Baseline Context",
+        "MONITOR": "Monitor",
+        "ALL": "All Buckets",
+      };
+
+      return labels[bucket] || bucket.replaceAll("_", " ");
+    }
+
+    function triageUrgencyLabel(value) {
+      const urgency = String(value || "LOW").toUpperCase();
+
+      const labels = {
+        "IMMEDIATE": "Immediate",
+        "HIGH": "High",
+        "NORMAL": "Normal",
+        "LOW": "Low",
+        "ALL": "All Urgencies",
+      };
+
+      return labels[urgency] || urgency.replaceAll("_", " ");
+    }
+
+    function ticketTriageClass(row) {
+      const urgency = String((row && row.triage_urgency_label) || "LOW")
+        .toLowerCase()
+        .replace(/[^a-z0-9-]/g, "");
+
+      if (["immediate", "high", "normal", "low"].includes(urgency)) {
+        return `ticket-triage-${urgency}`;
+      }
+
+      return "ticket-triage-low";
+    }
+
+    function ticketTriageBadge(row) {
+      const bucket = triageBucketLabel(row && row.triage_bucket);
+      const urgency = triageUrgencyLabel(row && row.triage_urgency_label);
+      const score = row && row.triage_urgency_score !== undefined
+        ? row.triage_urgency_score
+        : 0;
+
+      return `<span class="ticket-triage-badge ${ticketTriageClass(row)}">${esc(bucket)} / ${esc(urgency)} (${esc(score)})</span>`;
+    }
+
+    function triageSummaryCard(label, value, hint) {
+      return `
+        <div class="triage-summary-card">
+          <span class="label">${esc(label)}</span>
+          <span class="value">${esc(value ?? 0)}</span>
+          <span class="hint">${esc(hint || "")}</span>
+        </div>
+      `;
+    }
+
+    function renderTriageSummaryPanel(payload) {
+      const root = document.getElementById("investigation-triage-summary");
+
+      if (!root) return;
+
+      const summary = payload && payload.triage_summary ? payload.triage_summary : {};
+      const filters = payload && payload.filters ? payload.filters : {};
+
+      root.innerHTML = `
+        ${triageSummaryCard("Needs Review", summary.needs_review || 0, "Actionable or meaningful-change tickets")}
+        ${triageSummaryCard("Changed", summary.changed_since_review || 0, "New evidence after review")}
+        ${triageSummaryCard("Needs Context", summary.needs_context || 0, "Missing owner, role, or criticality")}
+        ${triageSummaryCard("Immediate", summary.immediate || 0, "Highest urgency queue items")}
+        ${triageSummaryCard("High", summary.high || 0, "High urgency queue items")}
+        ${triageSummaryCard("Selected Bucket", filters.triage_bucket || "ALL", "Current triage bucket filter")}
+      `;
+    }
+
+    function populateTriageSelect(id, values, selected) {
+      const element = document.getElementById(id);
+
+      if (!element) return;
+
+      const options = Array.isArray(values) && values.length ? values : ["ALL"];
+      const current = String(selected || element.value || "ALL").toUpperCase();
+
+      element.innerHTML = options.map(value => {
+        const raw = String(value || "ALL").toUpperCase();
+        const label = id === "triage-urgency-filter"
+          ? triageUrgencyLabel(raw)
+          : triageBucketLabel(raw);
+
+        return `<option value="${esc(raw)}" ${raw === current ? "selected" : ""}>${esc(label)}</option>`;
+      }).join("");
+    }
+
+    function renderTriageFilterOptions(payload) {
+      const filters = payload && payload.filters ? payload.filters : {};
+
+      populateTriageSelect(
+        "triage-bucket-filter",
+        filters.triage_buckets || ["ALL", "CHANGED_SINCE_REVIEW", "NEEDS_REVIEW", "NEEDS_CONTEXT", "STALE_CLOSED", "BASELINE_CONTEXT", "MONITOR"],
+        filters.triage_bucket || "ALL"
+      );
+
+      populateTriageSelect(
+        "triage-urgency-filter",
+        filters.triage_urgencies || ["ALL", "IMMEDIATE", "HIGH", "NORMAL", "LOW"],
+        filters.triage_urgency || "ALL"
+      );
+    }
+
     function ticketEvidenceCategoryLabel(category) {
       const value = String(category || "").toLowerCase();
 
@@ -14646,6 +14858,8 @@ def dashboard_index_html():
       const params = new URLSearchParams();
       const status = investigationCenterFilterValue("ticket-status-filter");
       const signal = investigationCenterFilterValue("ticket-signal-filter");
+      const triageBucket = investigationCenterFilterValue("triage-bucket-filter");
+      const triageUrgency = investigationCenterFilterValue("triage-urgency-filter");
 
       params.set("limit", "25");
 
@@ -14655,6 +14869,12 @@ def dashboard_index_html():
 
       if (signal && signal !== "ALL") {
         params.set("ticket_signal", signal);
+      }
+      if (triageBucket && triageBucket !== "ALL") {
+        params.set("triage_bucket", triageBucket);
+      }
+      if (triageUrgency && triageUrgency !== "ALL") {
+        params.set("triage_urgency", triageUrgency);
       }
 
       return scopedPath(`/api/investigation-center?${params.toString()}`);
@@ -14679,6 +14899,8 @@ def dashboard_index_html():
     async function refreshInvestigationCenter() {
       const payload = await api(investigationCenterFilterPath());
       renderInvestigationCenter(payload);
+      renderTriageFilterOptions(payload);
+      renderTriageSummaryPanel(payload);
     }
 
     function bindInvestigationCenterFilters() {
@@ -14699,9 +14921,13 @@ def dashboard_index_html():
 
           const statusElement = document.getElementById("ticket-status-filter");
           const signalElement = document.getElementById("ticket-signal-filter");
+          const triageBucketElement = document.getElementById("triage-bucket-filter");
+          const triageUrgencyElement = document.getElementById("triage-urgency-filter");
 
           if (statusElement) statusElement.value = "ALL";
           if (signalElement) signalElement.value = "ALL";
+          if (triageBucketElement) triageBucketElement.value = "ALL";
+          if (triageUrgencyElement) triageUrgencyElement.value = "ALL";
 
           refreshInvestigationCenter();
         });
@@ -14776,6 +15002,7 @@ def dashboard_index_html():
                   <strong>${esc(row.device_type || row.classification || row.role || "Unknown asset")}</strong>
                   <div class="siem-ticket-subject">${subjectButton(row.subject_key || "-")}</div>
                   ${ticketSignalBadge(row)}
+                  ${ticketTriageBadge(row)}
                 </div>
                 <div class="siem-priority-badge severity-${esc(levelClass)}">
                   <span class="level">${esc(level)}</span>
@@ -15293,6 +15520,8 @@ def dashboard_index_html():
         renderMetrics(summary);
         renderCurrentState(currentState);
         renderInvestigationCenter(investigationCenter);
+        renderTriageFilterOptions(investigationCenter);
+        renderTriageSummaryPanel(investigationCenter);
       bindInvestigationCenterFilters();
         renderScanContext(scanContext);
         renderScanJobs(scanJobs);
