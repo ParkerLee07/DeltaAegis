@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import ipaddress
 import json
 import os
 import re
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -40,6 +42,17 @@ IDENTITY_DROP_REVIEW_THRESHOLD = 0.25
 REMOVAL_THRESHOLD = 3
 MAC_RE = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
 SCAN_JOB_STATUSES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED"}
+
+ACCESS_ROLES = ("ADMIN", "ANALYST", "VIEWER")
+ACCESS_ROLE_RANKS = {
+    "VIEWER": 10,
+    "ANALYST": 20,
+    "ADMIN": 30,
+}
+ACCESS_PASSWORD_ALGORITHM = "pbkdf2_sha256"
+ACCESS_PASSWORD_ITERATIONS = 260000
+ACCESS_API_TOKEN_PREFIX = "da"
+
 
 
 class DeltaAegisError(RuntimeError):
@@ -579,6 +592,329 @@ def ensure_scoped_asset_lifecycle_schema(connection: sqlite3.Connection) -> None
     connection.execute("DROP TABLE asset_lifecycle")
     connection.execute("ALTER TABLE asset_lifecycle_scoped_migration RENAME TO asset_lifecycle")
 
+
+def ensure_enterprise_access_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS access_users ("
+        "user_id TEXT PRIMARY KEY,"
+        "username TEXT NOT NULL UNIQUE,"
+        "display_name TEXT,"
+        "role TEXT NOT NULL DEFAULT 'VIEWER',"
+        "password_hash TEXT NOT NULL DEFAULT '',"
+        "is_active INTEGER NOT NULL DEFAULT 1,"
+        "created_at TEXT NOT NULL,"
+        "updated_at TEXT NOT NULL,"
+        "last_login_at TEXT,"
+        "CHECK (role IN ('ADMIN', 'ANALYST', 'VIEWER'))"
+        ")"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_users_username "
+        "ON access_users(username)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_users_role "
+        "ON access_users(role)"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS access_api_tokens ("
+        "token_id TEXT PRIMARY KEY,"
+        "user_id TEXT NOT NULL,"
+        "token_name TEXT NOT NULL,"
+        "token_hash TEXT NOT NULL UNIQUE,"
+        "token_prefix TEXT NOT NULL,"
+        "role TEXT NOT NULL DEFAULT 'VIEWER',"
+        "is_active INTEGER NOT NULL DEFAULT 1,"
+        "created_at TEXT NOT NULL,"
+        "updated_at TEXT NOT NULL,"
+        "last_used_at TEXT,"
+        "expires_at TEXT,"
+        "FOREIGN KEY (user_id) REFERENCES access_users(user_id) ON DELETE CASCADE,"
+        "CHECK (role IN ('ADMIN', 'ANALYST', 'VIEWER'))"
+        ")"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_api_tokens_user_id "
+        "ON access_api_tokens(user_id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_api_tokens_prefix "
+        "ON access_api_tokens(token_prefix)"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS access_audit_log ("
+        "audit_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "actor_user_id TEXT,"
+        "actor_username TEXT,"
+        "actor_role TEXT,"
+        "action TEXT NOT NULL,"
+        "target_type TEXT,"
+        "target_key TEXT,"
+        "source_ip TEXT,"
+        "user_agent TEXT,"
+        "detail_json TEXT NOT NULL DEFAULT '{}',"
+        "created_at TEXT NOT NULL,"
+        "FOREIGN KEY (actor_user_id) REFERENCES access_users(user_id) ON DELETE SET NULL"
+        ")"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_audit_log_created_at "
+        "ON access_audit_log(created_at)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_audit_log_action "
+        "ON access_audit_log(action)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_access_audit_log_actor_user_id "
+        "ON access_audit_log(actor_user_id)"
+    )
+
+
+def normalize_access_role(value: str | None, default: str = "VIEWER") -> str:
+    role = str(value or default or "VIEWER").strip().upper().replace("-", "_").replace(" ", "_")
+
+    if role not in ACCESS_ROLE_RANKS:
+        raise DeltaAegisError(f"unsupported access role: {value!r}")
+
+    return role
+
+
+def access_role_allows(role: str | None, required_role: str | None) -> bool:
+    actual = normalize_access_role(role)
+    required = normalize_access_role(required_role)
+
+    return ACCESS_ROLE_RANKS[actual] >= ACCESS_ROLE_RANKS[required]
+
+
+def normalize_access_username(username: str) -> str:
+    value = str(username or "").strip().lower()
+
+    if not value:
+        raise DeltaAegisError("username is required")
+
+    if not re.fullmatch(r"[a-z0-9_.@-]{3,64}", value):
+        raise DeltaAegisError(
+            "username must be 3-64 characters using letters, numbers, dot, underscore, at-sign, or dash"
+        )
+
+    return value
+
+
+def hash_access_password(password: str, salt: str | None = None, iterations: int = ACCESS_PASSWORD_ITERATIONS) -> str:
+    if not password:
+        raise DeltaAegisError("password is required")
+
+    if iterations < 100000:
+        raise DeltaAegisError("password hash iteration count is too low")
+
+    salt_value = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        str(password).encode("utf-8"),
+        salt_value.encode("utf-8"),
+        iterations,
+    ).hex()
+
+    return f"{ACCESS_PASSWORD_ALGORITHM}${iterations}${salt_value}${digest}"
+
+
+def verify_access_password(password: str, password_hash: str | None) -> bool:
+    if not password or not password_hash:
+        return False
+
+    try:
+        algorithm, iterations_text, salt, expected_digest = str(password_hash).split("$", 3)
+        iterations = int(iterations_text)
+    except (TypeError, ValueError):
+        return False
+
+    if algorithm != ACCESS_PASSWORD_ALGORITHM:
+        return False
+
+    candidate = hash_access_password(password, salt=salt, iterations=iterations)
+    candidate_digest = candidate.rsplit("$", 1)[-1]
+
+    return hmac.compare_digest(candidate_digest, expected_digest)
+
+
+def hash_access_api_token(token: str) -> str:
+    if not token:
+        raise DeltaAegisError("API token is required")
+
+    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+
+
+def generate_access_api_token() -> str:
+    return f"{ACCESS_API_TOKEN_PREFIX}_{secrets.token_urlsafe(32)}"
+
+
+def create_access_user(
+    connection: sqlite3.Connection,
+    username: str,
+    role: str = "VIEWER",
+    password: str | None = None,
+    display_name: str | None = None,
+    is_active: bool = True,
+) -> dict[str, Any]:
+    ensure_enterprise_access_schema(connection)
+
+    normalized_username = normalize_access_username(username)
+    normalized_role = normalize_access_role(role)
+    now = utc_now()
+    user_id = str(uuid.uuid4())
+    password_hash = hash_access_password(password) if password else ""
+
+    connection.execute(
+        "INSERT INTO access_users ("
+        "user_id, username, display_name, role, password_hash, is_active, created_at, updated_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            user_id,
+            normalized_username,
+            display_name,
+            normalized_role,
+            password_hash,
+            1 if is_active else 0,
+            now,
+            now,
+        ),
+    )
+
+    return {
+        "user_id": user_id,
+        "username": normalized_username,
+        "display_name": display_name,
+        "role": normalized_role,
+        "is_active": bool(is_active),
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def access_user_by_username(connection: sqlite3.Connection, username: str) -> dict[str, Any] | None:
+    ensure_enterprise_access_schema(connection)
+
+    normalized_username = normalize_access_username(username)
+    row = connection.execute(
+        "SELECT user_id, username, display_name, role, password_hash, is_active, "
+        "created_at, updated_at, last_login_at "
+        "FROM access_users WHERE username = ?",
+        (normalized_username,),
+    ).fetchone()
+
+    if not row:
+        return None
+
+    return dict(row)
+
+
+def list_access_users(connection: sqlite3.Connection, include_inactive: bool = False) -> list[dict[str, Any]]:
+    ensure_enterprise_access_schema(connection)
+
+    where = "" if include_inactive else "WHERE is_active = 1"
+    rows = connection.execute(
+        "SELECT user_id, username, display_name, role, is_active, created_at, updated_at, last_login_at "
+        f"FROM access_users {where} ORDER BY username"
+    ).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def create_access_api_token(
+    connection: sqlite3.Connection,
+    user_id: str,
+    token_name: str,
+    role: str | None = None,
+    expires_at: str | None = None,
+) -> dict[str, Any]:
+    ensure_enterprise_access_schema(connection)
+
+    user = connection.execute(
+        "SELECT user_id, username, role, is_active FROM access_users WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+
+    if not user:
+        raise DeltaAegisError(f"access user not found: {user_id}")
+
+    if not int(user["is_active"] or 0):
+        raise DeltaAegisError(f"access user is inactive: {user['username']}")
+
+    token_value = generate_access_api_token()
+    token_hash = hash_access_api_token(token_value)
+    token_id = str(uuid.uuid4())
+    now = utc_now()
+    token_role = normalize_access_role(role or user["role"])
+    token_prefix = token_value[:12]
+    clean_token_name = str(token_name or "DeltaAegis API Token").strip() or "DeltaAegis API Token"
+
+    connection.execute(
+        "INSERT INTO access_api_tokens ("
+        "token_id, user_id, token_name, token_hash, token_prefix, role, "
+        "is_active, created_at, updated_at, expires_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+        (
+            token_id,
+            user_id,
+            clean_token_name,
+            token_hash,
+            token_prefix,
+            token_role,
+            now,
+            now,
+            expires_at,
+        ),
+    )
+
+    return {
+        "token_id": token_id,
+        "user_id": user_id,
+        "username": user["username"],
+        "token_name": clean_token_name,
+        "token": token_value,
+        "token_prefix": token_prefix,
+        "role": token_role,
+        "created_at": now,
+        "expires_at": expires_at,
+    }
+
+
+def record_access_audit_event(
+    connection: sqlite3.Connection,
+    action: str,
+    actor: dict[str, Any] | None = None,
+    target_type: str | None = None,
+    target_key: str | None = None,
+    source_ip: str | None = None,
+    user_agent: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> int:
+    ensure_enterprise_access_schema(connection)
+
+    actor = actor or {}
+    now = utc_now()
+    cursor = connection.execute(
+        "INSERT INTO access_audit_log ("
+        "actor_user_id, actor_username, actor_role, action, target_type, target_key, "
+        "source_ip, user_agent, detail_json, created_at"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            actor.get("user_id"),
+            actor.get("username"),
+            actor.get("role"),
+            str(action or "").strip().upper() or "UNKNOWN",
+            target_type,
+            target_key,
+            source_ip,
+            user_agent,
+            json.dumps(details or {}, sort_keys=True),
+            now,
+        ),
+    )
+
+    return int(cursor.lastrowid)
+
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(db_path)
@@ -621,6 +957,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
     backfill_snapshot_network_scopes(connection)
     ensure_scoped_asset_lifecycle_schema(connection)
+    ensure_enterprise_access_schema(connection)
     connection.commit()
     return connection
 
@@ -1627,6 +1964,434 @@ def print_netsniper_intelligence_host_detail(row: sqlite3.Row | None) -> None:
     else:
         print("  None recorded.")
 
+
+
+def access_parse_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+
+    text_value = str(value).strip()
+
+    if not text_value:
+        return None
+
+    if text_value.endswith("Z"):
+        text_value = text_value[:-1] + "+00:00"
+
+    try:
+        parsed = datetime.fromisoformat(text_value)
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    return parsed
+
+
+def access_token_is_expired(expires_at: str | None) -> bool:
+    parsed = access_parse_datetime(expires_at)
+
+    if not parsed:
+        return False
+
+    return parsed <= datetime.now(timezone.utc)
+
+
+def authenticate_access_api_token(
+    connection: sqlite3.Connection,
+    token: str,
+    required_role: str = "VIEWER",
+    update_last_used: bool = True,
+) -> dict[str, Any] | None:
+    ensure_enterprise_access_schema(connection)
+
+    supplied = str(token or "").strip()
+
+    if not supplied:
+        return None
+
+    token_hash = hash_access_api_token(supplied)
+    row = connection.execute(
+        "SELECT "
+        "t.token_id, "
+        "t.user_id, "
+        "t.token_name, "
+        "t.token_prefix, "
+        "t.role AS token_role, "
+        "t.is_active AS token_active, "
+        "t.created_at AS token_created_at, "
+        "t.updated_at AS token_updated_at, "
+        "t.last_used_at, "
+        "t.expires_at, "
+        "u.username, "
+        "u.display_name, "
+        "u.role AS user_role, "
+        "u.is_active AS user_active "
+        "FROM access_api_tokens t "
+        "JOIN access_users u ON u.user_id = t.user_id "
+        "WHERE t.token_hash = ?",
+        (token_hash,),
+    ).fetchone()
+
+    if not row:
+        return None
+
+    if not int(row["token_active"] or 0):
+        return None
+
+    if not int(row["user_active"] or 0):
+        return None
+
+    if access_token_is_expired(row["expires_at"]):
+        return None
+
+    token_role = normalize_access_role(row["token_role"])
+
+    if not access_role_allows(token_role, required_role):
+        return None
+
+    authenticated_at = utc_now()
+
+    if update_last_used:
+        connection.execute(
+            "UPDATE access_api_tokens "
+            "SET last_used_at = ?, updated_at = ? "
+            "WHERE token_id = ?",
+            (authenticated_at, authenticated_at, row["token_id"]),
+        )
+        connection.commit()
+
+    return {
+        "auth_type": "api_token",
+        "token_id": row["token_id"],
+        "token_name": row["token_name"],
+        "token_prefix": row["token_prefix"],
+        "user_id": row["user_id"],
+        "username": row["username"],
+        "display_name": row["display_name"],
+        "role": token_role,
+        "user_role": row["user_role"],
+        "last_used_at": authenticated_at if update_last_used else row["last_used_at"],
+        "expires_at": row["expires_at"],
+        "authenticated_at": authenticated_at,
+    }
+
+
+def list_access_api_tokens(
+    connection: sqlite3.Connection,
+    include_inactive: bool = False,
+) -> list[dict[str, Any]]:
+    ensure_enterprise_access_schema(connection)
+
+    where = "" if include_inactive else "WHERE t.is_active = 1 AND u.is_active = 1"
+    rows = connection.execute(
+        "SELECT "
+        "t.token_id, "
+        "t.user_id, "
+        "u.username, "
+        "t.token_name, "
+        "t.token_prefix, "
+        "t.role, "
+        "t.is_active, "
+        "t.created_at, "
+        "t.updated_at, "
+        "t.last_used_at, "
+        "t.expires_at "
+        "FROM access_api_tokens t "
+        "JOIN access_users u ON u.user_id = t.user_id "
+        f"{where} "
+        "ORDER BY t.created_at DESC, t.token_name"
+    ).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def command_user_create(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        user = create_access_user(
+            connection,
+            username=args.username,
+            role=args.role,
+            password=args.password,
+            display_name=args.display_name,
+            is_active=not args.inactive,
+        )
+        record_access_audit_event(
+            connection,
+            action="ACCESS_USER_CREATE",
+            actor={
+                "username": args.actor or "system",
+                "role": "ADMIN",
+            },
+            target_type="access_user",
+            target_key=user["username"],
+            details={
+                "created_user_id": user["user_id"],
+                "created_username": user["username"],
+                "created_role": user["role"],
+                "is_active": user["is_active"],
+                "password_set": bool(args.password),
+            },
+        )
+
+    print("DeltaAegis access user created")
+    print("==============================")
+    print(f"Username:     {user['username']}")
+    print(f"Display name: {user.get('display_name') or '-'}")
+    print(f"Role:         {user['role']}")
+    print(f"Active:       {'yes' if user['is_active'] else 'no'}")
+    print(f"User ID:      {user['user_id']}")
+
+    if not args.password:
+        print("Password:     not set")
+
+    return 0
+
+
+def command_users(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        rows = list_access_users(connection, include_inactive=args.include_inactive)
+
+    print("DeltaAegis access users")
+    print("=======================")
+
+    if not rows:
+        print("No access users found.")
+        return 0
+
+    for row in rows:
+        active = "active" if int(row.get("is_active") or 0) else "inactive"
+        print(
+            f"{row['username']:<24} "
+            f"{row['role']:<8} "
+            f"{active:<8} "
+            f"updated={row.get('updated_at') or '-'} "
+            f"id={row['user_id']}"
+        )
+
+    return 0
+
+
+def command_api_token_create(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        user = access_user_by_username(connection, args.username)
+
+        if not user:
+            raise DeltaAegisError(f"access user not found: {args.username}")
+
+        if not int(user.get("is_active") or 0):
+            raise DeltaAegisError(f"access user is inactive: {user['username']}")
+
+        token = create_access_api_token(
+            connection,
+            user_id=user["user_id"],
+            token_name=args.name,
+            role=args.role,
+            expires_at=args.expires_at,
+        )
+        record_access_audit_event(
+            connection,
+            action="ACCESS_API_TOKEN_CREATE",
+            actor={
+                "username": args.actor or "system",
+                "role": "ADMIN",
+            },
+            target_type="access_api_token",
+            target_key=token["token_id"],
+            details={
+                "token_id": token["token_id"],
+                "token_name": token["token_name"],
+                "token_prefix": token["token_prefix"],
+                "username": token["username"],
+                "role": token["role"],
+                "expires_at": token["expires_at"],
+            },
+        )
+
+    print("DeltaAegis API token created")
+    print("============================")
+    print(f"Username:     {token['username']}")
+    print(f"Token name:   {token['token_name']}")
+    print(f"Role:         {token['role']}")
+    print(f"Token ID:     {token['token_id']}")
+    print(f"Token prefix: {token['token_prefix']}")
+    print(f"Expires at:   {token.get('expires_at') or '-'}")
+    print()
+    print("Copy this token now. It will not be shown again:")
+    print(token["token"])
+
+    return 0
+
+
+def command_api_tokens(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        rows = list_access_api_tokens(connection, include_inactive=args.include_inactive)
+
+    print("DeltaAegis API tokens")
+    print("=====================")
+
+    if not rows:
+        print("No API tokens found.")
+        return 0
+
+    for row in rows:
+        active = "active" if int(row.get("is_active") or 0) else "inactive"
+        expired = "expired" if access_token_is_expired(row.get("expires_at")) else "valid"
+        print(
+            f"{row['username']:<24} "
+            f"{row['role']:<8} "
+            f"{active:<8} "
+            f"{expired:<7} "
+            f"prefix={row.get('token_prefix') or '-'} "
+            f"last_used={row.get('last_used_at') or '-'} "
+            f"name={row.get('token_name') or '-'}"
+        )
+
+    return 0
+
+
+def list_access_audit_events(
+    connection: sqlite3.Connection,
+    limit: int = 50,
+    action: str | None = None,
+    actor: str | None = None,
+    target_type: str | None = None,
+) -> list[dict[str, Any]]:
+    ensure_enterprise_access_schema(connection)
+
+    requested_limit = max(1, min(int(limit or 50), 500))
+    clauses = []
+    values: list[Any] = []
+
+    if action:
+        clauses.append("action = ?")
+        values.append(str(action).strip().upper())
+
+    if actor:
+        clauses.append("(actor_username = ? OR actor_user_id = ?)")
+        values.extend([str(actor).strip(), str(actor).strip()])
+
+    if target_type:
+        clauses.append("target_type = ?")
+        values.append(str(target_type).strip())
+
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+
+    rows = connection.execute(
+        "SELECT "
+        "audit_id, "
+        "actor_user_id, "
+        "actor_username, "
+        "actor_role, "
+        "action, "
+        "target_type, "
+        "target_key, "
+        "source_ip, "
+        "user_agent, "
+        "detail_json, "
+        "created_at "
+        "FROM access_audit_log "
+        f"{where} "
+        "ORDER BY audit_id DESC "
+        "LIMIT ?",
+        (*values, requested_limit),
+    ).fetchall()
+
+    events: list[dict[str, Any]] = []
+
+    for row in rows:
+        detail_json = row["detail_json"] or "{}"
+
+        try:
+            details = json.loads(detail_json)
+        except json.JSONDecodeError:
+            details = {"raw": detail_json}
+
+        event = dict(row)
+        event["details"] = details
+        events.append(event)
+
+    return events
+
+
+def access_audit_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    action_counts = Counter(str(row.get("action") or "UNKNOWN") for row in rows)
+    actor_counts = Counter(str(row.get("actor_username") or "system") for row in rows)
+
+    return {
+        "event_count": len(rows),
+        "action_counts": dict(action_counts),
+        "actor_counts": dict(actor_counts),
+    }
+
+
+def dashboard_access_audit_payload(
+    connection: sqlite3.Connection,
+    limit: int = 25,
+    action: str | None = None,
+    actor: str | None = None,
+    target_type: str | None = None,
+) -> dict[str, Any]:
+    rows = list_access_audit_events(
+        connection,
+        limit=limit,
+        action=action,
+        actor=actor,
+        target_type=target_type,
+    )
+
+    return {
+        "available": True,
+        "items": rows,
+        "item_count": len(rows),
+        "summary": access_audit_summary(rows),
+        "filters": {
+            "action": str(action or "").strip().upper() or "ALL",
+            "actor": str(actor or "").strip() or "ALL",
+            "target_type": str(target_type or "").strip() or "ALL",
+        },
+    }
+
+
+def command_access_audit(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        rows = list_access_audit_events(
+            connection,
+            limit=args.limit,
+            action=args.action,
+            actor=args.actor,
+            target_type=args.target_type,
+        )
+
+    print("DeltaAegis access audit log")
+    print("===========================")
+
+    if args.action:
+        print(f"Action filter: {str(args.action).strip().upper()}")
+
+    if args.actor:
+        print(f"Actor filter:  {args.actor}")
+
+    if args.target_type:
+        print(f"Target filter: {args.target_type}")
+
+    if not rows:
+        print("No access audit events found.")
+        return 0
+
+    for row in rows:
+        print(
+            f"{row.get('audit_id'):>5} "
+            f"{row.get('created_at') or '-'} "
+            f"{row.get('action') or '-':<36} "
+            f"actor={row.get('actor_username') or '-'} "
+            f"role={row.get('actor_role') or '-'} "
+            f"target={row.get('target_type') or '-'}:{row.get('target_key') or '-'} "
+            f"source={row.get('source_ip') or '-'}"
+        )
+
+    return 0
 
 def command_intelligence_hosts(args: argparse.Namespace) -> int:
     connection = connect(args.db)
@@ -15472,6 +16237,79 @@ def dashboard_index_html():
       bindIntelligenceHostLinks(section);
     }
 
+
+    function renderAccessAudit(payload) {
+      let section = document.getElementById("access-audit-panel");
+
+      if (!section) {
+        section = document.createElement("section");
+        section.id = "access-audit-panel";
+        section.dataset.tabPanel = "investigations";
+
+        const investigationCenter = document.getElementById("investigation-center-body");
+        const anchor = investigationCenter ? investigationCenter.closest("section") : null;
+
+        if (anchor && anchor.parentNode) {
+          anchor.parentNode.insertBefore(section, anchor.nextSibling);
+        } else {
+          document.body.appendChild(section);
+        }
+      }
+
+      const items = payload && Array.isArray(payload.items) ? payload.items : [];
+      const summary = payload && payload.summary ? payload.summary : {};
+      const actionCounts = summary.action_counts || {};
+
+      const summaryText = Object.keys(actionCounts).length
+        ? Object.entries(actionCounts)
+            .map(([action, count]) => `${esc(action)}=${esc(count)}`)
+            .join(", ")
+        : "No audit actions observed yet.";
+
+      const rows = items.length
+        ? items.map(row => `
+            <tr>
+              <td><code>${esc(row.created_at || "-")}</code></td>
+              <td>${esc(row.action || "-")}</td>
+              <td>${esc(row.actor_username || "-")}</td>
+              <td>${esc(row.actor_role || "-")}</td>
+              <td>${esc(row.target_type || "-")}</td>
+              <td><code>${esc(row.target_key || "-")}</code></td>
+              <td>${esc(row.source_ip || "-")}</td>
+            </tr>
+          `).join("")
+        : `<tr><td colspan="7">No access audit events found.</td></tr>`;
+
+      section.innerHTML = `
+        <h2>Access Audit Trail</h2>
+        <p class="muted">Recent operator, token, and dashboard workflow actions recorded by the v0.23 Enterprise Access Control layer.</p>
+        <div class="cards">
+          <div class="card">
+            <div class="label">Audit Events</div>
+            <strong>${esc(summary.event_count || items.length || 0)}</strong>
+          </div>
+          <div class="card">
+            <div class="label">Action Summary</div>
+            <strong>${summaryText}</strong>
+          </div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Action</th>
+              <th>Actor</th>
+              <th>Role</th>
+              <th>Target Type</th>
+              <th>Target</th>
+              <th>Source</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      `;
+    }
+
     function renderRecommendations(summary, scanContext, riskRows) {
       const steps = [];
       const latest = scanContext && scanContext.latest_scan ? scanContext.latest_scan : null;
@@ -15532,7 +16370,7 @@ def dashboard_index_html():
       try {
         setupDashboardTabs();
 
-        const [scopes, summary, scanContext, currentState, investigationCenter, scanJobs, assets, currentRisk, historicalRisk, portBehavior, events, alerts, annotations] = await Promise.all([
+        const [scopes, summary, scanContext, currentState, investigationCenter, scanJobs, assets, currentRisk, historicalRisk, portBehavior, events, alerts, annotations, accessAudit] = await Promise.all([
           api("/api/scopes"),
           api(scopedPath("/api/summary")),
           api(scopedPath("/api/scan-context")),
@@ -15545,7 +16383,8 @@ def dashboard_index_html():
           api(scopedPath("/api/port-behavior?limit=25&lookback=5")),
           api(scopedPath("/api/events?limit=20")),
           api(scopedPath("/api/alerts?limit=20")),
-          api(scopedPath("/api/annotations?limit=20"))
+          api(scopedPath("/api/annotations?limit=20")),
+          api(scopedPath("/api/access-audit?limit=20"))
         ]);
 
         renderScopes(scopes);
@@ -15564,6 +16403,7 @@ def dashboard_index_html():
         renderEvents(events);
         renderAlerts(alerts);
         renderAnnotations(annotations);
+        renderAccessAudit(accessAudit);
         renderClassificationSummary(summary);
         renderRecommendations(summary, scanContext, historicalRisk);
         renderExecutiveCharts(summary, currentRisk, portBehavior, investigationCenter, assets, events, alerts);
@@ -15597,29 +16437,72 @@ def command_dashboard(args):
             if not args.quiet:
                 super().log_message(fmt, *handler_args)
 
-        def authorized(self):
-            if not token:
-                return True
+        def dashboard_request_token(self):
+            supplied = self.headers.get("X-DeltaAegis-Token", "").strip()
 
-            supplied = self.headers.get("X-DeltaAegis-Token", "")
-
-            if supplied == token:
-                return True
+            if supplied:
+                return supplied
 
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
 
-            return query.get("token", [""])[0] == token
+            return query.get("token", [""])[0].strip()
 
-        def require_auth(self):
-            if self.authorized():
+        def dashboard_legacy_actor(self, auth_type="dashboard_unauthenticated"):
+            role = "ADMIN" if auth_type in {"legacy_dashboard_token", "dashboard_unauthenticated"} else "VIEWER"
+
+            return {
+                "auth_type": auth_type,
+                "user_id": None,
+                "username": "dashboard",
+                "display_name": "DeltaAegis Dashboard",
+                "role": role,
+            }
+
+        def authenticate_dashboard_request(self, required_role="VIEWER"):
+            required_role = normalize_access_role(required_role)
+            supplied = self.dashboard_request_token()
+            self.current_actor = None
+
+            if token and supplied == token:
+                self.current_actor = self.dashboard_legacy_actor("legacy_dashboard_token")
+                return True
+
+            if supplied:
+                connection = self.open_connection()
+
+                try:
+                    actor = authenticate_access_api_token(
+                        connection,
+                        supplied,
+                        required_role=required_role,
+                    )
+                finally:
+                    connection.close()
+
+                if actor:
+                    self.current_actor = actor
+                    return True
+
+            if not token and not supplied:
+                self.current_actor = self.dashboard_legacy_actor("dashboard_unauthenticated")
+                return True
+
+            return False
+
+        def authorized(self):
+            return self.authenticate_dashboard_request(required_role="VIEWER")
+
+        def require_auth(self, required_role="VIEWER"):
+            if self.authenticate_dashboard_request(required_role=required_role):
                 return True
 
             dashboard_json_response(
                 self,
                 {
                     "error": "unauthorized",
-                    "message": "Provide X-DeltaAegis-Token header or ?token=TOKEN.",
+                    "message": "Provide a valid X-DeltaAegis-Token header or ?token=TOKEN. Database-backed API tokens are supported.",
+                    "required_role": normalize_access_role(required_role),
                 },
                 status=401,
             )
@@ -15810,6 +16693,21 @@ def command_dashboard(args):
                     dashboard_json_response(self, dashboard_risk_payload(connection, limit, scope=scope))
                 elif route == "/api/annotations":
                     dashboard_json_response(self, dashboard_annotations_payload(connection, limit, scope=scope))
+                elif route == "/api/access-audit":
+                    action_filter = query.get("action", [""])[0].strip() or None
+                    actor_filter = query.get("actor", [""])[0].strip() or None
+                    target_type_filter = query.get("target_type", [""])[0].strip() or None
+
+                    dashboard_json_response(
+                        self,
+                        dashboard_access_audit_payload(
+                            connection,
+                            limit=limit,
+                            action=action_filter,
+                            actor=actor_filter,
+                            target_type=target_type_filter,
+                        ),
+                    )
                 else:
                     dashboard_json_response(
                         self,
@@ -15826,7 +16724,7 @@ def command_dashboard(args):
             parsed = urlparse(self.path)
             route = parsed.path
 
-            if not self.require_auth():
+            if not self.require_auth(required_role="ANALYST"):
                 return
 
             if route not in {"/api/investigate-asset", "/api/ticket-status"}:
@@ -15905,6 +16803,23 @@ def command_dashboard(args):
                             analyst=analyst,
                             note=note,
                         )
+                        record_access_audit_event(
+                            connection,
+                            action="DASHBOARD_TICKET_STATUS_UPDATE",
+                            actor=getattr(self, "current_actor", None),
+                            target_type="investigation_ticket",
+                            target_key=state.get("ticket_key") or subject_key,
+                            source_ip=self.client_address[0] if self.client_address else None,
+                            user_agent=self.headers.get("User-Agent", ""),
+                            details={
+                                "subject_key": subject_key,
+                                "scope": raw_scope,
+                                "status": status,
+                                "analyst": analyst,
+                                "note_present": bool(note),
+                            },
+                        )
+                        connection.commit()
                         investigation_center = dashboard_investigation_center_payload(
                             connection,
                             limit=25,
@@ -15956,6 +16871,24 @@ def command_dashboard(args):
                         status,
                         reason,
                     )
+
+                    record_access_audit_event(
+                        connection,
+                        action="DASHBOARD_ASSET_INVESTIGATION_UPDATE",
+                        actor=getattr(self, "current_actor", None),
+                        target_type="asset_investigation",
+                        target_key=asset_key,
+                        source_ip=self.client_address[0] if self.client_address else None,
+                        user_agent=self.headers.get("User-Agent", ""),
+                        details={
+                            "identifier": identifier,
+                            "asset_key": asset_key,
+                            "scope": resolved_scope,
+                            "status": status,
+                            "reason_present": bool(reason),
+                        },
+                    )
+                    connection.commit()
 
                     ticket_state = None
                     workflow_status = (
@@ -16019,9 +16952,11 @@ def command_dashboard(args):
     if token:
         print("Auth:     token required")
         print("Header:   X-DeltaAegis-Token")
+        print("DB Tokens: accepted via X-DeltaAegis-Token")
     else:
         print("Auth:     disabled")
         print("Warning:  bind to 127.0.0.1 unless you are using a trusted network")
+        print("DB Tokens: accepted when supplied in X-DeltaAegis-Token")
 
     print()
     print("Press Ctrl+C to stop.")
@@ -16036,13 +16971,40 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.22.0 Operator Triage Intelligence, Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.23.0 Enterprise Access Control, Operator Triage Intelligence, Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
     parser.add_argument("--reports-dir", type=Path, default=DEFAULT_REPORTS)
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("menu")
+    p = sub.add_parser("user-create", help="Create a local DeltaAegis access user")
+    p.add_argument("username")
+    p.add_argument("--role", choices=list(ACCESS_ROLES), default="VIEWER")
+    p.add_argument("--password", help="Initial password. For shared terminals, prefer setting this only during local setup.")
+    p.add_argument("--display-name")
+    p.add_argument("--inactive", action="store_true")
+    p.add_argument("--actor", default="system", help="Audit actor name for this administrative action")
+
+    p = sub.add_parser("users", help="List local DeltaAegis access users")
+    p.add_argument("--include-inactive", action="store_true")
+
+    p = sub.add_parser("api-token-create", help="Create a database-backed DeltaAegis API token")
+    p.add_argument("username")
+    p.add_argument("--name", default="DeltaAegis API Token")
+    p.add_argument("--role", choices=list(ACCESS_ROLES), default=None)
+    p.add_argument("--expires-at", help="Optional ISO-8601 expiration timestamp")
+    p.add_argument("--actor", default="system", help="Audit actor name for this administrative action")
+
+    p = sub.add_parser("api-tokens", help="List database-backed DeltaAegis API tokens")
+    p.add_argument("--include-inactive", action="store_true")
+
+    p = sub.add_parser("access-audit", help="List DeltaAegis access audit events")
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--action")
+    p.add_argument("--actor")
+    p.add_argument("--target-type")
+
     sub.add_parser("ingest")
     p = sub.add_parser("scan-start", help="Run a safe NetSniper v1.8 headless scan job")
     p.add_argument("--target", required=True, help="Private IPv4 CIDR target, such as 192.168.5.0/24")
@@ -16185,6 +17147,11 @@ def main() -> int:
     args = build_parser().parse_args()
     try:
         if args.command in {None, "menu"}: return run_interactive_menu(args)
+        if args.command == "user-create": return command_user_create(args)
+        if args.command == "users": return command_users(args)
+        if args.command == "api-token-create": return command_api_token_create(args)
+        if args.command == "api-tokens": return command_api_tokens(args)
+        if args.command == "access-audit": return command_access_audit(args)
         if args.command == "ingest": return command_ingest(args)
         if args.command == "scan-start": return command_scan_start(args)
         if args.command == "scan-jobs": return command_scan_jobs(args)

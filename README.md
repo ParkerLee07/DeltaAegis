@@ -14,13 +14,13 @@ Markdown reports, MAC-port behavior correlation, and a local dashboard.
 
 ## Current Release
 
-**DeltaAegis v0.22.0 — Operator Triage Intelligence**
+**DeltaAegis v0.23.0 — Enterprise Access Control**
 
-v0.22.0 turns the Investigation Center into a more operator-focused triage queue. It adds deterministic triage state, triage urgency scoring, triage bucket filters, dashboard triage controls, triage summary cards, row-level triage badges, and report-level triage summaries.
+v0.23.0 adds enterprise access-control foundations: local users, role-based access helpers, database-backed API tokens, dashboard token authentication, token usage tracking, and access audit visibility.
 
-Current feature baseline: **DeltaAegis v0.22.0 — Operator Triage Intelligence**.
+Current feature baseline: **DeltaAegis v0.23.0 — Enterprise Access Control**.
 
-DeltaAegis v0.22.0 adds:
+DeltaAegis v0.23.0 adds:
 
 - Operator triage state for Investigation Center queue items.
 - Triage buckets such as `NEEDS_REVIEW`, `CHANGED_SINCE_REVIEW`, `NEEDS_CONTEXT`, `STALE_CLOSED`, `BASELINE_CONTEXT`, and `MONITOR`.
