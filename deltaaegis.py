@@ -10426,6 +10426,45 @@ def dashboard_index_html():
       }
     }
 
+    /* v0.17 ticket signal state labels */
+    .ticket-signal-badge {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: 999px;
+      padding: 4px 9px;
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .ticket-signal-actionable {
+      border-color: rgba(248, 113, 113, 0.38);
+      background: rgba(127, 29, 29, 0.22);
+      color: #fecaca;
+    }
+
+    .ticket-signal-meaningful-change {
+      border-color: rgba(34, 211, 238, 0.38);
+      background: rgba(8, 145, 178, 0.18);
+      color: #a5f3fc;
+    }
+
+    .ticket-signal-baseline-context {
+      border-color: rgba(148, 163, 184, 0.28);
+      background: rgba(51, 65, 85, 0.24);
+      color: #cbd5e1;
+    }
+
+    .ticket-signal-unknown {
+      border-color: rgba(148, 163, 184, 0.2);
+      background: rgba(15, 23, 42, 0.55);
+      color: #94a3b8;
+    }
+
   </style>
 </head>
 <body class="dashboard-shell-refresh-v017">
@@ -10494,6 +10533,7 @@ def dashboard_index_html():
         <thead>
           <tr>
             <th>Priority</th>
+            <th>Signal</th>
             <th>Subject</th>
             <th>IP</th>
             <th>MAC</th>
@@ -12015,6 +12055,32 @@ def dashboard_index_html():
 
 
 
+
+    function ticketSignalLabel(row) {
+      const state = String((row && row.ticket_signal_state) || "ACTIONABLE").toUpperCase();
+
+      if (state === "BASELINE_CONTEXT") return "Baseline context";
+      if (state === "MEANINGFUL_CHANGE") return "Meaningful change";
+      if (state === "ACTIONABLE") return "Actionable";
+
+      return "Unclassified";
+    }
+
+    function ticketSignalClass(row) {
+      const state = String((row && row.ticket_signal_state) || "ACTIONABLE").toUpperCase();
+
+      if (state === "BASELINE_CONTEXT") return "ticket-signal-baseline-context";
+      if (state === "MEANINGFUL_CHANGE") return "ticket-signal-meaningful-change";
+      if (state === "ACTIONABLE") return "ticket-signal-actionable";
+
+      return "ticket-signal-unknown";
+    }
+
+    function ticketSignalBadge(row) {
+      return `<span class="ticket-signal-badge ${ticketSignalClass(row)}">${esc(ticketSignalLabel(row))}</span>`;
+    }
+
+
     function renderInvestigationCenter(payload) {
       const summaryBox = document.getElementById("investigation-center-summary");
       const tbody = document.getElementById("investigation-center-body");
@@ -12028,7 +12094,9 @@ def dashboard_index_html():
           ["Critical", summary.critical || 0],
           ["High", summary.high || 0],
           ["With Open Alerts", summary.with_open_alerts || 0],
-          ["With Port Behavior", summary.with_port_behavior || 0]
+          ["With Port Behavior", summary.with_port_behavior || 0],
+          ["Meaningful Changes", summary.meaningful_change || 0],
+          ["Baseline Context", summary.baseline_context || 0]
         ].map(([label, value]) => `
           <div class="metric-card command-center-kpi">
             <div class="label">${esc(label)}</div>
@@ -12047,7 +12115,7 @@ def dashboard_index_html():
         }
 
         if (tbody) {
-          tbody.innerHTML = `<tr><td colspan="9" class="muted">${esc(message)}</td></tr>`;
+          tbody.innerHTML = `<tr><td colspan="10" class="muted">${esc(message)}</td></tr>`;
         }
 
         return;
@@ -12067,6 +12135,7 @@ def dashboard_index_html():
                 <div class="siem-ticket-title">
                   <strong>${esc(row.device_type || row.classification || row.role || "Unknown asset")}</strong>
                   <div class="siem-ticket-subject">${subjectButton(row.subject_key || "-")}</div>
+                  ${ticketSignalBadge(row)}
                 </div>
                 <div class="siem-priority-badge severity-${esc(levelClass)}">
                   <span class="level">${esc(level)}</span>
@@ -12134,6 +12203,7 @@ def dashboard_index_html():
               ${esc(row.priority_level || "INFO")}<br>
               <span class="muted">${esc(row.priority_score || 0)}</span>
             </td>
+            <td>${ticketSignalBadge(row)}</td>
             <td>${subjectButton(row.subject_key || "-")}</td>
             <td><code>${esc(row.ip_address || "-")}</code></td>
             <td><code>${esc(row.mac_address || "-")}</code></td>
