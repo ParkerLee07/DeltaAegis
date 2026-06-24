@@ -10310,6 +10310,169 @@ def print_investigation_center_rows(payload):
 
 
 
+
+def print_ticket_evidence_section(title, rows, fields, limit=5):
+    items = list(rows or [])[:limit]
+
+    print()
+    print(title)
+    print("-" * len(title))
+
+    if not items:
+        print("  None.")
+        return
+
+    for index, row in enumerate(items, start=1):
+        print(f"{index:>2}.")
+        for field, label in fields:
+            value = row.get(field)
+
+            if isinstance(value, list):
+                value = ", ".join(str(item) for item in value[:6])
+
+            if isinstance(value, dict):
+                value = ", ".join(f"{key}={item}" for key, item in list(value.items())[:6])
+
+            if value in (None, ""):
+                value = "-"
+
+            print(f"    {label:<14} {value}")
+
+
+def print_ticket_evidence_payload(payload):
+    available = bool(payload.get("available", False))
+    summary = payload.get("summary") or {}
+    ticket_state = payload.get("ticket_state") or {}
+
+    print("DeltaAegis Ticket Evidence")
+    print("==========================")
+
+    if not available:
+        print(payload.get("error") or "Ticket evidence is unavailable.")
+        return
+
+    print(f"Subject:        {payload.get('subject_key') or summary.get('subject_key') or '-'}")
+    print(f"Selected:       {payload.get('selected_subject') or '-'}")
+    print(f"Scope:          {payload.get('selected_scope') or summary.get('scope') or '-'}")
+    print(f"Workflow:       {summary.get('ticket_status') or ticket_state.get('ticket_status') or 'OPEN'}")
+    print(f"Signal:         {summary.get('ticket_signal') or 'ACTIONABLE'}")
+    print(
+        "Priority:       "
+        f"{summary.get('priority_level') or 'INFO'} / "
+        f"{int(summary.get('priority_score') or 0)}"
+    )
+    print()
+    print(f"Why:            {summary.get('primary_reason') or '-'}")
+    print(f"Next action:    {summary.get('recommended_action') or '-'}")
+    print()
+    print(
+        "Evidence counts: "
+        f"risk={int(summary.get('risk_count') or 0)}, "
+        f"alerts={int(summary.get('alert_count') or 0)}, "
+        f"events={int(summary.get('event_count') or 0)}, "
+        f"ports={int(summary.get('port_behavior_count') or 0)}, "
+        f"history={int(summary.get('ticket_history_count') or 0)}, "
+        f"timeline={int(summary.get('timeline_count') or 0)}"
+    )
+
+    print_ticket_evidence_section(
+        "Evidence Timeline",
+        payload.get("timeline") or [],
+        [
+            ("timestamp", "Time"),
+            ("category", "Category"),
+            ("severity", "Severity"),
+            ("source", "Source"),
+            ("summary", "Summary"),
+        ],
+        limit=10,
+    )
+
+    print_ticket_evidence_section(
+        "Current Risk Evidence",
+        payload.get("risk") or [],
+        [
+            ("level", "Level"),
+            ("score", "Score"),
+            ("subject_key", "Subject"),
+            ("reasons", "Reasons"),
+        ],
+        limit=5,
+    )
+
+    print_ticket_evidence_section(
+        "Alerts",
+        payload.get("alerts") or [],
+        [
+            ("alert_id", "Alert"),
+            ("status", "Status"),
+            ("severity", "Severity"),
+            ("event_type", "Type"),
+            ("summary", "Summary"),
+        ],
+        limit=5,
+    )
+
+    print_ticket_evidence_section(
+        "Delta Events",
+        payload.get("events") or [],
+        [
+            ("event_id", "Event"),
+            ("created_at", "Time"),
+            ("severity", "Severity"),
+            ("event_type", "Type"),
+            ("summary", "Summary"),
+        ],
+        limit=5,
+    )
+
+    print_ticket_evidence_section(
+        "MAC-Port Behavior",
+        payload.get("port_behavior") or [],
+        [
+            ("severity", "Severity"),
+            ("behavior", "Behavior"),
+            ("protocol", "Protocol"),
+            ("port", "Port"),
+            ("reason", "Reason"),
+        ],
+        limit=5,
+    )
+
+    print_ticket_evidence_section(
+        "Ticket History",
+        payload.get("ticket_history") or [],
+        [
+            ("created_at", "Time"),
+            ("previous_status", "Previous"),
+            ("new_status", "New"),
+            ("analyst", "Analyst"),
+            ("note", "Note"),
+        ],
+        limit=10,
+    )
+
+
+def command_ticket_evidence(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    scope = optional_network_scope(getattr(args, "scope", None))
+
+    try:
+        payload = dashboard_ticket_evidence_payload(
+            connection,
+            subject_key=args.subject_key,
+            scope=scope,
+            limit=getattr(args, "limit", 10),
+        )
+    finally:
+        connection.close()
+
+    print_ticket_evidence_payload(payload)
+
+    return 0 if payload.get("available", False) else 1
+
+
+
 def command_ticket_status(args: argparse.Namespace) -> int:
     connection = connect(args.db)
 
@@ -14719,6 +14882,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--status", choices=["OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"])
     p.add_argument("--analyst")
     p.add_argument("--note")
+    p = sub.add_parser("ticket-evidence", help="Show evidence package for one investigation ticket")
+    p.add_argument("--subject", dest="subject_key", required=True, help="Ticket subject key such as mac:aa:bb:cc:dd:ee:ff")
+    p.add_argument("--scope", help="Optional network scope filter")
+    p.add_argument("--limit", type=int, default=10, help="Maximum evidence rows per section")
+
     p = sub.add_parser("ticket-history", help="Show workflow history for one investigation ticket")
     p.add_argument("subject_key")
     p.add_argument("--limit", type=int, default=20)
@@ -14840,6 +15008,7 @@ def main() -> int:
         if args.command == "scan-start": return command_scan_start(args)
         if args.command == "scan-jobs": return command_scan_jobs(args)
         if args.command == "ticket-status": return command_ticket_status(args)
+        if args.command == "ticket-evidence": return command_ticket_evidence(args)
         if args.command == "ticket-history": return command_ticket_history(args)
         if args.command == "ticket-list": return command_ticket_list(args)
         if args.command == "investigation-center": return command_investigation_center(args)
