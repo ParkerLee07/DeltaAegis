@@ -10014,6 +10014,179 @@ def dashboard_index_html():
       }
     }
 
+    /* v0.17 SIEM-style ticket queue */
+    .ticket-cards-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      gap: 14px;
+      margin: 18px 0;
+    }
+
+    .siem-ticket-card {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 20px;
+      background:
+        linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(2, 6, 23, 0.88));
+      padding: 16px;
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.22);
+    }
+
+    .siem-ticket-card::before {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 4px;
+      background: #64748b;
+    }
+
+    .siem-ticket-card.ticket-critical::before { background: #ef4444; }
+    .siem-ticket-card.ticket-high::before { background: #f97316; }
+    .siem-ticket-card.ticket-medium::before { background: #eab308; }
+    .siem-ticket-card.ticket-low::before { background: #22c55e; }
+
+    .siem-ticket-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .siem-ticket-title {
+      display: grid;
+      gap: 5px;
+      min-width: 0;
+    }
+
+    .siem-ticket-title strong {
+      color: #f8fafc;
+      font-size: 15px;
+    }
+
+    .siem-ticket-subject {
+      color: #bfdbfe;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+
+    .siem-priority-badge {
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: 16px;
+      background: rgba(15, 23, 42, 0.78);
+      padding: 8px 10px;
+      text-align: right;
+      min-width: 92px;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+
+    .siem-priority-badge .level {
+      display: block;
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .siem-priority-badge .score {
+      display: block;
+      margin-top: 2px;
+      color: #f8fafc;
+      font-size: 24px;
+      font-weight: 900;
+      letter-spacing: -0.05em;
+    }
+
+    .siem-ticket-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin: 12px 0;
+    }
+
+    .siem-ticket-meta div {
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      border-radius: 14px;
+      background: rgba(15, 23, 42, 0.5);
+      padding: 8px;
+      min-width: 0;
+    }
+
+    .siem-ticket-meta span {
+      display: block;
+      color: #94a3b8;
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .siem-ticket-meta code,
+    .siem-ticket-meta strong {
+      display: block;
+      margin-top: 4px;
+      overflow-wrap: anywhere;
+    }
+
+    .siem-ticket-section {
+      margin-top: 12px;
+    }
+
+    .siem-ticket-section .label {
+      margin-bottom: 6px;
+    }
+
+    .siem-ticket-reason {
+      color: #e2e8f0;
+      line-height: 1.55;
+    }
+
+    .siem-ticket-action {
+      color: #bbf7d0;
+      line-height: 1.55;
+    }
+
+    .siem-ticket-counts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .siem-count-pill {
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.72);
+      color: #dbeafe;
+      padding: 5px 9px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .siem-ticket-empty {
+      border: 1px dashed rgba(148, 163, 184, 0.25);
+      border-radius: 18px;
+      padding: 18px;
+      color: var(--muted);
+      background: rgba(15, 23, 42, 0.42);
+    }
+
+    .siem-ticket-table-note {
+      margin-top: 14px;
+      margin-bottom: 8px;
+    }
+
+    @media (max-width: 760px) {
+      .ticket-cards-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .siem-ticket-meta {
+        grid-template-columns: 1fr;
+      }
+    }
+
   </style>
 </head>
 <body class="dashboard-shell-refresh-v017">
@@ -10076,7 +10249,9 @@ def dashboard_index_html():
         recent delta events, asset identity, classification, and recommended next action.
       </p>
       <div id="investigation-center-summary" class="grid"></div>
-      <table>
+      <div id="investigation-ticket-cards" class="ticket-cards-grid"></div>
+      <p class="muted siem-ticket-table-note">Detailed queue table for sorting, copy/paste review, and compatibility with earlier DeltaAegis dashboard workflows.</p>
+      <table class="siem-ticket-table">
         <thead>
           <tr>
             <th>Priority</th>
@@ -11604,6 +11779,7 @@ def dashboard_index_html():
     function renderInvestigationCenter(payload) {
       const summaryBox = document.getElementById("investigation-center-summary");
       const tbody = document.getElementById("investigation-center-body");
+      const ticketCards = document.getElementById("investigation-ticket-cards");
       const items = payload && Array.isArray(payload.items) ? payload.items : [];
       const summary = payload && payload.summary ? payload.summary : {};
 
@@ -11622,15 +11798,79 @@ def dashboard_index_html():
         `).join("");
       }
 
-      if (!tbody) return;
-
       if (!items.length) {
         const message = payload && payload.available === false
           ? (payload.error || "Investigation Command Center is unavailable.")
           : "No investigation queue items matched the selected scope.";
-        tbody.innerHTML = `<tr><td colspan="9" class="muted">${esc(message)}</td></tr>`;
+
+        if (ticketCards) {
+          ticketCards.innerHTML = `<div class="siem-ticket-empty">${esc(message)}</div>`;
+        }
+
+        if (tbody) {
+          tbody.innerHTML = `<tr><td colspan="9" class="muted">${esc(message)}</td></tr>`;
+        }
+
         return;
       }
+
+      if (ticketCards) {
+        ticketCards.innerHTML = items.slice(0, 6).map(row => {
+          const level = String(row.priority_level || "INFO").toUpperCase();
+          const levelClass = level.toLowerCase().replace(/[^a-z0-9-]/g, "");
+          const triggers = Array.isArray(row.triggers) && row.triggers.length
+            ? row.triggers.map(trigger => `<span class="command-center-trigger">${esc(trigger)}</span>`).join(" ")
+            : `<span class="muted">No trigger context</span>`;
+
+          return `
+            <article class="siem-ticket-card ticket-${esc(levelClass)}">
+              <div class="siem-ticket-header">
+                <div class="siem-ticket-title">
+                  <strong>${esc(row.device_type || row.classification || row.role || "Unknown asset")}</strong>
+                  <div class="siem-ticket-subject">${subjectButton(row.subject_key || "-")}</div>
+                </div>
+                <div class="siem-priority-badge severity-${esc(levelClass)}">
+                  <span class="level">${esc(level)}</span>
+                  <span class="score">${esc(row.priority_score || 0)}</span>
+                </div>
+              </div>
+
+              <div class="siem-ticket-meta">
+                <div><span>IP address</span><code>${esc(row.ip_address || "-")}</code></div>
+                <div><span>MAC address</span><code>${esc(row.mac_address || "-")}</code></div>
+                <div><span>Role</span><strong>${esc(row.role || row.classification || "Unknown")}</strong></div>
+                <div><span>Identity</span><strong>${esc(row.identity_confidence || "Unknown")}</strong></div>
+              </div>
+
+              <div class="siem-ticket-section">
+                <div class="label">Triggers</div>
+                <div>${triggers}</div>
+              </div>
+
+              <div class="siem-ticket-section">
+                <div class="label">Why review?</div>
+                <div class="siem-ticket-reason">${esc(row.primary_reason || "-")}</div>
+              </div>
+
+              <div class="siem-ticket-section">
+                <div class="label">Recommended action</div>
+                <div class="siem-ticket-action">${esc(row.recommended_action || "-")}</div>
+              </div>
+
+              <div class="siem-ticket-counts">
+                <span class="siem-count-pill">Alerts ${esc(row.open_alerts || 0)}</span>
+                <span class="siem-count-pill">Events ${esc(row.recent_events || 0)}</span>
+                <span class="siem-count-pill">Ports ${esc(row.port_behavior_count || 0)}</span>
+                <span class="siem-count-pill">Findings ${esc(row.current_finding_count || 0)}</span>
+              </div>
+            </article>
+          `;
+        }).join("");
+
+        bindSubjectLinks(ticketCards);
+      }
+
+      if (!tbody) return;
 
       tbody.innerHTML = items.map(row => {
         const triggers = Array.isArray(row.triggers) && row.triggers.length
