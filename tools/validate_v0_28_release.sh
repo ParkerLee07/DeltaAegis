@@ -30,6 +30,9 @@ echo "[INFO] Running fast v0.28 feature validators..."
 ./tools/validate_v0_28_release_metadata.sh \
     || fail "v0.28 release metadata validator failed"
 
+./tools/validate_v0_28_dashboard_db_defaults.sh \
+    || fail "v0.28 dashboard DB default alignment validator failed"
+
 grep -q '"/api/netsniper/import-latest", "workflow.write"' deltaaegis.py \
     || fail "NetSniper import-latest endpoint is not mapped to workflow.write"
 
