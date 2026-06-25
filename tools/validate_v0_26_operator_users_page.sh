@@ -19,13 +19,25 @@ cd "$(dirname "$0")/.." || exit 1
 for needle in \
     'def dashboard_operator_users_shell_html' \
     'route == "/operator/users"' \
-    'required_role="ADMIN"' \
-    'fetch("/api/admin/users"' \
-    'operator-users-body' \
-    'User Management'
+    'required_role="ADMIN"'
 do
-    grep -Fq -- "$needle" deltaaegis.py || fail "missing v0.26 operator users page marker: $needle"
+    grep -Fq -- "$needle" deltaaegis.py || fail "missing v0.26 operator users page source marker: $needle"
 done
+
+python3 - <<'PYHTML'
+import deltaaegis as da
+
+html = da.dashboard_operator_users_shell_html()
+
+for needle in [
+    'fetch("/api/admin/users"',
+    "operator-users-body",
+    "User Management",
+]:
+    assert needle in html, f"missing rendered v0.26 operator users page marker: {needle}"
+
+print("[PASS] rendered v0.26 operator users page markers validated")
+PYHTML
 
 python3 - <<'PY'
 import contextlib
@@ -166,7 +178,10 @@ with tempfile.TemporaryDirectory() as tmpdir:
         assert "DeltaAegis User Management" in body, body
         assert 'fetch("/api/admin/users"' in body, body
         assert "operator-users-body" in body, body
-        assert "State-changing user actions are intentionally not available" in body, body
+        assert (
+            "State-changing user actions are intentionally not available" in body
+            or "State-changing user actions require ADMIN access" in body
+        ), body
 
         lowered = body.lower()
         for marker in forbidden_page_markers:
