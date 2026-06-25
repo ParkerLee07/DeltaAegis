@@ -1,27 +1,29 @@
 # DeltaAegis
 
-## Current Release — v0.26.0
+## Current Release — v0.28.0
 
-DeltaAegis v0.26.0 — Dashboard User Management adds an ADMIN-only dashboard user-management control surface on top of the v0.25 session UX foundation.
+DeltaAegis v0.28.0 — Dashboard NetSniper Import Setup makes the DeltaAegis dashboard the primary control surface for NetSniper telemetry intake while keeping NetSniper lightweight, CLI-first, and headless.
 
-### v0.26.0 Highlights
+Current feature baseline: **DeltaAegis v0.28.0 — Dashboard NetSniper Import Setup**.
 
-- Added an ADMIN-only `/api/admin/users` inventory endpoint for safe local dashboard user visibility.
-- Added `/operator/users` as a dashboard user-management page.
-- Added ADMIN-only user actions for creating users, enabling/disabling users, changing roles, and rotating passwords.
-- Added last-active-ADMIN protection so the dashboard cannot disable or demote the final active administrator.
-- Added user-management controls directly to the operator page.
-- Added user-management audit visibility for recent `ACCESS_USER_DASHBOARD_*` events.
-- Preserved v0.25 dashboard session UX compatibility and release validation.
-- Continued secret-safety guarantees: password hashes, token hashes, raw tokens, session token hashes, and submitted password values are not exposed by the dashboard user-management views.
+DeltaAegis v0.28.0 adds:
 
-## Current Release
+- Protected `/netsniper` dashboard tab for NetSniper telemetry-source visibility.
+- Dashboard-side NetSniper installation, runs-directory, latest-run, and import-readiness detection.
+- Floating dashboard navigation link to the NetSniper tab.
+- ANALYST+ dashboard action for importing the latest completed NetSniper run.
+- `DELTAAEGIS_NETSNIPER_ROOT` override for validators, services, and non-standard deployments.
+- Explicit no-raw-shell design boundary: the dashboard does not expose arbitrary command execution.
+- Fast v0.28 feature validators plus a separate v0.28 release metadata gate.
+
+
+## Prior Release Notes
 
 **DeltaAegis v0.24.0 — Dashboard Session Login**
 
 v0.23.0 adds enterprise access-control foundations: local users, role-based access helpers, database-backed API tokens, dashboard token authentication, token usage tracking, and access audit visibility.
 
-Current feature baseline: **DeltaAegis v0.24.0 — Dashboard Session Login**.
+Earlier feature baseline: **DeltaAegis v0.24.0 — Dashboard Session Login**.
 
 DeltaAegis v0.23.0 adds:
 
@@ -195,6 +197,11 @@ DeltaAegis does not require a separate database server.
 
 
 ## Recent Releases
+
+- DeltaAegis v0.28.0 — Dashboard NetSniper Import Setup adds a protected
+  dashboard NetSniper tab, latest-run detection, dashboard import-latest
+  action, and a no-raw-shell execution boundary while keeping NetSniper
+  lightweight and CLI/headless.
 
 ### v0.20.0 — Ticket Evidence Drilldown
 

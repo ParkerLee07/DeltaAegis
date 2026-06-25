@@ -20,7 +20,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Create the first DeltaAegis dashboard ADMIN account when no local accounts exist."
     )
-    parser.add_argument("--db", default="deltaaegis.db", help="DeltaAegis SQLite database path.")
+    parser.add_argument(
+        "--db",
+        default=str(REPO_ROOT / "data" / "deltaaegis.db"),
+        help="DeltaAegis SQLite database path. Default: %(default)s",
+    )
     parser.add_argument("--username", default=None, help="Admin username.")
     parser.add_argument("--password", default=None, help="Admin password. Prefer the prompt over this flag.")
     parser.add_argument("--display-name", default=None, help="Admin display name.")

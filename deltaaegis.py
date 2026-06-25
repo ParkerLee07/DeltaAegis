@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.22.0: Operator Triage Intelligence, Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
+"""DeltaAegis v0.28.0: Dashboard NetSniper Import Setup, dashboard-first NetSniper telemetry intake, operator workflow control, RBAC, session login, investigation intelligence, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -66,6 +66,8 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("GET", "/", "dashboard.read"),
     ("GET", "/operator", "operator.session.read"),
     ("GET", "/operator/users", "admin.users.read"),
+    ("GET", "/netsniper", "dashboard.read"),
+    ("GET", "/api/netsniper/status", "dashboard.read"),
     ("GET", "/api/session", "session.read"),
     ("GET", "/api/admin/users", "admin.users.read"),
     ("GET", "/api/access-audit", "admin.audit.read"),
@@ -73,6 +75,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("POST_PREFIX", "/api/admin/users/", "admin.users.write"),
     ("POST", "/api/ticket-status", "workflow.write"),
     ("POST", "/api/investigate-asset", "workflow.write"),
+    ("POST", "/api/netsniper/import-latest", "workflow.write"),
 )
 
 
@@ -8460,8 +8463,78 @@ def dashboard_inject_operator_floating_button(html_text: str) -> str:
     return html_text
 
 
+
+def dashboard_inject_netsniper_navigation(html_text: str) -> str:
+    if not isinstance(html_text, str):
+        return html_text
+
+    if "</body>" not in html_text:
+        return html_text
+
+    # Keep auth, operator, and the NetSniper page itself clean.
+    if (
+        "<title>DeltaAegis Login" in html_text
+        or "<title>DeltaAegis First Admin Setup" in html_text
+        or "<title>DeltaAegis Operator" in html_text
+        or "<title>DeltaAegis User Management" in html_text
+        or "<title>DeltaAegis NetSniper" in html_text
+    ):
+        return html_text
+
+    style = """
+<style id="deltaaegis-v028-netsniper-navigation-style">
+  #deltaaegis-netsniper-dashboard-link {
+    position: fixed;
+    right: 24px;
+    bottom: 86px;
+    z-index: 9999;
+    border: 1px solid rgba(34, 211, 238, 0.38);
+    border-radius: 999px;
+    background: rgba(8, 145, 178, 0.18);
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.34);
+    color: #67e8f9;
+    padding: 10px 14px;
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 950;
+    letter-spacing: 0.01em;
+  }
+
+  #deltaaegis-netsniper-dashboard-link:hover {
+    background: rgba(8, 145, 178, 0.30);
+  }
+
+  @media (max-width: 720px) {
+    #deltaaegis-netsniper-dashboard-link {
+      right: 16px;
+      bottom: 78px;
+    }
+  }
+</style>
+"""
+
+    link = """
+<a
+  id="deltaaegis-netsniper-dashboard-link"
+  href="/netsniper"
+  aria-label="Open NetSniper telemetry source tab"
+  title="Open NetSniper telemetry source tab"
+>NetSniper</a>
+"""
+
+    if 'id="deltaaegis-v028-netsniper-navigation-style"' not in html_text and "</head>" in html_text:
+        html_text = html_text.replace("</head>", style + "\n</head>", 1)
+
+    if 'id="deltaaegis-netsniper-dashboard-link"' not in html_text:
+        html_text = html_text.replace("</body>", link + "\n</body>", 1)
+
+    return html_text
+
+
+
 def dashboard_html_response(handler, body, status=200):
     body = dashboard_inject_operator_floating_button(body)
+    body = dashboard_inject_netsniper_navigation(body)
     body = body.encode("utf-8")
 
     handler.send_response(status)
@@ -8789,6 +8862,134 @@ def dashboard_netsniper_intelligence_summary_payload(connection, limit=10):
         "false_confidence_candidates": false_confidence[:limit],
         "unknown_with_exposed_services": unknown_exposed[:limit],
     }
+
+
+
+def dashboard_netsniper_root_path() -> Path:
+    """Return the lightweight NetSniper checkout path.
+
+    Defaults to ~/NetSniper. DELTAAEGIS_NETSNIPER_ROOT is supported for
+    validators, service deployments, and non-standard installs.
+    """
+    configured = os.environ.get("DELTAAEGIS_NETSNIPER_ROOT", "").strip()
+
+    if configured:
+        return Path(configured).expanduser()
+
+    return Path.home() / "NetSniper"
+
+
+def dashboard_netsniper_runs_dir() -> Path:
+    return dashboard_netsniper_root_path() / "runs"
+
+
+def dashboard_netsniper_read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def dashboard_netsniper_latest_manifest(runs_dir: Path) -> Path | None:
+    if not runs_dir.is_dir():
+        return None
+
+    manifests = sorted(runs_dir.glob("*/manifest.json"))
+    if not manifests:
+        return None
+
+    return manifests[-1]
+
+
+def dashboard_netsniper_status_payload() -> dict:
+    root_path = dashboard_netsniper_root_path()
+    runs_dir = dashboard_netsniper_runs_dir()
+    script_path = root_path / "netsniper.sh"
+    latest_manifest = dashboard_netsniper_latest_manifest(runs_dir)
+
+    latest_run = None
+    manifest_payload = {}
+
+    if latest_manifest is not None:
+        latest_run_path = latest_manifest.parent
+        manifest_payload = dashboard_netsniper_read_json(latest_manifest)
+        latest_run = {
+            "run_id": latest_run_path.name,
+            "path": str(latest_run_path),
+            "manifest_path": str(latest_manifest),
+            "status": str(manifest_payload.get("status") or "").upper() or None,
+            "scan_id": manifest_payload.get("scan_id"),
+            "scanner_version": manifest_payload.get("scanner_version"),
+            "target": manifest_payload.get("target"),
+            "created_at": manifest_payload.get("created_at") or manifest_payload.get("timestamp"),
+        }
+
+    latest_status = (latest_run or {}).get("status")
+    import_ready = bool(
+        latest_manifest is not None
+        and latest_status in {"COMPLETE", "COMPLETED", "SUCCESS"}
+    )
+
+    return {
+        "netsniper_root": str(root_path),
+        "netsniper_script": str(script_path),
+        "netsniper_installed": script_path.is_file(),
+        "runs_dir": str(runs_dir),
+        "runs_dir_exists": runs_dir.is_dir(),
+        "latest_run": latest_run,
+        "latest_run_status": latest_status,
+        "latest_manifest_found": latest_manifest is not None,
+        "import_ready": import_ready,
+        "notes": [
+            "NetSniper remains a lightweight CLI/headless telemetry producer.",
+            "DeltaAegis v0.28 starts with dashboard-side detection before scan execution.",
+            "Raw shell command execution is intentionally not exposed.",
+        ],
+    }
+
+
+
+
+def dashboard_netsniper_latest_completed_manifest(runs_dir: Path) -> Path | None:
+    if not runs_dir.is_dir():
+        return None
+
+    for manifest_path in reversed(sorted(runs_dir.glob("*/manifest.json"))):
+        manifest_payload = dashboard_netsniper_read_json(manifest_path)
+        status = str(manifest_payload.get("status") or "").upper()
+
+        if status in {"COMPLETE", "COMPLETED", "SUCCESS"}:
+            return manifest_path
+
+    return None
+
+
+def dashboard_netsniper_import_latest_payload(
+    connection: sqlite3.Connection,
+    export_path: Path,
+) -> dict:
+    runs_dir = dashboard_netsniper_runs_dir()
+
+    if not runs_dir.is_dir():
+        raise DeltaAegisError(f"NetSniper runs directory does not exist: {runs_dir}")
+
+    manifest_path = dashboard_netsniper_latest_completed_manifest(runs_dir)
+
+    if manifest_path is None:
+        raise DeltaAegisError(f"No completed NetSniper run manifest found under {runs_dir}")
+
+    result = ingest_manifest(connection, manifest_path, export_path)
+    status_payload = dashboard_netsniper_status_payload()
+
+    return {
+        "ok": True,
+        "action": "netsniper.import_latest",
+        "manifest_path": str(manifest_path),
+        "run_id": manifest_path.parent.name,
+        "result": result,
+        "status": status_payload,
+    }
+
 
 
 def dashboard_summary_payload(connection, scope=None):
@@ -14115,7 +14316,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.26 User Management</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.28 NetSniper Import</span></div>
     </div>
   </header>
 
@@ -17693,6 +17894,203 @@ def dashboard_login_html(
 
 
 
+
+def render_netsniper_page() -> str:
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DeltaAegis NetSniper</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #020617; color: #e2e8f0; }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, rgba(34,211,238,.13), transparent 34rem), #020617; }
+    main { width: min(1120px, calc(100vw - 32px)); margin: 0 auto; padding: 44px 0; }
+    .panel { border: 1px solid rgba(148,163,184,.22); border-radius: 24px; background: rgba(15,23,42,.92); box-shadow: 0 24px 80px rgba(0,0,0,.34); padding: 28px; }
+    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: .16em; text-transform: uppercase; }
+    h1 { margin: 8px 0 8px; font-size: 32px; letter-spacing: -.04em; }
+    h2 { margin: 26px 0 12px; font-size: 18px; }
+    p { margin: 0 0 20px; color: #94a3b8; line-height: 1.55; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 18px 0; }
+    a, button { border: 1px solid rgba(34,211,238,.28); border-radius: 999px; background: rgba(8,145,178,.14); color: #67e8f9; cursor: pointer; padding: 9px 13px; text-decoration: none; font-size: 13px; font-weight: 900; }
+    button:hover, a:hover { background: rgba(8,145,178,.26); }
+    .status { border: 1px solid rgba(148,163,184,.18); border-radius: 16px; background: rgba(2,6,23,.38); color: #cbd5e1; margin: 18px 0; padding: 12px 14px; font-weight: 700; white-space: pre-wrap; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin: 18px 0 22px; }
+    .card { border: 1px solid rgba(148,163,184,.18); border-radius: 18px; background: rgba(2,6,23,.34); padding: 14px; }
+    .card-label { color: #94a3b8; font-size: 11px; font-weight: 900; letter-spacing: .11em; text-transform: uppercase; }
+    .card-value { color: #f8fafc; font-size: 20px; font-weight: 950; margin-top: 4px; overflow-wrap: anywhere; }
+    .pill { display: inline-flex; border: 1px solid rgba(148,163,184,.22); border-radius: 999px; padding: 4px 8px; font-size: 11px; font-weight: 950; text-transform: uppercase; letter-spacing: .06em; }
+    .ok { color: #bbf7d0; border-color: rgba(34,197,94,.35); background: rgba(22,163,74,.12); }
+    .warn { color: #fde68a; border-color: rgba(251,191,36,.35); background: rgba(217,119,6,.12); }
+    pre { border: 1px solid rgba(148,163,184,.18); border-radius: 16px; background: rgba(2,6,23,.55); color: #cbd5e1; padding: 14px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="panel">
+      <div class="eyebrow">DeltaAegis Telemetry Source</div>
+      <h1>NetSniper</h1>
+      <p>DeltaAegis treats NetSniper as a lightweight CLI/headless scan engine. This page detects the local NetSniper checkout and its completed telemetry runs before dashboard scan execution is added.</p>
+
+      <div class="actions">
+        <a href="/">Back to dashboard</a>
+        <a href="/operator">Operator session</a>
+        <a href="/api/netsniper/status">View raw status JSON</a>
+        <button type="button" id="netsniper-refresh">Refresh status</button>
+        <button type="button" id="netsniper-import-latest">Import latest completed run</button>
+      </div>
+
+      <div class="status" id="netsniper-status">Loading NetSniper status…</div>
+
+      <div class="grid">
+        <div class="card"><div class="card-label">Installed</div><div class="card-value" id="netsniper-installed">—</div></div>
+        <div class="card"><div class="card-label">Runs directory</div><div class="card-value" id="netsniper-runs-dir-exists">—</div></div>
+        <div class="card"><div class="card-label">Latest run</div><div class="card-value" id="netsniper-latest-run">—</div></div>
+        <div class="card"><div class="card-label">Import ready</div><div class="card-value" id="netsniper-import-ready">—</div></div>
+      </div>
+
+      <h2>Detected paths</h2>
+      <pre id="netsniper-paths">Loading…</pre>
+
+      <h2>Latest run metadata</h2>
+      <pre id="netsniper-latest-json">Loading…</pre>
+
+      <h2>Import result</h2>
+      <pre id="netsniper-import-result">No import has been run from this page yet.</pre>
+
+      <h2>Design boundary</h2>
+      <p>This tab does not run arbitrary shell commands. Future scan execution should use a guarded NetSniper wrapper with validated target input, one active job at a time, and ADMIN-only launch controls.</p>
+    </section>
+  </main>
+
+  <script>
+    function text(value) {
+      if (value === null || value === undefined || value === "") { return "—"; }
+      return String(value);
+    }
+
+    function escapeHtml(value) {
+      return text(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function pill(value, goodLabel) {
+      const isGood = Boolean(value);
+      const label = isGood ? goodLabel : "No";
+      const cls = isGood ? "ok" : "warn";
+      return `<span class="pill ${cls}">${escapeHtml(label)}</span>`;
+    }
+
+    function setHtml(id, value) {
+      const element = document.getElementById(id);
+      if (element) { element.innerHTML = value; }
+    }
+
+    function setText(id, value) {
+      const element = document.getElementById(id);
+      if (element) { element.textContent = text(value); }
+    }
+
+    async function loadNetSniperStatus() {
+      const status = document.getElementById("netsniper-status");
+
+      try {
+        const response = await fetch("/api/netsniper/status", {
+          credentials: "same-origin",
+          cache: "no-store"
+        });
+
+        if (response.status === 401 || response.status === 403) {
+          window.location.href = "/login";
+          return;
+        }
+
+        if (!response.ok) {
+          status.textContent = "NetSniper status lookup failed.";
+          return;
+        }
+
+        const payload = await response.json();
+        const latest = payload.latest_run || {};
+
+        setHtml("netsniper-installed", pill(payload.netsniper_installed, "Yes"));
+        setHtml("netsniper-runs-dir-exists", pill(payload.runs_dir_exists, "Found"));
+        setText("netsniper-latest-run", latest.run_id || "No runs detected");
+        setHtml("netsniper-import-ready", pill(payload.import_ready, "Ready"));
+
+        setText("netsniper-paths", JSON.stringify({
+          netsniper_root: payload.netsniper_root,
+          netsniper_script: payload.netsniper_script,
+          runs_dir: payload.runs_dir
+        }, null, 2));
+
+        setText("netsniper-latest-json", JSON.stringify(latest || {}, null, 2));
+
+        status.textContent = payload.import_ready
+          ? "Latest NetSniper run is ready for dashboard import in the next v0.28 stage."
+          : "No completed import-ready NetSniper run was found yet.";
+      } catch (error) {
+        status.textContent = `NetSniper status lookup failed: ${error.message || error}`;
+      }
+    }
+
+    async function importLatestNetSniperRun() {
+      const status = document.getElementById("netsniper-status");
+      const output = document.getElementById("netsniper-import-result");
+      const button = document.getElementById("netsniper-import-latest");
+
+      button.disabled = true;
+      status.textContent = "Importing latest completed NetSniper run…";
+
+      try {
+        const response = await fetch("/api/netsniper/import-latest", {
+          method: "POST",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: {"Content-Type": "application/json"},
+          body: "{}"
+        });
+
+        let payload = {};
+        try {
+          payload = await response.json();
+        } catch (error) {
+          payload = {};
+        }
+
+        if (response.status === 401 || response.status === 403) {
+          window.location.href = "/login";
+          return;
+        }
+
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.message || payload.error || `Import failed with HTTP ${response.status}`);
+        }
+
+        output.textContent = JSON.stringify(payload, null, 2);
+        status.textContent = `Import complete: ${payload.result || payload.run_id || "latest run"}`;
+        await loadNetSniperStatus();
+      } catch (error) {
+        status.textContent = `Import failed: ${error.message || error}`;
+        output.textContent = String(error.message || error);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    document.getElementById("netsniper-refresh").addEventListener("click", loadNetSniperStatus);
+    document.getElementById("netsniper-import-latest").addEventListener("click", importLatestNetSniperRun);
+    loadNetSniperStatus();
+  </script>
+</body>
+</html>"""
+
+
+
 def command_dashboard(args):
     from http.cookies import SimpleCookie
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17977,6 +18375,14 @@ def command_dashboard(args):
                 if not self.require_permission("admin.users.read"):
                     return
                 dashboard_html_response(self, dashboard_operator_users_shell_html())
+                return
+
+            if route == "/netsniper":
+                dashboard_html_response(self, render_netsniper_page())
+                return
+
+            if route == "/api/netsniper/status":
+                dashboard_json_response(self, dashboard_netsniper_status_payload())
                 return
 
             if route == "/api/session":
@@ -18389,7 +18795,7 @@ def command_dashboard(args):
             if not self.require_permission("workflow.write"):
                 return
 
-            if route not in {"/api/investigate-asset", "/api/ticket-status"}:
+            if route not in {"/api/investigate-asset", "/api/ticket-status", "/api/netsniper/import-latest"}:
                 dashboard_json_response(
                     self,
                     {
@@ -18441,6 +18847,32 @@ def command_dashboard(args):
                 )
                 return
 
+
+            if route == "/api/netsniper/import-latest":
+                connection = self.open_connection()
+
+                try:
+                    try:
+                        payload = dashboard_netsniper_import_latest_payload(
+                            connection,
+                            args.events,
+                        )
+                    except DeltaAegisError as exc:
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "netsniper_import_failed",
+                                "message": str(exc),
+                            },
+                            status=400,
+                        )
+                        return
+
+                    dashboard_json_response(self, payload)
+                    return
+                finally:
+                    connection.close()
 
             if route == "/api/ticket-status":
                 subject_key = str(
@@ -18639,7 +19071,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.26.0 \u2014 Dashboard User Management, Dashboard Session UX, Enterprise Access Control, Operator Triage Intelligence, Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.28.0 — Dashboard NetSniper Import Setup, Dashboard User Management, Dashboard Session UX, Enterprise Access Control, Operator Triage Intelligence, Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper telemetry intake, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)

@@ -102,7 +102,8 @@ EOF2
 #   DELTAAEGIS_ADMIN_DISPLAY_NAME
 #
 # Do not ship a hardcoded public default password.
-DELTAAEGIS_DB_PATH="${DELTAAEGIS_DB_PATH:-deltaaegis.db}"
+DELTAAEGIS_DB_PATH="${DELTAAEGIS_DB_PATH:-data/deltaaegis.db}"
+mkdir -p "$(dirname "$DELTAAEGIS_DB_PATH")"
 
 if [ -f "tools/bootstrap_first_admin.py" ]; then
   if [ -n "${DELTAAEGIS_ADMIN_USERNAME:-}" ] || [ -n "${DELTAAEGIS_ADMIN_PASSWORD:-}" ]; then
