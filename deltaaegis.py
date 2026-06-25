@@ -16877,6 +16877,395 @@ def dashboard_session_payload(actor: dict[str, Any] | None) -> dict[str, Any]:
 
 
 
+
+class DashboardAdminUserActionError(DeltaAegisError):
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.status_code = int(status_code)
+
+
+def dashboard_admin_action_timestamp() -> str:
+    from datetime import datetime, timezone
+
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def dashboard_admin_json_error_response(
+    handler: Any,
+    message: str,
+    status_code: int = 400,
+    details: dict[str, Any] | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "ok": False,
+        "error": str(message),
+        "status": int(status_code),
+    }
+    if details:
+        payload["details"] = details
+
+    body = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+    handler.send_response(int(status_code))
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def dashboard_read_request_payload(handler: Any) -> dict[str, Any]:
+    length_text = handler.headers.get("Content-Length", "0")
+    try:
+        length = int(length_text or "0")
+    except ValueError:
+        length = 0
+
+    raw = handler.rfile.read(max(0, length)).decode("utf-8", "replace")
+    if not raw.strip():
+        return {}
+
+    content_type = handler.headers.get("Content-Type", "").lower()
+    if "application/json" in content_type:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise DashboardAdminUserActionError(
+                f"invalid JSON body: {exc.msg}",
+                status_code=400,
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise DashboardAdminUserActionError(
+                "JSON body must be an object",
+                status_code=400,
+            )
+        return parsed
+
+    form = parse_qs(raw, keep_blank_values=True)
+    return {
+        key: values[-1] if values else ""
+        for key, values in form.items()
+    }
+
+
+def dashboard_validate_access_username(username: str) -> str:
+    clean = str(username or "").strip().lower()
+
+    if not clean:
+        raise DashboardAdminUserActionError("username is required", status_code=400)
+
+    if len(clean) > 96:
+        raise DashboardAdminUserActionError("username is too long", status_code=400)
+
+    allowed = set("abcdefghijklmnopqrstuvwxyz0123456789._@-")
+    if any(character not in allowed for character in clean):
+        raise DashboardAdminUserActionError(
+            "username may only contain letters, numbers, dot, underscore, at-sign, and hyphen",
+            status_code=400,
+        )
+
+    if clean in {".", ".."} or "/" in clean or "\\" in clean:
+        raise DashboardAdminUserActionError("invalid username", status_code=400)
+
+    return clean
+
+
+def dashboard_access_user_by_username_required(
+    connection: sqlite3.Connection,
+    username: str,
+) -> dict[str, Any]:
+    clean_username = dashboard_validate_access_username(username)
+    user = access_user_by_username(connection, clean_username)
+    if not user:
+        raise DashboardAdminUserActionError(
+            f"access user not found: {clean_username}",
+            status_code=404,
+        )
+    return user
+
+
+def dashboard_active_admin_count(connection: sqlite3.Connection) -> int:
+    row = connection.execute(
+        "SELECT COUNT(*) AS count FROM access_users "
+        "WHERE role = 'ADMIN' AND is_active = 1"
+    ).fetchone()
+    return int(row["count"] if row else 0)
+
+
+def dashboard_actor_summary(actor: dict[str, Any] | None) -> dict[str, Any]:
+    actor = actor or {}
+    return {
+        "user_id": actor.get("user_id"),
+        "username": actor.get("username") or actor.get("token_name") or "dashboard.admin",
+        "role": normalize_access_role(actor.get("role") or "ADMIN"),
+        "auth_type": actor.get("auth_type"),
+    }
+
+
+def dashboard_record_admin_user_action(
+    connection: sqlite3.Connection,
+    actor: dict[str, Any] | None,
+    action: str,
+    target_username: str,
+    details: dict[str, Any] | None = None,
+) -> None:
+    actor_summary = dashboard_actor_summary(actor)
+    event_details = dict(details or {})
+    event_details["actor"] = actor_summary
+
+    record_access_audit_event(
+        connection,
+        action,
+        target_type="access_user",
+        target_key=target_username,
+        details=event_details,
+    )
+
+
+def dashboard_admin_user_action_response(
+    connection: sqlite3.Connection,
+    action: str,
+    target_username: str,
+) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "action": action,
+        "target_username": target_username,
+        "access": dashboard_admin_users_payload(connection),
+    }
+
+
+def dashboard_admin_create_user(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+    actor: dict[str, Any] | None,
+) -> dict[str, Any]:
+    username = dashboard_validate_access_username(str(payload.get("username") or ""))
+    display_name = str(payload.get("display_name") or username).strip() or username
+    role = normalize_access_role(str(payload.get("role") or "VIEWER"))
+    password = str(payload.get("password") or "")
+
+    if role not in ACCESS_ROLES:
+        raise DashboardAdminUserActionError("invalid role", status_code=400)
+
+    if not password:
+        raise DashboardAdminUserActionError("password is required", status_code=400)
+
+    if len(password) < 8:
+        raise DashboardAdminUserActionError(
+            "password must be at least 8 characters",
+            status_code=400,
+        )
+
+    if access_user_by_username(connection, username):
+        raise DashboardAdminUserActionError(
+            f"access user already exists: {username}",
+            status_code=409,
+        )
+
+    user = create_access_user(
+        connection,
+        username,
+        display_name=display_name,
+        role=role,
+        password=password,
+    )
+
+    dashboard_record_admin_user_action(
+        connection,
+        actor,
+        "ACCESS_USER_DASHBOARD_CREATE",
+        username,
+        {
+            "username": username,
+            "display_name": display_name,
+            "role": role,
+            "password_set": True,
+        },
+    )
+
+    return dashboard_admin_user_action_response(
+        connection,
+        "create",
+        user["username"],
+    )
+
+
+def dashboard_admin_set_user_enabled(
+    connection: sqlite3.Connection,
+    username: str,
+    enabled: bool,
+    actor: dict[str, Any] | None,
+) -> dict[str, Any]:
+    user = dashboard_access_user_by_username_required(connection, username)
+    target_username = str(user["username"])
+    target_role = normalize_access_role(user.get("role") or "VIEWER")
+    currently_active = bool(int(user.get("is_active") or 0))
+
+    if not enabled and currently_active and target_role == "ADMIN":
+        if dashboard_active_admin_count(connection) <= 1:
+            raise DashboardAdminUserActionError(
+                "cannot disable the last active ADMIN user",
+                status_code=409,
+            )
+
+    now = dashboard_admin_action_timestamp()
+    connection.execute(
+        "UPDATE access_users SET is_active = ?, updated_at = ? WHERE user_id = ?",
+        (1 if enabled else 0, now, user["user_id"]),
+    )
+
+    action = "ACCESS_USER_DASHBOARD_ENABLE" if enabled else "ACCESS_USER_DASHBOARD_DISABLE"
+    dashboard_record_admin_user_action(
+        connection,
+        actor,
+        action,
+        target_username,
+        {
+            "username": target_username,
+            "enabled": bool(enabled),
+            "previous_enabled": currently_active,
+            "role": target_role,
+        },
+    )
+
+    return dashboard_admin_user_action_response(
+        connection,
+        "enable" if enabled else "disable",
+        target_username,
+    )
+
+
+def dashboard_admin_set_user_role(
+    connection: sqlite3.Connection,
+    username: str,
+    payload: dict[str, Any],
+    actor: dict[str, Any] | None,
+) -> dict[str, Any]:
+    user = dashboard_access_user_by_username_required(connection, username)
+    target_username = str(user["username"])
+    old_role = normalize_access_role(user.get("role") or "VIEWER")
+    new_role = normalize_access_role(str(payload.get("role") or ""))
+
+    if new_role not in ACCESS_ROLES:
+        raise DashboardAdminUserActionError("invalid role", status_code=400)
+
+    if old_role == "ADMIN" and new_role != "ADMIN" and int(user.get("is_active") or 0):
+        if dashboard_active_admin_count(connection) <= 1:
+            raise DashboardAdminUserActionError(
+                "cannot remove ADMIN role from the last active ADMIN user",
+                status_code=409,
+            )
+
+    now = dashboard_admin_action_timestamp()
+    connection.execute(
+        "UPDATE access_users SET role = ?, updated_at = ? WHERE user_id = ?",
+        (new_role, now, user["user_id"]),
+    )
+
+    dashboard_record_admin_user_action(
+        connection,
+        actor,
+        "ACCESS_USER_DASHBOARD_ROLE_CHANGE",
+        target_username,
+        {
+            "username": target_username,
+            "old_role": old_role,
+            "new_role": new_role,
+        },
+    )
+
+    return dashboard_admin_user_action_response(
+        connection,
+        "role",
+        target_username,
+    )
+
+
+def dashboard_admin_rotate_user_password(
+    connection: sqlite3.Connection,
+    username: str,
+    payload: dict[str, Any],
+    actor: dict[str, Any] | None,
+) -> dict[str, Any]:
+    user = dashboard_access_user_by_username_required(connection, username)
+    target_username = str(user["username"])
+    password = str(payload.get("password") or "")
+
+    if not password:
+        raise DashboardAdminUserActionError("password is required", status_code=400)
+
+    if len(password) < 8:
+        raise DashboardAdminUserActionError(
+            "password must be at least 8 characters",
+            status_code=400,
+        )
+
+    password_hash = hash_access_password(password)
+    now = dashboard_admin_action_timestamp()
+    connection.execute(
+        "UPDATE access_users SET password_hash = ?, updated_at = ? WHERE user_id = ?",
+        (password_hash, now, user["user_id"]),
+    )
+
+    dashboard_record_admin_user_action(
+        connection,
+        actor,
+        "ACCESS_USER_DASHBOARD_PASSWORD_ROTATE",
+        target_username,
+        {
+            "username": target_username,
+            "password_set": True,
+        },
+    )
+
+    return dashboard_admin_user_action_response(
+        connection,
+        "password",
+        target_username,
+    )
+
+
+def dashboard_admin_handle_user_action(
+    connection: sqlite3.Connection,
+    route: str,
+    payload: dict[str, Any],
+    actor: dict[str, Any] | None,
+) -> dict[str, Any]:
+    clean_route = str(route or "").strip()
+
+    if clean_route == "/api/admin/users":
+        return dashboard_admin_create_user(connection, payload, actor)
+
+    prefix = "/api/admin/users/"
+    if not clean_route.startswith(prefix):
+        raise DashboardAdminUserActionError("unknown admin users route", status_code=404)
+
+    remainder = clean_route[len(prefix):].strip("/")
+    parts = [part for part in remainder.split("/") if part]
+
+    if len(parts) != 2:
+        raise DashboardAdminUserActionError("invalid admin users route", status_code=404)
+
+    username, action = parts[0], parts[1]
+
+    if action == "enable":
+        return dashboard_admin_set_user_enabled(connection, username, True, actor)
+
+    if action == "disable":
+        return dashboard_admin_set_user_enabled(connection, username, False, actor)
+
+    if action == "role":
+        return dashboard_admin_set_user_role(connection, username, payload, actor)
+
+    if action == "password":
+        return dashboard_admin_rotate_user_password(connection, username, payload, actor)
+
+    raise DashboardAdminUserActionError("unknown admin user action", status_code=404)
+
 def dashboard_admin_users_payload(connection: sqlite3.Connection) -> dict[str, Any]:
     """Return safe, dashboard-ready access-user metadata for ADMIN users.
 
@@ -17538,6 +17927,44 @@ def command_dashboard(args):
                         connection.close()
 
                 self.dashboard_logout_redirect()
+                return
+
+            if route == "/api/admin/users" or route.startswith("/api/admin/users/"):
+                if not self.require_auth(required_role="ADMIN"):
+                    return
+
+                connection = sqlite3.connect(db_path)
+                connection.row_factory = sqlite3.Row
+
+                try:
+                    payload = dashboard_read_request_payload(self)
+                    result = dashboard_admin_handle_user_action(
+                        connection,
+                        route,
+                        payload,
+                        getattr(self, "current_actor", None),
+                    )
+                    connection.commit()
+                except DashboardAdminUserActionError as exc:
+                    connection.rollback()
+                    dashboard_admin_json_error_response(
+                        self,
+                        str(exc),
+                        status_code=getattr(exc, "status_code", 400),
+                    )
+                    return
+                except DeltaAegisError as exc:
+                    connection.rollback()
+                    dashboard_admin_json_error_response(
+                        self,
+                        str(exc),
+                        status_code=400,
+                    )
+                    return
+                finally:
+                    connection.close()
+
+                dashboard_json_response(self, result)
                 return
 
             if not self.require_auth(required_role="ANALYST"):
