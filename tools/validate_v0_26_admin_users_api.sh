@@ -222,7 +222,16 @@ with tempfile.TemporaryDirectory() as tmpdir:
 print("[PASS] synthetic v0.26 admin users API validated")
 PY
 
-./tools/validate_v0_25_release.sh "$NETSNIPER_RUN_DIR" \
-    || fail "v0.25 backward compatibility gate failed"
+for inherited_validator in \
+    tools/validate_v0_25_operator_session_page.sh \
+    tools/validate_v0_25_operator_session_actions.sh \
+    tools/validate_v0_25_backward_compatibility_markers.sh
+do
+    if [[ -x "$inherited_validator" ]]; then
+        "$inherited_validator" "$NETSNIPER_RUN_DIR" \
+            || fail "inherited v0.25 compatibility gate failed: $inherited_validator"
+    fi
+done
+
 
 pass "DeltaAegis v0.26 admin users API validation passed"
