@@ -18784,7 +18784,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scope")
     p.add_argument("--quiet", action="store_true")
 
-    p.add_argument("--require-login", action="store_true", help="Require username/password dashboard login even if no password users exist")
+    p.add_argument(
+        "--require-login",
+        dest="require_login",
+        action="store_true",
+        default=True,
+        help="Require username/password dashboard login. Enabled by default for safe dashboard startup.",
+    )
+    p.add_argument(
+        "--no-require-login",
+        dest="require_login",
+        action="store_false",
+        help="Development-only escape hatch: allow unauthenticated dashboard access.",
+    )
     p = sub.add_parser("risk")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--subject")
