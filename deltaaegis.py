@@ -45,6 +45,68 @@ MAC_RE = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
 SCAN_JOB_STATUSES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED"}
 
 ACCESS_ROLES = ("ADMIN", "ANALYST", "VIEWER")
+
+
+# v0.27 RBAC policy matrix.
+#
+# Keep dashboard permissions here instead of scattering role literals
+# throughout route handlers. Route code should ask for a permission, and
+# this matrix defines the minimum role needed for that permission.
+ACCESS_RBAC_PERMISSIONS = {
+    "dashboard.read": "VIEWER",
+    "operator.session.read": "VIEWER",
+    "session.read": "VIEWER",
+    "admin.users.read": "ADMIN",
+    "admin.users.write": "ADMIN",
+    "admin.audit.read": "ADMIN",
+    "workflow.write": "ANALYST",
+}
+
+ACCESS_RBAC_ROUTE_POLICIES = (
+    ("GET", "/", "dashboard.read"),
+    ("GET", "/operator", "operator.session.read"),
+    ("GET", "/operator/users", "admin.users.read"),
+    ("GET", "/api/session", "session.read"),
+    ("GET", "/api/admin/users", "admin.users.read"),
+    ("GET", "/api/access-audit", "admin.audit.read"),
+    ("POST", "/api/admin/users", "admin.users.write"),
+    ("POST_PREFIX", "/api/admin/users/", "admin.users.write"),
+    ("POST", "/api/ticket-status", "workflow.write"),
+    ("POST", "/api/investigate-asset", "workflow.write"),
+)
+
+
+def access_rbac_required_role(permission: str) -> str:
+    clean_permission = str(permission or "").strip()
+
+    if clean_permission not in ACCESS_RBAC_PERMISSIONS:
+        raise ValueError(f"Unknown DeltaAegis RBAC permission: {permission}")
+
+    return ACCESS_RBAC_PERMISSIONS[clean_permission]
+
+
+def access_rbac_allows(role: str | None, permission: str) -> bool:
+    return access_role_allows(role, access_rbac_required_role(permission))
+
+
+def dashboard_route_permission(method: str, route: str) -> str | None:
+    clean_method = str(method or "").upper()
+    clean_route = str(route or "").split("?", 1)[0]
+
+    for policy_method, policy_route, permission in ACCESS_RBAC_ROUTE_POLICIES:
+        if policy_method == "POST_PREFIX":
+            if clean_method == "POST" and clean_route.startswith(policy_route):
+                return permission
+            continue
+
+        if clean_method == policy_method and clean_route == policy_route:
+            return permission
+
+    if clean_method == "GET" and clean_route.startswith("/api/"):
+        return "dashboard.read"
+
+    return None
+
 ACCESS_ROLE_RANKS = {
     "VIEWER": 10,
     "ANALYST": 20,
@@ -16943,6 +17005,94 @@ def dashboard_operator_session_shell_html() -> str:
 
 
 
+
+
+def dashboard_access_user_count(connection) -> int:
+    try:
+        row = connection.execute("SELECT COUNT(*) AS count FROM access_users").fetchone()
+    except Exception:
+        return 0
+
+    if row is None:
+        return 0
+
+    try:
+        return int(row["count"])
+    except Exception:
+        return int(row[0])
+
+
+def dashboard_first_admin_setup_required(connection) -> bool:
+    # First-run setup is only available before any local dashboard account
+    # exists. Disabled users still count as existing accounts, so setup cannot
+    # be abused to recreate an admin after the system has been initialized.
+    return dashboard_access_user_count(connection) == 0
+
+
+def dashboard_first_admin_setup_html(error: str = "") -> str:
+    safe_error = str(error or "")
+    safe_error = (
+        safe_error
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#039;")
+    )
+    error_html = (
+        '<div class="login-error">' + safe_error + '</div>'
+        if safe_error
+        else ""
+    )
+
+    html = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DeltaAegis First Admin Setup</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #020617; color: #e2e8f0; }
+    body { min-height: 100vh; margin: 0; display: grid; place-items: center; background: radial-gradient(circle at top left, rgba(34, 211, 238, 0.14), transparent 34rem), radial-gradient(circle at bottom right, rgba(59, 130, 246, 0.14), transparent 34rem), #020617; }
+    .setup-shell { width: min(460px, calc(100vw - 32px)); border: 1px solid rgba(148, 163, 184, 0.24); border-radius: 24px; background: rgba(15, 23, 42, 0.94); box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42); padding: 28px; }
+    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: 0.16em; text-transform: uppercase; }
+    h1 { margin: 8px 0 8px; font-size: 30px; letter-spacing: -0.04em; }
+    p { margin: 0 0 22px; color: #94a3b8; line-height: 1.55; }
+    label { display: block; margin: 14px 0 6px; color: #cbd5e1; font-size: 13px; font-weight: 800; }
+    input { width: 100%; box-sizing: border-box; border: 1px solid rgba(148, 163, 184, 0.28); border-radius: 14px; background: rgba(2, 6, 23, 0.82); color: #f8fafc; padding: 12px 13px; font-size: 15px; outline: none; }
+    input:focus { border-color: rgba(34, 211, 238, 0.65); box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.12); }
+    button { width: 100%; margin-top: 20px; border: 0; border-radius: 14px; background: linear-gradient(135deg, #06b6d4, #2563eb); color: white; padding: 12px 14px; font-size: 15px; font-weight: 900; cursor: pointer; }
+    .login-error { margin: 14px 0 4px; border: 1px solid rgba(248, 113, 113, 0.34); border-radius: 14px; background: rgba(127, 29, 29, 0.28); color: #fecaca; padding: 10px 12px; font-size: 13px; font-weight: 700; }
+    .setup-note { margin-top: 16px; color: #64748b; font-size: 12px; line-height: 1.45; }
+  </style>
+</head>
+<body>
+  <main class="setup-shell">
+    <div class="eyebrow">DeltaAegis First Run</div>
+    <h1>Create first admin</h1>
+    <p>No local dashboard accounts exist yet. Create the first ADMIN account to initialize this DeltaAegis installation.</p>
+    {{ERROR_HTML}}
+    <form method="post" action="/setup">
+      <label for="username">Admin username</label>
+      <input id="username" name="username" autocomplete="username" required placeholder="parker.admin">
+
+      <label for="display_name">Display name</label>
+      <input id="display_name" name="display_name" autocomplete="name" placeholder="Parker Admin">
+
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="new-password" required placeholder="Minimum 8 characters">
+
+      <label for="password_confirm">Confirm password</label>
+      <input id="password_confirm" name="password_confirm" type="password" autocomplete="new-password" required placeholder="Repeat password">
+
+      <button type="submit">Create first admin</button>
+    </form>
+    <div class="setup-note">This setup page is disabled automatically after the first local dashboard account exists.</div>
+  </main>
+</body>
+</html>"""
+    return html.replace("{{ERROR_HTML}}", error_html)
+
 def dashboard_session_payload(actor: dict[str, Any] | None) -> dict[str, Any]:
     if not actor:
         return {
@@ -17682,6 +17832,52 @@ def command_dashboard(args):
         def open_connection(self):
             return connect(db_path)
 
+
+        def require_permission(self, permission: str):
+            required_role = access_rbac_required_role(permission)
+
+            # v0.27 RBAC semantics:
+            # - Missing/invalid browser login on HTML pages redirects to /login.
+            # - Missing/invalid API/token authentication returns 401.
+            # - Valid authentication with a role below the permission returns 403.
+            session_token = self.dashboard_session_cookie_token()
+
+            if session_token:
+                if self.authenticate_dashboard_request(required_role="VIEWER"):
+                    actor = getattr(self, "current_actor", None)
+
+                    if actor and access_role_allows(actor.get("role"), required_role):
+                        return True
+
+                    dashboard_json_response(
+                        self,
+                        {
+                            "error": "forbidden",
+                            "message": "The authenticated role is not allowed to access this DeltaAegis resource.",
+                            "required_role": normalize_access_role(required_role),
+                            "actor_role": normalize_access_role(actor.get("role") if actor else None),
+                        },
+                        status=403,
+                    )
+                    return False
+
+                return False
+
+            # Preserve browser UX compatibility for protected HTML pages.
+            route = self.path.split("?", 1)[0]
+            request_token = self.dashboard_request_token()
+
+            if not request_token and route in {"/", "/operator", "/operator/users"}:
+                self.dashboard_login_redirect()
+                return False
+
+            # Non-browser access and token/API requests continue to use the
+            # existing auth path.
+            return self.require_auth(required_role=required_role)
+
+
+
+
         def do_GET(self):
             operator_route = self.path.split("?", 1)[0]
             if operator_route == "/operator":
@@ -17696,7 +17892,36 @@ def command_dashboard(args):
                 dashboard_text_response(self, "ok")
                 return
 
+            if route == "/setup":
+                connection = self.open_connection()
+
+                try:
+                    setup_required = dashboard_first_admin_setup_required(connection)
+                finally:
+                    connection.close()
+
+                if not setup_required:
+                    dashboard_redirect_response(self, "/login")
+                    return
+
+                dashboard_html_response(self, dashboard_first_admin_setup_html())
+                return
+
             if route == "/login":
+                connection = self.open_connection()
+
+                try:
+                    setup_required = dashboard_first_admin_setup_required(connection)
+                finally:
+                    connection.close()
+
+                if setup_required:
+                    dashboard_redirect_response(self, "/setup")
+                    return
+
+                # Login must remain a public browser page. Use silent auth here;
+                # do not call require_auth() or require_permission(), because
+                # those helpers emit JSON 401/403 responses for protected routes.
                 if self.authenticate_dashboard_request(required_role="VIEWER"):
                     dashboard_redirect_response(self, "/")
                     return
@@ -17737,11 +17962,11 @@ def command_dashboard(args):
                 dashboard_html_response(self, dashboard_index_html())
                 return
 
-            if not self.require_auth():
+            if not self.require_permission("dashboard.read"):
                 return
 
             if route == "/operator/users":
-                if not self.require_auth(required_role="ADMIN"):
+                if not self.require_permission("admin.users.read"):
                     return
                 dashboard_html_response(self, dashboard_operator_users_shell_html())
                 return
@@ -17919,13 +18144,15 @@ def command_dashboard(args):
                 elif route == "/api/annotations":
                     dashboard_json_response(self, dashboard_annotations_payload(connection, limit, scope=scope))
                 elif route == "/api/admin/users":
-                    if not self.require_auth(required_role="ADMIN"):
+                    if not self.require_permission("admin.users.read"):
                         return
                     dashboard_json_response(
                         self,
                         dashboard_admin_users_payload(connection),
                     )
                 elif route == "/api/access-audit":
+                    if not self.require_permission("admin.audit.read"):
+                        return
                     action_filter = query.get("action", [""])[0].strip() or None
                     actor_filter = query.get("actor", [""])[0].strip() or None
                     target_type_filter = query.get("target_type", [""])[0].strip() or None
@@ -17955,6 +18182,96 @@ def command_dashboard(args):
         def do_POST(self):
             parsed = urlparse(self.path)
             route = parsed.path
+
+            if route == "/setup":
+                connection = self.open_connection()
+
+                try:
+                    setup_required = dashboard_first_admin_setup_required(connection)
+                finally:
+                    connection.close()
+
+                if not setup_required:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "error": "setup_disabled",
+                            "message": "First-admin setup is disabled because a dashboard account already exists.",
+                        },
+                        status=403,
+                    )
+                    return
+
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    content_length = 0
+
+                content_length = max(0, min(content_length, 16384))
+                raw_body = self.rfile.read(content_length).decode("utf-8", errors="replace")
+                form = parse_qs(raw_body)
+
+                username = form.get("username", [""])[0].strip()
+                display_name = form.get("display_name", [""])[0].strip()
+                password = form.get("password", [""])[0]
+                password_confirm = form.get("password_confirm", [""])[0]
+
+                if not username:
+                    dashboard_html_response(self, dashboard_first_admin_setup_html("Username is required."))
+                    return
+
+                if len(password) < 8:
+                    dashboard_html_response(self, dashboard_first_admin_setup_html("Password must be at least 8 characters."))
+                    return
+
+                if password != password_confirm:
+                    dashboard_html_response(self, dashboard_first_admin_setup_html("Passwords do not match."))
+                    return
+
+                connection = self.open_connection()
+
+                try:
+                    if not dashboard_first_admin_setup_required(connection):
+                        dashboard_json_response(
+                            self,
+                            {
+                                "error": "setup_disabled",
+                                "message": "First-admin setup is disabled because a dashboard account already exists.",
+                            },
+                            status=403,
+                        )
+                        return
+
+                    create_access_user(
+                        connection,
+                        username,
+                        display_name=display_name or username,
+                        role="ADMIN",
+                        password=password,
+                    )
+                    connection.commit()
+
+                    session = dashboard_user_login(
+                        connection,
+                        username,
+                        password,
+                        source_ip=self.client_address[0] if self.client_address else None,
+                        user_agent=self.headers.get("User-Agent", ""),
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+
+                if not session:
+                    dashboard_redirect_response(self, "/login")
+                    return
+
+                dashboard_redirect_response(
+                    self,
+                    "/",
+                    cookie_header=dashboard_session_cookie_header(session["session_token"]),
+                )
+                return
 
             if route == "/login":
                 try:
@@ -18024,7 +18341,7 @@ def command_dashboard(args):
                 return
 
             if route == "/api/admin/users" or route.startswith("/api/admin/users/"):
-                if not self.require_auth(required_role="ADMIN"):
+                if not self.require_permission("admin.users.write"):
                     return
 
                 connection = sqlite3.connect(db_path)
@@ -18061,7 +18378,7 @@ def command_dashboard(args):
                 dashboard_json_response(self, result)
                 return
 
-            if not self.require_auth(required_role="ANALYST"):
+            if not self.require_permission("workflow.write"):
                 return
 
             if route not in {"/api/investigate-asset", "/api/ticket-status"}:

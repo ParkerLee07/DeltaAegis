@@ -19,7 +19,7 @@ cd "$(dirname "$0")/.." || exit 1
 for needle in \
     'def dashboard_operator_users_shell_html' \
     'route == "/operator/users"' \
-    'required_role="ADMIN"'
+    'require_permission("admin.users.read")'
 do
     grep -Fq -- "$needle" deltaaegis.py || fail "missing v0.26 operator users page source marker: $needle"
 done
@@ -166,7 +166,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
         wait_for_dashboard(port)
 
         status, headers, body = request(port, "GET", "/operator/users")
-        assert status in {302, 401, 403}, (status, body)
+        assert status in {302, 303, 401, 403}, (status, body)
 
         analyst_cookie = login(port, "page.analyst", "analyst-password")
         status, headers, body = request(port, "GET", "/operator/users", cookie=analyst_cookie)

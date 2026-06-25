@@ -90,3 +90,30 @@ Runtime data:
   $BASE/reports
 
 EOF2
+
+# DeltaAegis first-admin bootstrap
+#
+# Fresh installs need a local dashboard account. The installer prompts for the
+# first ADMIN account only when the database has no existing dashboard users.
+# Non-interactive installs may set:
+#   DELTAAEGIS_DB_PATH
+#   DELTAAEGIS_ADMIN_USERNAME
+#   DELTAAEGIS_ADMIN_PASSWORD
+#   DELTAAEGIS_ADMIN_DISPLAY_NAME
+#
+# Do not ship a hardcoded public default password.
+DELTAAEGIS_DB_PATH="${DELTAAEGIS_DB_PATH:-deltaaegis.db}"
+
+if [ -f "tools/bootstrap_first_admin.py" ]; then
+  if [ -n "${DELTAAEGIS_ADMIN_USERNAME:-}" ] || [ -n "${DELTAAEGIS_ADMIN_PASSWORD:-}" ]; then
+    PYTHONPATH="$PWD" python3 tools/bootstrap_first_admin.py \
+      --db "$DELTAAEGIS_DB_PATH" \
+      --non-interactive
+  elif [ -t 0 ]; then
+    PYTHONPATH="$PWD" python3 tools/bootstrap_first_admin.py \
+      --db "$DELTAAEGIS_DB_PATH"
+  else
+    echo "[INFO] No TTY available for dashboard admin setup."
+    echo "[INFO] Create the first admin later at /setup, or rerun with DELTAAEGIS_ADMIN_USERNAME and DELTAAEGIS_ADMIN_PASSWORD."
+  fi
+fi
