@@ -1,263 +1,50 @@
 # DeltaAegis
 
+DeltaAegis is a self-hosted, delta-first network-state monitoring and investigation console powered by NetSniper telemetry.
+
+It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
+
 ## Current Release — v0.28.0
 
-DeltaAegis v0.28.0 — Dashboard NetSniper Import Setup makes the DeltaAegis dashboard the primary control surface for NetSniper telemetry intake while keeping NetSniper lightweight, CLI-first, and headless.
+**DeltaAegis v0.28.0 — Dashboard NetSniper Import Setup**
 
 Current feature baseline: **DeltaAegis v0.28.0 — Dashboard NetSniper Import Setup**.
 
-DeltaAegis v0.28.0 adds:
+v0.28.0 makes the DeltaAegis dashboard the primary control surface for NetSniper telemetry intake while keeping NetSniper lightweight, CLI-first, and headless.
+
+### Current v0.28.0 highlights
 
 - Protected `/netsniper` dashboard tab for NetSniper telemetry-source visibility.
-- Dashboard-side NetSniper installation, runs-directory, latest-run, and import-readiness detection.
+- Dashboard-side NetSniper root, script, runs-directory, latest-run, and import-readiness detection.
 - Floating dashboard navigation link to the NetSniper tab.
 - ANALYST+ dashboard action for importing the latest completed NetSniper run.
 - `DELTAAEGIS_NETSNIPER_ROOT` override for validators, services, and non-standard deployments.
-- Explicit no-raw-shell design boundary: the dashboard does not expose arbitrary command execution.
-- Fast v0.28 feature validators plus a separate v0.28 release metadata gate.
-
-
-## Prior Release Notes
-
-**DeltaAegis v0.24.0 — Dashboard Session Login**
-
-v0.23.0 adds enterprise access-control foundations: local users, role-based access helpers, database-backed API tokens, dashboard token authentication, token usage tracking, and access audit visibility.
-
-Earlier feature baseline: **DeltaAegis v0.24.0 — Dashboard Session Login**.
-
-DeltaAegis v0.23.0 adds:
-
-- Operator triage state for Investigation Center queue items.
-- Triage buckets such as `NEEDS_REVIEW`, `CHANGED_SINCE_REVIEW`, `NEEDS_CONTEXT`, `STALE_CLOSED`, `BASELINE_CONTEXT`, and `MONITOR`.
-- Triage urgency labels: `IMMEDIATE`, `HIGH`, `NORMAL`, and `LOW`.
-- CLI and dashboard API filters for `triage_bucket` and `triage_urgency`.
-- Dashboard triage summary cards and ticket-row triage badges.
-- Report Investigation Command Center triage summaries.
-- v0.22 release validators for triage model, API/CLI filters, dashboard triage UI, report output, and release metadata.
+- Installer, first-admin bootstrap, and admin reset tooling aligned on `data/deltaaegis.db`.
+- Fast v0.28 feature validators and consolidated release gate.
+- Explicit no-raw-shell dashboard boundary.
 
 ## What DeltaAegis Does
 
-DeltaAegis answers:
+DeltaAegis helps answer:
 
-- What changed between accepted NetSniper scans?
-- Which assets appeared, disappeared, or changed state?
+- What changed on the network since the last accepted scan?
 - Which services opened or closed?
-- Which findings were added or removed?
-- Which alerts are open, acknowledged, resolved, or suppressed?
-- Which assets need an owner, role, criticality, or analyst review?
-- Which NetSniper classifications are strong, weak, contradictory, or review-only?
-- Did the same MAC-backed device unexpectedly expose a new or volatile port?
-- Why did DeltaAegis assign risk or review priority to a subject?
-- Which evidence supports an Investigation Center ticket?
+- Which assets are new, stable, missing, or no longer observed?
+- Which alerts need review?
+- Which assets have owner, role, criticality, notes, or investigation status?
+- Which risks are explainable and worth prioritizing?
+- Which NetSniper classifications are strong, weak, contradictory, or uncertain?
+- Which NetSniper run is ready to import into the SIEM workflow?
 
-Basic flow:
+## Architecture
 
-```text
-NetSniper telemetry bundle
-        ↓
-DeltaAegis ingestion
-        ↓
-SQLite snapshot history
-        ↓
-Delta engine
-        ↓
-Events + alerts
-        ↓
-Asset context + investigation notes
-        ↓
-Risk prioritization
-        ↓
-Dashboard + Markdown reports
-```
+NetSniper telemetry bundle → DeltaAegis ingest → SQLite snapshot history → Delta engine → Events, alerts, and asset context → Risk prioritization and investigation workflow → Dashboard, CLI, and Markdown reports.
 
-DeltaAegis is intentionally conservative. It exposes confidence, evidence, contradictions, and
-review queues so operators can validate uncertain assets instead of treating every classification as
-fact.
-
----
-
-## Core Capabilities
-
-### Snapshot and Delta Monitoring
-
-- Ingests finalized NetSniper telemetry bundles.
-- Stores accepted snapshots in SQLite.
-- Preserves append-only JSONL event history.
-- Applies snapshot-quality and scan-profile compatibility gates.
-- Tracks service-opened, service-closed, finding-added, finding-removed, profile-reset, identity, lifecycle, and classification events.
-- Supports network-scope isolation so unrelated subnets are not compared as one environment.
-
-### Asset Lifecycle and Identity
-
-- Tracks stable assets across accepted scans.
-- Uses MAC-backed identity when available.
-- Separates globally administered MACs, locally administered MACs, and IP-only observations.
-- Filters unusable network and broadcast addresses.
-- Maintains asset annotations for owner, role, criticality, and notes.
-- Supports inferred and persisted investigation status.
-
-### Alert and Investigation Workflow
-
-- Maintains operator-facing alerts with `OPEN`, `ACKNOWLEDGED`, `RESOLVED`, and `SUPPRESSED` states.
-- Supports alert acknowledgement and suppression notes with analyst-provided reasons.
-- Provides asset investigation detail with services, findings, events, alerts, annotations, classification context, and recommended next steps.
-- Supports persistent investigation statuses such as `NEW`, `REVIEWING`, `NEEDS_OWNER`, `EXPECTED`, `FALSE_POSITIVE`, `MONITORING`, and `RESOLVED`.
-- Supports persistent investigation ticket states with `OPEN`, `IN_REVIEW`, `RESOLVED`, and `SUPPRESSED` workflow states.
-- Records ticket workflow history with analyst notes and protects against repeated same-status audit noise.
-- Supports dashboard and CLI-driven ticket workflow updates through `/api/ticket-status`, `ticket-status`, `ticket-list`, and `ticket-history`.
-- Supports operator filters for workflow status and signal label in the Investigation Center API, CLI, and dashboard.
-- Separates visible filtered queue counts from total workflow and signal summaries.
-
-### NetSniper Intelligence
-
-DeltaAegis stores and displays NetSniper classification intelligence, including:
-
-- primary classification type
-- category
-- confidence score
-- confidence band
-- decision
-- SIEM action
-- evidence records
-- evidence reasons
-- observed hints
-- contradictions
-- secondary candidates
-- findings
-
-v0.12.0 adds per-host NetSniper v1.7 drilldown through:
-
-```bash
-deltaaegis intelligence
-deltaaegis intelligence-hosts --action review_queue --limit 25
-deltaaegis intelligence-host 192.168.4.1
-```
-
-The dashboard Intelligence tab also supports clickable host evidence drilldown for NetSniper v1.7
-review queue entries.
-
-### Risk and Reporting
-
-- Calculates an explainable risk register for prioritized analyst review.
-- Uses classification-aware risk context conservatively.
-- Uses MAC-port behavior correlation to highlight unexpected or volatile open ports.
-- Avoids inflating risk from weak or display-only classifications.
-- Avoids over-weighting normal printer/web management port volatility.
-- Generates Markdown investigation reports.
-- Includes asset context, alert review notes, NetSniper intelligence summaries, MAC-port behavior changes, risk explanations, events, alerts, and recommended actions.
-
-### Dashboard
-
-The local dashboard includes tabs for:
-
-- Overview
-- Investigations
-- Risk
-- Port Behavior
-- Assets
-- Intelligence
-- Events
-- Alerts
-
-Dashboard features include:
-
-- scope-aware views
-- asset inventory
-- event and alert tables
-- risk register
-- MAC-port behavior review
-- asset investigation panel
-- investigation status controls
-- ticket workflow badges and action buttons
-- ticket workflow and signal filter controls
-- total queue, visible queue, workflow-state, and signal-label counters
-- NetSniper intelligence summary
-- NetSniper v1.7 host evidence drilldown
-
-Security note: keep the dashboard bound to `127.0.0.1` unless protected by trusted network controls,
-an SSH tunnel, VPN, reverse proxy, or token protection.
-
----
-
-## Requirements
-
-- Linux
-- Python 3.10 or newer
-- NetSniper telemetry bundles
-- SQLite through the Python standard library
-
-Optional:
-
-- `sqlite3` CLI for manual database inspection
-- Git for source control and updates
-
-DeltaAegis does not require a separate database server.
-
----
-
-
-## Recent Releases
-
-- DeltaAegis v0.28.0 — Dashboard NetSniper Import Setup adds a protected
-  dashboard NetSniper tab, latest-run detection, dashboard import-latest
-  action, and a no-raw-shell execution boundary while keeping NetSniper
-  lightweight and CLI/headless.
-
-### v0.20.0 — Ticket Evidence Drilldown
-
-DeltaAegis v0.20.0 adds evidence drilldown across the Investigation Center workflow.
-
-- Added ticket evidence backend payloads that combine workflow state, history, current risk, alerts, events, port behavior, and asset detail.
-- Added `/api/ticket-evidence` for dashboard-driven ticket evidence review.
-- Added dashboard **View Evidence** actions and a Ticket Evidence Drilldown panel.
-- Added `ticket-evidence` CLI output for terminal-based investigation.
-- Added Markdown report **Ticket Evidence Appendix** entries for top Investigation Center tickets.
-- Added v0.20 release validation covering payload, dashboard, CLI, report appendix, and compatibility regression gates.
-
-### v0.19.0 — Workflow Filters and Operator Views
-
-- Adds Investigation Center backend filters for workflow status and ticket signal.
-- Adds dashboard filter controls for workflow state and signal label.
-- Adds filter-aware `/api/investigation-center` query parameters: `ticket_status` and `ticket_signal`.
-- Adds total queue versus visible filtered queue counters.
-- Adds workflow and signal summary counters.
-- Adds CLI operator context showing active filters, visible-vs-total counts, workflow summary, and signal summary.
-- Adds report operator summaries with Workflow and Signal columns.
-- Adds v0.19 release validation for backend filters, dashboard filters, workflow counters, and operator views.
-
-
-### v0.18.0 — Investigation Workflow Actions
-
-- Adds persistent investigation ticket state for `OPEN`, `IN_REVIEW`, `RESOLVED`, and `SUPPRESSED`.
-- Adds ticket workflow history with analyst and note context.
-- Adds `ticket-status`, `ticket-list`, and `ticket-history` CLI commands.
-- Adds dashboard workflow badges and ticket-card workflow actions.
-- Adds `/api/ticket-status` for dashboard workflow updates.
-- Adds no-op workflow protection to prevent repeated same-status audit noise.
-- Adds consolidated v0.18 release validation for the workflow contract.
-
-
-- DeltaAegis v0.15.0 — MAC-Port Behavior Correlation adds MAC-backed
-  open-port behavior detection, `port-behavior`, `/api/port-behavior`,
-  dashboard Port Behavior visibility, current-risk integration, and
-  MAC-Port Behavior Changes in Markdown reports.
-- DeltaAegis v0.14.1 — Dashboard Risk Explanation Polish added expandable
-  dashboard explanations for why assets are Critical, High, Medium, Low, or Info.
-- DeltaAegis v0.14.0 — NetSniper Scan Orchestration added controlled scan jobs,
-  safe NetSniper v1.8 headless CLI launch, optional auto-ingest, captured logs,
-  `/api/scan-jobs`, and read-only dashboard scan job history.
-- DeltaAegis v0.13.0 — Current-State SIEM Dashboard added latest accepted snapshot
-  state, full NetSniper inventory preservation, current-state dashboard cards,
-  separated current/historical risk views, and calibrated current-risk scoring.
-- DeltaAegis v0.12.2 — Dashboard Runtime Hotfix fixed the Intelligence tab
-  JavaScript runtime error without changing database schema, ingestion behavior,
-  or NetSniper intelligence behavior.
-- DeltaAegis v0.12.1 — README Metadata Cleanup refreshed project metadata and
-  documentation for the v0.12 baseline.
-- DeltaAegis v0.12.0 — Intelligence Drilldown established the NetSniper v1.7
-  per-host intelligence drilldown baseline.
+NetSniper remains the lightweight scanner and telemetry producer. DeltaAegis is the dashboard, history store, delta engine, analyst workflow layer, and local SIEM-style console.
 
 ## Installation
+
+Clone the repository:
 
 ```bash
 git clone https://github.com/ParkerLee07/DeltaAegis.git
@@ -266,32 +53,154 @@ chmod +x install.sh
 ./install.sh
 ```
 
-After installation:
+The installer creates local runtime directories:
 
-```bash
-deltaaegis
+```text
+data/
+events/
+reports/
+backups/
 ```
 
-Or run directly from the repository:
+The default installed dashboard database is:
 
-```bash
-python3 deltaaegis.py
+```text
+data/deltaaegis.db
 ```
 
----
+The installer also creates a local launcher:
 
-## Common Commands
-
-Launch the interactive menu:
-
-```bash
-deltaaegis
+```text
+~/.local/bin/deltaaegis
 ```
 
-Ingest new NetSniper telemetry bundles:
+Make sure `~/.local/bin` is in your shell `PATH`.
+
+## First Login
+
+Start the dashboard:
 
 ```bash
-deltaaegis ingest
+deltaaegis dashboard
+```
+
+Default URL:
+
+```text
+http://127.0.0.1:8090
+```
+
+On a fresh install, DeltaAegis redirects to the first-admin setup page. Create the first local ADMIN user there.
+
+Dashboard login is required by default.
+
+## Admin Password Reset
+
+If you lose access to the dashboard, reset or create an ADMIN account:
+
+```bash
+python3 tools/reset_dashboard_admin.py
+```
+
+The reset helper defaults to the installed dashboard database:
+
+```text
+data/deltaaegis.db
+```
+
+You can also specify a database path:
+
+```bash
+python3 tools/reset_dashboard_admin.py \
+  --db data/deltaaegis.db \
+  --username admin
+```
+
+## Dashboard
+
+Start the dashboard:
+
+```bash
+deltaaegis dashboard
+```
+
+Start on a specific host and port:
+
+```bash
+deltaaegis dashboard --host 127.0.0.1 --port 8090
+```
+
+Development-only unauthenticated mode:
+
+```bash
+deltaaegis dashboard --no-require-login
+```
+
+Do not use unauthenticated mode on exposed networks.
+
+### Dashboard areas
+
+- Overview — current SIEM summary, recent changes, and network state.
+- Assets — current and historical asset inventory.
+- Risk — explainable risk prioritization.
+- Investigations — asset workflow and investigation status.
+- Tickets — operator investigation workflow.
+- Intelligence — NetSniper classification quality and device-intelligence context.
+- Events — delta events from accepted scans.
+- Alerts — analyst-facing alert review.
+- NetSniper — telemetry source status and latest completed run import.
+- Admin/User Management — local users, roles, and access controls.
+
+## NetSniper Integration
+
+DeltaAegis expects finalized NetSniper telemetry bundles under:
+
+```text
+~/NetSniper/runs/
+```
+
+The dashboard NetSniper tab reports:
+
+- NetSniper root path.
+- NetSniper script presence.
+- Runs directory presence.
+- Latest run.
+- Latest manifest.
+- Import readiness.
+- Latest completed run status.
+
+Override the NetSniper root when needed:
+
+```bash
+DELTAAEGIS_NETSNIPER_ROOT=/custom/NetSniper deltaaegis dashboard
+```
+
+Import the latest completed NetSniper run from the dashboard using the `/netsniper` tab, or use the CLI:
+
+```bash
+deltaaegis ingest --runs-dir ~/NetSniper/runs
+```
+
+## Security Boundary
+
+DeltaAegis v0.28.0 does not expose arbitrary shell command execution from the dashboard.
+
+The `/api/netsniper/import-latest` endpoint imports completed telemetry and is protected by the `workflow.write` permission. ANALYST and ADMIN users can perform workflow write actions.
+
+Raw NetSniper scan execution from the dashboard is intentionally deferred to a future guarded job-control release.
+
+## Core CLI Commands
+
+Show configured paths:
+
+```bash
+deltaaegis paths
+```
+
+Ingest NetSniper telemetry:
+
+```bash
+deltaaegis ingest --runs-dir ~/NetSniper/runs
 ```
 
 Show system summary:
@@ -300,7 +209,7 @@ Show system summary:
 deltaaegis summary
 ```
 
-List imported snapshots:
+List snapshots:
 
 ```bash
 deltaaegis snapshots --limit 20
@@ -318,366 +227,143 @@ Show alerts:
 deltaaegis alerts --status OPEN --limit 50
 ```
 
-Show snapshot health:
-
-```bash
-deltaaegis health --limit 20
-```
-
-Show configured telemetry paths:
-
-```bash
-deltaaegis paths
-```
-
-Show the explainable risk register:
+Show current risk register:
 
 ```bash
 deltaaegis risk
 ```
 
-Show risk details for one subject:
+Show asset detail:
 
 ```bash
-deltaaegis asset-risk SUBJECT_KEY
+deltaaegis asset 192.168.4.32
 ```
 
-Show latest NetSniper intelligence summary:
+Show NetSniper intelligence summary:
 
 ```bash
 deltaaegis intelligence
 ```
 
-List NetSniper v1.7 review queue hosts:
-
-```bash
-deltaaegis intelligence-hosts --action review_queue --limit 25
-```
-
-Inspect one NetSniper v1.7 intelligence host:
-
-```bash
-deltaaegis intelligence-host 192.168.4.1
-```
-
-Start the dashboard:
-
-```bash
-deltaaegis dashboard
-```
-
-Start the dashboard on a custom local port:
-
-```bash
-deltaaegis dashboard --host 127.0.0.1 --port 8090
-```
-
-Start the dashboard with token protection:
-
-```bash
-deltaaegis dashboard --token CHANGE_ME
-```
-
----
-
-## Network Scope Isolation
-
-DeltaAegis supports canonical network scope isolation across scan history, baseline selection,
-lifecycle state, CLI views, and dashboard views.
-
-Examples:
-
-```bash
-deltaaegis scopes
-deltaaegis snapshots --scope 192.168.4.0/24
-deltaaegis latest --scope 192.168.4.0/24
-deltaaegis events --scope 192.168.4.0/24
-deltaaegis alerts --scope 192.168.4.0/24
-deltaaegis risk --scope 192.168.4.0/24
-deltaaegis dashboard --scope 192.168.4.0/24
-```
-
-Targets such as `192.168.4.25/24` are normalized to `192.168.4.0/24`.
-
----
-
-## Investigation Workflow
-
-Show asset history by asset key or current IP:
-
-```bash
-deltaaegis asset 192.168.4.32
-deltaaegis asset mac:aa:bb:cc:dd:ee:ff
-```
-
-Show timeline for a specific subject key:
-
-```bash
-deltaaegis asset-timeline 'SUBJECT_KEY'
-deltaaegis asset-timeline 'ip:192.168.4.32'
-deltaaegis asset-timeline '192.168.4.32:tcp/8080'
-deltaaegis asset-timeline 'mac:aa:bb:cc:dd:ee:ff'
-```
-
-Set investigation status:
-
-```bash
-deltaaegis investigate-asset 'mac:aa:bb:cc:dd:ee:ff' \
-  --scope 192.168.4.0/24 \
-  --status MONITORING \
-  --reason "Known device under review"
-```
-
----
-
-## Alert Review
-
-Acknowledge an alert:
-
-```bash
-deltaaegis ack ALERT_ID --reason "Reviewed and confirmed expected behavior"
-```
-
-Suppress an alert:
-
-```bash
-deltaaegis suppress ALERT_ID --reason "Known recurring lab service"
-```
-
-Show detailed alert context:
-
-```bash
-deltaaegis alert-detail ALERT_ID
-```
-
-Show review notes for an alert:
-
-```bash
-deltaaegis alert-notes ALERT_ID
-```
-
----
-
-## Asset Annotations
-
-Annotate an asset:
-
-```bash
-deltaaegis annotate-asset 'ASSET_KEY' \
-  --owner "IT" \
-  --role "Printer" \
-  --criticality "LOW" \
-  --notes "Known office printer"
-```
-
-Show notes for one asset:
-
-```bash
-deltaaegis asset-notes 'ASSET_KEY'
-```
-
-List annotations:
-
-```bash
-deltaaegis asset-annotations
-```
-
----
-
-## Reports
-
 Generate a Markdown report:
 
 ```bash
-deltaaegis report --limit 100
+deltaaegis report
 ```
 
-Reports include:
+## Local Data Layout
 
-- snapshot summary
-- asset lifecycle context
-- event summary
-- alert context
-- alert review notes
-- asset annotations
-- NetSniper intelligence summary
-- classification review context
-- explainable risk register
-- recommended next actions
+Default local runtime layout:
 
----
+```text
+DeltaAegis/
+├── data/
+│   └── deltaaegis.db
+├── events/
+│   └── events.jsonl
+├── reports/
+│   └── generated Markdown reports
+├── backups/
+│   └── local backup files
+├── deltaaegis.py
+├── install.sh
+└── uninstall.sh
+```
+
+Runtime data is local and should not be committed to Git.
+
+## Access Control
+
+DeltaAegis supports local dashboard users and role-based permissions.
+
+Typical roles:
+
+- ADMIN — full dashboard and administrative access.
+- ANALYST — investigation and workflow actions.
+- VIEWER — read-only dashboard review.
+
+API tokens remain available for automation through the `X-DeltaAegis-Token` header.
+
+## Uninstall
+
+Remove the installed launcher while keeping project files and runtime data:
+
+```bash
+./uninstall.sh
+```
+
+Remove runtime data directories:
+
+```bash
+./uninstall.sh --purge-runtime
+```
+
+Remove the entire project directory:
+
+```bash
+./uninstall.sh --purge-project --yes
+```
+
+Preview uninstall actions without deleting anything:
+
+```bash
+./uninstall.sh --dry-run
+```
 
 ## Validation
 
-Current release validation:
+Run the v0.28 release gate:
 
 ```bash
-tools/validate_v0_12_release.sh
+./tools/validate_v0_28_release.sh /path/to/NetSniper/runs/latest-or-known-run
 ```
 
-Important v0.14 validators:
-
-- `tools/validate_v0_14_scan_job_registry.sh`
-- `tools/validate_v0_14_scan_start.sh`
-- `tools/validate_v0_14_scan_jobs_dashboard.sh`
-- `tools/validate_v0_14_risk_explanations.sh`
-- `tools/validate_v0_14_release.sh`
-
-Important v0.13 validators:
-
-- `tools/validate_v0_13_full_inventory_ingest.sh`
-- `tools/validate_v0_13_current_state_payload.sh`
-- `tools/validate_v0_13_current_state_dashboard_ui.sh`
-- `tools/validate_v0_13_current_risk.sh`
-- `tools/validate_v0_13_release.sh`
-
-Important v0.12 validators:
+Useful v0.28 validators:
 
 ```bash
-tools/validate_v0_12_intelligence_drilldown.sh
-tools/validate_v0_12_dashboard_intelligence_api.sh
-tools/validate_v0_12_dashboard_intelligence_panel.sh
-tools/validate_v0_12_release.sh
+./tools/validate_v0_28_netsniper_status_tab.sh
+./tools/validate_v0_28_netsniper_navigation.sh
+./tools/validate_v0_28_netsniper_import_latest.sh /path/to/NetSniper/runs/latest-or-known-run
+./tools/validate_v0_28_dashboard_db_defaults.sh
+./tools/validate_v0_28_release_metadata.sh
 ```
 
-General Python checks:
+Basic syntax check:
 
 ```bash
 python3 -m py_compile deltaaegis.py
-pytest -q
 ```
 
----
+## Scope and Limitations
 
-## Version Highlights
+DeltaAegis is a local network-state monitoring, investigation, reporting, and SIEM-style dashboard project.
 
-### v0.19.0 — Workflow Filters and Operator Views
+It is not a replacement for a mature enterprise SIEM.
 
-- Adds Investigation Center backend filters for workflow status and ticket signal.
-- Adds dashboard filter controls for workflow state and signal label.
-- Adds filter-aware `/api/investigation-center` query parameters: `ticket_status` and `ticket_signal`.
-- Adds total queue versus visible filtered queue counters.
-- Adds workflow and signal summary counters.
-- Adds CLI operator context showing active filters, visible-vs-total counts, workflow summary, and signal summary.
-- Adds report operator summaries with Workflow and Signal columns.
-- Adds v0.19 release validation for backend filters, dashboard filters, workflow counters, and operator views.
+DeltaAegis does not currently:
 
-### v0.18.0 — Investigation Workflow Actions
+- Ingest endpoint logs.
+- Store full packet captures indefinitely.
+- Perform machine-learning anomaly detection.
+- Automatically discover business owners for assets.
+- Execute raw shell commands from the dashboard.
+- Launch NetSniper scans from the dashboard through a guarded job runner.
+- Replace manual analyst review.
 
-- Adds persistent investigation ticket state for `OPEN`, `IN_REVIEW`, `RESOLVED`, and `SUPPRESSED`.
-- Adds ticket workflow history with analyst and note context.
-- Adds `ticket-status`, `ticket-list`, and `ticket-history` CLI commands.
-- Adds dashboard workflow badges and ticket-card workflow actions.
-- Adds `/api/ticket-status` for dashboard workflow updates.
-- Adds no-op workflow protection to prevent repeated same-status audit noise.
-- Adds consolidated v0.18 release validation for the workflow contract.
+Its conclusions are limited to NetSniper telemetry, stored historical snapshots, analyst annotations, investigation state, and local DeltaAegis database records.
 
-### v0.17.0 — Executive SIEM Dashboard Refresh
+## Authorized Use Only
 
-- Adds an executive SIEM-style dashboard shell.
-- Adds SIEM-aligned visible navigation labels.
-- Adds executive analytics panels for events, risk, taxonomy, and network activity.
-- Adds ticket-style investigation cards.
-- Adds ticket signal tuning to reduce stable printer inventory noise.
-- Adds visible `Actionable`, `Meaningful change`, and `Baseline context` labels.
-- Preserves v0.16 Investigation Command Center APIs, CLI, and report behavior.
+Use DeltaAegis only on networks and systems for which you have explicit authorization.
 
-### v0.16.0 — Investigation Command Center
-
-- Adds `/api/investigation-center` for a prioritized investigation queue.
-- Adds dashboard Command Center tab.
-- Adds `investigation-center` CLI command.
-- Adds Markdown report section for `Investigation Command Center`.
-- Combines current risk, open alerts, recent events, MAC-port behavior,
-  identity context, classification context, and recommended actions.
-
-### v0.15.0 — MAC-Port Behavior Correlation
-
-- `port-behavior` CLI command for MAC-backed open-port behavior review.
-- `/api/port-behavior` dashboard API.
-- Dashboard Port Behavior tab.
-- Current-risk integration for unexpected or volatile MAC-backed ports.
-- Conservative risk contribution caps for normal printer/web service volatility.
-- Markdown report section for MAC-Port Behavior Changes.
-
-### v0.14.0 — NetSniper Scan Orchestration
-
-- `scan_jobs` registry for NetSniper orchestration history.
-- Safe `scan-start --target <private-cidr>` CLI command.
-- Fixed NetSniper v1.8 headless command execution.
-- Captured scan stdout/stderr logs.
-- Optional explicit auto-ingest after successful scan completion.
-- `/api/scan-jobs` read-only dashboard API.
-- Dashboard Scan Jobs tab for job status and bundle visibility.
-
-### v0.13 compatibility notes
-
-The v0.13 current-state SIEM dashboard baseline remains available through:
-
-- `/api/current-state` for latest accepted snapshot state.
-- `/api/current-risk` for latest-snapshot-only current risk.
-- Current Risk Subjects and Historical Risk Context dashboard sections.
-
-### v0.13.0 — Current-State SIEM Dashboard
-
-- Full NetSniper inventory preservation during ingest.
-- Latest accepted snapshot current-state API.
-- Dashboard Current Network State cards.
-- Current Risk Subjects separated from Historical Risk Context.
-- Current-risk scoring calibrated against all-CRITICAL saturation.
-- v0.13 release validators for ingest, API payloads, dashboard UI wiring, and risk scoring.
-
-### v0.12.0 — Intelligence Drilldown
-
-- Per-host NetSniper v1.7 intelligence storage.
-- `intelligence-hosts` CLI command.
-- `intelligence-host` CLI command.
-- Dashboard API for per-host intelligence evidence.
-- Clickable dashboard host evidence drilldown panel.
-
-### v0.11.x — Intelligence Review Dashboard
-
-- NetSniper v1.7 run-level intelligence summary storage.
-- Dashboard Intelligence tab summary cards.
-- Review queue samples.
-- v0.11.1 metadata cleanup.
-
-### v0.10.0 — NetSniper v1.6 Intelligence Integration
-
-- First-class calibrated classification fields.
-- SIEM action policy handling.
-- Conservative classification-aware risk behavior.
-
-### v0.9.0 — Investigation Workflow
-
-- Dashboard-driven investigation workflow.
-- Persistent asset investigation statuses.
-- Clickable risk, event, and alert subjects.
-- Dashboard investigation status controls.
-
-Earlier history is tracked in `CHANGELOG.md`.
-
----
-
-## Project Status
-
-DeltaAegis is still pre-v1.0.
-
-It is functional as a local-first network-state monitoring and investigation console, but v1.0
-should wait until configuration, installation, documentation, release validation, dashboard
-workflows, and operator review actions are stable enough for normal users.
-
----
+DeltaAegis is intended for defensive monitoring, lab validation, internship research, and authorized security assessment workflows.
 
 ## Related Project
 
-DeltaAegis is powered by NetSniper telemetry.
+DeltaAegis is designed to work with NetSniper.
 
-NetSniper performs network discovery and produces immutable telemetry bundles. DeltaAegis ingests
-those bundles and focuses on historical state, deltas, review workflow, and reporting.
-
----
+NetSniper performs network discovery and scan-bundle generation. DeltaAegis ingests those bundles and tracks how the monitored network changes over time.
 
 ## License
 
-MIT License.
+MIT License. See `LICENSE`.
