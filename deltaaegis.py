@@ -75,6 +75,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("POST_PREFIX", "/api/admin/users/", "admin.users.write"),
     ("POST", "/api/ticket-status", "workflow.write"),
     ("POST", "/api/investigate-asset", "workflow.write"),
+    ("POST", "/api/netsniper/import-latest", "workflow.write"),
 )
 
 
@@ -8865,7 +8866,16 @@ def dashboard_netsniper_intelligence_summary_payload(connection, limit=10):
 
 
 def dashboard_netsniper_root_path() -> Path:
-    """Return the default lightweight NetSniper checkout path."""
+    """Return the lightweight NetSniper checkout path.
+
+    Defaults to ~/NetSniper. DELTAAEGIS_NETSNIPER_ROOT is supported for
+    validators, service deployments, and non-standard installs.
+    """
+    configured = os.environ.get("DELTAAEGIS_NETSNIPER_ROOT", "").strip()
+
+    if configured:
+        return Path(configured).expanduser()
+
     return Path.home() / "NetSniper"
 
 
@@ -8935,6 +8945,49 @@ def dashboard_netsniper_status_payload() -> dict:
             "DeltaAegis v0.28 starts with dashboard-side detection before scan execution.",
             "Raw shell command execution is intentionally not exposed.",
         ],
+    }
+
+
+
+
+def dashboard_netsniper_latest_completed_manifest(runs_dir: Path) -> Path | None:
+    if not runs_dir.is_dir():
+        return None
+
+    for manifest_path in reversed(sorted(runs_dir.glob("*/manifest.json"))):
+        manifest_payload = dashboard_netsniper_read_json(manifest_path)
+        status = str(manifest_payload.get("status") or "").upper()
+
+        if status in {"COMPLETE", "COMPLETED", "SUCCESS"}:
+            return manifest_path
+
+    return None
+
+
+def dashboard_netsniper_import_latest_payload(
+    connection: sqlite3.Connection,
+    export_path: Path,
+) -> dict:
+    runs_dir = dashboard_netsniper_runs_dir()
+
+    if not runs_dir.is_dir():
+        raise DeltaAegisError(f"NetSniper runs directory does not exist: {runs_dir}")
+
+    manifest_path = dashboard_netsniper_latest_completed_manifest(runs_dir)
+
+    if manifest_path is None:
+        raise DeltaAegisError(f"No completed NetSniper run manifest found under {runs_dir}")
+
+    result = ingest_manifest(connection, manifest_path, export_path)
+    status_payload = dashboard_netsniper_status_payload()
+
+    return {
+        "ok": True,
+        "action": "netsniper.import_latest",
+        "manifest_path": str(manifest_path),
+        "run_id": manifest_path.parent.name,
+        "result": result,
+        "status": status_payload,
     }
 
 
@@ -17884,6 +17937,7 @@ def render_netsniper_page() -> str:
         <a href="/operator">Operator session</a>
         <a href="/api/netsniper/status">View raw status JSON</a>
         <button type="button" id="netsniper-refresh">Refresh status</button>
+        <button type="button" id="netsniper-import-latest">Import latest completed run</button>
       </div>
 
       <div class="status" id="netsniper-status">Loading NetSniper status…</div>
@@ -17900,6 +17954,9 @@ def render_netsniper_page() -> str:
 
       <h2>Latest run metadata</h2>
       <pre id="netsniper-latest-json">Loading…</pre>
+
+      <h2>Import result</h2>
+      <pre id="netsniper-import-result">No import has been run from this page yet.</pre>
 
       <h2>Design boundary</h2>
       <p>This tab does not run arbitrary shell commands. Future scan execution should use a guarded NetSniper wrapper with validated target input, one active job at a time, and ADMIN-only launch controls.</p>
@@ -17981,7 +18038,52 @@ def render_netsniper_page() -> str:
       }
     }
 
+    async function importLatestNetSniperRun() {
+      const status = document.getElementById("netsniper-status");
+      const output = document.getElementById("netsniper-import-result");
+      const button = document.getElementById("netsniper-import-latest");
+
+      button.disabled = true;
+      status.textContent = "Importing latest completed NetSniper run…";
+
+      try {
+        const response = await fetch("/api/netsniper/import-latest", {
+          method: "POST",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: {"Content-Type": "application/json"},
+          body: "{}"
+        });
+
+        let payload = {};
+        try {
+          payload = await response.json();
+        } catch (error) {
+          payload = {};
+        }
+
+        if (response.status === 401 || response.status === 403) {
+          window.location.href = "/login";
+          return;
+        }
+
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.message || payload.error || `Import failed with HTTP ${response.status}`);
+        }
+
+        output.textContent = JSON.stringify(payload, null, 2);
+        status.textContent = `Import complete: ${payload.result || payload.run_id || "latest run"}`;
+        await loadNetSniperStatus();
+      } catch (error) {
+        status.textContent = `Import failed: ${error.message || error}`;
+        output.textContent = String(error.message || error);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
     document.getElementById("netsniper-refresh").addEventListener("click", loadNetSniperStatus);
+    document.getElementById("netsniper-import-latest").addEventListener("click", importLatestNetSniperRun);
     loadNetSniperStatus();
   </script>
 </body>
@@ -18693,7 +18795,7 @@ def command_dashboard(args):
             if not self.require_permission("workflow.write"):
                 return
 
-            if route not in {"/api/investigate-asset", "/api/ticket-status"}:
+            if route not in {"/api/investigate-asset", "/api/ticket-status", "/api/netsniper/import-latest"}:
                 dashboard_json_response(
                     self,
                     {
@@ -18745,6 +18847,32 @@ def command_dashboard(args):
                 )
                 return
 
+
+            if route == "/api/netsniper/import-latest":
+                connection = self.open_connection()
+
+                try:
+                    try:
+                        payload = dashboard_netsniper_import_latest_payload(
+                            connection,
+                            args.events,
+                        )
+                    except DeltaAegisError as exc:
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "netsniper_import_failed",
+                                "message": str(exc),
+                            },
+                            status=400,
+                        )
+                        return
+
+                    dashboard_json_response(self, payload)
+                    return
+                finally:
+                    connection.close()
 
             if route == "/api/ticket-status":
                 subject_key = str(
