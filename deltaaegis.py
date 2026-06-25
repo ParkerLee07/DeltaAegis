@@ -17005,6 +17005,94 @@ def dashboard_operator_session_shell_html() -> str:
 
 
 
+
+
+def dashboard_access_user_count(connection) -> int:
+    try:
+        row = connection.execute("SELECT COUNT(*) AS count FROM access_users").fetchone()
+    except Exception:
+        return 0
+
+    if row is None:
+        return 0
+
+    try:
+        return int(row["count"])
+    except Exception:
+        return int(row[0])
+
+
+def dashboard_first_admin_setup_required(connection) -> bool:
+    # First-run setup is only available before any local dashboard account
+    # exists. Disabled users still count as existing accounts, so setup cannot
+    # be abused to recreate an admin after the system has been initialized.
+    return dashboard_access_user_count(connection) == 0
+
+
+def dashboard_first_admin_setup_html(error: str = "") -> str:
+    safe_error = str(error or "")
+    safe_error = (
+        safe_error
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#039;")
+    )
+    error_html = (
+        '<div class="login-error">' + safe_error + '</div>'
+        if safe_error
+        else ""
+    )
+
+    html = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DeltaAegis First Admin Setup</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #020617; color: #e2e8f0; }
+    body { min-height: 100vh; margin: 0; display: grid; place-items: center; background: radial-gradient(circle at top left, rgba(34, 211, 238, 0.14), transparent 34rem), radial-gradient(circle at bottom right, rgba(59, 130, 246, 0.14), transparent 34rem), #020617; }
+    .setup-shell { width: min(460px, calc(100vw - 32px)); border: 1px solid rgba(148, 163, 184, 0.24); border-radius: 24px; background: rgba(15, 23, 42, 0.94); box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42); padding: 28px; }
+    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: 0.16em; text-transform: uppercase; }
+    h1 { margin: 8px 0 8px; font-size: 30px; letter-spacing: -0.04em; }
+    p { margin: 0 0 22px; color: #94a3b8; line-height: 1.55; }
+    label { display: block; margin: 14px 0 6px; color: #cbd5e1; font-size: 13px; font-weight: 800; }
+    input { width: 100%; box-sizing: border-box; border: 1px solid rgba(148, 163, 184, 0.28); border-radius: 14px; background: rgba(2, 6, 23, 0.82); color: #f8fafc; padding: 12px 13px; font-size: 15px; outline: none; }
+    input:focus { border-color: rgba(34, 211, 238, 0.65); box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.12); }
+    button { width: 100%; margin-top: 20px; border: 0; border-radius: 14px; background: linear-gradient(135deg, #06b6d4, #2563eb); color: white; padding: 12px 14px; font-size: 15px; font-weight: 900; cursor: pointer; }
+    .login-error { margin: 14px 0 4px; border: 1px solid rgba(248, 113, 113, 0.34); border-radius: 14px; background: rgba(127, 29, 29, 0.28); color: #fecaca; padding: 10px 12px; font-size: 13px; font-weight: 700; }
+    .setup-note { margin-top: 16px; color: #64748b; font-size: 12px; line-height: 1.45; }
+  </style>
+</head>
+<body>
+  <main class="setup-shell">
+    <div class="eyebrow">DeltaAegis First Run</div>
+    <h1>Create first admin</h1>
+    <p>No local dashboard accounts exist yet. Create the first ADMIN account to initialize this DeltaAegis installation.</p>
+    {{ERROR_HTML}}
+    <form method="post" action="/setup">
+      <label for="username">Admin username</label>
+      <input id="username" name="username" autocomplete="username" required placeholder="parker.admin">
+
+      <label for="display_name">Display name</label>
+      <input id="display_name" name="display_name" autocomplete="name" placeholder="Parker Admin">
+
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="new-password" required placeholder="Minimum 8 characters">
+
+      <label for="password_confirm">Confirm password</label>
+      <input id="password_confirm" name="password_confirm" type="password" autocomplete="new-password" required placeholder="Repeat password">
+
+      <button type="submit">Create first admin</button>
+    </form>
+    <div class="setup-note">This setup page is disabled automatically after the first local dashboard account exists.</div>
+  </main>
+</body>
+</html>"""
+    return html.replace("{{ERROR_HTML}}", error_html)
+
 def dashboard_session_payload(actor: dict[str, Any] | None) -> dict[str, Any]:
     if not actor:
         return {
@@ -17804,8 +17892,37 @@ def command_dashboard(args):
                 dashboard_text_response(self, "ok")
                 return
 
+            if route == "/setup":
+                connection = self.open_connection()
+
+                try:
+                    setup_required = dashboard_first_admin_setup_required(connection)
+                finally:
+                    connection.close()
+
+                if not setup_required:
+                    dashboard_redirect_response(self, "/login")
+                    return
+
+                dashboard_html_response(self, dashboard_first_admin_setup_html())
+                return
+
             if route == "/login":
-                if self.require_permission("operator.session.read"):
+                connection = self.open_connection()
+
+                try:
+                    setup_required = dashboard_first_admin_setup_required(connection)
+                finally:
+                    connection.close()
+
+                if setup_required:
+                    dashboard_redirect_response(self, "/setup")
+                    return
+
+                # Login must remain a public browser page. Use silent auth here;
+                # do not call require_auth() or require_permission(), because
+                # those helpers emit JSON 401/403 responses for protected routes.
+                if self.authenticate_dashboard_request(required_role="VIEWER"):
                     dashboard_redirect_response(self, "/")
                     return
 
@@ -18065,6 +18182,96 @@ def command_dashboard(args):
         def do_POST(self):
             parsed = urlparse(self.path)
             route = parsed.path
+
+            if route == "/setup":
+                connection = self.open_connection()
+
+                try:
+                    setup_required = dashboard_first_admin_setup_required(connection)
+                finally:
+                    connection.close()
+
+                if not setup_required:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "error": "setup_disabled",
+                            "message": "First-admin setup is disabled because a dashboard account already exists.",
+                        },
+                        status=403,
+                    )
+                    return
+
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    content_length = 0
+
+                content_length = max(0, min(content_length, 16384))
+                raw_body = self.rfile.read(content_length).decode("utf-8", errors="replace")
+                form = parse_qs(raw_body)
+
+                username = form.get("username", [""])[0].strip()
+                display_name = form.get("display_name", [""])[0].strip()
+                password = form.get("password", [""])[0]
+                password_confirm = form.get("password_confirm", [""])[0]
+
+                if not username:
+                    dashboard_html_response(self, dashboard_first_admin_setup_html("Username is required."))
+                    return
+
+                if len(password) < 8:
+                    dashboard_html_response(self, dashboard_first_admin_setup_html("Password must be at least 8 characters."))
+                    return
+
+                if password != password_confirm:
+                    dashboard_html_response(self, dashboard_first_admin_setup_html("Passwords do not match."))
+                    return
+
+                connection = self.open_connection()
+
+                try:
+                    if not dashboard_first_admin_setup_required(connection):
+                        dashboard_json_response(
+                            self,
+                            {
+                                "error": "setup_disabled",
+                                "message": "First-admin setup is disabled because a dashboard account already exists.",
+                            },
+                            status=403,
+                        )
+                        return
+
+                    create_access_user(
+                        connection,
+                        username,
+                        display_name=display_name or username,
+                        role="ADMIN",
+                        password=password,
+                    )
+                    connection.commit()
+
+                    session = dashboard_user_login(
+                        connection,
+                        username,
+                        password,
+                        source_ip=self.client_address[0] if self.client_address else None,
+                        user_agent=self.headers.get("User-Agent", ""),
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+
+                if not session:
+                    dashboard_redirect_response(self, "/login")
+                    return
+
+                dashboard_redirect_response(
+                    self,
+                    "/",
+                    cookie_header=dashboard_session_cookie_header(session["session_token"]),
+                )
+                return
 
             if route == "/login":
                 try:
