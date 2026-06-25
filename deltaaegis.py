@@ -8332,6 +8332,14 @@ def dashboard_json_response(handler, payload, status=200):
 
 
 def dashboard_inject_operator_floating_button(html_text: str) -> str:
+    # Do not inject dashboard-only polish into auth/operator pages.
+    if (
+        "<title>DeltaAegis Operator" in html_text
+        or "<title>DeltaAegis Login" in html_text
+        or "<title>DeltaAegis First Admin Setup" in html_text
+    ):
+        return html_text
+
     if not isinstance(html_text, str):
         return html_text
 
@@ -17074,10 +17082,10 @@ def dashboard_first_admin_setup_html(error: str = "") -> str:
     {{ERROR_HTML}}
     <form method="post" action="/setup">
       <label for="username">Admin username</label>
-      <input id="username" name="username" autocomplete="username" required placeholder="parker.admin">
+      <input id="username" name="username" autocomplete="username" required placeholder="admin">
 
       <label for="display_name">Display name</label>
-      <input id="display_name" name="display_name" autocomplete="name" placeholder="Parker Admin">
+      <input id="display_name" name="display_name" autocomplete="name" placeholder="Security Admin">
 
       <label for="password">Password</label>
       <input id="password" name="password" type="password" autocomplete="new-password" required placeholder="Minimum 8 characters">
@@ -17670,7 +17678,7 @@ def dashboard_login_html(
         error_block,
         '    <form method="post" action="/login" autocomplete="on">',
         '      <label for="username">Username</label>',
-        '      <input id="username" name="username" value="' + safe_username + '" autocomplete="username" required autofocus>',
+        '      <input id="username" name="username" autocomplete="username" required autofocus>',
         '      <label for="password">Password</label>',
         '      <input id="password" name="password" type="password" autocomplete="current-password" required>',
         '      <button type="submit">Sign in</button>',
