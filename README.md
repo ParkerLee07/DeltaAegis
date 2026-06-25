@@ -4,15 +4,15 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.28.0
+## Current Release — v0.28.1
 
-**DeltaAegis v0.28.0 — Dashboard NetSniper Import Setup**
+**DeltaAegis v0.28.1 — README and Uninstall Cleanup**
+
+v0.28.1 refreshes the public README and uninstall workflow while preserving the v0.28.0 dashboard NetSniper import feature baseline.
 
 Current feature baseline: **DeltaAegis v0.28.0 — Dashboard NetSniper Import Setup**.
 
-v0.28.0 makes the DeltaAegis dashboard the primary control surface for NetSniper telemetry intake while keeping NetSniper lightweight, CLI-first, and headless.
-
-### Current v0.28.0 highlights
+### Current v0.28.x highlights
 
 - Protected `/netsniper` dashboard tab for NetSniper telemetry-source visibility.
 - Dashboard-side NetSniper root, script, runs-directory, latest-run, and import-readiness detection.
@@ -20,7 +20,8 @@ v0.28.0 makes the DeltaAegis dashboard the primary control surface for NetSniper
 - ANALYST+ dashboard action for importing the latest completed NetSniper run.
 - `DELTAAEGIS_NETSNIPER_ROOT` override for validators, services, and non-standard deployments.
 - Installer, first-admin bootstrap, and admin reset tooling aligned on `data/deltaaegis.db`.
-- Fast v0.28 feature validators and consolidated release gate.
+- Safer uninstall workflow with launcher removal, runtime-data purge, project purge confirmation, and dry-run support.
+- Refreshed README focused on the current dashboard-first DeltaAegis workflow.
 - Explicit no-raw-shell dashboard boundary.
 
 ## What DeltaAegis Does

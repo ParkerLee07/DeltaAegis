@@ -15,8 +15,11 @@ cd "$(dirname "$0")/.." || exit 1
 bash -n install.sh || fail "install.sh has bash syntax errors"
 bash -n uninstall.sh || fail "uninstall.sh has bash syntax errors"
 
-grep -Fq 'Current Release — v0.28.0' README.md \
-    || fail "README does not advertise v0.28.0 as current release"
+grep -Fq 'Current Release — v0.28.1' README.md \
+    || fail "README does not advertise v0.28.1 as current release"
+
+grep -Fq 'DeltaAegis v0.28.1 — README and Uninstall Cleanup' README.md \
+    || fail "README does not advertise v0.28.1 docs/uninstall cleanup"
 
 grep -Fq 'Current feature baseline: **DeltaAegis v0.28.0 — Dashboard NetSniper Import Setup**.' README.md \
     || fail "README missing v0.28 current feature baseline"
