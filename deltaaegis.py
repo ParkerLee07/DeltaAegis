@@ -8462,8 +8462,78 @@ def dashboard_inject_operator_floating_button(html_text: str) -> str:
     return html_text
 
 
+
+def dashboard_inject_netsniper_navigation(html_text: str) -> str:
+    if not isinstance(html_text, str):
+        return html_text
+
+    if "</body>" not in html_text:
+        return html_text
+
+    # Keep auth, operator, and the NetSniper page itself clean.
+    if (
+        "<title>DeltaAegis Login" in html_text
+        or "<title>DeltaAegis First Admin Setup" in html_text
+        or "<title>DeltaAegis Operator" in html_text
+        or "<title>DeltaAegis User Management" in html_text
+        or "<title>DeltaAegis NetSniper" in html_text
+    ):
+        return html_text
+
+    style = """
+<style id="deltaaegis-v028-netsniper-navigation-style">
+  #deltaaegis-netsniper-dashboard-link {
+    position: fixed;
+    right: 24px;
+    bottom: 86px;
+    z-index: 9999;
+    border: 1px solid rgba(34, 211, 238, 0.38);
+    border-radius: 999px;
+    background: rgba(8, 145, 178, 0.18);
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.34);
+    color: #67e8f9;
+    padding: 10px 14px;
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 950;
+    letter-spacing: 0.01em;
+  }
+
+  #deltaaegis-netsniper-dashboard-link:hover {
+    background: rgba(8, 145, 178, 0.30);
+  }
+
+  @media (max-width: 720px) {
+    #deltaaegis-netsniper-dashboard-link {
+      right: 16px;
+      bottom: 78px;
+    }
+  }
+</style>
+"""
+
+    link = """
+<a
+  id="deltaaegis-netsniper-dashboard-link"
+  href="/netsniper"
+  aria-label="Open NetSniper telemetry source tab"
+  title="Open NetSniper telemetry source tab"
+>NetSniper</a>
+"""
+
+    if 'id="deltaaegis-v028-netsniper-navigation-style"' not in html_text and "</head>" in html_text:
+        html_text = html_text.replace("</head>", style + "\n</head>", 1)
+
+    if 'id="deltaaegis-netsniper-dashboard-link"' not in html_text:
+        html_text = html_text.replace("</body>", link + "\n</body>", 1)
+
+    return html_text
+
+
+
 def dashboard_html_response(handler, body, status=200):
     body = dashboard_inject_operator_floating_button(body)
+    body = dashboard_inject_netsniper_navigation(body)
     body = body.encode("utf-8")
 
     handler.send_response(status)

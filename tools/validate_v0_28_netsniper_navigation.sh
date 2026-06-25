@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-NETSNIPER_RUN_DIR="${1:-/home/parker/NetSniper/runs/20260623-123007}"
-
 fail() {
     echo "[FAIL] $1" >&2
     exit 1
@@ -16,25 +14,21 @@ cd "$(dirname "$0")/.." || exit 1
 
 python3 -m py_compile deltaaegis.py || fail "deltaaegis.py does not compile"
 
-grep -q 'def dashboard_netsniper_status_payload' deltaaegis.py \
-    || fail "missing dashboard_netsniper_status_payload"
+grep -q 'def dashboard_inject_netsniper_navigation' deltaaegis.py \
+    || fail "missing dashboard_inject_netsniper_navigation"
 
-grep -q 'def render_netsniper_page' deltaaegis.py \
-    || fail "missing render_netsniper_page"
+grep -q 'dashboard_inject_netsniper_navigation(body)' deltaaegis.py \
+    || fail "dashboard_html_response does not call NetSniper navigation injector"
 
-grep -q '"/api/netsniper/status"' deltaaegis.py \
-    || fail "missing /api/netsniper/status route"
+grep -q 'id="deltaaegis-netsniper-dashboard-link"' deltaaegis.py \
+    || fail "missing NetSniper dashboard link id"
 
-grep -q '"/netsniper"' deltaaegis.py \
-    || fail "missing /netsniper route"
-
-grep -q 'Raw shell command execution is intentionally not exposed' deltaaegis.py \
-    || fail "missing no-raw-shell design boundary note"
+grep -q 'href="/netsniper"' deltaaegis.py \
+    || fail "missing /netsniper dashboard link"
 
 python3 - <<'PY'
 import contextlib
 import http.client
-import json
 from pathlib import Path
 import socket
 import subprocess
@@ -96,35 +90,16 @@ with tempfile.TemporaryDirectory() as tmpdir:
     try:
         wait_for_dashboard(port)
 
+        status, headers, body = request(port, "GET", "/")
+        assert status == 200, (status, headers, body[:400])
+        assert 'id="deltaaegis-netsniper-dashboard-link"' in body, body[:2000]
+        assert 'href="/netsniper"' in body, body[:2000]
+        assert ">NetSniper<" in body, body[:2000]
+
         status, headers, body = request(port, "GET", "/netsniper")
         assert status == 200, (status, headers, body[:400])
-        assert "DeltaAegis NetSniper" in body, body[:500]
-        assert "/api/netsniper/status" in body, body[:500]
-        assert "This tab does not run arbitrary shell commands" in body, body[:5000]
-
-        status, headers, body = request(port, "GET", "/api/netsniper/status")
-        assert status == 200, (status, headers, body[:400])
-        payload = json.loads(body)
-
-        required = [
-            "netsniper_root",
-            "netsniper_script",
-            "netsniper_installed",
-            "runs_dir",
-            "runs_dir_exists",
-            "latest_run",
-            "latest_run_status",
-            "latest_manifest_found",
-            "import_ready",
-            "notes",
-        ]
-
-        missing = [key for key in required if key not in payload]
-        assert not missing, missing
-
-        assert payload["netsniper_root"].endswith("/NetSniper"), payload
-        assert payload["runs_dir"].endswith("/NetSniper/runs"), payload
-        assert any("lightweight CLI" in note for note in payload["notes"]), payload["notes"]
+        assert "DeltaAegis NetSniper" in body, body[:1000]
+        assert 'id="deltaaegis-netsniper-dashboard-link"' not in body, "NetSniper page should not inject a duplicate self-link"
 
     finally:
         process.terminate()
@@ -134,7 +109,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
             process.kill()
             output, _ = process.communicate(timeout=5)
 
-print("[PASS] NetSniper dashboard status tab validated")
+print("[PASS] dashboard NetSniper navigation link validated")
 PY
 
-pass "DeltaAegis v0.28 NetSniper status tab validation passed"
+pass "DeltaAegis v0.28 NetSniper navigation validation passed"
