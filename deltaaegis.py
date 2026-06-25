@@ -8266,7 +8266,132 @@ def dashboard_json_response(handler, payload, status=200):
     handler.wfile.write(body)
 
 
+
+
+
+def dashboard_inject_operator_floating_button(html_text: str) -> str:
+    if not isinstance(html_text, str):
+        return html_text
+
+    if "</body>" not in html_text:
+        return html_text
+
+    # Do not inject dashboard-only polish into operator pages.
+    if "DeltaAegis Operator Session" in html_text or "DeltaAegis User Management" in html_text:
+        return html_text
+
+    polish_style = """
+<style id="deltaaegis-v026-dashboard-polish-style">
+  a[href="/operator"]:not(#deltaaegis-operator-floating-button) {
+    display: none !important;
+  }
+</style>
+"""
+
+    polish_script = """
+<script id="deltaaegis-v026-dashboard-polish-script">
+(function () {
+  function replaceText(node, fromText, toText) {
+    if (!node || !node.childNodes) { return; }
+
+    for (const child of Array.from(node.childNodes)) {
+      if (child.nodeType === Node.TEXT_NODE && child.nodeValue && child.nodeValue.includes(fromText)) {
+        child.nodeValue = child.nodeValue.replaceAll(fromText, toText);
+      } else {
+        replaceText(child, fromText, toText);
+      }
+    }
+  }
+
+  function removeLegacyOperatorLinks() {
+    document.querySelectorAll('a[href="/operator"]').forEach(function (link) {
+      if (link.id !== "deltaaegis-operator-floating-button") {
+        link.remove();
+      }
+    });
+  }
+
+  function hideDashboardAccessAuditTrail() {
+    const headings = Array.from(document.querySelectorAll("h1,h2,h3,h4"));
+    headings.forEach(function (heading) {
+      if ((heading.textContent || "").trim() !== "Access Audit Trail") {
+        return;
+      }
+
+      let node = heading;
+      while (node) {
+        const next = node.nextElementSibling;
+        node.setAttribute("data-deltaaegis-v026-moved-audit", "true");
+        node.style.display = "none";
+
+        if (next && /^H[1-4]$/.test(next.tagName || "")) {
+          break;
+        }
+
+        node = next;
+      }
+    });
+  }
+
+  function applyDashboardPolish() {
+    replaceText(document.body, "v0.26 User Management", "v0.26 User Management");
+    replaceText(document.body, "v0.26 user management", "v0.26 user management");
+    removeLegacyOperatorLinks();
+    hideDashboardAccessAuditTrail();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", applyDashboardPolish);
+  } else {
+    applyDashboardPolish();
+  }
+
+  const observer = new MutationObserver(applyDashboardPolish);
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+})();
+</script>
+"""
+
+    floating_button = """
+  <a
+    id="deltaaegis-operator-floating-button"
+    href="/operator"
+    aria-label="Open operator session page"
+    title="Open operator session page"
+    style="
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      z-index: 9999;
+      border: 1px solid rgba(34, 211, 238, 0.38);
+      border-radius: 999px;
+      background: rgba(8, 145, 178, 0.92);
+      color: #ecfeff;
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 13px;
+      font-weight: 950;
+      padding: 11px 15px;
+      text-decoration: none;
+      backdrop-filter: blur(10px);
+    "
+  >Operator</a>
+"""
+
+    if 'id="deltaaegis-v026-dashboard-polish-style"' not in html_text and "</head>" in html_text:
+        html_text = html_text.replace("</head>", polish_style + "\n</head>", 1)
+
+    if 'id="deltaaegis-v026-dashboard-polish-script"' not in html_text:
+        html_text = html_text.replace("</body>", polish_script + "\n</body>", 1)
+
+    if 'id="deltaaegis-operator-floating-button"' not in html_text:
+        html_text = html_text.replace("</body>", floating_button + "\n</body>", 1)
+
+    return html_text
+
+
 def dashboard_html_response(handler, body, status=200):
+    body = dashboard_inject_operator_floating_button(body)
     body = body.encode("utf-8")
 
     handler.send_response(status)
@@ -13920,7 +14045,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.19 Filters</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.26 User Management</span></div>
     </div>
   </header>
 
@@ -16733,7 +16858,7 @@ def dashboard_index_html_base_v025_operator_link():
       try {
         setupDashboardTabs();
 
-        const [scopes, summary, scanContext, currentState, investigationCenter, scanJobs, assets, currentRisk, historicalRisk, portBehavior, events, alerts, annotations, accessAudit] = await Promise.all([
+        const [scopes, summary, scanContext, currentState, investigationCenter, scanJobs, assets, currentRisk, historicalRisk, portBehavior, events, alerts, annotations] = await Promise.all([
           api("/api/scopes"),
           api(scopedPath("/api/summary")),
           api(scopedPath("/api/scan-context")),
@@ -16746,8 +16871,7 @@ def dashboard_index_html_base_v025_operator_link():
           api(scopedPath("/api/port-behavior?limit=25&lookback=5")),
           api(scopedPath("/api/events?limit=20")),
           api(scopedPath("/api/alerts?limit=20")),
-          api(scopedPath("/api/annotations?limit=20")),
-          api(scopedPath("/api/access-audit?limit=20"))
+          api(scopedPath("/api/annotations?limit=20"))
         ]);
 
         renderScopes(scopes);
@@ -16766,7 +16890,7 @@ def dashboard_index_html_base_v025_operator_link():
         renderEvents(events);
         renderAlerts(alerts);
         renderAnnotations(annotations);
-        renderAccessAudit(accessAudit);
+        // Access Audit Trail moved to /operator in v0.26.
         renderClassificationSummary(summary);
         renderRecommendations(summary, scanContext, historicalRisk);
         renderExecutiveCharts(summary, currentRisk, portBehavior, investigationCenter, assets, events, alerts);
@@ -16794,31 +16918,9 @@ def dashboard_index_html(*args, **kwargs) -> str:
     html_text = dashboard_index_html_base_v025_operator_link(*args, **kwargs)
 
     operator_link = """
-<style id="deltaaegis-operator-link-style">
-  .operator-session-link {
-    position: fixed;
-    top: 16px;
-    right: 16px;
-    z-index: 9999;
-    border: 1px solid rgba(34, 211, 238, 0.34);
-    border-radius: 999px;
-    background: rgba(15, 23, 42, 0.92);
-    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.32);
-    color: #67e8f9;
-    padding: 8px 12px;
-    font-size: 12px;
-    font-weight: 900;
-    letter-spacing: 0.02em;
-    text-decoration: none;
-  }
-  .operator-session-link:hover {
-    background: rgba(8, 145, 178, 0.22);
-  }
-</style>
-<a id="operator-session-link" class="operator-session-link" href="/operator" title="Open operator session page">Operator</a>
 """
 
-    if 'id="operator-session-link"' in html_text:
+    if 'id="removed-v026-operator-link"' in html_text:
         return html_text
 
     if "</body>" in html_text:
@@ -16833,18 +16935,13 @@ def dashboard_operator_session_shell_html_base_v025_actions() -> str:
 
 
 
+def dashboard_operator_users_shell_html() -> str:
+    return "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n  <title>DeltaAegis User Management</title>\n  <style>\n    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; background: #020617; color: #e2e8f0; }\n    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, rgba(34,211,238,.13), transparent 34rem), #020617; }\n    main { width: min(1180px, calc(100vw - 32px)); margin: 0 auto; padding: 44px 0; }\n    .panel { border: 1px solid rgba(148,163,184,.22); border-radius: 24px; background: rgba(15,23,42,.92); box-shadow: 0 24px 80px rgba(0,0,0,.34); padding: 28px; }\n    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: .16em; text-transform: uppercase; }\n    h1 { margin: 8px 0 8px; font-size: 32px; letter-spacing: -.04em; }\n    h2 { margin: 26px 0 12px; font-size: 18px; }\n    p { margin: 0 0 20px; color: #94a3b8; line-height: 1.55; }\n    .actions, .form-grid, .row-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }\n    a, button { border: 1px solid rgba(34,211,238,.28); border-radius: 999px; background: rgba(8,145,178,.14); color: #67e8f9; cursor: pointer; padding: 9px 13px; text-decoration: none; font-size: 13px; font-weight: 900; }\n    button:hover, a:hover { background: rgba(8,145,178,.26); }\n    button.danger { border-color: rgba(248,113,113,.35); background: rgba(220,38,38,.12); color: #fecaca; }\n    button.safe { border-color: rgba(34,197,94,.35); background: rgba(22,163,74,.12); color: #bbf7d0; }\n    input, select { border: 1px solid rgba(148,163,184,.22); border-radius: 12px; background: rgba(2,6,23,.48); color: #e2e8f0; padding: 10px 12px; font-weight: 800; }\n    input::placeholder { color: #64748b; }\n    label { color: #94a3b8; display: grid; gap: 6px; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }\n    .status { border: 1px solid rgba(148,163,184,.18); border-radius: 16px; background: rgba(2,6,23,.38); color: #cbd5e1; margin: 18px 0; padding: 12px 14px; font-weight: 700; white-space: pre-wrap; }\n    .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 18px 0 22px; }\n    .card { border: 1px solid rgba(148,163,184,.18); border-radius: 18px; background: rgba(2,6,23,.34); padding: 14px; }\n    .card-label { color: #94a3b8; font-size: 11px; font-weight: 900; letter-spacing: .11em; text-transform: uppercase; }\n    .card-value { color: #f8fafc; font-size: 24px; font-weight: 950; margin-top: 4px; }\n    .table-wrap { overflow-x: auto; border: 1px solid rgba(148,163,184,.18); border-radius: 18px; }\n    table { width: 100%; border-collapse: collapse; min-width: 1020px; }\n    th, td { border-bottom: 1px solid rgba(148,163,184,.14); padding: 12px 14px; text-align: left; vertical-align: top; }\n    th { color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }\n    td { color: #e2e8f0; font-size: 13px; font-weight: 700; }\n    .pill { display: inline-flex; border: 1px solid rgba(148,163,184,.22); border-radius: 999px; padding: 4px 8px; font-size: 11px; font-weight: 950; text-transform: uppercase; letter-spacing: .06em; }\n    .enabled { color: #bbf7d0; border-color: rgba(34,197,94,.35); background: rgba(22,163,74,.12); }\n    .disabled { color: #fecaca; border-color: rgba(248,113,113,.35); background: rgba(220,38,38,.12); }\n    .muted { color: #94a3b8; font-weight: 600; }\n  </style>\n</head>\n<body>\n  <main>\n    <section class=\"panel\">\n      <div class=\"eyebrow\">DeltaAegis Admin</div>\n      <h1>User Management</h1>\n      <p>ADMIN-only v0.26 control surface for local dashboard users. State-changing user actions require ADMIN access and are sent to audited backend APIs. Passwords are never displayed after submission.</p>\n\n      <div class=\"actions\">\n        <a href=\"/operator\">Back to operator session</a>\n        <a href=\"/\">Back to dashboard</a>\n        <a href=\"/api/admin/users\">View raw /api/admin/users JSON</a>\n        <button type=\"button\" id=\"operator-users-refresh\">Refresh users</button>\n      </div>\n\n      <h2>Create user</h2>\n      <form id=\"operator-create-user-form\" class=\"form-grid\">\n        <label>Username\n          <input id=\"operator-create-username\" name=\"username\" autocomplete=\"off\" required placeholder=\"analyst.one\">\n        </label>\n        <label>Display name\n          <input id=\"operator-create-display-name\" name=\"display_name\" autocomplete=\"off\" placeholder=\"Analyst One\">\n        </label>\n        <label>Role\n          <select id=\"operator-create-role\" name=\"role\">\n            <option value=\"VIEWER\">VIEWER</option>\n            <option value=\"ANALYST\">ANALYST</option>\n            <option value=\"ADMIN\">ADMIN</option>\n          </select>\n        </label>\n        <label>Temporary password\n          <input id=\"operator-create-password\" name=\"password\" type=\"password\" autocomplete=\"new-password\" required placeholder=\"Minimum 8 characters\">\n        </label>\n        <button type=\"submit\" class=\"safe\">Create user</button>\n      </form>\n\n      <div class=\"status\" id=\"operator-users-status\">Loading users\u2026</div>\n\n      <div class=\"summary\" id=\"operator-users-summary\" hidden>\n        <div class=\"card\"><div class=\"card-label\">Users</div><div class=\"card-value\" id=\"operator-users-count\">0</div></div>\n        <div class=\"card\"><div class=\"card-label\">Enabled</div><div class=\"card-value\" id=\"operator-users-enabled-count\">0</div></div>\n        <div class=\"card\"><div class=\"card-label\">Admins</div><div class=\"card-value\" id=\"operator-users-admin-count\">0</div></div>\n        <div class=\"card\"><div class=\"card-label\">Analysts</div><div class=\"card-value\" id=\"operator-users-analyst-count\">0</div></div>\n        <div class=\"card\"><div class=\"card-label\">Viewers</div><div class=\"card-value\" id=\"operator-users-viewer-count\">0</div></div>\n      </div>\n\n      <div class=\"table-wrap\" id=\"operator-users-table-wrap\" hidden>\n        <table>\n          <thead>\n            <tr>\n              <th>Username</th><th>Display name</th><th>Role</th><th>Status</th>\n              <th>Password</th><th>Active tokens</th><th>Last token used</th><th>Updated</th><th>Actions</th>\n            </tr>\n          </thead>\n          <tbody id=\"operator-users-body\"></tbody>\n        </table>\n      </div>\n\n      <h2>Recent user-management audit events</h2>\n      <p class=\"muted\">Shows recent audited dashboard user-management actions. Secrets, password hashes, token hashes, raw tokens, and submitted password values are not displayed.</p>\n      <div class=\"actions\">\n        <button type=\"button\" id=\"operator-users-audit-refresh\">Refresh audit trail</button>\n        <a href=\"/api/access-audit?limit=50\">View raw /api/access-audit JSON</a>\n      </div>\n      <div class=\"status\" id=\"operator-users-audit-status\">Loading user-management audit events\u2026</div>\n      <div class=\"table-wrap\" id=\"operator-users-audit-table-wrap\" hidden>\n        <table>\n          <thead>\n            <tr>\n              <th>Timestamp</th><th>Action</th><th>Target</th><th>Actor</th><th>Details</th>\n            </tr>\n          </thead>\n          <tbody id=\"operator-users-audit-body\"></tbody>\n        </table>\n      </div>\n\n    </section>\n  </main>\n\n  <script>\n    function text(value) {\n      if (value === null || value === undefined || value === \"\") { return \"\u2014\"; }\n      return String(value);\n    }\n\n    function setText(id, value) {\n      const element = document.getElementById(id);\n      if (element) { element.textContent = text(value); }\n    }\n\n    function escapeHtml(value) {\n      return text(value)\n        .replaceAll(\"&\", \"&amp;\")\n        .replaceAll(\"<\", \"&lt;\")\n        .replaceAll(\">\", \"&gt;\")\n        .replaceAll('\"', \"&quot;\")\n        .replaceAll(\"'\", \"&#039;\");\n    }\n\n    function roleOptions(currentRole) {\n      return [\"ADMIN\", \"ANALYST\", \"VIEWER\"].map(function (role) {\n        const selected = role === currentRole ? \" selected\" : \"\";\n        return `<option value=\"${role}\"${selected}>${role}</option>`;\n      }).join(\"\");\n    }\n\n    async function adminPost(path, payload) {\n      const response = await fetch(path, {\n        method: \"POST\",\n        credentials: \"same-origin\",\n        cache: \"no-store\",\n        headers: { \"Content-Type\": \"application/json\" },\n        body: JSON.stringify(payload || {})\n      });\n\n      let data = {};\n      try { data = await response.json(); } catch (error) { data = {}; }\n\n      if (response.status === 401) {\n        window.location.href = \"/login\";\n        return null;\n      }\n\n      if (!response.ok) {\n        throw new Error(data.error || data.message || `Request failed with HTTP ${response.status}`);\n      }\n\n      return data;\n    }\n\n    async function loadOperatorUsers() {\n      const status = document.getElementById(\"operator-users-status\");\n      const summary = document.getElementById(\"operator-users-summary\");\n      const tableWrap = document.getElementById(\"operator-users-table-wrap\");\n      const body = document.getElementById(\"operator-users-body\");\n\n      try {\n        const response = await fetch(\"/api/admin/users\", {\n          credentials: \"same-origin\",\n          cache: \"no-store\"\n        });\n\n        if (response.status === 401) {\n          window.location.href = \"/login\";\n          return;\n        }\n\n        if (response.status === 403) {\n          status.textContent = \"Admin role required.\";\n          return;\n        }\n\n        if (!response.ok) {\n          status.textContent = \"User lookup failed.\";\n          return;\n        }\n\n        const payload = await response.json();\n        const roleCounts = payload.role_counts || {};\n        const users = payload.users || [];\n\n        setText(\"operator-users-count\", payload.count || users.length || 0);\n        setText(\"operator-users-enabled-count\", payload.enabled_count || 0);\n        setText(\"operator-users-admin-count\", roleCounts.ADMIN || 0);\n        setText(\"operator-users-analyst-count\", roleCounts.ANALYST || 0);\n        setText(\"operator-users-viewer-count\", roleCounts.VIEWER || 0);\n\n        body.innerHTML = users.length\n          ? users.map(function (user) {\n              const enabledClass = user.enabled ? \"enabled\" : \"disabled\";\n              const enabledText = user.enabled ? \"Enabled\" : \"Disabled\";\n              const toggleAction = user.enabled ? \"disable\" : \"enable\";\n              const toggleLabel = user.enabled ? \"Disable\" : \"Enable\";\n              const toggleClass = user.enabled ? \"danger\" : \"safe\";\n\n              return `\n                <tr data-username=\"${escapeHtml(user.username)}\">\n                  <td>${escapeHtml(user.username)}</td>\n                  <td>${escapeHtml(user.display_name)}</td>\n                  <td>\n                    <select data-role-select=\"${escapeHtml(user.username)}\">\n                      ${roleOptions(user.role)}\n                    </select>\n                  </td>\n                  <td><span class=\"pill ${enabledClass}\">${enabledText}</span></td>\n                  <td>${user.password_configured ? \"Configured\" : '<span class=\"muted\">Not set</span>'}</td>\n                  <td>${escapeHtml(user.active_token_count)}</td>\n                  <td>${escapeHtml(user.last_token_used_at)}</td>\n                  <td>${escapeHtml(user.updated_at)}</td>\n                  <td>\n                    <div class=\"row-actions\">\n                      <button type=\"button\" data-action=\"role\" data-username=\"${escapeHtml(user.username)}\">Change role</button>\n                      <button type=\"button\" data-action=\"password\" data-username=\"${escapeHtml(user.username)}\">Rotate password</button>\n                      <button type=\"button\" class=\"${toggleClass}\" data-action=\"${toggleAction}\" data-username=\"${escapeHtml(user.username)}\">${toggleLabel}</button>\n                    </div>\n                  </td>\n                </tr>\n              `;\n            }).join(\"\")\n          : '<tr><td colspan=\"9\" class=\"muted\">No users found.</td></tr>';\n\n        status.textContent = \"Users loaded.\";\n        summary.hidden = false;\n        tableWrap.hidden = false;\n      } catch (error) {\n        status.textContent = `User lookup failed: ${error.message || error}`;\n      }\n    }\n\n    document.getElementById(\"operator-users-refresh\").addEventListener(\"click\", loadOperatorUsers);\n\n    document.getElementById(\"operator-create-user-form\").addEventListener(\"submit\", async function (event) {\n      event.preventDefault();\n      const status = document.getElementById(\"operator-users-status\");\n      const form = event.currentTarget;\n\n      const payload = {\n        username: document.getElementById(\"operator-create-username\").value,\n        display_name: document.getElementById(\"operator-create-display-name\").value,\n        role: document.getElementById(\"operator-create-role\").value,\n        password: document.getElementById(\"operator-create-password\").value\n      };\n\n      try {\n        await adminPost(\"/api/admin/users\", payload);\n        form.reset();\n        status.textContent = `Created user ${payload.username}.`;\n        await loadOperatorUsers();\n      } catch (error) {\n        status.textContent = `Create user failed: ${error.message || error}`;\n      }\n    });\n\n    document.getElementById(\"operator-users-body\").addEventListener(\"click\", async function (event) {\n      const button = event.target.closest(\"button[data-action]\");\n      if (!button) { return; }\n\n      const username = button.dataset.username;\n      const action = button.dataset.action;\n      const status = document.getElementById(\"operator-users-status\");\n\n      try {\n        if (action === \"role\") {\n          const roleSelect = document.querySelector(`[data-role-select=\"${CSS.escape(username)}\"]`);\n          await adminPost(`/api/admin/users/${encodeURIComponent(username)}/role`, {\n            role: roleSelect ? roleSelect.value : \"VIEWER\"\n          });\n          status.textContent = `Changed role for ${username}.`;\n        } else if (action === \"password\") {\n          const password = window.prompt(`Enter a new temporary password for ${username}. It will not be displayed after submission.`);\n          if (!password) {\n            status.textContent = \"Password rotation cancelled.\";\n            return;\n          }\n          await adminPost(`/api/admin/users/${encodeURIComponent(username)}/password`, {\n            password: password\n          });\n          status.textContent = `Rotated password for ${username}.`;\n        } else if (action === \"disable\" || action === \"enable\") {\n          await adminPost(`/api/admin/users/${encodeURIComponent(username)}/${action}`, {});\n          status.textContent = `${action === \"disable\" ? \"Disabled\" : \"Enabled\"} ${username}.`;\n        }\n\n        await loadOperatorUsers();\n      } catch (error) {\n        status.textContent = `Action failed: ${error.message || error}`;\n      }\n    });\n\n\n    function auditEventsFromPayload(payload) {\n      if (!payload) { return []; }\n      if (Array.isArray(payload.events)) { return payload.events; }\n      if (Array.isArray(payload.audit_events)) { return payload.audit_events; }\n      if (Array.isArray(payload.rows)) { return payload.rows; }\n      if (Array.isArray(payload.items)) { return payload.items; }\n      return [];\n    }\n\n    function actorText(event) {\n      const details = event.details || {};\n      const actor = details.actor || {};\n      return text(\n        event.actor_username ||\n        event.username ||\n        actor.username ||\n        actor.token_name ||\n        actor.user_id ||\n        \"\u2014\"\n      );\n    }\n\n    function targetText(event) {\n      return text(\n        event.target_key ||\n        event.target_username ||\n        event.target ||\n        event.resource ||\n        \"\u2014\"\n      );\n    }\n\n    function safeAuditDetails(event) {\n      const details = Object.assign({}, event.details || {});\n      if (details.actor) {\n        details.actor = {\n          username: details.actor.username || details.actor.token_name || \"\u2014\",\n          role: details.actor.role || \"\u2014\",\n          auth_type: details.actor.auth_type || \"\u2014\"\n        };\n      }\n\n      for (const key of Object.keys(details)) {\n        const lower = key.toLowerCase();\n        if (\n          lower.includes(\"password\") ||\n          lower.includes(\"token\") ||\n          lower.includes(\"secret\") ||\n          lower.includes(\"hash\")\n        ) {\n          details[key] = \"[redacted]\";\n        }\n      }\n\n      return JSON.stringify(details, null, 2);\n    }\n\n    async function loadOperatorUserAuditEvents() {\n      const status = document.getElementById(\"operator-users-audit-status\");\n      const tableWrap = document.getElementById(\"operator-users-audit-table-wrap\");\n      const body = document.getElementById(\"operator-users-audit-body\");\n\n      try {\n        const response = await fetch(\"/api/access-audit?limit=50\", {\n          credentials: \"same-origin\",\n          cache: \"no-store\"\n        });\n\n        if (response.status === 401) {\n          window.location.href = \"/login\";\n          return;\n        }\n\n        if (response.status === 403) {\n          status.textContent = \"Admin role required for audit visibility.\";\n          return;\n        }\n\n        if (!response.ok) {\n          status.textContent = \"Audit lookup failed.\";\n          return;\n        }\n\n        const payload = await response.json();\n        const events = auditEventsFromPayload(payload)\n          .filter(function (event) {\n            return String(event.action || \"\").startsWith(\"ACCESS_USER_DASHBOARD_\");\n          })\n          .slice(0, 20);\n\n        body.innerHTML = events.length\n          ? events.map(function (event) {\n              return `\n                <tr>\n                  <td>${escapeHtml(event.created_at || event.timestamp || event.event_time)}</td>\n                  <td><span class=\"pill\">${escapeHtml(event.action)}</span></td>\n                  <td>${escapeHtml(targetText(event))}</td>\n                  <td>${escapeHtml(actorText(event))}</td>\n                  <td><pre class=\"muted\">${escapeHtml(safeAuditDetails(event))}</pre></td>\n                </tr>\n              `;\n            }).join(\"\")\n          : '<tr><td colspan=\"5\" class=\"muted\">No user-management audit events found.</td></tr>';\n\n        status.textContent = `Loaded ${events.length} user-management audit event(s).`;\n        tableWrap.hidden = false;\n      } catch (error) {\n        status.textContent = `Audit lookup failed: ${error.message || error}`;\n      }\n    }\n\n    document.getElementById(\"operator-users-audit-refresh\").addEventListener(\"click\", loadOperatorUserAuditEvents);\n\n    loadOperatorUsers();\n    loadOperatorUserAuditEvents();\n  </script>\n</body>\n</html>"
+
 def dashboard_operator_session_shell_html() -> str:
-    html_text = dashboard_operator_session_shell_html_base_v025_actions()
+    return "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n  <title>DeltaAegis Operator Session</title>\n  <style>\n    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; background: #020617; color: #e2e8f0; }\n    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, rgba(34, 211, 238, 0.13), transparent 34rem), #020617; }\n    main { width: min(900px, calc(100vw - 32px)); margin: 0 auto; padding: 44px 0; }\n    .panel { border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 24px; background: rgba(15, 23, 42, 0.92); box-shadow: 0 24px 80px rgba(0, 0, 0, 0.34); padding: 28px; }\n    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: 0.16em; text-transform: uppercase; }\n    h1 { margin: 8px 0 8px; font-size: 32px; letter-spacing: -0.04em; }\n    p { margin: 0 0 24px; color: #94a3b8; line-height: 1.55; }\n    table { width: 100%; border-collapse: collapse; margin: 22px 0; overflow: hidden; border-radius: 16px; }\n    th, td { border-bottom: 1px solid rgba(148, 163, 184, 0.14); padding: 13px 14px; text-align: left; }\n    th { width: 180px; color: #94a3b8; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }\n    td { color: #f8fafc; font-weight: 700; }\n    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }\n    a { border: 1px solid rgba(34, 211, 238, 0.28); border-radius: 999px; color: #67e8f9; padding: 9px 13px; text-decoration: none; font-size: 13px; font-weight: 900; }\n    a.logout { border-color: rgba(248, 113, 113, 0.34); color: #fecaca; }\n    .status { border: 1px solid rgba(148, 163, 184, 0.18); border-radius: 16px; background: rgba(2, 6, 23, 0.38); color: #cbd5e1; margin-top: 18px; padding: 12px 14px; font-weight: 700; }\n  </style>\n\n  <style id=\"deltaaegis-operator-audit-layout-fix\">\n    main {\n      width: min(1180px, calc(100vw - 32px)) !important;\n    }\n\n    h2 {\n      margin-top: 28px;\n      margin-bottom: 12px;\n      font-size: 22px;\n      letter-spacing: -0.02em;\n    }\n\n    .muted {\n      color: #94a3b8;\n      overflow-wrap: anywhere;\n    }\n\n    #operator-access-audit-table-wrap {\n      max-width: 100%;\n      overflow-x: auto;\n      border-radius: 18px;\n    }\n\n    #operator-access-audit-table-wrap table {\n      width: 100%;\n      min-width: 0;\n      table-layout: fixed;\n    }\n\n    #operator-access-audit-table-wrap th,\n    #operator-access-audit-table-wrap td {\n      overflow-wrap: anywhere;\n      word-break: break-word;\n      vertical-align: top;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(1),\n    #operator-access-audit-table-wrap td:nth-child(1) {\n      width: 21%;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(2),\n    #operator-access-audit-table-wrap td:nth-child(2) {\n      width: 20%;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(3),\n    #operator-access-audit-table-wrap td:nth-child(3) {\n      width: 20%;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(4),\n    #operator-access-audit-table-wrap td:nth-child(4) {\n      width: 14%;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(5),\n    #operator-access-audit-table-wrap td:nth-child(5) {\n      width: 25%;\n    }\n\n    #operator-access-audit-table-wrap pre {\n      margin: 0;\n      max-width: 100%;\n      white-space: pre-wrap;\n      overflow-wrap: anywhere;\n      word-break: break-word;\n      font-size: 11px;\n      line-height: 1.45;\n    }\n\n    #operator-access-audit-table-wrap .pill {\n      white-space: normal;\n      overflow-wrap: anywhere;\n    }\n  </style>\n\n</head>\n<body>\n  <main>\n    <section class=\"panel\">\n      <div class=\"eyebrow\">DeltaAegis</div>\n      <h1>Operator Session</h1>\n      <p>This page loads the current operator identity from the protected <code>/api/session</code> endpoint.</p>\n      <div class=\"status\" id=\"operator-session-status\">Loading session\u2026</div>\n      <table id=\"operator-session-table\" hidden>\n        <tbody>\n          <tr><th>Username</th><td id=\"operator-session-username\">\u2014</td></tr>\n          <tr><th>Display name</th><td id=\"operator-session-display-name\">\u2014</td></tr>\n          <tr><th>Role</th><td id=\"operator-session-role\">\u2014</td></tr>\n          <tr><th>Auth type</th><td id=\"operator-session-auth-type\">\u2014</td></tr>\n          <tr><th>Session ID</th><td id=\"operator-session-id\">\u2014</td></tr>\n          <tr><th>Expires at</th><td id=\"operator-session-expires-at\">\u2014</td></tr>\n        </tbody>\n      </table>\n      <div class=\"actions\">\n        <a id=\"deltaaegis-admin-control-panel-link\" href=\"/operator/users\">Admin control panel</a>\n        <a href=\"/\">Back to dashboard</a>\n        <a href=\"/api/session\">View raw /api/session JSON</a>\n        <a class=\"logout\" href=\"/logout\">Logout</a>\n      </div>\n\n      <h2>Access Audit Trail</h2>\n      <p class=\"muted\">Operator-centered view of recent dashboard access and account-management audit events. Secrets, password hashes, token hashes, raw tokens, and submitted password values are not displayed.</p>\n      <div class=\"actions\">\n        <button type=\"button\" id=\"operator-access-audit-refresh\">Refresh access audit</button>\n        <a href=\"/api/access-audit?limit=50\">View raw /api/access-audit JSON</a>\n      </div>\n      <div class=\"status\" id=\"operator-access-audit-status\">Loading access audit trail\u2026</div>\n      <div class=\"table-wrap\" id=\"operator-access-audit-table-wrap\" hidden>\n        <table>\n          <thead>\n            <tr>\n              <th>Timestamp</th><th>Action</th><th>Target</th><th>Actor</th><th>Details</th>\n            </tr>\n          </thead>\n          <tbody id=\"operator-access-audit-body\"></tbody>\n        </table>\n      </div>\n\n    </section>\n  </main>\n  <script>\n    function setText(id, value) {\n      const element = document.getElementById(id);\n      if (element) { element.textContent = value || \"\u2014\"; }\n    }\n    async function loadOperatorSession() {\n      const status = document.getElementById(\"operator-session-status\");\n      const table = document.getElementById(\"operator-session-table\");\n      try {\n        const response = await fetch(\"/api/session\", { credentials: \"same-origin\", cache: \"no-store\" });\n        if (response.status === 401 || response.status === 403) { window.location.href = \"/login\"; return; }\n        if (!response.ok) { status.textContent = \"Session lookup failed.\"; return; }\n        const session = await response.json();\n        const user = session.user || {};\n        setText(\"operator-session-username\", user.username);\n        setText(\"operator-session-display-name\", user.display_name);\n        setText(\"operator-session-role\", user.role || session.role);\n        setText(\"operator-session-auth-type\", session.auth_type);\n        setText(\"operator-session-id\", session.session_id);\n        setText(\"operator-session-expires-at\", session.expires_at);\n        status.textContent = \"Session loaded.\";\n        table.hidden = false;\n      } catch (error) {\n        status.textContent = \"Session lookup failed.\";\n      }\n    }\n    loadOperatorSession();\n  </script>\n<style id=\"deltaaegis-operator-actions-style\">\n  .operator-action-button {\n    border: 1px solid rgba(34, 211, 238, 0.28);\n    border-radius: 999px;\n    background: rgba(8, 145, 178, 0.14);\n    color: #67e8f9;\n    cursor: pointer;\n    padding: 9px 13px;\n    font-size: 13px;\n    font-weight: 900;\n  }\n  .operator-action-button:hover {\n    background: rgba(8, 145, 178, 0.26);\n  }\n  .operator-action-output {\n    border: 1px solid rgba(148, 163, 184, 0.18);\n    border-radius: 16px;\n    background: rgba(2, 6, 23, 0.55);\n    color: #cbd5e1;\n    margin-top: 18px;\n    max-height: 260px;\n    overflow: auto;\n    padding: 14px;\n    white-space: pre-wrap;\n    word-break: break-word;\n    font-size: 12px;\n  }\n</style>\n<script id=\"deltaaegis-operator-actions-script\">\n(function () {\n  function ensureActionControls() {\n    const actions = document.querySelector(\".actions\");\n\n    if (!actions || document.getElementById(\"operator-refresh-session\")) {\n      return;\n    }\n\n    const refreshButton = document.createElement(\"button\");\n    refreshButton.id = \"operator-refresh-session\";\n    refreshButton.className = \"operator-action-button\";\n    refreshButton.type = \"button\";\n    refreshButton.textContent = \"Refresh session\";\n\n    const copyButton = document.createElement(\"button\");\n    copyButton.id = \"operator-copy-session-json\";\n    copyButton.className = \"operator-action-button\";\n    copyButton.type = \"button\";\n    copyButton.textContent = \"Copy /api/session JSON\";\n\n    actions.insertBefore(copyButton, actions.firstChild);\n    actions.insertBefore(refreshButton, actions.firstChild);\n\n    const output = document.createElement(\"pre\");\n    output.id = \"operator-session-json-output\";\n    output.className = \"operator-action-output\";\n    output.hidden = true;\n    actions.parentNode.insertBefore(output, actions.nextSibling);\n\n    refreshButton.addEventListener(\"click\", function () {\n      if (typeof loadOperatorSession === \"function\") {\n        loadOperatorSession();\n      }\n    });\n\n    copyButton.addEventListener(\"click\", async function () {\n      const response = await fetch(\"/api/session\", {\n        credentials: \"same-origin\",\n        cache: \"no-store\"\n      });\n\n      if (response.status === 401 || response.status === 403) {\n        window.location.href = \"/login\";\n        return;\n      }\n\n      const session = await response.json();\n      const jsonText = JSON.stringify(session, null, 2);\n      output.textContent = jsonText;\n      output.hidden = false;\n\n      try {\n        await navigator.clipboard.writeText(jsonText);\n        copyButton.textContent = \"Copied /api/session JSON\";\n        window.setTimeout(function () {\n          copyButton.textContent = \"Copy /api/session JSON\";\n        }, 1600);\n      } catch (error) {\n        copyButton.textContent = \"Copy unavailable\";\n        window.setTimeout(function () {\n          copyButton.textContent = \"Copy /api/session JSON\";\n        }, 1600);\n      }\n    });\n  }\n\n  if (document.readyState === \"loading\") {\n    document.addEventListener(\"DOMContentLoaded\", ensureActionControls);\n  } else {\n    ensureActionControls();\n  }\n})();\n</script>\n\n  <script id=\"deltaaegis-operator-access-audit-script\">\n    function operatorAuditText(value) {\n      if (value === null || value === undefined || value === \"\") { return \"\u2014\"; }\n      return String(value);\n    }\n\n    function operatorAuditEscape(value) {\n      return operatorAuditText(value)\n        .replaceAll(\"&\", \"&amp;\")\n        .replaceAll(\"<\", \"&lt;\")\n        .replaceAll(\">\", \"&gt;\")\n        .replaceAll('\"', \"&quot;\")\n        .replaceAll(\"'\", \"&#039;\");\n    }\n\n    function operatorAuditEventsFromPayload(payload) {\n      if (!payload) { return []; }\n      if (Array.isArray(payload.events)) { return payload.events; }\n      if (Array.isArray(payload.audit_events)) { return payload.audit_events; }\n      if (Array.isArray(payload.rows)) { return payload.rows; }\n      if (Array.isArray(payload.items)) { return payload.items; }\n      return [];\n    }\n\n    function operatorAuditSafeDetails(event) {\n      const details = Object.assign({}, event.details || {});\n      if (details.actor) {\n        details.actor = {\n          username: details.actor.username || details.actor.token_name || \"\u2014\",\n          role: details.actor.role || \"\u2014\",\n          auth_type: details.actor.auth_type || \"\u2014\"\n        };\n      }\n\n      for (const key of Object.keys(details)) {\n        const lower = key.toLowerCase();\n        if (lower.includes(\"password\") || lower.includes(\"token\") || lower.includes(\"secret\") || lower.includes(\"hash\")) {\n          details[key] = \"[redacted]\";\n        }\n      }\n\n      return JSON.stringify(details, null, 2);\n    }\n\n    async function loadOperatorAccessAuditTrail() {\n      const status = document.getElementById(\"operator-access-audit-status\");\n      const tableWrap = document.getElementById(\"operator-access-audit-table-wrap\");\n      const body = document.getElementById(\"operator-access-audit-body\");\n\n      try {\n        const response = await fetch(\"/api/access-audit?limit=50\", {\n          credentials: \"same-origin\",\n          cache: \"no-store\"\n        });\n\n        if (response.status === 401) {\n          window.location.href = \"/login\";\n          return;\n        }\n\n        if (response.status === 403) {\n          status.textContent = \"Admin role required for access audit visibility.\";\n          return;\n        }\n\n        if (!response.ok) {\n          status.textContent = \"Access audit lookup failed.\";\n          return;\n        }\n\n        const payload = await response.json();\n        const events = operatorAuditEventsFromPayload(payload).slice(0, 50);\n\n        body.innerHTML = events.length\n          ? events.map(function (event) {\n              const details = event.details || {};\n              const actor = details.actor || {};\n              const actorText = event.actor_username || event.username || actor.username || actor.token_name || actor.user_id || \"\u2014\";\n              const targetText = event.target_key || event.target_username || event.target || event.resource || \"\u2014\";\n\n              return `\n                <tr>\n                  <td>${operatorAuditEscape(event.created_at || event.timestamp || event.event_time)}</td>\n                  <td><span class=\"pill\">${operatorAuditEscape(event.action)}</span></td>\n                  <td>${operatorAuditEscape(targetText)}</td>\n                  <td>${operatorAuditEscape(actorText)}</td>\n                  <td><pre class=\"muted\">${operatorAuditEscape(operatorAuditSafeDetails(event))}</pre></td>\n                </tr>\n              `;\n            }).join(\"\")\n          : '<tr><td colspan=\"5\" class=\"muted\">No access audit events found.</td></tr>';\n\n        status.textContent = `Loaded ${events.length} access audit event(s).`;\n        tableWrap.hidden = false;\n      } catch (error) {\n        status.textContent = `Access audit lookup failed: ${error.message || error}`;\n      }\n    }\n\n    document.getElementById(\"operator-access-audit-refresh\").addEventListener(\"click\", loadOperatorAccessAuditTrail);\n    loadOperatorAccessAuditTrail();\n  </script>\n\n</body>\n</html>"
 
-    actions = '<style id="deltaaegis-operator-actions-style">\n  .operator-action-button {\n    border: 1px solid rgba(34, 211, 238, 0.28);\n    border-radius: 999px;\n    background: rgba(8, 145, 178, 0.14);\n    color: #67e8f9;\n    cursor: pointer;\n    padding: 9px 13px;\n    font-size: 13px;\n    font-weight: 900;\n  }\n  .operator-action-button:hover {\n    background: rgba(8, 145, 178, 0.26);\n  }\n  .operator-action-output {\n    border: 1px solid rgba(148, 163, 184, 0.18);\n    border-radius: 16px;\n    background: rgba(2, 6, 23, 0.55);\n    color: #cbd5e1;\n    margin-top: 18px;\n    max-height: 260px;\n    overflow: auto;\n    padding: 14px;\n    white-space: pre-wrap;\n    word-break: break-word;\n    font-size: 12px;\n  }\n</style>\n<script id="deltaaegis-operator-actions-script">\n(function () {\n  function ensureActionControls() {\n    const actions = document.querySelector(".actions");\n\n    if (!actions || document.getElementById("operator-refresh-session")) {\n      return;\n    }\n\n    const refreshButton = document.createElement("button");\n    refreshButton.id = "operator-refresh-session";\n    refreshButton.className = "operator-action-button";\n    refreshButton.type = "button";\n    refreshButton.textContent = "Refresh session";\n\n    const copyButton = document.createElement("button");\n    copyButton.id = "operator-copy-session-json";\n    copyButton.className = "operator-action-button";\n    copyButton.type = "button";\n    copyButton.textContent = "Copy /api/session JSON";\n\n    actions.insertBefore(copyButton, actions.firstChild);\n    actions.insertBefore(refreshButton, actions.firstChild);\n\n    const output = document.createElement("pre");\n    output.id = "operator-session-json-output";\n    output.className = "operator-action-output";\n    output.hidden = true;\n    actions.parentNode.insertBefore(output, actions.nextSibling);\n\n    refreshButton.addEventListener("click", function () {\n      if (typeof loadOperatorSession === "function") {\n        loadOperatorSession();\n      }\n    });\n\n    copyButton.addEventListener("click", async function () {\n      const response = await fetch("/api/session", {\n        credentials: "same-origin",\n        cache: "no-store"\n      });\n\n      if (response.status === 401 || response.status === 403) {\n        window.location.href = "/login";\n        return;\n      }\n\n      const session = await response.json();\n      const jsonText = JSON.stringify(session, null, 2);\n      output.textContent = jsonText;\n      output.hidden = false;\n\n      try {\n        await navigator.clipboard.writeText(jsonText);\n        copyButton.textContent = "Copied /api/session JSON";\n        window.setTimeout(function () {\n          copyButton.textContent = "Copy /api/session JSON";\n        }, 1600);\n      } catch (error) {\n        copyButton.textContent = "Copy unavailable";\n        window.setTimeout(function () {\n          copyButton.textContent = "Copy /api/session JSON";\n        }, 1600);\n      }\n    });\n  }\n\n  if (document.readyState === "loading") {\n    document.addEventListener("DOMContentLoaded", ensureActionControls);\n  } else {\n    ensureActionControls();\n  }\n})();\n</script>'
 
-    if 'id="deltaaegis-operator-actions-script"' in html_text:
-        return html_text
-
-    if "</body>" in html_text:
-        return html_text.replace("</body>", actions + "\n</body>", 1)
-
-    return html_text + actions
 
 def dashboard_session_payload(actor: dict[str, Any] | None) -> dict[str, Any]:
     if not actor:
@@ -16872,6 +16969,458 @@ def dashboard_session_payload(actor: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+
+
+
+class DashboardAdminUserActionError(DeltaAegisError):
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.status_code = int(status_code)
+
+
+def dashboard_admin_action_timestamp() -> str:
+    from datetime import datetime, timezone
+
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def dashboard_admin_json_error_response(
+    handler: Any,
+    message: str,
+    status_code: int = 400,
+    details: dict[str, Any] | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "ok": False,
+        "error": str(message),
+        "status": int(status_code),
+    }
+    if details:
+        payload["details"] = details
+
+    body = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+    handler.send_response(int(status_code))
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def dashboard_read_request_payload(handler: Any) -> dict[str, Any]:
+    length_text = handler.headers.get("Content-Length", "0")
+    try:
+        length = int(length_text or "0")
+    except ValueError:
+        length = 0
+
+    raw = handler.rfile.read(max(0, length)).decode("utf-8", "replace")
+    if not raw.strip():
+        return {}
+
+    content_type = handler.headers.get("Content-Type", "").lower()
+    if "application/json" in content_type:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise DashboardAdminUserActionError(
+                f"invalid JSON body: {exc.msg}",
+                status_code=400,
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise DashboardAdminUserActionError(
+                "JSON body must be an object",
+                status_code=400,
+            )
+        return parsed
+
+    form = parse_qs(raw, keep_blank_values=True)
+    return {
+        key: values[-1] if values else ""
+        for key, values in form.items()
+    }
+
+
+def dashboard_validate_access_username(username: str) -> str:
+    clean = str(username or "").strip().lower()
+
+    if not clean:
+        raise DashboardAdminUserActionError("username is required", status_code=400)
+
+    if len(clean) > 96:
+        raise DashboardAdminUserActionError("username is too long", status_code=400)
+
+    allowed = set("abcdefghijklmnopqrstuvwxyz0123456789._@-")
+    if any(character not in allowed for character in clean):
+        raise DashboardAdminUserActionError(
+            "username may only contain letters, numbers, dot, underscore, at-sign, and hyphen",
+            status_code=400,
+        )
+
+    if clean in {".", ".."} or "/" in clean or "\\" in clean:
+        raise DashboardAdminUserActionError("invalid username", status_code=400)
+
+    return clean
+
+
+def dashboard_access_user_by_username_required(
+    connection: sqlite3.Connection,
+    username: str,
+) -> dict[str, Any]:
+    clean_username = dashboard_validate_access_username(username)
+    user = access_user_by_username(connection, clean_username)
+    if not user:
+        raise DashboardAdminUserActionError(
+            f"access user not found: {clean_username}",
+            status_code=404,
+        )
+    return user
+
+
+def dashboard_active_admin_count(connection: sqlite3.Connection) -> int:
+    row = connection.execute(
+        "SELECT COUNT(*) AS count FROM access_users "
+        "WHERE role = 'ADMIN' AND is_active = 1"
+    ).fetchone()
+    return int(row["count"] if row else 0)
+
+
+def dashboard_actor_summary(actor: dict[str, Any] | None) -> dict[str, Any]:
+    actor = actor or {}
+    return {
+        "user_id": actor.get("user_id"),
+        "username": actor.get("username") or actor.get("token_name") or "dashboard.admin",
+        "role": normalize_access_role(actor.get("role") or "ADMIN"),
+        "auth_type": actor.get("auth_type"),
+    }
+
+
+def dashboard_record_admin_user_action(
+    connection: sqlite3.Connection,
+    actor: dict[str, Any] | None,
+    action: str,
+    target_username: str,
+    details: dict[str, Any] | None = None,
+) -> None:
+    actor_summary = dashboard_actor_summary(actor)
+    event_details = dict(details or {})
+    event_details["actor"] = actor_summary
+
+    record_access_audit_event(
+        connection,
+        action,
+        target_type="access_user",
+        target_key=target_username,
+        details=event_details,
+    )
+
+
+def dashboard_admin_user_action_response(
+    connection: sqlite3.Connection,
+    action: str,
+    target_username: str,
+) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "action": action,
+        "target_username": target_username,
+        "access": dashboard_admin_users_payload(connection),
+    }
+
+
+def dashboard_admin_create_user(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+    actor: dict[str, Any] | None,
+) -> dict[str, Any]:
+    username = dashboard_validate_access_username(str(payload.get("username") or ""))
+    display_name = str(payload.get("display_name") or username).strip() or username
+    role = normalize_access_role(str(payload.get("role") or "VIEWER"))
+    password = str(payload.get("password") or "")
+
+    if role not in ACCESS_ROLES:
+        raise DashboardAdminUserActionError("invalid role", status_code=400)
+
+    if not password:
+        raise DashboardAdminUserActionError("password is required", status_code=400)
+
+    if len(password) < 8:
+        raise DashboardAdminUserActionError(
+            "password must be at least 8 characters",
+            status_code=400,
+        )
+
+    if access_user_by_username(connection, username):
+        raise DashboardAdminUserActionError(
+            f"access user already exists: {username}",
+            status_code=409,
+        )
+
+    user = create_access_user(
+        connection,
+        username,
+        display_name=display_name,
+        role=role,
+        password=password,
+    )
+
+    dashboard_record_admin_user_action(
+        connection,
+        actor,
+        "ACCESS_USER_DASHBOARD_CREATE",
+        username,
+        {
+            "username": username,
+            "display_name": display_name,
+            "role": role,
+            "password_set": True,
+        },
+    )
+
+    return dashboard_admin_user_action_response(
+        connection,
+        "create",
+        user["username"],
+    )
+
+
+def dashboard_admin_set_user_enabled(
+    connection: sqlite3.Connection,
+    username: str,
+    enabled: bool,
+    actor: dict[str, Any] | None,
+) -> dict[str, Any]:
+    user = dashboard_access_user_by_username_required(connection, username)
+    target_username = str(user["username"])
+    target_role = normalize_access_role(user.get("role") or "VIEWER")
+    currently_active = bool(int(user.get("is_active") or 0))
+
+    if not enabled and currently_active and target_role == "ADMIN":
+        if dashboard_active_admin_count(connection) <= 1:
+            raise DashboardAdminUserActionError(
+                "cannot disable the last active ADMIN user",
+                status_code=409,
+            )
+
+    now = dashboard_admin_action_timestamp()
+    connection.execute(
+        "UPDATE access_users SET is_active = ?, updated_at = ? WHERE user_id = ?",
+        (1 if enabled else 0, now, user["user_id"]),
+    )
+
+    action = "ACCESS_USER_DASHBOARD_ENABLE" if enabled else "ACCESS_USER_DASHBOARD_DISABLE"
+    dashboard_record_admin_user_action(
+        connection,
+        actor,
+        action,
+        target_username,
+        {
+            "username": target_username,
+            "enabled": bool(enabled),
+            "previous_enabled": currently_active,
+            "role": target_role,
+        },
+    )
+
+    return dashboard_admin_user_action_response(
+        connection,
+        "enable" if enabled else "disable",
+        target_username,
+    )
+
+
+def dashboard_admin_set_user_role(
+    connection: sqlite3.Connection,
+    username: str,
+    payload: dict[str, Any],
+    actor: dict[str, Any] | None,
+) -> dict[str, Any]:
+    user = dashboard_access_user_by_username_required(connection, username)
+    target_username = str(user["username"])
+    old_role = normalize_access_role(user.get("role") or "VIEWER")
+    new_role = normalize_access_role(str(payload.get("role") or ""))
+
+    if new_role not in ACCESS_ROLES:
+        raise DashboardAdminUserActionError("invalid role", status_code=400)
+
+    if old_role == "ADMIN" and new_role != "ADMIN" and int(user.get("is_active") or 0):
+        if dashboard_active_admin_count(connection) <= 1:
+            raise DashboardAdminUserActionError(
+                "cannot remove ADMIN role from the last active ADMIN user",
+                status_code=409,
+            )
+
+    now = dashboard_admin_action_timestamp()
+    connection.execute(
+        "UPDATE access_users SET role = ?, updated_at = ? WHERE user_id = ?",
+        (new_role, now, user["user_id"]),
+    )
+
+    dashboard_record_admin_user_action(
+        connection,
+        actor,
+        "ACCESS_USER_DASHBOARD_ROLE_CHANGE",
+        target_username,
+        {
+            "username": target_username,
+            "old_role": old_role,
+            "new_role": new_role,
+        },
+    )
+
+    return dashboard_admin_user_action_response(
+        connection,
+        "role",
+        target_username,
+    )
+
+
+def dashboard_admin_rotate_user_password(
+    connection: sqlite3.Connection,
+    username: str,
+    payload: dict[str, Any],
+    actor: dict[str, Any] | None,
+) -> dict[str, Any]:
+    user = dashboard_access_user_by_username_required(connection, username)
+    target_username = str(user["username"])
+    password = str(payload.get("password") or "")
+
+    if not password:
+        raise DashboardAdminUserActionError("password is required", status_code=400)
+
+    if len(password) < 8:
+        raise DashboardAdminUserActionError(
+            "password must be at least 8 characters",
+            status_code=400,
+        )
+
+    password_hash = hash_access_password(password)
+    now = dashboard_admin_action_timestamp()
+    connection.execute(
+        "UPDATE access_users SET password_hash = ?, updated_at = ? WHERE user_id = ?",
+        (password_hash, now, user["user_id"]),
+    )
+
+    dashboard_record_admin_user_action(
+        connection,
+        actor,
+        "ACCESS_USER_DASHBOARD_PASSWORD_ROTATE",
+        target_username,
+        {
+            "username": target_username,
+            "password_set": True,
+        },
+    )
+
+    return dashboard_admin_user_action_response(
+        connection,
+        "password",
+        target_username,
+    )
+
+
+def dashboard_admin_handle_user_action(
+    connection: sqlite3.Connection,
+    route: str,
+    payload: dict[str, Any],
+    actor: dict[str, Any] | None,
+) -> dict[str, Any]:
+    clean_route = str(route or "").strip()
+
+    if clean_route == "/api/admin/users":
+        return dashboard_admin_create_user(connection, payload, actor)
+
+    prefix = "/api/admin/users/"
+    if not clean_route.startswith(prefix):
+        raise DashboardAdminUserActionError("unknown admin users route", status_code=404)
+
+    remainder = clean_route[len(prefix):].strip("/")
+    parts = [part for part in remainder.split("/") if part]
+
+    if len(parts) != 2:
+        raise DashboardAdminUserActionError("invalid admin users route", status_code=404)
+
+    username, action = parts[0], parts[1]
+
+    if action == "enable":
+        return dashboard_admin_set_user_enabled(connection, username, True, actor)
+
+    if action == "disable":
+        return dashboard_admin_set_user_enabled(connection, username, False, actor)
+
+    if action == "role":
+        return dashboard_admin_set_user_role(connection, username, payload, actor)
+
+    if action == "password":
+        return dashboard_admin_rotate_user_password(connection, username, payload, actor)
+
+    raise DashboardAdminUserActionError("unknown admin user action", status_code=404)
+
+def dashboard_admin_users_payload(connection: sqlite3.Connection) -> dict[str, Any]:
+    """Return safe, dashboard-ready access-user metadata for ADMIN users.
+
+    This intentionally does not expose password hashes, API token hashes,
+    raw token values, session token hashes, or cookie/session secrets.
+    """
+    if "ensure_access_schema" in globals():
+        ensure_access_schema(connection)
+
+    rows = connection.execute(
+        "SELECT "
+        "u.username, "
+        "u.display_name, "
+        "u.role, "
+        "u.is_active, "
+        "u.created_at, "
+        "u.updated_at, "
+        "CASE WHEN u.password_hash IS NOT NULL AND u.password_hash != '' "
+        "THEN 1 ELSE 0 END AS password_configured, "
+        "(SELECT COUNT(*) FROM access_api_tokens t "
+        " WHERE t.user_id = u.user_id AND t.is_active = 1) "
+        "AS active_token_count, "
+        "(SELECT MAX(t.last_used_at) FROM access_api_tokens t "
+        " WHERE t.user_id = u.user_id) "
+        "AS last_token_used_at "
+        "FROM access_users u "
+        "ORDER BY u.username"
+    ).fetchall()
+
+    users: list[dict[str, Any]] = []
+    role_counts: dict[str, int] = {role: 0 for role in ACCESS_ROLES}
+    enabled_count = 0
+
+    for row in rows:
+        role = normalize_access_role(row["role"])
+        enabled = bool(int(row["is_active"] or 0))
+        role_counts[role] = role_counts.get(role, 0) + 1
+        if enabled:
+            enabled_count += 1
+
+        users.append(
+            {
+                "username": row["username"],
+                "display_name": row["display_name"],
+                "role": role,
+                "enabled": enabled,
+                "password_configured": bool(int(row["password_configured"] or 0)),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "active_token_count": int(row["active_token_count"] or 0),
+                "last_token_used_at": row["last_token_used_at"],
+            }
+        )
+
+    return {
+        "users": users,
+        "count": len(users),
+        "enabled_count": enabled_count,
+        "role_counts": role_counts,
+        "roles": list(ACCESS_ROLES),
+    }
 
 def dashboard_has_active_password_users(connection: sqlite3.Connection) -> bool:
     ensure_dashboard_session_schema(connection)
@@ -17191,6 +17740,12 @@ def command_dashboard(args):
             if not self.require_auth():
                 return
 
+            if route == "/operator/users":
+                if not self.require_auth(required_role="ADMIN"):
+                    return
+                dashboard_html_response(self, dashboard_operator_users_shell_html())
+                return
+
             if route == "/api/session":
                 dashboard_json_response(
                     self,
@@ -17363,6 +17918,13 @@ def command_dashboard(args):
                     dashboard_json_response(self, dashboard_risk_payload(connection, limit, scope=scope))
                 elif route == "/api/annotations":
                     dashboard_json_response(self, dashboard_annotations_payload(connection, limit, scope=scope))
+                elif route == "/api/admin/users":
+                    if not self.require_auth(required_role="ADMIN"):
+                        return
+                    dashboard_json_response(
+                        self,
+                        dashboard_admin_users_payload(connection),
+                    )
                 elif route == "/api/access-audit":
                     action_filter = query.get("action", [""])[0].strip() or None
                     actor_filter = query.get("actor", [""])[0].strip() or None
@@ -17459,6 +18021,44 @@ def command_dashboard(args):
                         connection.close()
 
                 self.dashboard_logout_redirect()
+                return
+
+            if route == "/api/admin/users" or route.startswith("/api/admin/users/"):
+                if not self.require_auth(required_role="ADMIN"):
+                    return
+
+                connection = sqlite3.connect(db_path)
+                connection.row_factory = sqlite3.Row
+
+                try:
+                    payload = dashboard_read_request_payload(self)
+                    result = dashboard_admin_handle_user_action(
+                        connection,
+                        route,
+                        payload,
+                        getattr(self, "current_actor", None),
+                    )
+                    connection.commit()
+                except DashboardAdminUserActionError as exc:
+                    connection.rollback()
+                    dashboard_admin_json_error_response(
+                        self,
+                        str(exc),
+                        status_code=getattr(exc, "status_code", 400),
+                    )
+                    return
+                except DeltaAegisError as exc:
+                    connection.rollback()
+                    dashboard_admin_json_error_response(
+                        self,
+                        str(exc),
+                        status_code=400,
+                    )
+                    return
+                finally:
+                    connection.close()
+
+                dashboard_json_response(self, result)
                 return
 
             if not self.require_auth(required_role="ANALYST"):
@@ -17714,7 +18314,7 @@ def command_dashboard(args):
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.25.0 — Dashboard Session UX Enterprise Access Control, Operator Triage Intelligence, Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.26.0 \u2014 Dashboard User Management, Dashboard Session UX, Enterprise Access Control, Operator Triage Intelligence, Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper scan orchestration, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)

@@ -1,30 +1,19 @@
 # DeltaAegis
 
-## Current Release — v0.25.0
+## Current Release — v0.26.0
 
-DeltaAegis v0.25.0 — Dashboard Session UX adds a visible operator session experience on top of the v0.24 username/password login foundation.
+DeltaAegis v0.26.0 — Dashboard User Management adds an ADMIN-only dashboard user-management control surface on top of the v0.25 session UX foundation.
 
-### v0.25.0 Highlights
+### v0.26.0 Highlights
 
-- Protected `/operator` session shell page.
-- Dashboard `Operator` link for opening the session page.
-- Client-side session refresh action.
-- Client-side copy action for the existing protected `/api/session` JSON.
-- No new backend session-data endpoint added.
-- v0.24 dashboard session login compatibility preserved.
-
-
-**Self-hosted, delta-first network-state monitoring and investigation console powered by NetSniper
-telemetry.**
-
-DeltaAegis ingests finalized NetSniper telemetry bundles, stores normalized historical snapshots in
-SQLite, compares accepted scans over time, and explains what changed on a monitored network.
-
-It is built for conservative, evidence-backed monitoring: asset lifecycle tracking, service-delta
-detection, alert review, investigation notes, risk prioritization, NetSniper intelligence review,
-Markdown reports, MAC-port behavior correlation, and a local dashboard.
-
----
+- Added an ADMIN-only `/api/admin/users` inventory endpoint for safe local dashboard user visibility.
+- Added `/operator/users` as a dashboard user-management page.
+- Added ADMIN-only user actions for creating users, enabling/disabling users, changing roles, and rotating passwords.
+- Added last-active-ADMIN protection so the dashboard cannot disable or demote the final active administrator.
+- Added user-management controls directly to the operator page.
+- Added user-management audit visibility for recent `ACCESS_USER_DASHBOARD_*` events.
+- Preserved v0.25 dashboard session UX compatibility and release validation.
+- Continued secret-safety guarantees: password hashes, token hashes, raw tokens, session token hashes, and submitted password values are not exposed by the dashboard user-management views.
 
 ## Current Release
 
