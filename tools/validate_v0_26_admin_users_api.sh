@@ -19,7 +19,7 @@ cd "$(dirname "$0")/.." || exit 1
 for needle in \
     'def dashboard_admin_users_payload' \
     'route == "/api/admin/users"' \
-    'required_role="ADMIN"' \
+    'require_permission("admin.users.read")' \
     '"password_configured"' \
     '"active_token_count"' \
     '"last_token_used_at"'
