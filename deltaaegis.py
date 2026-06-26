@@ -4340,6 +4340,293 @@ def query_scan_schedules(
     ).fetchall()
 
 
+
+def utc_datetime_to_text(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def next_schedule_run_text(cadence_minutes: int, base_time: datetime | None = None) -> str:
+    safe_cadence = validate_scan_schedule_cadence_minutes(cadence_minutes)
+    base = base_time or datetime.now(timezone.utc)
+    return utc_datetime_to_text(base + timedelta(minutes=safe_cadence))
+
+
+def active_scan_job_exists(connection: sqlite3.Connection) -> bool:
+    row = connection.execute(
+        """
+        SELECT 1
+        FROM scan_jobs
+        WHERE status IN ('QUEUED', 'RUNNING')
+        LIMIT 1
+        """
+    ).fetchone()
+
+    return row is not None
+
+
+def query_due_scan_schedules(
+    connection: sqlite3.Connection,
+    limit: int = 1,
+    now_text: str | None = None,
+) -> list[sqlite3.Row]:
+    now_value = now_text or utc_now_text()
+
+    return connection.execute(
+        """
+        SELECT
+            schedule_id,
+            name,
+            target,
+            network_scope,
+            scan_profile,
+            cadence_minutes,
+            enabled,
+            auto_ingest,
+            last_run_at,
+            next_run_at,
+            last_job_id,
+            last_status,
+            failure_count,
+            skip_count,
+            created_at,
+            updated_at,
+            message
+        FROM scan_schedules
+        WHERE enabled = 1
+          AND next_run_at IS NOT NULL
+          AND next_run_at <= ?
+        ORDER BY next_run_at ASC, created_at ASC
+        LIMIT ?
+        """,
+        (now_value, limit),
+    ).fetchall()
+
+
+def mark_scan_schedule_skipped(
+    connection: sqlite3.Connection,
+    schedule_id: str,
+    cadence_minutes: int,
+    reason: str,
+) -> dict[str, Any]:
+    now_dt = datetime.now(timezone.utc)
+    now = utc_datetime_to_text(now_dt)
+    next_run_at = next_schedule_run_text(cadence_minutes, now_dt)
+
+    connection.execute(
+        """
+        UPDATE scan_schedules
+        SET
+            skip_count = skip_count + 1,
+            last_status = ?,
+            next_run_at = ?,
+            updated_at = ?,
+            message = ?
+        WHERE schedule_id = ?
+        """,
+        ("SKIPPED", next_run_at, now, reason, schedule_id),
+    )
+
+    row = connection.execute(
+        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
+        (schedule_id,),
+    ).fetchone()
+
+    if row is None:
+        raise DeltaAegisError(f"scan schedule disappeared unexpectedly: {schedule_id}")
+
+    return scan_schedule_to_dict(row)
+
+
+def update_scan_schedule_after_job(
+    connection: sqlite3.Connection,
+    schedule_id: str,
+    cadence_minutes: int,
+    job: dict[str, Any],
+) -> dict[str, Any]:
+    now_dt = datetime.now(timezone.utc)
+    now = utc_datetime_to_text(now_dt)
+    next_run_at = next_schedule_run_text(cadence_minutes, now_dt)
+    status = str(job.get("status") or "UNKNOWN").upper()
+    failure_increment = 0 if status == "COMPLETED" else 1
+
+    connection.execute(
+        """
+        UPDATE scan_schedules
+        SET
+            last_run_at = ?,
+            next_run_at = ?,
+            last_job_id = ?,
+            last_status = ?,
+            failure_count = failure_count + ?,
+            updated_at = ?,
+            message = ?
+        WHERE schedule_id = ?
+        """,
+        (
+            now,
+            next_run_at,
+            job.get("job_id"),
+            status,
+            failure_increment,
+            now,
+            job.get("message") or f"scheduled scan finished with status {status}",
+            schedule_id,
+        ),
+    )
+
+    row = connection.execute(
+        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
+        (schedule_id,),
+    ).fetchone()
+
+    if row is None:
+        raise DeltaAegisError(f"scan schedule disappeared unexpectedly: {schedule_id}")
+
+    return scan_schedule_to_dict(row)
+
+
+def run_due_scan_schedules(
+    connection: sqlite3.Connection,
+    netsniper_path: Path,
+    runs_dir: Path,
+    logs_dir: Path,
+    events_path: Path,
+    max_runs: int = 1,
+) -> list[dict[str, Any]]:
+    max_runs = max(1, int(max_runs or 1))
+    results: list[dict[str, Any]] = []
+
+    for row in query_due_scan_schedules(connection, limit=max_runs):
+        schedule = scan_schedule_to_dict(row)
+
+        if active_scan_job_exists(connection):
+            skipped = mark_scan_schedule_skipped(
+                connection,
+                schedule["schedule_id"],
+                schedule["cadence_minutes"],
+                "scheduled scan skipped: another scan job is active",
+            )
+            connection.commit()
+            results.append(
+                {
+                    "schedule_id": schedule["schedule_id"],
+                    "name": schedule["name"],
+                    "action": "skipped",
+                    "reason": "active scan job exists",
+                    "schedule": skipped,
+                }
+            )
+            continue
+
+        job = create_scan_job(
+            connection,
+            schedule["target"],
+            netsniper_path,
+            runs_dir,
+            auto_ingest=schedule["auto_ingest"],
+            scan_profile=schedule["scan_profile"],
+        )
+        connection.commit()
+
+        try:
+            final_job = execute_scan_job(
+                connection,
+                job["job_id"],
+                schedule["target"],
+                netsniper_path,
+                runs_dir,
+                logs_dir,
+                events_path,
+                auto_ingest=schedule["auto_ingest"],
+                scan_profile=schedule["scan_profile"],
+            )
+        except DeltaAegisError as exc:
+            final_job = {
+                "job_id": job["job_id"],
+                "status": "FAILED",
+                "message": str(exc),
+            }
+            updated = update_scan_schedule_after_job(
+                connection,
+                schedule["schedule_id"],
+                schedule["cadence_minutes"],
+                final_job,
+            )
+            connection.commit()
+            results.append(
+                {
+                    "schedule_id": schedule["schedule_id"],
+                    "name": schedule["name"],
+                    "action": "failed",
+                    "job": final_job,
+                    "schedule": updated,
+                }
+            )
+            continue
+
+        updated = update_scan_schedule_after_job(
+            connection,
+            schedule["schedule_id"],
+            schedule["cadence_minutes"],
+            final_job,
+        )
+        connection.commit()
+
+        results.append(
+            {
+                "schedule_id": schedule["schedule_id"],
+                "name": schedule["name"],
+                "action": "ran",
+                "job": final_job,
+                "schedule": updated,
+            }
+        )
+
+    return results
+
+
+def print_schedule_run_results(results: list[dict[str, Any]]) -> None:
+    if not results:
+        print("No due scan schedules found.")
+        return
+
+    print("DeltaAegis Scheduled Scan Runner")
+    print("===============================")
+    print()
+
+    for result in results:
+        print(f"{result['schedule_id']}  {result['action']}  {result.get('name') or '-'}")
+
+        if result.get("reason"):
+            print(f"  reason={result['reason']}")
+
+        job = result.get("job") or {}
+        if job:
+            print(f"  job={job.get('job_id') or '-'}  status={job.get('status') or '-'}")
+
+        schedule = result.get("schedule") or {}
+        if schedule:
+            print(f"  next_run={schedule.get('next_run_at') or '-'}  last_status={schedule.get('last_status') or '-'}")
+
+
+def command_schedule_run_due(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+
+    results = run_due_scan_schedules(
+        connection,
+        netsniper_path=Path(args.netsniper_path).expanduser(),
+        runs_dir=Path(args.runs_dir).expanduser(),
+        logs_dir=Path(args.scan_logs_dir).expanduser(),
+        events_path=args.events,
+        max_runs=args.max_runs,
+    )
+
+    print_schedule_run_results(results)
+
+    failed = any((item.get("job") or {}).get("status") == "FAILED" for item in results)
+    return 1 if failed else 0
+
+
 def set_scan_schedule_enabled(
     connection: sqlite3.Connection,
     schedule_id: str,
@@ -19926,6 +20213,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("schedule_id")
     p = sub.add_parser("schedule-delete", help="Delete a saved NetSniper scan schedule")
     p.add_argument("schedule_id")
+    p = sub.add_parser("schedule-run-due", help="Run due saved NetSniper scan schedules once")
+    p.add_argument("--max-runs", type=int, default=1)
+    p.add_argument("--netsniper-path", type=Path, default=DEFAULT_NETSNIPER)
+    p.add_argument("--scan-logs-dir", type=Path, default=DEFAULT_SCAN_LOGS)
     p = sub.add_parser("ticket-status", help="Show or update persistent investigation ticket workflow status")
     p.add_argument("subject_key")
     p.add_argument("--status", choices=["OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"])
@@ -20085,6 +20376,7 @@ def main() -> int:
         if args.command == "schedule-enable": return command_schedule_enable(args)
         if args.command == "schedule-disable": return command_schedule_disable(args)
         if args.command == "schedule-delete": return command_schedule_delete(args)
+        if args.command == "schedule-run-due": return command_schedule_run_due(args)
         if args.command == "ticket-status": return command_ticket_status(args)
         if args.command == "ticket-evidence": return command_ticket_evidence(args)
         if args.command == "ticket-history": return command_ticket_history(args)
