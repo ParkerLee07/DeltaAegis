@@ -60,6 +60,7 @@ ACCESS_RBAC_PERMISSIONS = {
     "admin.users.write": "ADMIN",
     "admin.audit.read": "ADMIN",
     "workflow.write": "ANALYST",
+    "scan.start": "ADMIN",
 }
 
 ACCESS_RBAC_ROUTE_POLICIES = (
@@ -76,6 +77,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("POST", "/api/ticket-status", "workflow.write"),
     ("POST", "/api/investigate-asset", "workflow.write"),
     ("POST", "/api/netsniper/import-latest", "workflow.write"),
+    ("POST", "/api/netsniper/scan-start", "scan.start"),
 )
 
 
@@ -8991,6 +8993,65 @@ def dashboard_netsniper_import_latest_payload(
     }
 
 
+
+
+
+def dashboard_active_scan_job(connection: sqlite3.Connection) -> dict[str, Any] | None:
+    row = connection.execute(
+        """
+        SELECT *
+        FROM scan_jobs
+        WHERE status IN ('QUEUED', 'RUNNING')
+        ORDER BY created_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+
+    return scan_job_to_dict(row) if row else None
+
+
+def dashboard_netsniper_scan_start_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+    events_path: Path,
+) -> dict[str, Any]:
+    target = str(payload.get("target") or "").strip()
+    safe_target = validate_private_cidr(target)
+
+    existing = dashboard_active_scan_job(connection)
+    if existing is not None:
+        raise DeltaAegisError(
+            f"active scan job already exists: {existing.get('job_id')} ({existing.get('status')})"
+        )
+
+    root_path = dashboard_netsniper_root_path()
+    runs_dir = dashboard_netsniper_runs_dir()
+    netsniper_path = root_path / "netsniper.sh"
+    logs_dir = DEFAULT_SCAN_LOGS
+
+    if not netsniper_path.is_file():
+        raise DeltaAegisError(f"NetSniper script not found: {netsniper_path}")
+
+    job = create_scan_job(
+        connection,
+        safe_target,
+        netsniper_path,
+        runs_dir,
+        auto_ingest=False,
+    )
+    connection.commit()
+
+    return {
+        "ok": True,
+        "job": job,
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "target": safe_target,
+        "netsniper_path": str(netsniper_path),
+        "runs_dir": str(runs_dir),
+        "logs_dir": str(logs_dir),
+        "message": "scan job queued; dashboard background execution will be attached in the next v0.29 stage",
+    }
 
 def dashboard_summary_payload(connection, scope=None):
     if scope:
