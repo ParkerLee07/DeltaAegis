@@ -79,6 +79,12 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("POST", "/api/investigate-asset", "workflow.write"),
     ("POST", "/api/netsniper/import-latest", "workflow.write"),
     ("POST", "/api/netsniper/scan-start", "scan.start"),
+    ("GET", "/api/netsniper/schedules", "dashboard.read"),
+    ("POST", "/api/netsniper/schedule-create", "scan.start"),
+    ("POST", "/api/netsniper/schedule-enable", "scan.start"),
+    ("POST", "/api/netsniper/schedule-disable", "scan.start"),
+    ("POST", "/api/netsniper/schedule-delete", "scan.start"),
+    ("POST", "/api/netsniper/schedule-run-due", "scan.start"),
 )
 
 
@@ -4138,6 +4144,166 @@ def dashboard_scan_jobs_payload(
             scope=scope,
         )
     ]
+
+
+
+def dashboard_scan_schedules_payload(
+    connection: sqlite3.Connection,
+    limit: int = 50,
+    scope: str | None = None,
+    enabled: bool | None = None,
+) -> list[dict[str, Any]]:
+    return [
+        scan_schedule_to_dict(row)
+        for row in query_scan_schedules(
+            connection,
+            limit=limit,
+            enabled=enabled,
+            scope=scope,
+        )
+    ]
+
+
+def dashboard_schedule_id_from_payload(payload: dict[str, Any]) -> str:
+    schedule_id = str(payload.get("schedule_id") or "").strip()
+
+    if not schedule_id:
+        raise DashboardAdminUserActionError("schedule_id is required", status_code=400)
+
+    if len(schedule_id) > 96:
+        raise DashboardAdminUserActionError("schedule_id is too long", status_code=400)
+
+    return schedule_id
+
+
+def dashboard_bool_from_payload(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return default
+
+    if isinstance(value, bool):
+        return value
+
+    normalized = str(value).strip().lower()
+
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+
+    return default
+
+
+def dashboard_netsniper_schedule_create_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    profile = payload.get("scan_profile")
+
+    if profile is None:
+        profile = payload.get("profile")
+
+    cadence = payload.get("cadence_minutes")
+
+    if cadence is None:
+        cadence = 60
+
+    schedule = create_scan_schedule(
+        connection,
+        name=str(payload.get("name") or "").strip(),
+        target=str(payload.get("target") or "").strip(),
+        scan_profile=str(profile or "balanced").strip(),
+        cadence_minutes=int(cadence),
+        enabled=dashboard_bool_from_payload(payload.get("enabled"), True),
+        auto_ingest=dashboard_bool_from_payload(payload.get("auto_ingest"), True),
+    )
+
+    return {
+        "ok": True,
+        "action": "schedule.create",
+        "schedule": schedule,
+        "schedules": dashboard_scan_schedules_payload(connection),
+    }
+
+
+def dashboard_netsniper_schedule_enabled_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+    enabled: bool,
+) -> dict[str, Any]:
+    schedule_id = dashboard_schedule_id_from_payload(payload)
+    schedule = set_scan_schedule_enabled(connection, schedule_id, enabled)
+
+    return {
+        "ok": True,
+        "action": "schedule.enable" if enabled else "schedule.disable",
+        "schedule": schedule,
+        "schedules": dashboard_scan_schedules_payload(connection),
+    }
+
+
+def dashboard_netsniper_schedule_delete_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    schedule_id = dashboard_schedule_id_from_payload(payload)
+    delete_scan_schedule(connection, schedule_id)
+
+    return {
+        "ok": True,
+        "action": "schedule.delete",
+        "schedule_id": schedule_id,
+        "schedules": dashboard_scan_schedules_payload(connection),
+    }
+
+
+def dashboard_netsniper_schedule_run_due_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+    events_path: Path,
+) -> dict[str, Any]:
+    max_runs = int(payload.get("max_runs") or 1)
+
+    results = run_due_scan_schedules(
+        connection,
+        netsniper_path=dashboard_netsniper_root_path() / "netsniper.sh",
+        runs_dir=dashboard_netsniper_runs_dir(),
+        logs_dir=DEFAULT_SCAN_LOGS,
+        events_path=events_path,
+        max_runs=max_runs,
+    )
+
+    return {
+        "ok": True,
+        "action": "schedule.run_due",
+        "results": results,
+        "schedules": dashboard_scan_schedules_payload(connection),
+        "scan_jobs": dashboard_scan_jobs_payload(connection, limit=20),
+    }
+
+
+def dashboard_netsniper_schedule_action_payload(
+    connection: sqlite3.Connection,
+    route: str,
+    payload: dict[str, Any],
+    events_path: Path,
+) -> dict[str, Any]:
+    if route == "/api/netsniper/schedule-create":
+        return dashboard_netsniper_schedule_create_payload(connection, payload)
+
+    if route == "/api/netsniper/schedule-enable":
+        return dashboard_netsniper_schedule_enabled_payload(connection, payload, True)
+
+    if route == "/api/netsniper/schedule-disable":
+        return dashboard_netsniper_schedule_enabled_payload(connection, payload, False)
+
+    if route == "/api/netsniper/schedule-delete":
+        return dashboard_netsniper_schedule_delete_payload(connection, payload)
+
+    if route == "/api/netsniper/schedule-run-due":
+        return dashboard_netsniper_schedule_run_due_payload(connection, payload, events_path)
+
+    raise DashboardAdminUserActionError(f"unsupported schedule route: {route}", status_code=404)
 
 
 def print_scan_job_rows(rows: Iterable[sqlite3.Row]) -> None:
@@ -19380,6 +19546,22 @@ def command_dashboard(args):
                 dashboard_html_response(self, render_netsniper_page())
                 return
 
+            if route == "/api/netsniper/schedules":
+                connection = self.open_connection()
+
+                try:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": True,
+                            "schedules": dashboard_scan_schedules_payload(connection),
+                        },
+                    )
+                finally:
+                    connection.close()
+
+                return
+
             if route == "/api/netsniper/status":
                 dashboard_json_response(self, dashboard_netsniper_status_payload())
                 return
@@ -19775,6 +19957,58 @@ def command_dashboard(args):
                         self,
                         str(exc),
                         status_code=getattr(exc, "status_code", 400),
+                    )
+                    return
+                except DeltaAegisError as exc:
+                    connection.rollback()
+                    dashboard_admin_json_error_response(
+                        self,
+                        str(exc),
+                        status_code=400,
+                    )
+                    return
+                finally:
+                    connection.close()
+
+                dashboard_json_response(self, result)
+                return
+
+            if route in {
+                "/api/netsniper/schedule-create",
+                "/api/netsniper/schedule-enable",
+                "/api/netsniper/schedule-disable",
+                "/api/netsniper/schedule-delete",
+                "/api/netsniper/schedule-run-due",
+            }:
+                if not self.require_permission("scan.start"):
+                    return
+
+                try:
+                    payload = dashboard_read_request_payload(self)
+                except DashboardAdminUserActionError as exc:
+                    dashboard_admin_json_error_response(
+                        self,
+                        str(exc),
+                        status_code=exc.status_code,
+                    )
+                    return
+
+                connection = self.open_connection()
+
+                try:
+                    result = dashboard_netsniper_schedule_action_payload(
+                        connection,
+                        route,
+                        payload,
+                        args.events,
+                    )
+                    connection.commit()
+                except DashboardAdminUserActionError as exc:
+                    connection.rollback()
+                    dashboard_admin_json_error_response(
+                        self,
+                        str(exc),
+                        status_code=exc.status_code,
                     )
                     return
                 except DeltaAegisError as exc:
