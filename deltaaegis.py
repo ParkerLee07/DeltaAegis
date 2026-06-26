@@ -18379,7 +18379,9 @@ def render_netsniper_page() -> str:
       const output = document.getElementById("netsniper-scan-start-result");
       const button = document.getElementById("netsniper-scan-start");
       const targetInput = document.getElementById("netsniper-scan-target");
+      const profileInput = document.getElementById("netsniper-scan-profile");
       const target = targetInput ? targetInput.value.trim() : "";
+      const scanProfile = profileInput ? profileInput.value.trim() : "balanced";
 
       if (!target) {
         output.textContent = "Target CIDR is required.";

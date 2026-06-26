@@ -21,6 +21,9 @@ grep -Fq 'id="netsniper-scan-profile"' deltaaegis.py \
 grep -Fq 'body: JSON.stringify({target: target, scan_profile: scanProfile})' deltaaegis.py \
     || fail "dashboard JS does not POST scan_profile"
 
+grep -Fq 'const scanProfile = profileInput ? profileInput.value.trim() : "balanced";' deltaaegis.py \
+    || fail "dashboard JS does not define scanProfile before POST"
+
 grep -Fq 'payload.get("scan_profile")' deltaaegis.py \
     || fail "dashboard helper does not read scan_profile"
 
