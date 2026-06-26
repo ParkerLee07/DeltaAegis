@@ -4782,11 +4782,32 @@ def run_due_scan_schedules(
                 scan_profile=schedule["scan_profile"],
             )
         except DeltaAegisError as exc:
-            final_job = {
-                "job_id": job["job_id"],
-                "status": "FAILED",
-                "message": str(exc),
-            }
+            failure_message = str(exc)
+
+            update_scan_job(
+                connection,
+                job["job_id"],
+                status="FAILED",
+                finished_at=utc_now_text(),
+                exit_code=1,
+                message=failure_message,
+            )
+
+            failed_row = connection.execute(
+                "SELECT * FROM scan_jobs WHERE job_id = ?",
+                (job["job_id"],),
+            ).fetchone()
+
+            final_job = (
+                scan_job_to_dict(failed_row)
+                if failed_row is not None
+                else {
+                    "job_id": job["job_id"],
+                    "status": "FAILED",
+                    "message": failure_message,
+                }
+            )
+
             updated = update_scan_schedule_after_job(
                 connection,
                 schedule["schedule_id"],
