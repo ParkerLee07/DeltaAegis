@@ -19713,6 +19713,92 @@ def render_netsniper_page() -> str:
 
 
 
+
+DASHBOARD_SCHEDULE_WORKER_INTERVAL_SECONDS = 60
+
+
+def dashboard_run_due_schedule_tick(
+    db_path: Path,
+    events_path: Path,
+    netsniper_path: Path | None = None,
+    runs_dir: Path | None = None,
+    logs_dir: Path | None = None,
+    max_runs: int = 1,
+) -> list[dict[str, Any]]:
+    connection = connect(db_path)
+
+    try:
+        return run_due_scan_schedules(
+            connection,
+            netsniper_path=netsniper_path or (dashboard_netsniper_root_path() / "netsniper.sh"),
+            runs_dir=runs_dir or dashboard_netsniper_runs_dir(),
+            logs_dir=logs_dir or DEFAULT_SCAN_LOGS,
+            events_path=events_path,
+            max_runs=max_runs,
+        )
+    finally:
+        connection.close()
+
+
+def dashboard_schedule_worker_loop(
+    db_path: Path,
+    events_path: Path,
+    stop_event: threading.Event,
+    interval_seconds: int = DASHBOARD_SCHEDULE_WORKER_INTERVAL_SECONDS,
+    quiet: bool = False,
+) -> None:
+    safe_interval = max(1, int(interval_seconds or DASHBOARD_SCHEDULE_WORKER_INTERVAL_SECONDS))
+
+    while not stop_event.is_set():
+        try:
+            results = dashboard_run_due_schedule_tick(
+                db_path=db_path,
+                events_path=events_path,
+                max_runs=1,
+            )
+
+            if results and not quiet:
+                print(
+                    f"[DeltaAegis] dashboard schedule worker processed "
+                    f"{len(results)} due schedule(s)",
+                    flush=True,
+                )
+        except Exception as exc:
+            if not quiet:
+                print(
+                    f"[DeltaAegis] dashboard schedule worker error: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+        stop_event.wait(safe_interval)
+
+
+def dashboard_start_schedule_worker_thread(
+    db_path: Path,
+    events_path: Path,
+    interval_seconds: int = DASHBOARD_SCHEDULE_WORKER_INTERVAL_SECONDS,
+    quiet: bool = False,
+) -> tuple[threading.Thread, threading.Event]:
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        name="deltaaegis-dashboard-schedule-worker",
+        target=dashboard_schedule_worker_loop,
+        kwargs={
+            "db_path": db_path,
+            "events_path": events_path,
+            "stop_event": stop_event,
+            "interval_seconds": interval_seconds,
+            "quiet": quiet,
+        },
+        daemon=True,
+    )
+    thread.start()
+
+    return thread, stop_event
+
+
+
 def command_dashboard(args):
     from http.cookies import SimpleCookie
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20803,6 +20889,11 @@ def command_dashboard(args):
 
     server_address = (args.host, args.port)
     server = ThreadingHTTPServer(server_address, DeltaAegisDashboardHandler)
+    dashboard_schedule_worker_thread, dashboard_schedule_worker_stop = dashboard_start_schedule_worker_thread(
+        db_path=db_path,
+        events_path=args.events,
+        quiet=args.quiet,
+    )
 
     print("DeltaAegis dashboard starting")
     print("============================")
@@ -20833,6 +20924,8 @@ def command_dashboard(args):
     except KeyboardInterrupt:
         print("\nStopping dashboard.")
     finally:
+        dashboard_schedule_worker_stop.set()
+        dashboard_schedule_worker_thread.join(timeout=2.0)
         server.server_close()
 
     return 0
