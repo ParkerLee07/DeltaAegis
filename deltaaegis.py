@@ -484,6 +484,35 @@ CREATE INDEX IF NOT EXISTS idx_scan_jobs_status
 CREATE INDEX IF NOT EXISTS idx_scan_jobs_scope
     ON scan_jobs(network_scope);
 
+CREATE TABLE IF NOT EXISTS scan_schedules (
+    schedule_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    target TEXT NOT NULL,
+    network_scope TEXT NOT NULL,
+    scan_profile TEXT NOT NULL DEFAULT 'balanced',
+    cadence_minutes INTEGER NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    auto_ingest INTEGER NOT NULL DEFAULT 1,
+    last_run_at TEXT,
+    next_run_at TEXT,
+    last_job_id TEXT,
+    last_status TEXT,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    skip_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    message TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_schedules_enabled_next_run
+    ON scan_schedules(enabled, next_run_at);
+
+CREATE INDEX IF NOT EXISTS idx_scan_schedules_scope
+    ON scan_schedules(network_scope);
+
+CREATE INDEX IF NOT EXISTS idx_scan_schedules_profile
+    ON scan_schedules(scan_profile);
+
 """
 
 
@@ -3976,6 +4005,7 @@ def command_scan_start(args: argparse.Namespace) -> int:
         netsniper_path,
         runs_dir,
         auto_ingest=args.auto_ingest,
+        scan_profile=safe_profile,
     )
     connection.commit()
 
@@ -3996,6 +4026,7 @@ def command_scan_start(args: argparse.Namespace) -> int:
             logs_dir,
             args.events,
             auto_ingest=args.auto_ingest,
+            scan_profile=safe_profile,
         )
     except DeltaAegisError as exc:
         print(f"Scan job failed: {exc}", file=sys.stderr)
@@ -4150,6 +4181,332 @@ def command_scan_jobs(args: argparse.Namespace) -> int:
             scope=scope,
         )
     )
+
+    return 0
+
+
+
+ALLOWED_SCAN_SCHEDULE_CADENCE_MINUTES = {60, 120, 360, 720, 1440}
+
+
+def validate_scan_schedule_cadence_minutes(value: int | str | None) -> int:
+    try:
+        minutes = int(value if value is not None else 60)
+    except (TypeError, ValueError) as exc:
+        raise DeltaAegisError(f"invalid schedule cadence minutes: {value!r}") from exc
+
+    if minutes not in ALLOWED_SCAN_SCHEDULE_CADENCE_MINUTES:
+        allowed = ", ".join(str(item) for item in sorted(ALLOWED_SCAN_SCHEDULE_CADENCE_MINUTES))
+        raise DeltaAegisError(
+            f"invalid schedule cadence minutes: {minutes}; allowed values: {allowed}"
+        )
+
+    return minutes
+
+
+def validate_scan_schedule_name(name: str | None) -> str:
+    value = str(name or "").strip()
+
+    if not value:
+        raise DeltaAegisError("schedule name is required")
+
+    if len(value) > 80:
+        raise DeltaAegisError("schedule name must be 80 characters or fewer")
+
+    return value
+
+
+def scan_schedule_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+
+    item["enabled"] = bool(item.get("enabled"))
+    item["auto_ingest"] = bool(item.get("auto_ingest"))
+    item["cadence_minutes"] = int(item.get("cadence_minutes") or 60)
+    item["scan_profile"] = item.get("scan_profile") or "balanced"
+
+    return item
+
+
+def create_scan_schedule(
+    connection: sqlite3.Connection,
+    name: str,
+    target: str,
+    scan_profile: str = "balanced",
+    cadence_minutes: int = 60,
+    enabled: bool = True,
+    auto_ingest: bool = True,
+) -> dict[str, Any]:
+    safe_name = validate_scan_schedule_name(name)
+    safe_target = validate_private_cidr(target)
+    safe_profile = validate_netsniper_scan_profile(scan_profile)
+    safe_cadence = validate_scan_schedule_cadence_minutes(cadence_minutes)
+
+    now = utc_now_text()
+    schedule_id = f"sched-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    next_run_at = now if enabled else None
+
+    connection.execute(
+        """
+        INSERT INTO scan_schedules (
+            schedule_id,
+            name,
+            target,
+            network_scope,
+            scan_profile,
+            cadence_minutes,
+            enabled,
+            auto_ingest,
+            next_run_at,
+            created_at,
+            updated_at,
+            message
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            schedule_id,
+            safe_name,
+            safe_target,
+            safe_target,
+            safe_profile,
+            safe_cadence,
+            1 if enabled else 0,
+            1 if auto_ingest else 0,
+            next_run_at,
+            now,
+            now,
+            "schedule created",
+        ),
+    )
+
+    row = connection.execute(
+        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
+        (schedule_id,),
+    ).fetchone()
+
+    if row is None:
+        raise DeltaAegisError(f"scan schedule disappeared unexpectedly: {schedule_id}")
+
+    return scan_schedule_to_dict(row)
+
+
+def query_scan_schedules(
+    connection: sqlite3.Connection,
+    limit: int = 20,
+    enabled: bool | None = None,
+    scope: str | None = None,
+) -> list[sqlite3.Row]:
+    clauses = []
+    params: list[Any] = []
+
+    if enabled is not None:
+        clauses.append("enabled = ?")
+        params.append(1 if enabled else 0)
+
+    if scope:
+        clauses.append("network_scope = ?")
+        params.append(validate_private_cidr(scope))
+
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+
+    params.append(limit)
+
+    return connection.execute(
+        f"""
+        SELECT
+            schedule_id,
+            name,
+            target,
+            network_scope,
+            scan_profile,
+            cadence_minutes,
+            enabled,
+            auto_ingest,
+            last_run_at,
+            next_run_at,
+            last_job_id,
+            last_status,
+            failure_count,
+            skip_count,
+            created_at,
+            updated_at,
+            message
+        FROM scan_schedules
+        {where}
+        ORDER BY enabled DESC, next_run_at ASC, created_at DESC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+
+
+def set_scan_schedule_enabled(
+    connection: sqlite3.Connection,
+    schedule_id: str,
+    enabled: bool,
+) -> dict[str, Any]:
+    row = connection.execute(
+        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
+        (schedule_id,),
+    ).fetchone()
+
+    if row is None:
+        raise DeltaAegisError(f"scan schedule not found: {schedule_id}")
+
+    now = utc_now_text()
+
+    connection.execute(
+        """
+        UPDATE scan_schedules
+        SET
+            enabled = ?,
+            next_run_at = ?,
+            updated_at = ?,
+            message = ?
+        WHERE schedule_id = ?
+        """,
+        (
+            1 if enabled else 0,
+            now if enabled else None,
+            now,
+            "schedule enabled" if enabled else "schedule disabled",
+            schedule_id,
+        ),
+    )
+
+    row = connection.execute(
+        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
+        (schedule_id,),
+    ).fetchone()
+
+    if row is None:
+        raise DeltaAegisError(f"scan schedule disappeared unexpectedly: {schedule_id}")
+
+    return scan_schedule_to_dict(row)
+
+
+def delete_scan_schedule(
+    connection: sqlite3.Connection,
+    schedule_id: str,
+) -> None:
+    cursor = connection.execute(
+        "DELETE FROM scan_schedules WHERE schedule_id = ?",
+        (schedule_id,),
+    )
+
+    if cursor.rowcount == 0:
+        raise DeltaAegisError(f"scan schedule not found: {schedule_id}")
+
+
+def print_scan_schedule_rows(rows: Iterable[sqlite3.Row]) -> None:
+    rows = list(rows)
+
+    if not rows:
+        print("No scan schedules found.")
+        return
+
+    print("DeltaAegis Scan Schedules")
+    print("=========================")
+    print()
+
+    for row in rows:
+        item = scan_schedule_to_dict(row)
+        enabled_label = "enabled" if item["enabled"] else "disabled"
+        print(
+            f"{item['schedule_id']}  "
+            f"{enabled_label:<8}  "
+            f"{item['target']:<18}  "
+            f"profile={item['scan_profile']}  "
+            f"cadence={item['cadence_minutes']}m"
+        )
+        print(f"  name={item['name']}")
+        print(f"  next_run={item.get('next_run_at') or '-'}  last_run={item.get('last_run_at') or '-'}")
+
+        if item.get("last_job_id"):
+            print(f"  last_job={item['last_job_id']}  last_status={item.get('last_status') or '-'}")
+
+        print(f"  auto_ingest={'yes' if item['auto_ingest'] else 'no'}  skips={item['skip_count']}  failures={item['failure_count']}")
+
+        if item.get("message"):
+            print(f"  message={item['message']}")
+
+
+def command_schedule_create(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+
+    schedule = create_scan_schedule(
+        connection,
+        name=args.name,
+        target=args.target,
+        scan_profile=args.profile,
+        cadence_minutes=args.cadence_minutes,
+        enabled=not args.disabled,
+        auto_ingest=args.auto_ingest,
+    )
+    connection.commit()
+
+    print(f"Created scan schedule: {schedule['schedule_id']}")
+    print(f"Name: {schedule['name']}")
+    print(f"Target: {schedule['target']}")
+    print(f"Scan profile: {schedule['scan_profile']}")
+    print(f"Cadence: {schedule['cadence_minutes']} minutes")
+    print(f"Enabled: {'yes' if schedule['enabled'] else 'no'}")
+    print(f"Auto-ingest: {'yes' if schedule['auto_ingest'] else 'no'}")
+    print(f"Next run: {schedule.get('next_run_at') or '-'}")
+
+    return 0
+
+
+def command_schedule_list(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+
+    enabled_filter: bool | None
+    if args.enabled == "enabled":
+        enabled_filter = True
+    elif args.enabled == "disabled":
+        enabled_filter = False
+    else:
+        enabled_filter = None
+
+    print_scan_schedule_rows(
+        query_scan_schedules(
+            connection,
+            limit=args.limit,
+            enabled=enabled_filter,
+            scope=getattr(args, "scope", None),
+        )
+    )
+
+    return 0
+
+
+def command_schedule_enable(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    schedule = set_scan_schedule_enabled(connection, args.schedule_id, True)
+    connection.commit()
+
+    print(f"Enabled scan schedule: {schedule['schedule_id']}")
+    print(f"Next run: {schedule.get('next_run_at') or '-'}")
+
+    return 0
+
+
+def command_schedule_disable(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    schedule = set_scan_schedule_enabled(connection, args.schedule_id, False)
+    connection.commit()
+
+    print(f"Disabled scan schedule: {schedule['schedule_id']}")
+
+    return 0
+
+
+def command_schedule_delete(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    delete_scan_schedule(connection, args.schedule_id)
+    connection.commit()
+
+    print(f"Deleted scan schedule: {args.schedule_id}")
 
     return 0
 
@@ -19552,6 +19909,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--status", choices=sorted(SCAN_JOB_STATUSES))
     p.add_argument("--scope")
+    p = sub.add_parser("schedule-create", help="Create a saved profile-aware NetSniper scan schedule")
+    p.add_argument("--name", required=True)
+    p.add_argument("--target", required=True, help="Private IPv4 CIDR target, such as 192.168.5.0/24")
+    p.add_argument("--profile", choices=["quick", "balanced", "accurate"], default="balanced")
+    p.add_argument("--cadence-minutes", type=int, choices=sorted(ALLOWED_SCAN_SCHEDULE_CADENCE_MINUTES), default=60)
+    p.add_argument("--disabled", action="store_true", help="Create the schedule disabled")
+    p.add_argument("--no-auto-ingest", dest="auto_ingest", action="store_false", default=True, help="Do not auto-ingest completed scheduled scan bundles")
+    p = sub.add_parser("schedule-list", help="List saved NetSniper scan schedules")
+    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--enabled", choices=["all", "enabled", "disabled"], default="all")
+    p.add_argument("--scope")
+    p = sub.add_parser("schedule-enable", help="Enable a saved NetSniper scan schedule")
+    p.add_argument("schedule_id")
+    p = sub.add_parser("schedule-disable", help="Disable a saved NetSniper scan schedule")
+    p.add_argument("schedule_id")
+    p = sub.add_parser("schedule-delete", help="Delete a saved NetSniper scan schedule")
+    p.add_argument("schedule_id")
     p = sub.add_parser("ticket-status", help="Show or update persistent investigation ticket workflow status")
     p.add_argument("subject_key")
     p.add_argument("--status", choices=["OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"])
@@ -19706,6 +20080,11 @@ def main() -> int:
         if args.command == "ingest": return command_ingest(args)
         if args.command == "scan-start": return command_scan_start(args)
         if args.command == "scan-jobs": return command_scan_jobs(args)
+        if args.command == "schedule-create": return command_schedule_create(args)
+        if args.command == "schedule-list": return command_schedule_list(args)
+        if args.command == "schedule-enable": return command_schedule_enable(args)
+        if args.command == "schedule-disable": return command_schedule_disable(args)
+        if args.command == "schedule-delete": return command_schedule_delete(args)
         if args.command == "ticket-status": return command_ticket_status(args)
         if args.command == "ticket-evidence": return command_ticket_evidence(args)
         if args.command == "ticket-history": return command_ticket_history(args)
