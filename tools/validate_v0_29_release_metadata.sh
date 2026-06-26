@@ -45,6 +45,13 @@ grep -Fq 'def dashboard_netsniper_scan_worker' deltaaegis.py \
 grep -Fq 'fetch("/api/netsniper/scan-start"' deltaaegis.py \
     || fail "deltaaegis.py missing dashboard scan-start POST"
 
+grep -Fq 'v0.29 Guarded Scan Jobs' deltaaegis.py \
+    || fail "dashboard release badge does not advertise v0.29 guarded scan jobs"
+
+if grep -Fq 'v0.28 NetSniper Import' deltaaegis.py; then
+    fail "dashboard still advertises stale v0.28 NetSniper Import release badge"
+fi
+
 if grep -nE 'shell=True' deltaaegis.py; then
     fail "unsafe subprocess shell=True pattern found"
 fi

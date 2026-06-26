@@ -14459,7 +14459,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.28 NetSniper Import</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.29 Guarded Scan Jobs</span></div>
     </div>
   </header>
 
