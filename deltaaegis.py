@@ -18980,6 +18980,77 @@ def render_netsniper_page() -> str:
       </form>
       <pre id="netsniper-scan-start-result">No scan has been started from this page yet.</pre>
 
+      <h2>Scheduled scans</h2>
+      <p>Saved profile-aware NetSniper scan schedules. These use the same guarded scan-job path as manual dashboard launches.</p>
+
+      <form id="netsniper-schedule-create-form" class="scan-form">
+        <label>Schedule name
+          <input id="netsniper-schedule-name" name="name" autocomplete="off" placeholder="Hourly Balanced Monitoring" required>
+        </label>
+        <label>Private CIDR target
+          <input id="netsniper-schedule-target" name="target" autocomplete="off" placeholder="192.168.5.0/24" required>
+        </label>
+        <label>Scan profile
+          <select id="netsniper-schedule-profile" name="scan_profile">
+            <option value="balanced" selected>Balanced — routine telemetry</option>
+            <option value="accurate">Accurate — deeper evidence</option>
+            <option value="quick">Quick — lighter check</option>
+          </select>
+        </label>
+        <label>Cadence
+          <select id="netsniper-schedule-cadence" name="cadence_minutes">
+            <option value="60" selected>Every 1 hour</option>
+            <option value="120">Every 2 hours</option>
+            <option value="360">Every 6 hours</option>
+            <option value="720">Every 12 hours</option>
+            <option value="1440">Daily</option>
+          </select>
+        </label>
+        <label>Enabled
+          <select id="netsniper-schedule-enabled" name="enabled">
+            <option value="true" selected>Enabled</option>
+            <option value="false">Disabled</option>
+          </select>
+        </label>
+        <label>Auto-ingest
+          <select id="netsniper-schedule-auto-ingest" name="auto_ingest">
+            <option value="true" selected>Enabled</option>
+            <option value="false">Disabled</option>
+          </select>
+        </label>
+        <button type="submit" id="netsniper-schedule-create">Create schedule</button>
+      </form>
+
+      <div class="actions">
+        <button type="button" id="netsniper-schedules-refresh">Refresh schedules</button>
+        <button type="button" id="netsniper-schedules-run-due">Run due schedules</button>
+        <a href="/api/netsniper/schedules">View raw schedules JSON</a>
+      </div>
+
+      <pre id="netsniper-schedule-result">No scheduled scan action has run from this page yet.</pre>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Status</th>
+              <th>Target</th>
+              <th>Profile</th>
+              <th>Cadence</th>
+              <th>Next run</th>
+              <th>Last run</th>
+              <th>Last status</th>
+              <th>Last job</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="netsniper-schedules-body">
+            <tr><td colspan="10">Loading schedules…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
       <h2>Recent scan jobs</h2>
       <p>Recent guarded NetSniper scan jobs from the DeltaAegis scan job ledger.</p>
       <div class="table-wrap">
@@ -19182,6 +19253,241 @@ def render_netsniper_page() -> str:
       }
     }
 
+
+    function scheduleCadenceLabel(minutes) {
+      const value = Number.parseInt(minutes || 60, 10);
+      const labels = {
+        60: "Every 1 hour",
+        120: "Every 2 hours",
+        360: "Every 6 hours",
+        720: "Every 12 hours",
+        1440: "Daily"
+      };
+      return labels[value] || `${value} minutes`;
+    }
+
+    function scheduleEnabledPill(schedule) {
+      const enabled = Boolean(schedule && schedule.enabled);
+      const cls = enabled ? "ok" : "warn";
+      const label = enabled ? "Enabled" : "Disabled";
+      return `<span class="pill ${cls}">${label}</span>`;
+    }
+
+    async function postNetSniperSchedule(path, payload) {
+      const response = await fetch(path, {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload || {})
+      });
+
+      let data = {};
+      try {
+        data = await response.json();
+      } catch (error) {
+        data = {};
+      }
+
+      if (response.status === 401) {
+        window.location.href = "/login";
+        return null;
+      }
+
+      if (response.status === 403) {
+        throw new Error("ADMIN role required to manage NetSniper scan schedules.");
+      }
+
+      if (!response.ok || !data.ok) {
+        throw new Error(data.message || data.error || `Schedule request failed with HTTP ${response.status}`);
+      }
+
+      return data;
+    }
+
+    function renderNetSniperSchedules(payload) {
+      const tbody = document.getElementById("netsniper-schedules-body");
+      if (!tbody) { return; }
+
+      const schedules = Array.isArray(payload)
+        ? payload
+        : (payload.schedules || payload.items || []);
+
+      if (!schedules.length) {
+        tbody.innerHTML = '<tr><td colspan="10">No scan schedules found.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = schedules.slice(0, 20).map(function (schedule) {
+        const scheduleId = schedule.schedule_id || "";
+        const toggleAction = schedule.enabled ? "disable" : "enable";
+        const toggleLabel = schedule.enabled ? "Disable" : "Enable";
+
+        return `
+          <tr>
+            <td>${escapeHtml(schedule.name || "-")}<br><code>${escapeHtml(scheduleId || "-")}</code></td>
+            <td>${scheduleEnabledPill(schedule)}</td>
+            <td>${escapeHtml(schedule.target || schedule.network_scope || "-")}</td>
+            <td>${escapeHtml(schedule.scan_profile || "balanced")}</td>
+            <td>${escapeHtml(scheduleCadenceLabel(schedule.cadence_minutes))}</td>
+            <td>${escapeHtml(schedule.next_run_at || "-")}</td>
+            <td>${escapeHtml(schedule.last_run_at || "-")}</td>
+            <td>${escapeHtml(schedule.last_status || "-")}</td>
+            <td>${escapeHtml(schedule.last_job_id || "-")}</td>
+            <td>
+              <button type="button" data-schedule-action="${toggleAction}" data-schedule-id="${escapeHtml(scheduleId)}">${toggleLabel}</button>
+              <button type="button" data-schedule-action="delete" data-schedule-id="${escapeHtml(scheduleId)}">Delete</button>
+            </td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    async function loadNetSniperSchedules() {
+      try {
+        const response = await fetch("/api/netsniper/schedules", {
+          credentials: "same-origin",
+          cache: "no-store"
+        });
+
+        if (response.status === 401 || response.status === 403) {
+          return;
+        }
+
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = await response.json();
+        renderNetSniperSchedules(payload);
+      } catch (error) {
+        const tbody = document.getElementById("netsniper-schedules-body");
+        if (tbody) {
+          tbody.innerHTML = `<tr><td colspan="10">Schedule lookup failed: ${escapeHtml(error.message || error)}</td></tr>`;
+        }
+      }
+    }
+
+    async function createNetSniperSchedule(event) {
+      event.preventDefault();
+
+      const status = document.getElementById("netsniper-status");
+      const output = document.getElementById("netsniper-schedule-result");
+      const button = document.getElementById("netsniper-schedule-create");
+
+      const nameInput = document.getElementById("netsniper-schedule-name");
+      const targetInput = document.getElementById("netsniper-schedule-target");
+      const profileInput = document.getElementById("netsniper-schedule-profile");
+      const cadenceInput = document.getElementById("netsniper-schedule-cadence");
+      const enabledInput = document.getElementById("netsniper-schedule-enabled");
+      const autoIngestInput = document.getElementById("netsniper-schedule-auto-ingest");
+
+      const name = nameInput ? nameInput.value.trim() : "";
+      const target = targetInput ? targetInput.value.trim() : "";
+
+      if (!name || !target) {
+        output.textContent = "Schedule name and target CIDR are required.";
+        return;
+      }
+
+      button.disabled = true;
+      status.textContent = "Creating NetSniper scan schedule…";
+
+      try {
+        const payload = await postNetSniperSchedule("/api/netsniper/schedule-create", {
+          name: name,
+          target: target,
+          scan_profile: profileInput ? profileInput.value : "balanced",
+          cadence_minutes: cadenceInput ? Number.parseInt(cadenceInput.value, 10) : 60,
+          enabled: enabledInput ? enabledInput.value === "true" : true,
+          auto_ingest: autoIngestInput ? autoIngestInput.value === "true" : true
+        });
+
+        if (!payload) { return; }
+
+        output.textContent = JSON.stringify(payload, null, 2);
+        status.textContent = `Created scan schedule: ${(payload.schedule || {}).schedule_id || name}`;
+        renderNetSniperSchedules(payload);
+        await loadNetSniperSchedules();
+      } catch (error) {
+        status.textContent = `Schedule create failed: ${error.message || error}`;
+        output.textContent = String(error.message || error);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function runDueNetSniperSchedules() {
+      const status = document.getElementById("netsniper-status");
+      const output = document.getElementById("netsniper-schedule-result");
+      const button = document.getElementById("netsniper-schedules-run-due");
+
+      button.disabled = true;
+      status.textContent = "Running due NetSniper schedules…";
+
+      try {
+        const payload = await postNetSniperSchedule("/api/netsniper/schedule-run-due", {max_runs: 1});
+
+        if (!payload) { return; }
+
+        output.textContent = JSON.stringify(payload, null, 2);
+        status.textContent = `Schedule runner complete: ${(payload.results || []).length} result(s)`;
+        renderNetSniperSchedules(payload);
+
+        if (payload.scan_jobs) {
+          renderNetSniperScanJobs(payload.scan_jobs);
+        }
+
+        await loadNetSniperSchedules();
+        await loadNetSniperScanJobs();
+      } catch (error) {
+        status.textContent = `Schedule runner failed: ${error.message || error}`;
+        output.textContent = String(error.message || error);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function handleNetSniperScheduleAction(event) {
+      const button = event.target.closest("button[data-schedule-action]");
+      if (!button) { return; }
+
+      const action = button.dataset.scheduleAction;
+      const scheduleId = button.dataset.scheduleId;
+      const status = document.getElementById("netsniper-status");
+      const output = document.getElementById("netsniper-schedule-result");
+
+      if (!scheduleId) {
+        output.textContent = "Schedule ID is missing.";
+        return;
+      }
+
+      if (action === "delete" && !window.confirm(`Delete scan schedule ${scheduleId}?`)) {
+        return;
+      }
+
+      button.disabled = true;
+      status.textContent = `Applying schedule action: ${action}`;
+
+      try {
+        const payload = await postNetSniperSchedule(`/api/netsniper/schedule-${action}`, {
+          schedule_id: scheduleId
+        });
+
+        if (!payload) { return; }
+
+        output.textContent = JSON.stringify(payload, null, 2);
+        status.textContent = `Schedule action complete: ${action}`;
+        renderNetSniperSchedules(payload);
+      } catch (error) {
+        status.textContent = `Schedule action failed: ${error.message || error}`;
+        output.textContent = String(error.message || error);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+
     async function startNetSniperScan(event) {
       event.preventDefault();
 
@@ -19244,12 +19550,19 @@ def render_netsniper_page() -> str:
     document.getElementById("netsniper-refresh").addEventListener("click", function () {
       loadNetSniperStatus();
       loadNetSniperScanJobs();
+      loadNetSniperSchedules();
     });
     document.getElementById("netsniper-import-latest").addEventListener("click", importLatestNetSniperRun);
     document.getElementById("netsniper-scan-start-form").addEventListener("submit", startNetSniperScan);
+    document.getElementById("netsniper-schedule-create-form").addEventListener("submit", createNetSniperSchedule);
+    document.getElementById("netsniper-schedules-refresh").addEventListener("click", loadNetSniperSchedules);
+    document.getElementById("netsniper-schedules-run-due").addEventListener("click", runDueNetSniperSchedules);
+    document.getElementById("netsniper-schedules-body").addEventListener("click", handleNetSniperScheduleAction);
     loadNetSniperStatus();
     loadNetSniperScanJobs();
+    loadNetSniperSchedules();
     window.setInterval(loadNetSniperScanJobs, 5000);
+    window.setInterval(loadNetSniperSchedules, 15000);
   </script>
 </body>
 </html>"""
