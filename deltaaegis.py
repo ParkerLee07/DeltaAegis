@@ -18,6 +18,7 @@ import re
 import secrets
 import sqlite3
 import subprocess
+import threading
 import sys
 import uuid
 import xml.etree.ElementTree as ET
@@ -60,6 +61,7 @@ ACCESS_RBAC_PERMISSIONS = {
     "admin.users.write": "ADMIN",
     "admin.audit.read": "ADMIN",
     "workflow.write": "ANALYST",
+    "scan.start": "ADMIN",
 }
 
 ACCESS_RBAC_ROUTE_POLICIES = (
@@ -76,6 +78,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("POST", "/api/ticket-status", "workflow.write"),
     ("POST", "/api/investigate-asset", "workflow.write"),
     ("POST", "/api/netsniper/import-latest", "workflow.write"),
+    ("POST", "/api/netsniper/scan-start", "scan.start"),
 )
 
 
@@ -8992,6 +8995,146 @@ def dashboard_netsniper_import_latest_payload(
 
 
 
+
+
+def dashboard_active_scan_job(connection: sqlite3.Connection) -> dict[str, Any] | None:
+    row = connection.execute(
+        """
+        SELECT *
+        FROM scan_jobs
+        WHERE status IN ('QUEUED', 'RUNNING')
+        ORDER BY created_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+
+    return scan_job_to_dict(row) if row else None
+
+
+def dashboard_netsniper_scan_start_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+    db_path: Path,
+    events_path: Path,
+) -> dict[str, Any]:
+    target = str(payload.get("target") or "").strip()
+    safe_target = validate_private_cidr(target)
+
+    existing = dashboard_active_scan_job(connection)
+    if existing is not None:
+        raise DeltaAegisError(
+            f"active scan job already exists: {existing.get('job_id')} ({existing.get('status')})"
+        )
+
+    root_path = dashboard_netsniper_root_path()
+    runs_dir = dashboard_netsniper_runs_dir()
+    netsniper_path = root_path / "netsniper.sh"
+    logs_dir = DEFAULT_SCAN_LOGS
+
+    if not netsniper_path.is_file():
+        raise DeltaAegisError(f"NetSniper script not found: {netsniper_path}")
+
+    job = create_scan_job(
+        connection,
+        safe_target,
+        netsniper_path,
+        runs_dir,
+        auto_ingest=False,
+    )
+    connection.commit()
+
+    dashboard_start_scan_job_thread(
+        db_path=db_path,
+        events_path=events_path,
+        job_id=job["job_id"],
+        target=safe_target,
+        netsniper_path=netsniper_path,
+        runs_dir=runs_dir,
+        logs_dir=logs_dir,
+        auto_ingest=False,
+    )
+
+    return {
+        "ok": True,
+        "job": job,
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "target": safe_target,
+        "netsniper_path": str(netsniper_path),
+        "runs_dir": str(runs_dir),
+        "logs_dir": str(logs_dir),
+        "message": "scan job queued and started in a guarded dashboard background worker",
+    }
+
+
+
+def dashboard_netsniper_scan_worker(
+    db_path: Path,
+    events_path: Path,
+    job_id: str,
+    target: str,
+    netsniper_path: Path,
+    runs_dir: Path,
+    logs_dir: Path,
+    auto_ingest: bool = False,
+) -> None:
+    connection = connect(db_path)
+
+    try:
+        execute_scan_job(
+            connection,
+            job_id,
+            target,
+            netsniper_path,
+            runs_dir,
+            logs_dir,
+            events_path,
+            auto_ingest=auto_ingest,
+        )
+    except Exception as exc:
+        try:
+            update_scan_job(
+                connection,
+                job_id,
+                status="FAILED",
+                finished_at=utc_now_text(),
+                message=f"scan worker failed: {exc}",
+            )
+            connection.commit()
+        except Exception:
+            pass
+    finally:
+        connection.close()
+
+
+def dashboard_start_scan_job_thread(
+    db_path: Path,
+    events_path: Path,
+    job_id: str,
+    target: str,
+    netsniper_path: Path,
+    runs_dir: Path,
+    logs_dir: Path,
+    auto_ingest: bool = False,
+) -> threading.Thread:
+    thread = threading.Thread(
+        name=f"deltaaegis-netsniper-scan-{job_id}",
+        target=dashboard_netsniper_scan_worker,
+        kwargs={
+            "db_path": db_path,
+            "events_path": events_path,
+            "job_id": job_id,
+            "target": target,
+            "netsniper_path": netsniper_path,
+            "runs_dir": runs_dir,
+            "logs_dir": logs_dir,
+            "auto_ingest": auto_ingest,
+        },
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
 def dashboard_summary_payload(connection, scope=None):
     if scope:
         snapshot_count = connection.execute(
@@ -14316,7 +14459,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.28 NetSniper Import</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.29 Guarded Scan Jobs</span></div>
     </div>
   </header>
 
@@ -17922,6 +18065,14 @@ def render_netsniper_page() -> str:
     .pill { display: inline-flex; border: 1px solid rgba(148,163,184,.22); border-radius: 999px; padding: 4px 8px; font-size: 11px; font-weight: 950; text-transform: uppercase; letter-spacing: .06em; }
     .ok { color: #bbf7d0; border-color: rgba(34,197,94,.35); background: rgba(22,163,74,.12); }
     .warn { color: #fde68a; border-color: rgba(251,191,36,.35); background: rgba(217,119,6,.12); }
+    .scan-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 12px 0 14px; }
+    .scan-form label { color: #94a3b8; display: grid; gap: 6px; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+    .scan-form input { border: 1px solid rgba(148,163,184,.22); border-radius: 12px; background: rgba(2,6,23,.48); color: #e2e8f0; padding: 10px 12px; min-width: 240px; font-weight: 800; }
+    .table-wrap { overflow-x: auto; border: 1px solid rgba(148,163,184,.18); border-radius: 18px; margin-top: 10px; }
+    table { width: 100%; border-collapse: collapse; min-width: 900px; }
+    th, td { border-bottom: 1px solid rgba(148,163,184,.14); padding: 10px 12px; text-align: left; vertical-align: top; }
+    th { color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+    td { color: #e2e8f0; font-size: 13px; font-weight: 700; }
     pre { border: 1px solid rgba(148,163,184,.18); border-radius: 16px; background: rgba(2,6,23,.55); color: #cbd5e1; padding: 14px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
   </style>
 </head>
@@ -17958,8 +18109,40 @@ def render_netsniper_page() -> str:
       <h2>Import result</h2>
       <pre id="netsniper-import-result">No import has been run from this page yet.</pre>
 
+      <h2>Guarded scan launch</h2>
+      <p>ADMIN-only launch control for a single private IPv4 CIDR target. DeltaAegis uses a fixed NetSniper headless command shape and does not expose arbitrary shell input.</p>
+      <form id="netsniper-scan-start-form" class="scan-form">
+        <label>Private CIDR target
+          <input id="netsniper-scan-target" name="target" autocomplete="off" placeholder="192.168.5.0/24" required>
+        </label>
+        <button type="submit" id="netsniper-scan-start">Start guarded scan</button>
+      </form>
+      <pre id="netsniper-scan-start-result">No scan has been started from this page yet.</pre>
+
+      <h2>Recent scan jobs</h2>
+      <p>Recent guarded NetSniper scan jobs from the DeltaAegis scan job ledger.</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Job</th>
+              <th>Status</th>
+              <th>Target</th>
+              <th>Created</th>
+              <th>Updated</th>
+              <th>Exit</th>
+              <th>Bundle</th>
+              <th>Message</th>
+            </tr>
+          </thead>
+          <tbody id="netsniper-scan-jobs-body">
+            <tr><td colspan="8">Loading scan jobs…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
       <h2>Design boundary</h2>
-      <p>This tab does not run arbitrary shell commands. Future scan execution should use a guarded NetSniper wrapper with validated target input, one active job at a time, and ADMIN-only launch controls.</p>
+      <p>This tab does not run arbitrary shell commands. Scan execution uses a guarded NetSniper wrapper with validated private-CIDR input, one active job at a time, and ADMIN-only launch controls.</p>
     </section>
   </main>
 
@@ -18031,7 +18214,7 @@ def render_netsniper_page() -> str:
         setText("netsniper-latest-json", JSON.stringify(latest || {}, null, 2));
 
         status.textContent = payload.import_ready
-          ? "Latest NetSniper run is ready for dashboard import in the next v0.28 stage."
+          ? "Latest NetSniper run is ready for dashboard import."
           : "No completed import-ready NetSniper run was found yet.";
       } catch (error) {
         status.textContent = `NetSniper status lookup failed: ${error.message || error}`;
@@ -18082,9 +18265,126 @@ def render_netsniper_page() -> str:
       }
     }
 
-    document.getElementById("netsniper-refresh").addEventListener("click", loadNetSniperStatus);
+    function renderNetSniperScanJobs(payload) {
+      const tbody = document.getElementById("netsniper-scan-jobs-body");
+      if (!tbody) { return; }
+
+      const jobs = Array.isArray(payload)
+        ? payload
+        : (payload.jobs || payload.scan_jobs || payload.items || []);
+
+      if (!jobs.length) {
+        tbody.innerHTML = '<tr><td colspan="8">No scan jobs found.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = jobs.slice(0, 10).map(function (job) {
+        return `
+          <tr>
+            <td><code>${escapeHtml(job.job_id || "-")}</code></td>
+            <td><span class="pill">${escapeHtml(job.status || "-")}</span></td>
+            <td>${escapeHtml(job.target || job.network_scope || "-")}</td>
+            <td>${escapeHtml(job.created_at || "-")}</td>
+            <td>${escapeHtml(job.updated_at || "-")}</td>
+            <td>${escapeHtml(job.exit_code === null || job.exit_code === undefined ? "-" : job.exit_code)}</td>
+            <td>${escapeHtml(job.bundle_path || "-")}</td>
+            <td>${escapeHtml(job.message || "-")}</td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    async function loadNetSniperScanJobs() {
+      try {
+        const response = await fetch("/api/scan-jobs?limit=10", {
+          credentials: "same-origin",
+          cache: "no-store"
+        });
+
+        if (response.status === 401 || response.status === 403) {
+          return;
+        }
+
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = await response.json();
+        renderNetSniperScanJobs(payload);
+      } catch (error) {
+        const tbody = document.getElementById("netsniper-scan-jobs-body");
+        if (tbody) {
+          tbody.innerHTML = `<tr><td colspan="8">Scan job lookup failed: ${escapeHtml(error.message || error)}</td></tr>`;
+        }
+      }
+    }
+
+    async function startNetSniperScan(event) {
+      event.preventDefault();
+
+      const status = document.getElementById("netsniper-status");
+      const output = document.getElementById("netsniper-scan-start-result");
+      const button = document.getElementById("netsniper-scan-start");
+      const targetInput = document.getElementById("netsniper-scan-target");
+      const target = targetInput ? targetInput.value.trim() : "";
+
+      if (!target) {
+        output.textContent = "Target CIDR is required.";
+        return;
+      }
+
+      button.disabled = true;
+      status.textContent = "Starting guarded NetSniper scan job…";
+
+      try {
+        const response = await fetch("/api/netsniper/scan-start", {
+          method: "POST",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({target: target})
+        });
+
+        let payload = {};
+        try {
+          payload = await response.json();
+        } catch (error) {
+          payload = {};
+        }
+
+        if (response.status === 401) {
+          window.location.href = "/login";
+          return;
+        }
+
+        if (response.status === 403) {
+          throw new Error("ADMIN role required to start NetSniper scans.");
+        }
+
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.message || payload.error || `Scan start failed with HTTP ${response.status}`);
+        }
+
+        output.textContent = JSON.stringify(payload, null, 2);
+        status.textContent = `Scan job started: ${payload.job_id || "queued"}`;
+        await loadNetSniperScanJobs();
+      } catch (error) {
+        status.textContent = `Scan start failed: ${error.message || error}`;
+        output.textContent = String(error.message || error);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    document.getElementById("netsniper-refresh").addEventListener("click", function () {
+      loadNetSniperStatus();
+      loadNetSniperScanJobs();
+    });
     document.getElementById("netsniper-import-latest").addEventListener("click", importLatestNetSniperRun);
+    document.getElementById("netsniper-scan-start-form").addEventListener("submit", startNetSniperScan);
     loadNetSniperStatus();
+    loadNetSniperScanJobs();
+    window.setInterval(loadNetSniperScanJobs, 5000);
   </script>
 </body>
 </html>"""
@@ -18791,6 +19091,82 @@ def command_dashboard(args):
 
                 dashboard_json_response(self, result)
                 return
+
+            if route == "/api/netsniper/scan-start":
+                if not self.require_permission("scan.start"):
+                    return
+
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    content_length = 0
+
+                if content_length <= 0:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "missing_body",
+                            "message": "POST body must be JSON.",
+                        },
+                        status=400,
+                    )
+                    return
+
+                if content_length > 65536:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "body_too_large",
+                            "message": "POST body is too large.",
+                        },
+                        status=413,
+                    )
+                    return
+
+                try:
+                    raw_body = self.rfile.read(content_length).decode("utf-8")
+                    payload = json.loads(raw_body)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "invalid_json",
+                            "message": "POST body must be valid JSON.",
+                        },
+                        status=400,
+                    )
+                    return
+
+                connection = self.open_connection()
+
+                try:
+                    try:
+                        result = dashboard_netsniper_scan_start_payload(
+                            connection,
+                            payload,
+                            args.db,
+                            args.events,
+                        )
+                    except DeltaAegisError as exc:
+                        connection.rollback()
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "netsniper_scan_start_failed",
+                                "message": str(exc),
+                            },
+                            status=400,
+                        )
+                        return
+
+                    dashboard_json_response(self, result)
+                    return
+                finally:
+                    connection.close()
 
             if not self.require_permission("workflow.write"):
                 return

@@ -4,25 +4,23 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.28.1
+## Current Release — v0.29.0
 
-**DeltaAegis v0.28.1 — README and Uninstall Cleanup**
+**DeltaAegis v0.29.0 — Guarded NetSniper Scan Jobs**
 
-v0.28.1 refreshes the public README and uninstall workflow while preserving the v0.28.0 dashboard NetSniper import feature baseline.
+v0.29.0 adds ADMIN-only guarded NetSniper scan launching from the DeltaAegis dashboard.
 
-Current feature baseline: **DeltaAegis v0.28.0 — Dashboard NetSniper Import Setup**.
+### Current v0.29.0 highlights
 
-### Current v0.28.x highlights
-
-- Protected `/netsniper` dashboard tab for NetSniper telemetry-source visibility.
-- Dashboard-side NetSniper root, script, runs-directory, latest-run, and import-readiness detection.
-- Floating dashboard navigation link to the NetSniper tab.
-- ANALYST+ dashboard action for importing the latest completed NetSniper run.
-- `DELTAAEGIS_NETSNIPER_ROOT` override for validators, services, and non-standard deployments.
-- Installer, first-admin bootstrap, and admin reset tooling aligned on `data/deltaaegis.db`.
-- Safer uninstall workflow with launcher removal, runtime-data purge, project purge confirmation, and dry-run support.
-- Refreshed README focused on the current dashboard-first DeltaAegis workflow.
-- Explicit no-raw-shell dashboard boundary.
+- `/netsniper` dashboard scan-launch form for private IPv4 CIDR targets.
+- ADMIN-only `POST /api/netsniper/scan-start` route.
+- Strict private-CIDR validation before any scan job is created.
+- One-active-job guard for queued/running NetSniper jobs.
+- Background scan execution so dashboard HTTP requests do not block for the full scan.
+- Fixed NetSniper headless command shape: `--non-interactive --target <CIDR> --greenbone no --json-status`.
+- Recent scan-job visibility on the NetSniper dashboard page.
+- Continued support for importing the latest completed NetSniper run.
+- No raw shell command input and no `shell=True` execution in the guarded scan path.
 
 ## What DeltaAegis Does
 
