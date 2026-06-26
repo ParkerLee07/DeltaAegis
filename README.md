@@ -4,23 +4,21 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.29.0
+## Current Release — v0.30.0
 
-**DeltaAegis v0.29.0 — Guarded NetSniper Scan Jobs**
+**DeltaAegis v0.30.0 — NetSniper Profile-Aware Scan Jobs**
 
-v0.29.0 adds ADMIN-only guarded NetSniper scan launching from the DeltaAegis dashboard.
+v0.30.0 makes DeltaAegis aware of NetSniper v1.9 scan profiles when launching guarded scan jobs from the CLI or dashboard.
 
-### Current v0.29.0 highlights
+### Current v0.30.0 highlights
 
-- `/netsniper` dashboard scan-launch form for private IPv4 CIDR targets.
-- ADMIN-only `POST /api/netsniper/scan-start` route.
-- Strict private-CIDR validation before any scan job is created.
-- One-active-job guard for queued/running NetSniper jobs.
-- Background scan execution so dashboard HTTP requests do not block for the full scan.
-- Fixed NetSniper headless command shape: `--non-interactive --target <CIDR> --greenbone no --json-status`.
-- Recent scan-job visibility on the NetSniper dashboard page.
-- Continued support for importing the latest completed NetSniper run.
-- No raw shell command input and no `shell=True` execution in the guarded scan path.
+- Added profile-aware NetSniper scan jobs using `quick`, `balanced`, and `accurate`.
+- Added `deltaaegis scan-start --profile quick|balanced|accurate`.
+- Added guarded dashboard scan-profile selection for NetSniper launches.
+- Added `scan_jobs.scan_profile` storage with migration support for existing databases.
+- Added scan-job history/profile visibility in CLI and dashboard job tables.
+- Preserved the v0.29 guarded scan-job safety model, including ADMIN-only dashboard launch, private-CIDR validation, one-active-job protection, fixed argument construction, no raw shell execution, background execution, logs, and auto-status tracking.
+
 
 ## What DeltaAegis Does
 

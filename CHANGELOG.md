@@ -1,3 +1,25 @@
+## v0.30.0 - 2026-06-26
+
+DeltaAegis v0.30.0 adds profile-aware NetSniper scan jobs for the NetSniper v1.9 scan-profile model.
+
+### Added
+
+- Added scan-profile storage to the `scan_jobs` ledger.
+- Added `deltaaegis scan-start --profile quick|balanced|accurate`.
+- Added profile-aware NetSniper command construction using `--profile`.
+- Added dashboard scan-profile selection for guarded NetSniper launches.
+- Added profile visibility to dashboard and CLI scan-job history.
+- Added v0.30 backend and dashboard validators.
+
+### Preserved
+
+- Preserved ADMIN-only dashboard scan launch.
+- Preserved private IPv4 CIDR validation.
+- Preserved one-active-job protection.
+- Preserved fixed argument-vector execution with no raw shell input.
+- Preserved v0.29 guarded scan-job release gate compatibility.
+
+
 # Changelog
 
 ## DeltaAegis v0.25.0 — Dashboard Session UX
