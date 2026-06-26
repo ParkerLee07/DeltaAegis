@@ -9053,6 +9053,9 @@ def dashboard_netsniper_scan_start_payload(
 ) -> dict[str, Any]:
     target = str(payload.get("target") or "").strip()
     safe_target = validate_private_cidr(target)
+    safe_profile = validate_netsniper_scan_profile(
+        payload.get("scan_profile") or payload.get("profile") or "balanced"
+    )
 
     existing = dashboard_active_scan_job(connection)
     if existing is not None:
@@ -9074,6 +9077,7 @@ def dashboard_netsniper_scan_start_payload(
         netsniper_path,
         runs_dir,
         auto_ingest=False,
+        scan_profile=safe_profile,
     )
     connection.commit()
 
@@ -9085,6 +9089,7 @@ def dashboard_netsniper_scan_start_payload(
         netsniper_path=netsniper_path,
         runs_dir=runs_dir,
         logs_dir=logs_dir,
+        scan_profile=safe_profile,
         auto_ingest=False,
     )
 
@@ -9094,12 +9099,12 @@ def dashboard_netsniper_scan_start_payload(
         "job_id": job["job_id"],
         "status": job["status"],
         "target": safe_target,
+        "scan_profile": safe_profile,
         "netsniper_path": str(netsniper_path),
         "runs_dir": str(runs_dir),
         "logs_dir": str(logs_dir),
         "message": "scan job queued and started in a guarded dashboard background worker",
     }
-
 
 
 def dashboard_netsniper_scan_worker(
@@ -9110,6 +9115,7 @@ def dashboard_netsniper_scan_worker(
     netsniper_path: Path,
     runs_dir: Path,
     logs_dir: Path,
+    scan_profile: str = "balanced",
     auto_ingest: bool = False,
 ) -> None:
     connection = connect(db_path)
@@ -9124,6 +9130,7 @@ def dashboard_netsniper_scan_worker(
             logs_dir,
             events_path,
             auto_ingest=auto_ingest,
+            scan_profile=scan_profile,
         )
     except Exception as exc:
         try:
@@ -9149,6 +9156,7 @@ def dashboard_start_scan_job_thread(
     netsniper_path: Path,
     runs_dir: Path,
     logs_dir: Path,
+    scan_profile: str = "balanced",
     auto_ingest: bool = False,
 ) -> threading.Thread:
     thread = threading.Thread(
@@ -9162,12 +9170,14 @@ def dashboard_start_scan_job_thread(
             "netsniper_path": netsniper_path,
             "runs_dir": runs_dir,
             "logs_dir": logs_dir,
+            "scan_profile": scan_profile,
             "auto_ingest": auto_ingest,
         },
         daemon=True,
     )
     thread.start()
     return thread
+
 
 def dashboard_summary_payload(connection, scope=None):
     if scope:
@@ -16923,7 +16933,7 @@ def dashboard_index_html_base_v025_operator_link():
           <td>${esc(row.criticality)}</td>
           <td>${esc(row.notes)}</td>
         </tr>
-      `).join("") || `<tr><td colspan="8" class="muted">No annotations found.</td></tr>`;
+      `).join("") || `<tr><td colspan="9" class="muted">No annotations found.</td></tr>`;
     }
 
     function renderClassificationSummary(summary) {
@@ -16978,7 +16988,7 @@ def dashboard_index_html_base_v025_operator_link():
               <td>${esc(row.reason)}</td>
             </tr>
           `).join("")
-        : `<tr><td colspan="8">No weak, unknown, or contradictory classifications require review.</td></tr>`;
+        : `<tr><td colspan="9">No weak, unknown, or contradictory classifications require review.</td></tr>`;
 
 
       const v17TopRows = v17TopTypes.length
@@ -18149,6 +18159,13 @@ def render_netsniper_page() -> str:
         <label>Private CIDR target
           <input id="netsniper-scan-target" name="target" autocomplete="off" placeholder="192.168.5.0/24" required>
         </label>
+          <label>Scan profile
+            <select id="netsniper-scan-profile" name="scan_profile">
+              <option value="balanced" selected>Balanced — routine telemetry</option>
+              <option value="accurate">Accurate — deeper evidence</option>
+              <option value="quick">Quick — lighter check</option>
+            </select>
+          </label>
         <button type="submit" id="netsniper-scan-start">Start guarded scan</button>
       </form>
       <pre id="netsniper-scan-start-result">No scan has been started from this page yet.</pre>
@@ -18162,7 +18179,8 @@ def render_netsniper_page() -> str:
               <th>Job</th>
               <th>Status</th>
               <th>Target</th>
-              <th>Created</th>
+                            <th>Profile</th>
+<th>Created</th>
               <th>Updated</th>
               <th>Exit</th>
               <th>Bundle</th>
@@ -18170,7 +18188,7 @@ def render_netsniper_page() -> str:
             </tr>
           </thead>
           <tbody id="netsniper-scan-jobs-body">
-            <tr><td colspan="8">Loading scan jobs…</td></tr>
+            <tr><td colspan="9">Loading scan jobs…</td></tr>
           </tbody>
         </table>
       </div>
@@ -18308,7 +18326,7 @@ def render_netsniper_page() -> str:
         : (payload.jobs || payload.scan_jobs || payload.items || []);
 
       if (!jobs.length) {
-        tbody.innerHTML = '<tr><td colspan="8">No scan jobs found.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9">No scan jobs found.</td></tr>';
         return;
       }
 
@@ -18318,6 +18336,7 @@ def render_netsniper_page() -> str:
             <td><code>${escapeHtml(job.job_id || "-")}</code></td>
             <td><span class="pill">${escapeHtml(job.status || "-")}</span></td>
             <td>${escapeHtml(job.target || job.network_scope || "-")}</td>
+            <td>${escapeHtml(job.scan_profile || "balanced")}</td>
             <td>${escapeHtml(job.created_at || "-")}</td>
             <td>${escapeHtml(job.updated_at || "-")}</td>
             <td>${escapeHtml(job.exit_code === null || job.exit_code === undefined ? "-" : job.exit_code)}</td>
@@ -18348,7 +18367,7 @@ def render_netsniper_page() -> str:
       } catch (error) {
         const tbody = document.getElementById("netsniper-scan-jobs-body");
         if (tbody) {
-          tbody.innerHTML = `<tr><td colspan="8">Scan job lookup failed: ${escapeHtml(error.message || error)}</td></tr>`;
+          tbody.innerHTML = `<tr><td colspan="9">Scan job lookup failed: ${escapeHtml(error.message || error)}</td></tr>`;
         }
       }
     }
@@ -18376,7 +18395,7 @@ def render_netsniper_page() -> str:
           credentials: "same-origin",
           cache: "no-store",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({target: target})
+          body: JSON.stringify({target: target, scan_profile: scanProfile})
         });
 
         let payload = {};
