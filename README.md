@@ -4,21 +4,27 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.30.0
+## Current Release — v0.31.0
 
-**DeltaAegis v0.30.0 — NetSniper Profile-Aware Scan Jobs**
+**DeltaAegis v0.31.0 — Scheduled Profile-Aware Scans**
 
-v0.30.0 makes DeltaAegis aware of NetSniper v1.9 scan profiles when launching guarded scan jobs from the CLI or dashboard.
+DeltaAegis v0.31.0 adds saved, profile-aware NetSniper scan schedules with dashboard controls, one-click hourly balanced monitoring, automatic due-schedule execution from the dashboard process, and persisted scheduled scan success/failure state.
 
-### Current v0.30.0 highlights
+### Highlights
 
-- Added profile-aware NetSniper scan jobs using `quick`, `balanced`, and `accurate`.
-- Added `deltaaegis scan-start --profile quick|balanced|accurate`.
-- Added guarded dashboard scan-profile selection for NetSniper launches.
-- Added `scan_jobs.scan_profile` storage with migration support for existing databases.
-- Added scan-job history/profile visibility in CLI and dashboard job tables.
-- Preserved the v0.29 guarded scan-job safety model, including ADMIN-only dashboard launch, private-CIDR validation, one-active-job protection, fixed argument construction, no raw shell execution, background execution, logs, and auto-status tracking.
+- Saved NetSniper scan schedules with private-CIDR validation, profile selection, cadence, enabled state, and auto-ingest controls.
+- Dashboard schedule API and UI for creating, enabling, disabling, deleting, listing, and manually running due schedules.
+- One-click **Hourly Balanced Monitoring** using the balanced profile, a 60-minute cadence, and auto-ingest enabled.
+- Dashboard schedule worker that wakes periodically, runs at most one due schedule per tick, skips when another scan is active, and reuses the guarded v0.30 scan-job path.
+- Scheduled scan failure persistence so execution errors mark both the scan job and schedule as failed instead of leaving stale `RUNNING` jobs.
 
+### Validation
+
+Run the v0.31 release gate:
+
+```bash
+./tools/validate_v0_31_release.sh
+```
 
 ## What DeltaAegis Does
 
