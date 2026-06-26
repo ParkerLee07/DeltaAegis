@@ -1319,6 +1319,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
     ensure_column(connection, "snapshots", "neighbors_captured_at", "neighbors_captured_at TEXT")
     ensure_column(connection, "snapshots", "network_scope", "network_scope TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "asset_observations", "identity_class", "identity_class TEXT NOT NULL DEFAULT 'IP_ONLY'")
+    ensure_column(connection, "scan_jobs", "scan_profile", "scan_profile TEXT NOT NULL DEFAULT 'balanced'")
 
     # NetSniper v1.4 classification intelligence columns.
     ensure_column(connection, "asset_observations", "device_type_confidence", "device_type_confidence INTEGER")
@@ -3664,8 +3665,28 @@ def validate_private_cidr(target: str) -> str:
     return str(network)
 
 
-def build_netsniper_headless_command(netsniper_path: Path, target: str) -> list[str]:
+ALLOWED_NETSNIPER_SCAN_PROFILES = {"quick", "balanced", "accurate"}
+
+
+def validate_netsniper_scan_profile(profile: str | None) -> str:
+    value = str(profile or "balanced").strip().lower()
+
+    if not value:
+        value = "balanced"
+
+    if value == "deep":
+        raise DeltaAegisError("NetSniper scan profile 'deep' is planned but not runtime-enabled. Use quick, balanced, or accurate.")
+
+    if value not in ALLOWED_NETSNIPER_SCAN_PROFILES:
+        allowed = ", ".join(sorted(ALLOWED_NETSNIPER_SCAN_PROFILES))
+        raise DeltaAegisError(f"invalid NetSniper scan profile: {profile!r}; allowed profiles: {allowed}")
+
+    return value
+
+
+def build_netsniper_headless_command(netsniper_path: Path, target: str, scan_profile: str = "balanced") -> list[str]:
     safe_target = validate_private_cidr(target)
+    safe_profile = validate_netsniper_scan_profile(scan_profile)
 
     return [
         str(netsniper_path),
@@ -3675,6 +3696,8 @@ def build_netsniper_headless_command(netsniper_path: Path, target: str) -> list[
         "--greenbone",
         "no",
         "--json-status",
+        "--profile",
+        safe_profile,
     ]
 
 
@@ -3685,8 +3708,10 @@ def create_scan_job(
     netsniper_path: Path,
     runs_dir: Path,
     auto_ingest: bool = False,
+    scan_profile: str = "balanced",
 ) -> dict[str, Any]:
     safe_target = validate_private_cidr(target)
+    safe_profile = validate_netsniper_scan_profile(scan_profile)
     now = utc_now_text()
     job_id = f"scan-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
 
@@ -3701,11 +3726,12 @@ def create_scan_job(
             updated_at,
             netsniper_path,
             runs_dir,
+            scan_profile,
             auto_ingest,
             status_json,
             message
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             job_id,
@@ -3716,6 +3742,7 @@ def create_scan_job(
             now,
             str(netsniper_path),
             str(runs_dir),
+            safe_profile,
             1 if auto_ingest else 0,
             "{}",
             "scan job queued",
@@ -3731,11 +3758,11 @@ def create_scan_job(
         "updated_at": now,
         "netsniper_path": str(netsniper_path),
         "runs_dir": str(runs_dir),
+        "scan_profile": safe_profile,
         "auto_ingest": auto_ingest,
         "status_json": {},
         "message": "scan job queued",
     }
-
 
 def update_scan_job(
     connection: sqlite3.Connection,
@@ -3830,8 +3857,10 @@ def execute_scan_job(
     logs_dir: Path,
     events_path: Path,
     auto_ingest: bool = False,
+    scan_profile: str = "balanced",
 ) -> dict[str, Any]:
     safe_target = validate_private_cidr(target)
+    safe_profile = validate_netsniper_scan_profile(scan_profile)
     netsniper_path = Path(netsniper_path).expanduser()
     runs_dir = Path(runs_dir).expanduser()
     logs_dir = Path(logs_dir).expanduser()
@@ -3840,7 +3869,7 @@ def execute_scan_job(
     if not netsniper_path.is_file():
         raise DeltaAegisError(f"NetSniper executable not found: {netsniper_path}")
 
-    command = build_netsniper_headless_command(netsniper_path, safe_target)
+    command = build_netsniper_headless_command(netsniper_path, safe_target, safe_profile)
 
     logs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3891,9 +3920,9 @@ def execute_scan_job(
     message_parts = []
 
     if final_status == "COMPLETED":
-        message_parts.append("NetSniper scan completed")
+        message_parts.append(f"NetSniper scan completed profile={safe_profile}")
     else:
-        message_parts.append(f"NetSniper scan failed with exit code {completed.returncode}")
+        message_parts.append(f"NetSniper scan failed with exit code {completed.returncode} profile={safe_profile}")
 
     if bundle_path:
         message_parts.append(f"bundle={bundle_path}")
@@ -3936,6 +3965,7 @@ def command_scan_start(args: argparse.Namespace) -> int:
     connection = connect(args.db)
 
     safe_target = validate_private_cidr(args.target)
+    safe_profile = validate_netsniper_scan_profile(args.profile)
     netsniper_path = Path(args.netsniper_path).expanduser()
     logs_dir = Path(args.scan_logs_dir).expanduser()
     runs_dir = Path(args.runs_dir).expanduser()
@@ -3952,6 +3982,7 @@ def command_scan_start(args: argparse.Namespace) -> int:
     print(f"Created scan job: {job['job_id']}")
     print(f"Target: {safe_target}")
     print(f"NetSniper: {netsniper_path}")
+    print(f"Scan profile: {safe_profile}")
     print(f"Auto-ingest: {'yes' if args.auto_ingest else 'no'}")
     print()
 
@@ -3999,6 +4030,7 @@ def scan_job_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     item = dict(row)
 
     item["auto_ingest"] = bool(item.get("auto_ingest"))
+    item["scan_profile"] = item.get("scan_profile") or "balanced"
     item["status_json"] = decode_json_field(item.get("status_json"), {})
 
     return item
@@ -4043,6 +4075,7 @@ def query_scan_jobs(
             finished_at,
             netsniper_path,
             runs_dir,
+            scan_profile,
             bundle_path,
             exit_code,
             auto_ingest,
@@ -4093,6 +4126,7 @@ def print_scan_job_rows(rows: Iterable[sqlite3.Row]) -> None:
             f"{item['job_id']}  "
             f"{item['status']:<9}  "
             f"{item['target']:<18}  "
+            f"profile={item.get('scan_profile') or 'balanced'}  "
             f"scope={item['network_scope'] or '-'}"
         )
         print(f"  created={item['created_at']}  updated={item['updated_at']}")
@@ -19487,8 +19521,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--target-type")
 
     sub.add_parser("ingest")
-    p = sub.add_parser("scan-start", help="Run a safe NetSniper v1.8 headless scan job")
+    p = sub.add_parser("scan-start", help="Run a safe NetSniper v1.9 profile-aware headless scan job")
     p.add_argument("--target", required=True, help="Private IPv4 CIDR target, such as 192.168.5.0/24")
+    p.add_argument("--profile", choices=["quick", "balanced", "accurate"], default="balanced", help="NetSniper v1.9 scan profile. Default: balanced")
     p.add_argument("--netsniper-path", type=Path, default=DEFAULT_NETSNIPER)
     p.add_argument("--scan-logs-dir", type=Path, default=DEFAULT_SCAN_LOGS)
     p.add_argument("--auto-ingest", action="store_true", help="Ingest the completed NetSniper bundle after a successful scan")
