@@ -85,6 +85,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("POST", "/api/netsniper/schedule-disable", "scan.start"),
     ("POST", "/api/netsniper/schedule-delete", "scan.start"),
     ("POST", "/api/netsniper/schedule-run-due", "scan.start"),
+    ("POST", "/api/netsniper/hourly-monitoring", "scan.start"),
 )
 
 
@@ -4282,6 +4283,77 @@ def dashboard_netsniper_schedule_run_due_payload(
     }
 
 
+
+HOURLY_BALANCED_MONITORING_NAME = "Hourly Balanced Monitoring"
+
+
+def dashboard_hourly_monitoring_schedule_rows(
+    connection: sqlite3.Connection,
+) -> list[sqlite3.Row]:
+    return connection.execute(
+        """
+        SELECT *
+        FROM scan_schedules
+        WHERE name = ?
+        ORDER BY created_at ASC
+        """,
+        (HOURLY_BALANCED_MONITORING_NAME,),
+    ).fetchall()
+
+
+def dashboard_netsniper_hourly_monitoring_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    enabled = dashboard_bool_from_payload(payload.get("enabled"), True)
+    existing_rows = dashboard_hourly_monitoring_schedule_rows(connection)
+
+    if not enabled:
+        updated_schedule = None
+
+        for row in existing_rows:
+            updated_schedule = set_scan_schedule_enabled(
+                connection,
+                row["schedule_id"],
+                False,
+            )
+
+        return {
+            "ok": True,
+            "action": "hourly_monitoring.disable",
+            "schedule": updated_schedule,
+            "schedules": dashboard_scan_schedules_payload(connection),
+        }
+
+    target = str(payload.get("target") or "").strip()
+
+    if not target:
+        raise DashboardAdminUserActionError(
+            "target is required to enable hourly monitoring",
+            status_code=400,
+        )
+
+    for row in existing_rows:
+        delete_scan_schedule(connection, row["schedule_id"])
+
+    schedule = create_scan_schedule(
+        connection,
+        name=HOURLY_BALANCED_MONITORING_NAME,
+        target=target,
+        scan_profile="balanced",
+        cadence_minutes=60,
+        enabled=True,
+        auto_ingest=True,
+    )
+
+    return {
+        "ok": True,
+        "action": "hourly_monitoring.enable",
+        "schedule": schedule,
+        "schedules": dashboard_scan_schedules_payload(connection),
+    }
+
+
 def dashboard_netsniper_schedule_action_payload(
     connection: sqlite3.Connection,
     route: str,
@@ -4302,6 +4374,9 @@ def dashboard_netsniper_schedule_action_payload(
 
     if route == "/api/netsniper/schedule-run-due":
         return dashboard_netsniper_schedule_run_due_payload(connection, payload, events_path)
+
+    if route == "/api/netsniper/hourly-monitoring":
+        return dashboard_netsniper_hourly_monitoring_payload(connection, payload)
 
     raise DashboardAdminUserActionError(f"unsupported schedule route: {route}", status_code=404)
 
@@ -18983,6 +19058,15 @@ def render_netsniper_page() -> str:
       <h2>Scheduled scans</h2>
       <p>Saved profile-aware NetSniper scan schedules. These use the same guarded scan-job path as manual dashboard launches.</p>
 
+      <div class="actions" id="netsniper-hourly-monitoring-controls">
+        <label>Hourly monitoring target
+          <input id="netsniper-hourly-monitoring-target" name="hourly_target" autocomplete="off" placeholder="192.168.5.0/24">
+        </label>
+        <button type="button" id="netsniper-hourly-monitoring-enable">Enable hourly balanced monitoring</button>
+        <button type="button" id="netsniper-hourly-monitoring-disable">Disable hourly monitoring</button>
+      </div>
+      <p class="muted">Hourly monitoring creates or refreshes one saved schedule named <code>Hourly Balanced Monitoring</code> using the balanced profile, a 60-minute cadence, and auto-ingest enabled.</p>
+
       <form id="netsniper-schedule-create-form" class="scan-form">
         <label>Schedule name
           <input id="netsniper-schedule-name" name="name" autocomplete="off" placeholder="Hourly Balanced Monitoring" required>
@@ -19368,6 +19452,64 @@ def render_netsniper_page() -> str:
       }
     }
 
+
+    function hourlyMonitoringTargetValue() {
+      const hourlyTarget = document.getElementById("netsniper-hourly-monitoring-target");
+      const scheduleTarget = document.getElementById("netsniper-schedule-target");
+      const scanTarget = document.getElementById("netsniper-scan-target");
+
+      const candidates = [
+        hourlyTarget ? hourlyTarget.value.trim() : "",
+        scheduleTarget ? scheduleTarget.value.trim() : "",
+        scanTarget ? scanTarget.value.trim() : ""
+      ];
+
+      return candidates.find(function (value) { return Boolean(value); }) || "";
+    }
+
+    async function setHourlyNetSniperMonitoring(enabled) {
+      const status = document.getElementById("netsniper-status");
+      const output = document.getElementById("netsniper-schedule-result");
+      const enableButton = document.getElementById("netsniper-hourly-monitoring-enable");
+      const disableButton = document.getElementById("netsniper-hourly-monitoring-disable");
+      const target = hourlyMonitoringTargetValue();
+
+      if (enabled && !target) {
+        output.textContent = "Target CIDR is required to enable hourly monitoring.";
+        return;
+      }
+
+      enableButton.disabled = true;
+      disableButton.disabled = true;
+      status.textContent = enabled
+        ? "Enabling hourly balanced monitoring…"
+        : "Disabling hourly balanced monitoring…";
+
+      try {
+        const payload = await postNetSniperSchedule("/api/netsniper/hourly-monitoring", {
+          target: target,
+          enabled: Boolean(enabled)
+        });
+
+        if (!payload) { return; }
+
+        output.textContent = JSON.stringify(payload, null, 2);
+        status.textContent = enabled
+          ? "Hourly balanced monitoring enabled."
+          : "Hourly balanced monitoring disabled.";
+
+        renderNetSniperSchedules(payload);
+        await loadNetSniperSchedules();
+      } catch (error) {
+        status.textContent = `Hourly monitoring action failed: ${error.message || error}`;
+        output.textContent = String(error.message || error);
+      } finally {
+        enableButton.disabled = false;
+        disableButton.disabled = false;
+      }
+    }
+
+
     async function createNetSniperSchedule(event) {
       event.preventDefault();
 
@@ -19557,6 +19699,8 @@ def render_netsniper_page() -> str:
     document.getElementById("netsniper-schedule-create-form").addEventListener("submit", createNetSniperSchedule);
     document.getElementById("netsniper-schedules-refresh").addEventListener("click", loadNetSniperSchedules);
     document.getElementById("netsniper-schedules-run-due").addEventListener("click", runDueNetSniperSchedules);
+    document.getElementById("netsniper-hourly-monitoring-enable").addEventListener("click", function () { setHourlyNetSniperMonitoring(true); });
+    document.getElementById("netsniper-hourly-monitoring-disable").addEventListener("click", function () { setHourlyNetSniperMonitoring(false); });
     document.getElementById("netsniper-schedules-body").addEventListener("click", handleNetSniperScheduleAction);
     loadNetSniperStatus();
     loadNetSniperScanJobs();
@@ -20292,6 +20436,7 @@ def command_dashboard(args):
                 "/api/netsniper/schedule-disable",
                 "/api/netsniper/schedule-delete",
                 "/api/netsniper/schedule-run-due",
+                "/api/netsniper/hourly-monitoring",
             }:
                 if not self.require_permission("scan.start"):
                     return
