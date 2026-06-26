@@ -18,6 +18,7 @@ import re
 import secrets
 import sqlite3
 import subprocess
+import threading
 import sys
 import uuid
 import xml.etree.ElementTree as ET
@@ -9013,6 +9014,7 @@ def dashboard_active_scan_job(connection: sqlite3.Connection) -> dict[str, Any] 
 def dashboard_netsniper_scan_start_payload(
     connection: sqlite3.Connection,
     payload: dict[str, Any],
+    db_path: Path,
     events_path: Path,
 ) -> dict[str, Any]:
     target = str(payload.get("target") or "").strip()
@@ -9041,6 +9043,17 @@ def dashboard_netsniper_scan_start_payload(
     )
     connection.commit()
 
+    dashboard_start_scan_job_thread(
+        db_path=db_path,
+        events_path=events_path,
+        job_id=job["job_id"],
+        target=safe_target,
+        netsniper_path=netsniper_path,
+        runs_dir=runs_dir,
+        logs_dir=logs_dir,
+        auto_ingest=False,
+    )
+
     return {
         "ok": True,
         "job": job,
@@ -9050,8 +9063,77 @@ def dashboard_netsniper_scan_start_payload(
         "netsniper_path": str(netsniper_path),
         "runs_dir": str(runs_dir),
         "logs_dir": str(logs_dir),
-        "message": "scan job queued; dashboard background execution will be attached in the next v0.29 stage",
+        "message": "scan job queued and started in a guarded dashboard background worker",
     }
+
+
+
+def dashboard_netsniper_scan_worker(
+    db_path: Path,
+    events_path: Path,
+    job_id: str,
+    target: str,
+    netsniper_path: Path,
+    runs_dir: Path,
+    logs_dir: Path,
+    auto_ingest: bool = False,
+) -> None:
+    connection = connect(db_path)
+
+    try:
+        execute_scan_job(
+            connection,
+            job_id,
+            target,
+            netsniper_path,
+            runs_dir,
+            logs_dir,
+            events_path,
+            auto_ingest=auto_ingest,
+        )
+    except Exception as exc:
+        try:
+            update_scan_job(
+                connection,
+                job_id,
+                status="FAILED",
+                finished_at=utc_now_text(),
+                message=f"scan worker failed: {exc}",
+            )
+            connection.commit()
+        except Exception:
+            pass
+    finally:
+        connection.close()
+
+
+def dashboard_start_scan_job_thread(
+    db_path: Path,
+    events_path: Path,
+    job_id: str,
+    target: str,
+    netsniper_path: Path,
+    runs_dir: Path,
+    logs_dir: Path,
+    auto_ingest: bool = False,
+) -> threading.Thread:
+    thread = threading.Thread(
+        name=f"deltaaegis-netsniper-scan-{job_id}",
+        target=dashboard_netsniper_scan_worker,
+        kwargs={
+            "db_path": db_path,
+            "events_path": events_path,
+            "job_id": job_id,
+            "target": target,
+            "netsniper_path": netsniper_path,
+            "runs_dir": runs_dir,
+            "logs_dir": logs_dir,
+            "auto_ingest": auto_ingest,
+        },
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 def dashboard_summary_payload(connection, scope=None):
     if scope:
@@ -18852,6 +18934,82 @@ def command_dashboard(args):
 
                 dashboard_json_response(self, result)
                 return
+
+            if route == "/api/netsniper/scan-start":
+                if not self.require_permission("scan.start"):
+                    return
+
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    content_length = 0
+
+                if content_length <= 0:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "missing_body",
+                            "message": "POST body must be JSON.",
+                        },
+                        status=400,
+                    )
+                    return
+
+                if content_length > 65536:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "body_too_large",
+                            "message": "POST body is too large.",
+                        },
+                        status=413,
+                    )
+                    return
+
+                try:
+                    raw_body = self.rfile.read(content_length).decode("utf-8")
+                    payload = json.loads(raw_body)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "invalid_json",
+                            "message": "POST body must be valid JSON.",
+                        },
+                        status=400,
+                    )
+                    return
+
+                connection = self.open_connection()
+
+                try:
+                    try:
+                        result = dashboard_netsniper_scan_start_payload(
+                            connection,
+                            payload,
+                            args.db,
+                            args.events,
+                        )
+                    except DeltaAegisError as exc:
+                        connection.rollback()
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "netsniper_scan_start_failed",
+                                "message": str(exc),
+                            },
+                            status=400,
+                        )
+                        return
+
+                    dashboard_json_response(self, result)
+                    return
+                finally:
+                    connection.close()
 
             if not self.require_permission("workflow.write"):
                 return
