@@ -46,3 +46,6 @@ deltaaegis.py.backup-v0.7-*
 # Local versioned patch backups
 deltaaegis.py.backup-v*
 *.backup-v*
+
+# DeltaAegis local scan runtime logs
+scan-logs/
