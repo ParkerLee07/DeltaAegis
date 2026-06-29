@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.28.0: Dashboard NetSniper Import Setup, dashboard-first NetSniper telemetry intake, operator workflow control, RBAC, session login, investigation intelligence, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console.
+"""DeltaAegis v0.31.0: Scheduled Profile-Aware Scans, saved NetSniper scan schedules, dashboard schedule controls, one-click hourly monitoring, automatic due-schedule execution, and guarded scan-job persistence.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -79,6 +79,13 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("POST", "/api/investigate-asset", "workflow.write"),
     ("POST", "/api/netsniper/import-latest", "workflow.write"),
     ("POST", "/api/netsniper/scan-start", "scan.start"),
+    ("GET", "/api/netsniper/schedules", "dashboard.read"),
+    ("POST", "/api/netsniper/schedule-create", "scan.start"),
+    ("POST", "/api/netsniper/schedule-enable", "scan.start"),
+    ("POST", "/api/netsniper/schedule-disable", "scan.start"),
+    ("POST", "/api/netsniper/schedule-delete", "scan.start"),
+    ("POST", "/api/netsniper/schedule-run-due", "scan.start"),
+    ("POST", "/api/netsniper/hourly-monitoring", "scan.start"),
 )
 
 
@@ -483,6 +490,35 @@ CREATE INDEX IF NOT EXISTS idx_scan_jobs_status
 
 CREATE INDEX IF NOT EXISTS idx_scan_jobs_scope
     ON scan_jobs(network_scope);
+
+CREATE TABLE IF NOT EXISTS scan_schedules (
+    schedule_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    target TEXT NOT NULL,
+    network_scope TEXT NOT NULL,
+    scan_profile TEXT NOT NULL DEFAULT 'balanced',
+    cadence_minutes INTEGER NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    auto_ingest INTEGER NOT NULL DEFAULT 1,
+    last_run_at TEXT,
+    next_run_at TEXT,
+    last_job_id TEXT,
+    last_status TEXT,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    skip_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    message TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_schedules_enabled_next_run
+    ON scan_schedules(enabled, next_run_at);
+
+CREATE INDEX IF NOT EXISTS idx_scan_schedules_scope
+    ON scan_schedules(network_scope);
+
+CREATE INDEX IF NOT EXISTS idx_scan_schedules_profile
+    ON scan_schedules(scan_profile);
 
 """
 
@@ -3815,28 +3851,38 @@ def update_scan_job(
 
 
 def extract_netsniper_status_json(stdout_text: str) -> dict[str, Any]:
-    for raw_line in reversed((stdout_text or "").splitlines()):
-        line = raw_line.strip()
+    text = stdout_text or ""
+    decoder = json.JSONDecoder()
+    best: dict[str, Any] | None = None
 
-        if not line:
+    index = text.find("{")
+
+    while index != -1:
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            index = text.find("{", index + 1)
             continue
 
-        candidates = [line]
+        if isinstance(value, dict):
+            best = value
 
-        if "{" in line and "}" in line:
-            candidates.append(line[line.find("{"): line.rfind("}") + 1])
+            if any(
+                key in value
+                for key in (
+                    "bundle_path",
+                    "manifest_path",
+                    "run_dir",
+                    "run_directory",
+                    "return_code",
+                    "status",
+                )
+            ):
+                best = value
 
-        for candidate in candidates:
-            try:
-                value = json.loads(candidate)
-            except json.JSONDecodeError:
-                continue
+        index = text.find("{", index + 1)
 
-            if isinstance(value, dict):
-                return value
-
-    return {}
-
+    return best or {}
 
 def extract_netsniper_bundle_path(status_json: dict[str, Any]) -> str | None:
     for key in ("bundle_path", "bundle_dir", "run_dir", "run_directory"):
@@ -3846,6 +3892,132 @@ def extract_netsniper_bundle_path(status_json: dict[str, Any]) -> str | None:
             return str(value)
 
     return None
+
+
+def netsniper_manifest_runtime_profile(manifest: dict[str, Any]) -> str:
+    for key in (
+        "scan_profile_effective",
+        "scan_profile_requested",
+        "effective_scan_profile",
+        "requested_scan_profile",
+        "profile",
+    ):
+        value = manifest.get(key)
+
+        if value:
+            return str(value).strip().lower()
+
+    return ""
+
+
+def netsniper_manifest_is_complete(manifest: dict[str, Any]) -> bool:
+    return str(
+        manifest.get("status")
+        or manifest.get("run_status")
+        or ""
+    ).strip().upper() in {"COMPLETE", "COMPLETED"}
+
+
+def netsniper_manifest_matches_scan_job(
+    manifest: dict[str, Any],
+    target: str,
+    scan_profile: str,
+) -> bool:
+    manifest_target = str(
+        manifest.get("target")
+        or manifest.get("network_scope")
+        or ""
+    ).strip()
+
+    if manifest_target != target:
+        return False
+
+    if not netsniper_manifest_is_complete(manifest):
+        return False
+
+    runtime_profile = netsniper_manifest_runtime_profile(manifest)
+
+    if runtime_profile in ALLOWED_NETSNIPER_SCAN_PROFILES:
+        return runtime_profile == scan_profile
+
+    return True
+
+
+def utc_text_to_epoch(value: str) -> float:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    return parsed.timestamp()
+
+
+def find_completed_netsniper_manifest_for_scan(
+    runs_dir: Path,
+    target: str,
+    scan_profile: str,
+    started_at: str,
+) -> Path | None:
+    runs_dir = Path(runs_dir).expanduser()
+    threshold = max(0.0, utc_text_to_epoch(started_at) - 300.0)
+    candidates: list[tuple[float, Path]] = []
+
+    if not runs_dir.is_dir():
+        return None
+
+    for manifest_path in runs_dir.glob("*/manifest.json"):
+        try:
+            modified_at = manifest_path.stat().st_mtime
+        except OSError:
+            continue
+
+        if modified_at < threshold:
+            continue
+
+        manifest = load_json_file(manifest_path, {})
+
+        if not isinstance(manifest, dict):
+            continue
+
+        if not netsniper_manifest_matches_scan_job(manifest, target, scan_profile):
+            continue
+
+        candidates.append((modified_at, manifest_path))
+
+    if not candidates:
+        return None
+
+    candidates.sort(reverse=True, key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def enrich_netsniper_status_from_manifest(
+    status_json: dict[str, Any],
+    manifest_path: Path,
+) -> dict[str, Any]:
+    manifest = load_json_file(manifest_path, {})
+    enriched = dict(status_json or {})
+
+    enriched.setdefault("status", manifest.get("status") or "COMPLETE")
+    enriched.setdefault("target", manifest.get("target"))
+    enriched.setdefault("return_code", 0)
+    enriched["run_dir"] = str(manifest_path.parent)
+    enriched["manifest_path"] = str(manifest_path)
+
+    if manifest.get("scan_id"):
+        enriched.setdefault("scan_id", manifest.get("scan_id"))
+
+    if manifest.get("scan_profile_effective"):
+        enriched.setdefault("scan_profile_effective", manifest.get("scan_profile_effective"))
+
+    if manifest.get("scan_profile_requested"):
+        enriched.setdefault("scan_profile_requested", manifest.get("scan_profile_requested"))
+
+    return enriched
+
 
 
 def execute_scan_job(
@@ -3898,6 +4070,17 @@ def execute_scan_job(
             stderr=subprocess.PIPE,
             check=False,
         )
+    except KeyboardInterrupt as exc:
+        update_scan_job(
+            connection,
+            job_id,
+            status="FAILED",
+            finished_at=utc_now_text(),
+            exit_code=130,
+            message=f"NetSniper scan interrupted by operator profile={safe_profile}",
+        )
+        connection.commit()
+        raise DeltaAegisError("NetSniper scan interrupted by operator") from exc
     except OSError as exc:
         update_scan_job(
             connection,
@@ -3915,6 +4098,19 @@ def execute_scan_job(
 
     status_json = extract_netsniper_status_json(completed.stdout)
     bundle_path = extract_netsniper_bundle_path(status_json)
+
+    if completed.returncode == 0 and not bundle_path:
+        manifest_path = find_completed_netsniper_manifest_for_scan(
+            runs_dir,
+            safe_target,
+            safe_profile,
+            started_at,
+        )
+
+        if manifest_path is not None:
+            status_json = enrich_netsniper_status_from_manifest(status_json, manifest_path)
+            bundle_path = str(manifest_path.parent)
+
     final_status = "COMPLETED" if completed.returncode == 0 else "FAILED"
 
     message_parts = []
@@ -3976,6 +4172,7 @@ def command_scan_start(args: argparse.Namespace) -> int:
         netsniper_path,
         runs_dir,
         auto_ingest=args.auto_ingest,
+        scan_profile=safe_profile,
     )
     connection.commit()
 
@@ -3996,6 +4193,7 @@ def command_scan_start(args: argparse.Namespace) -> int:
             logs_dir,
             args.events,
             auto_ingest=args.auto_ingest,
+            scan_profile=safe_profile,
         )
     except DeltaAegisError as exc:
         print(f"Scan job failed: {exc}", file=sys.stderr)
@@ -4109,6 +4307,240 @@ def dashboard_scan_jobs_payload(
     ]
 
 
+
+def dashboard_scan_schedules_payload(
+    connection: sqlite3.Connection,
+    limit: int = 50,
+    scope: str | None = None,
+    enabled: bool | None = None,
+) -> list[dict[str, Any]]:
+    return [
+        scan_schedule_to_dict(row)
+        for row in query_scan_schedules(
+            connection,
+            limit=limit,
+            enabled=enabled,
+            scope=scope,
+        )
+    ]
+
+
+def dashboard_schedule_id_from_payload(payload: dict[str, Any]) -> str:
+    schedule_id = str(payload.get("schedule_id") or "").strip()
+
+    if not schedule_id:
+        raise DashboardAdminUserActionError("schedule_id is required", status_code=400)
+
+    if len(schedule_id) > 96:
+        raise DashboardAdminUserActionError("schedule_id is too long", status_code=400)
+
+    return schedule_id
+
+
+def dashboard_bool_from_payload(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return default
+
+    if isinstance(value, bool):
+        return value
+
+    normalized = str(value).strip().lower()
+
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+
+    return default
+
+
+def dashboard_netsniper_schedule_create_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    profile = payload.get("scan_profile")
+
+    if profile is None:
+        profile = payload.get("profile")
+
+    cadence = payload.get("cadence_minutes")
+
+    if cadence is None:
+        cadence = 60
+
+    schedule = create_scan_schedule(
+        connection,
+        name=str(payload.get("name") or "").strip(),
+        target=str(payload.get("target") or "").strip(),
+        scan_profile=str(profile or "balanced").strip(),
+        cadence_minutes=int(cadence),
+        enabled=dashboard_bool_from_payload(payload.get("enabled"), True),
+        auto_ingest=dashboard_bool_from_payload(payload.get("auto_ingest"), True),
+    )
+
+    return {
+        "ok": True,
+        "action": "schedule.create",
+        "schedule": schedule,
+        "schedules": dashboard_scan_schedules_payload(connection),
+    }
+
+
+def dashboard_netsniper_schedule_enabled_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+    enabled: bool,
+) -> dict[str, Any]:
+    schedule_id = dashboard_schedule_id_from_payload(payload)
+    schedule = set_scan_schedule_enabled(connection, schedule_id, enabled)
+
+    return {
+        "ok": True,
+        "action": "schedule.enable" if enabled else "schedule.disable",
+        "schedule": schedule,
+        "schedules": dashboard_scan_schedules_payload(connection),
+    }
+
+
+def dashboard_netsniper_schedule_delete_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    schedule_id = dashboard_schedule_id_from_payload(payload)
+    delete_scan_schedule(connection, schedule_id)
+
+    return {
+        "ok": True,
+        "action": "schedule.delete",
+        "schedule_id": schedule_id,
+        "schedules": dashboard_scan_schedules_payload(connection),
+    }
+
+
+def dashboard_netsniper_schedule_run_due_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+    events_path: Path,
+) -> dict[str, Any]:
+    max_runs = int(payload.get("max_runs") or 1)
+
+    results = run_due_scan_schedules(
+        connection,
+        netsniper_path=dashboard_netsniper_root_path() / "netsniper.sh",
+        runs_dir=dashboard_netsniper_runs_dir(),
+        logs_dir=DEFAULT_SCAN_LOGS,
+        events_path=events_path,
+        max_runs=max_runs,
+    )
+
+    return {
+        "ok": True,
+        "action": "schedule.run_due",
+        "results": results,
+        "schedules": dashboard_scan_schedules_payload(connection),
+        "scan_jobs": dashboard_scan_jobs_payload(connection, limit=20),
+    }
+
+
+
+HOURLY_BALANCED_MONITORING_NAME = "Hourly Balanced Monitoring"
+
+
+def dashboard_hourly_monitoring_schedule_rows(
+    connection: sqlite3.Connection,
+) -> list[sqlite3.Row]:
+    return connection.execute(
+        """
+        SELECT *
+        FROM scan_schedules
+        WHERE name = ?
+        ORDER BY created_at ASC
+        """,
+        (HOURLY_BALANCED_MONITORING_NAME,),
+    ).fetchall()
+
+
+def dashboard_netsniper_hourly_monitoring_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    enabled = dashboard_bool_from_payload(payload.get("enabled"), True)
+    existing_rows = dashboard_hourly_monitoring_schedule_rows(connection)
+
+    if not enabled:
+        updated_schedule = None
+
+        for row in existing_rows:
+            updated_schedule = set_scan_schedule_enabled(
+                connection,
+                row["schedule_id"],
+                False,
+            )
+
+        return {
+            "ok": True,
+            "action": "hourly_monitoring.disable",
+            "schedule": updated_schedule,
+            "schedules": dashboard_scan_schedules_payload(connection),
+        }
+
+    target = str(payload.get("target") or "").strip()
+
+    if not target:
+        raise DashboardAdminUserActionError(
+            "target is required to enable hourly monitoring",
+            status_code=400,
+        )
+
+    for row in existing_rows:
+        delete_scan_schedule(connection, row["schedule_id"])
+
+    schedule = create_scan_schedule(
+        connection,
+        name=HOURLY_BALANCED_MONITORING_NAME,
+        target=target,
+        scan_profile="balanced",
+        cadence_minutes=60,
+        enabled=True,
+        auto_ingest=True,
+    )
+
+    return {
+        "ok": True,
+        "action": "hourly_monitoring.enable",
+        "schedule": schedule,
+        "schedules": dashboard_scan_schedules_payload(connection),
+    }
+
+
+def dashboard_netsniper_schedule_action_payload(
+    connection: sqlite3.Connection,
+    route: str,
+    payload: dict[str, Any],
+    events_path: Path,
+) -> dict[str, Any]:
+    if route == "/api/netsniper/schedule-create":
+        return dashboard_netsniper_schedule_create_payload(connection, payload)
+
+    if route == "/api/netsniper/schedule-enable":
+        return dashboard_netsniper_schedule_enabled_payload(connection, payload, True)
+
+    if route == "/api/netsniper/schedule-disable":
+        return dashboard_netsniper_schedule_enabled_payload(connection, payload, False)
+
+    if route == "/api/netsniper/schedule-delete":
+        return dashboard_netsniper_schedule_delete_payload(connection, payload)
+
+    if route == "/api/netsniper/schedule-run-due":
+        return dashboard_netsniper_schedule_run_due_payload(connection, payload, events_path)
+
+    if route == "/api/netsniper/hourly-monitoring":
+        return dashboard_netsniper_hourly_monitoring_payload(connection, payload)
+
+    raise DashboardAdminUserActionError(f"unsupported schedule route: {route}", status_code=404)
+
+
 def print_scan_job_rows(rows: Iterable[sqlite3.Row]) -> None:
     rows = list(rows)
 
@@ -4150,6 +4582,640 @@ def command_scan_jobs(args: argparse.Namespace) -> int:
             scope=scope,
         )
     )
+
+    return 0
+
+
+
+ALLOWED_SCAN_SCHEDULE_CADENCE_MINUTES = {60, 120, 360, 720, 1440}
+
+
+def validate_scan_schedule_cadence_minutes(value: int | str | None) -> int:
+    try:
+        minutes = int(value if value is not None else 60)
+    except (TypeError, ValueError) as exc:
+        raise DeltaAegisError(f"invalid schedule cadence minutes: {value!r}") from exc
+
+    if minutes not in ALLOWED_SCAN_SCHEDULE_CADENCE_MINUTES:
+        allowed = ", ".join(str(item) for item in sorted(ALLOWED_SCAN_SCHEDULE_CADENCE_MINUTES))
+        raise DeltaAegisError(
+            f"invalid schedule cadence minutes: {minutes}; allowed values: {allowed}"
+        )
+
+    return minutes
+
+
+def validate_scan_schedule_name(name: str | None) -> str:
+    value = str(name or "").strip()
+
+    if not value:
+        raise DeltaAegisError("schedule name is required")
+
+    if len(value) > 80:
+        raise DeltaAegisError("schedule name must be 80 characters or fewer")
+
+    return value
+
+
+def scan_schedule_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+
+    item["enabled"] = bool(item.get("enabled"))
+    item["auto_ingest"] = bool(item.get("auto_ingest"))
+    item["cadence_minutes"] = int(item.get("cadence_minutes") or 60)
+    item["scan_profile"] = item.get("scan_profile") or "balanced"
+
+    return item
+
+
+def create_scan_schedule(
+    connection: sqlite3.Connection,
+    name: str,
+    target: str,
+    scan_profile: str = "balanced",
+    cadence_minutes: int = 60,
+    enabled: bool = True,
+    auto_ingest: bool = True,
+) -> dict[str, Any]:
+    safe_name = validate_scan_schedule_name(name)
+    safe_target = validate_private_cidr(target)
+    safe_profile = validate_netsniper_scan_profile(scan_profile)
+    safe_cadence = validate_scan_schedule_cadence_minutes(cadence_minutes)
+
+    now = utc_now_text()
+    schedule_id = f"sched-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    next_run_at = now if enabled else None
+
+    connection.execute(
+        """
+        INSERT INTO scan_schedules (
+            schedule_id,
+            name,
+            target,
+            network_scope,
+            scan_profile,
+            cadence_minutes,
+            enabled,
+            auto_ingest,
+            next_run_at,
+            created_at,
+            updated_at,
+            message
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            schedule_id,
+            safe_name,
+            safe_target,
+            safe_target,
+            safe_profile,
+            safe_cadence,
+            1 if enabled else 0,
+            1 if auto_ingest else 0,
+            next_run_at,
+            now,
+            now,
+            "schedule created",
+        ),
+    )
+
+    row = connection.execute(
+        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
+        (schedule_id,),
+    ).fetchone()
+
+    if row is None:
+        raise DeltaAegisError(f"scan schedule disappeared unexpectedly: {schedule_id}")
+
+    return scan_schedule_to_dict(row)
+
+
+def query_scan_schedules(
+    connection: sqlite3.Connection,
+    limit: int = 20,
+    enabled: bool | None = None,
+    scope: str | None = None,
+) -> list[sqlite3.Row]:
+    clauses = []
+    params: list[Any] = []
+
+    if enabled is not None:
+        clauses.append("enabled = ?")
+        params.append(1 if enabled else 0)
+
+    if scope:
+        clauses.append("network_scope = ?")
+        params.append(validate_private_cidr(scope))
+
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+
+    params.append(limit)
+
+    return connection.execute(
+        f"""
+        SELECT
+            schedule_id,
+            name,
+            target,
+            network_scope,
+            scan_profile,
+            cadence_minutes,
+            enabled,
+            auto_ingest,
+            last_run_at,
+            next_run_at,
+            last_job_id,
+            last_status,
+            failure_count,
+            skip_count,
+            created_at,
+            updated_at,
+            message
+        FROM scan_schedules
+        {where}
+        ORDER BY enabled DESC, next_run_at ASC, created_at DESC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+
+
+
+def utc_datetime_to_text(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def next_schedule_run_text(cadence_minutes: int, base_time: datetime | None = None) -> str:
+    safe_cadence = validate_scan_schedule_cadence_minutes(cadence_minutes)
+    base = base_time or datetime.now(timezone.utc)
+    return utc_datetime_to_text(base + timedelta(minutes=safe_cadence))
+
+
+def active_scan_job_exists(connection: sqlite3.Connection) -> bool:
+    row = connection.execute(
+        """
+        SELECT 1
+        FROM scan_jobs
+        WHERE status IN ('QUEUED', 'RUNNING')
+        LIMIT 1
+        """
+    ).fetchone()
+
+    return row is not None
+
+
+def query_due_scan_schedules(
+    connection: sqlite3.Connection,
+    limit: int = 1,
+    now_text: str | None = None,
+) -> list[sqlite3.Row]:
+    now_value = now_text or utc_now_text()
+
+    return connection.execute(
+        """
+        SELECT
+            schedule_id,
+            name,
+            target,
+            network_scope,
+            scan_profile,
+            cadence_minutes,
+            enabled,
+            auto_ingest,
+            last_run_at,
+            next_run_at,
+            last_job_id,
+            last_status,
+            failure_count,
+            skip_count,
+            created_at,
+            updated_at,
+            message
+        FROM scan_schedules
+        WHERE enabled = 1
+          AND next_run_at IS NOT NULL
+          AND next_run_at <= ?
+        ORDER BY next_run_at ASC, created_at ASC
+        LIMIT ?
+        """,
+        (now_value, limit),
+    ).fetchall()
+
+
+def mark_scan_schedule_skipped(
+    connection: sqlite3.Connection,
+    schedule_id: str,
+    cadence_minutes: int,
+    reason: str,
+) -> dict[str, Any]:
+    now_dt = datetime.now(timezone.utc)
+    now = utc_datetime_to_text(now_dt)
+    next_run_at = next_schedule_run_text(cadence_minutes, now_dt)
+
+    connection.execute(
+        """
+        UPDATE scan_schedules
+        SET
+            skip_count = skip_count + 1,
+            last_status = ?,
+            next_run_at = ?,
+            updated_at = ?,
+            message = ?
+        WHERE schedule_id = ?
+        """,
+        ("SKIPPED", next_run_at, now, reason, schedule_id),
+    )
+
+    row = connection.execute(
+        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
+        (schedule_id,),
+    ).fetchone()
+
+    if row is None:
+        raise DeltaAegisError(f"scan schedule disappeared unexpectedly: {schedule_id}")
+
+    return scan_schedule_to_dict(row)
+
+
+def update_scan_schedule_after_job(
+    connection: sqlite3.Connection,
+    schedule_id: str,
+    cadence_minutes: int,
+    job: dict[str, Any],
+) -> dict[str, Any]:
+    now_dt = datetime.now(timezone.utc)
+    now = utc_datetime_to_text(now_dt)
+    next_run_at = next_schedule_run_text(cadence_minutes, now_dt)
+    status = str(job.get("status") or "UNKNOWN").upper()
+    failure_increment = 0 if status == "COMPLETED" else 1
+
+    connection.execute(
+        """
+        UPDATE scan_schedules
+        SET
+            last_run_at = ?,
+            next_run_at = ?,
+            last_job_id = ?,
+            last_status = ?,
+            failure_count = failure_count + ?,
+            updated_at = ?,
+            message = ?
+        WHERE schedule_id = ?
+        """,
+        (
+            now,
+            next_run_at,
+            job.get("job_id"),
+            status,
+            failure_increment,
+            now,
+            job.get("message") or f"scheduled scan finished with status {status}",
+            schedule_id,
+        ),
+    )
+
+    row = connection.execute(
+        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
+        (schedule_id,),
+    ).fetchone()
+
+    if row is None:
+        raise DeltaAegisError(f"scan schedule disappeared unexpectedly: {schedule_id}")
+
+    return scan_schedule_to_dict(row)
+
+
+def run_due_scan_schedules(
+    connection: sqlite3.Connection,
+    netsniper_path: Path,
+    runs_dir: Path,
+    logs_dir: Path,
+    events_path: Path,
+    max_runs: int = 1,
+) -> list[dict[str, Any]]:
+    max_runs = max(1, int(max_runs or 1))
+    results: list[dict[str, Any]] = []
+
+    for row in query_due_scan_schedules(connection, limit=max_runs):
+        schedule = scan_schedule_to_dict(row)
+
+        if active_scan_job_exists(connection):
+            skipped = mark_scan_schedule_skipped(
+                connection,
+                schedule["schedule_id"],
+                schedule["cadence_minutes"],
+                "scheduled scan skipped: another scan job is active",
+            )
+            connection.commit()
+            results.append(
+                {
+                    "schedule_id": schedule["schedule_id"],
+                    "name": schedule["name"],
+                    "action": "skipped",
+                    "reason": "active scan job exists",
+                    "schedule": skipped,
+                }
+            )
+            continue
+
+        job = create_scan_job(
+            connection,
+            schedule["target"],
+            netsniper_path,
+            runs_dir,
+            auto_ingest=schedule["auto_ingest"],
+            scan_profile=schedule["scan_profile"],
+        )
+        connection.commit()
+
+        try:
+            final_job = execute_scan_job(
+                connection,
+                job["job_id"],
+                schedule["target"],
+                netsniper_path,
+                runs_dir,
+                logs_dir,
+                events_path,
+                auto_ingest=schedule["auto_ingest"],
+                scan_profile=schedule["scan_profile"],
+            )
+        except DeltaAegisError as exc:
+            failure_message = str(exc)
+
+            update_scan_job(
+                connection,
+                job["job_id"],
+                status="FAILED",
+                finished_at=utc_now_text(),
+                exit_code=1,
+                message=failure_message,
+            )
+
+            failed_row = connection.execute(
+                "SELECT * FROM scan_jobs WHERE job_id = ?",
+                (job["job_id"],),
+            ).fetchone()
+
+            final_job = (
+                scan_job_to_dict(failed_row)
+                if failed_row is not None
+                else {
+                    "job_id": job["job_id"],
+                    "status": "FAILED",
+                    "message": failure_message,
+                }
+            )
+
+            updated = update_scan_schedule_after_job(
+                connection,
+                schedule["schedule_id"],
+                schedule["cadence_minutes"],
+                final_job,
+            )
+            connection.commit()
+            results.append(
+                {
+                    "schedule_id": schedule["schedule_id"],
+                    "name": schedule["name"],
+                    "action": "failed",
+                    "job": final_job,
+                    "schedule": updated,
+                }
+            )
+            continue
+
+        updated = update_scan_schedule_after_job(
+            connection,
+            schedule["schedule_id"],
+            schedule["cadence_minutes"],
+            final_job,
+        )
+        connection.commit()
+
+        results.append(
+            {
+                "schedule_id": schedule["schedule_id"],
+                "name": schedule["name"],
+                "action": "ran",
+                "job": final_job,
+                "schedule": updated,
+            }
+        )
+
+    return results
+
+
+def print_schedule_run_results(results: list[dict[str, Any]]) -> None:
+    if not results:
+        print("No due scan schedules found.")
+        return
+
+    print("DeltaAegis Scheduled Scan Runner")
+    print("===============================")
+    print()
+
+    for result in results:
+        print(f"{result['schedule_id']}  {result['action']}  {result.get('name') or '-'}")
+
+        if result.get("reason"):
+            print(f"  reason={result['reason']}")
+
+        job = result.get("job") or {}
+        if job:
+            print(f"  job={job.get('job_id') or '-'}  status={job.get('status') or '-'}")
+
+        schedule = result.get("schedule") or {}
+        if schedule:
+            print(f"  next_run={schedule.get('next_run_at') or '-'}  last_status={schedule.get('last_status') or '-'}")
+
+
+def command_schedule_run_due(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+
+    results = run_due_scan_schedules(
+        connection,
+        netsniper_path=Path(args.netsniper_path).expanduser(),
+        runs_dir=Path(args.runs_dir).expanduser(),
+        logs_dir=Path(args.scan_logs_dir).expanduser(),
+        events_path=args.events,
+        max_runs=args.max_runs,
+    )
+
+    print_schedule_run_results(results)
+
+    failed = any((item.get("job") or {}).get("status") == "FAILED" for item in results)
+    return 1 if failed else 0
+
+
+def set_scan_schedule_enabled(
+    connection: sqlite3.Connection,
+    schedule_id: str,
+    enabled: bool,
+) -> dict[str, Any]:
+    row = connection.execute(
+        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
+        (schedule_id,),
+    ).fetchone()
+
+    if row is None:
+        raise DeltaAegisError(f"scan schedule not found: {schedule_id}")
+
+    now = utc_now_text()
+
+    connection.execute(
+        """
+        UPDATE scan_schedules
+        SET
+            enabled = ?,
+            next_run_at = ?,
+            updated_at = ?,
+            message = ?
+        WHERE schedule_id = ?
+        """,
+        (
+            1 if enabled else 0,
+            now if enabled else None,
+            now,
+            "schedule enabled" if enabled else "schedule disabled",
+            schedule_id,
+        ),
+    )
+
+    row = connection.execute(
+        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
+        (schedule_id,),
+    ).fetchone()
+
+    if row is None:
+        raise DeltaAegisError(f"scan schedule disappeared unexpectedly: {schedule_id}")
+
+    return scan_schedule_to_dict(row)
+
+
+def delete_scan_schedule(
+    connection: sqlite3.Connection,
+    schedule_id: str,
+) -> None:
+    cursor = connection.execute(
+        "DELETE FROM scan_schedules WHERE schedule_id = ?",
+        (schedule_id,),
+    )
+
+    if cursor.rowcount == 0:
+        raise DeltaAegisError(f"scan schedule not found: {schedule_id}")
+
+
+def print_scan_schedule_rows(rows: Iterable[sqlite3.Row]) -> None:
+    rows = list(rows)
+
+    if not rows:
+        print("No scan schedules found.")
+        return
+
+    print("DeltaAegis Scan Schedules")
+    print("=========================")
+    print()
+
+    for row in rows:
+        item = scan_schedule_to_dict(row)
+        enabled_label = "enabled" if item["enabled"] else "disabled"
+        print(
+            f"{item['schedule_id']}  "
+            f"{enabled_label:<8}  "
+            f"{item['target']:<18}  "
+            f"profile={item['scan_profile']}  "
+            f"cadence={item['cadence_minutes']}m"
+        )
+        print(f"  name={item['name']}")
+        print(f"  next_run={item.get('next_run_at') or '-'}  last_run={item.get('last_run_at') or '-'}")
+
+        if item.get("last_job_id"):
+            print(f"  last_job={item['last_job_id']}  last_status={item.get('last_status') or '-'}")
+
+        print(f"  auto_ingest={'yes' if item['auto_ingest'] else 'no'}  skips={item['skip_count']}  failures={item['failure_count']}")
+
+        if item.get("message"):
+            print(f"  message={item['message']}")
+
+
+def command_schedule_create(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+
+    schedule = create_scan_schedule(
+        connection,
+        name=args.name,
+        target=args.target,
+        scan_profile=args.profile,
+        cadence_minutes=args.cadence_minutes,
+        enabled=not args.disabled,
+        auto_ingest=args.auto_ingest,
+    )
+    connection.commit()
+
+    print(f"Created scan schedule: {schedule['schedule_id']}")
+    print(f"Name: {schedule['name']}")
+    print(f"Target: {schedule['target']}")
+    print(f"Scan profile: {schedule['scan_profile']}")
+    print(f"Cadence: {schedule['cadence_minutes']} minutes")
+    print(f"Enabled: {'yes' if schedule['enabled'] else 'no'}")
+    print(f"Auto-ingest: {'yes' if schedule['auto_ingest'] else 'no'}")
+    print(f"Next run: {schedule.get('next_run_at') or '-'}")
+
+    return 0
+
+
+def command_schedule_list(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+
+    enabled_filter: bool | None
+    if args.enabled == "enabled":
+        enabled_filter = True
+    elif args.enabled == "disabled":
+        enabled_filter = False
+    else:
+        enabled_filter = None
+
+    print_scan_schedule_rows(
+        query_scan_schedules(
+            connection,
+            limit=args.limit,
+            enabled=enabled_filter,
+            scope=getattr(args, "scope", None),
+        )
+    )
+
+    return 0
+
+
+def command_schedule_enable(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    schedule = set_scan_schedule_enabled(connection, args.schedule_id, True)
+    connection.commit()
+
+    print(f"Enabled scan schedule: {schedule['schedule_id']}")
+    print(f"Next run: {schedule.get('next_run_at') or '-'}")
+
+    return 0
+
+
+def command_schedule_disable(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    schedule = set_scan_schedule_enabled(connection, args.schedule_id, False)
+    connection.commit()
+
+    print(f"Disabled scan schedule: {schedule['schedule_id']}")
+
+    return 0
+
+
+def command_schedule_delete(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    delete_scan_schedule(connection, args.schedule_id)
+    connection.commit()
+
+    print(f"Deleted scan schedule: {args.schedule_id}")
 
     return 0
 
@@ -14503,7 +15569,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.30 Profile-Aware Scans</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.31 Scheduled Scans</span></div>
     </div>
   </header>
 
@@ -18170,6 +19236,86 @@ def render_netsniper_page() -> str:
       </form>
       <pre id="netsniper-scan-start-result">No scan has been started from this page yet.</pre>
 
+      <h2>Scheduled scans</h2>
+      <p>Saved profile-aware NetSniper scan schedules. These use the same guarded scan-job path as manual dashboard launches.</p>
+
+      <div class="actions" id="netsniper-hourly-monitoring-controls">
+        <label>Hourly monitoring target
+          <input id="netsniper-hourly-monitoring-target" name="hourly_target" autocomplete="off" placeholder="192.168.5.0/24">
+        </label>
+        <button type="button" id="netsniper-hourly-monitoring-enable">Enable hourly balanced monitoring</button>
+        <button type="button" id="netsniper-hourly-monitoring-disable">Disable hourly monitoring</button>
+      </div>
+      <p class="muted">Hourly monitoring creates or refreshes one saved schedule named <code>Hourly Balanced Monitoring</code> using the balanced profile, a 60-minute cadence, and auto-ingest enabled.</p>
+
+      <form id="netsniper-schedule-create-form" class="scan-form">
+        <label>Schedule name
+          <input id="netsniper-schedule-name" name="name" autocomplete="off" placeholder="Hourly Balanced Monitoring" required>
+        </label>
+        <label>Private CIDR target
+          <input id="netsniper-schedule-target" name="target" autocomplete="off" placeholder="192.168.5.0/24" required>
+        </label>
+        <label>Scan profile
+          <select id="netsniper-schedule-profile" name="scan_profile">
+            <option value="balanced" selected>Balanced — routine telemetry</option>
+            <option value="accurate">Accurate — deeper evidence</option>
+            <option value="quick">Quick — lighter check</option>
+          </select>
+        </label>
+        <label>Cadence
+          <select id="netsniper-schedule-cadence" name="cadence_minutes">
+            <option value="60" selected>Every 1 hour</option>
+            <option value="120">Every 2 hours</option>
+            <option value="360">Every 6 hours</option>
+            <option value="720">Every 12 hours</option>
+            <option value="1440">Daily</option>
+          </select>
+        </label>
+        <label>Enabled
+          <select id="netsniper-schedule-enabled" name="enabled">
+            <option value="true" selected>Enabled</option>
+            <option value="false">Disabled</option>
+          </select>
+        </label>
+        <label>Auto-ingest
+          <select id="netsniper-schedule-auto-ingest" name="auto_ingest">
+            <option value="true" selected>Enabled</option>
+            <option value="false">Disabled</option>
+          </select>
+        </label>
+        <button type="submit" id="netsniper-schedule-create">Create schedule</button>
+      </form>
+
+      <div class="actions">
+        <button type="button" id="netsniper-schedules-refresh">Refresh schedules</button>
+        <button type="button" id="netsniper-schedules-run-due">Run due schedules</button>
+        <a href="/api/netsniper/schedules">View raw schedules JSON</a>
+      </div>
+
+      <pre id="netsniper-schedule-result">No scheduled scan action has run from this page yet.</pre>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Status</th>
+              <th>Target</th>
+              <th>Profile</th>
+              <th>Cadence</th>
+              <th>Next run</th>
+              <th>Last run</th>
+              <th>Last status</th>
+              <th>Last job</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="netsniper-schedules-body">
+            <tr><td colspan="10">Loading schedules…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
       <h2>Recent scan jobs</h2>
       <p>Recent guarded NetSniper scan jobs from the DeltaAegis scan job ledger.</p>
       <div class="table-wrap">
@@ -18372,6 +19518,299 @@ def render_netsniper_page() -> str:
       }
     }
 
+
+    function scheduleCadenceLabel(minutes) {
+      const value = Number.parseInt(minutes || 60, 10);
+      const labels = {
+        60: "Every 1 hour",
+        120: "Every 2 hours",
+        360: "Every 6 hours",
+        720: "Every 12 hours",
+        1440: "Daily"
+      };
+      return labels[value] || `${value} minutes`;
+    }
+
+    function scheduleEnabledPill(schedule) {
+      const enabled = Boolean(schedule && schedule.enabled);
+      const cls = enabled ? "ok" : "warn";
+      const label = enabled ? "Enabled" : "Disabled";
+      return `<span class="pill ${cls}">${label}</span>`;
+    }
+
+    async function postNetSniperSchedule(path, payload) {
+      const response = await fetch(path, {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload || {})
+      });
+
+      let data = {};
+      try {
+        data = await response.json();
+      } catch (error) {
+        data = {};
+      }
+
+      if (response.status === 401) {
+        window.location.href = "/login";
+        return null;
+      }
+
+      if (response.status === 403) {
+        throw new Error("ADMIN role required to manage NetSniper scan schedules.");
+      }
+
+      if (!response.ok || !data.ok) {
+        throw new Error(data.message || data.error || `Schedule request failed with HTTP ${response.status}`);
+      }
+
+      return data;
+    }
+
+    function renderNetSniperSchedules(payload) {
+      const tbody = document.getElementById("netsniper-schedules-body");
+      if (!tbody) { return; }
+
+      const schedules = Array.isArray(payload)
+        ? payload
+        : (payload.schedules || payload.items || []);
+
+      if (!schedules.length) {
+        tbody.innerHTML = '<tr><td colspan="10">No scan schedules found.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = schedules.slice(0, 20).map(function (schedule) {
+        const scheduleId = schedule.schedule_id || "";
+        const toggleAction = schedule.enabled ? "disable" : "enable";
+        const toggleLabel = schedule.enabled ? "Disable" : "Enable";
+
+        return `
+          <tr>
+            <td>${escapeHtml(schedule.name || "-")}<br><code>${escapeHtml(scheduleId || "-")}</code></td>
+            <td>${scheduleEnabledPill(schedule)}</td>
+            <td>${escapeHtml(schedule.target || schedule.network_scope || "-")}</td>
+            <td>${escapeHtml(schedule.scan_profile || "balanced")}</td>
+            <td>${escapeHtml(scheduleCadenceLabel(schedule.cadence_minutes))}</td>
+            <td>${escapeHtml(schedule.next_run_at || "-")}</td>
+            <td>${escapeHtml(schedule.last_run_at || "-")}</td>
+            <td>${escapeHtml(schedule.last_status || "-")}</td>
+            <td>${escapeHtml(schedule.last_job_id || "-")}</td>
+            <td>
+              <button type="button" data-schedule-action="${toggleAction}" data-schedule-id="${escapeHtml(scheduleId)}">${toggleLabel}</button>
+              <button type="button" data-schedule-action="delete" data-schedule-id="${escapeHtml(scheduleId)}">Delete</button>
+            </td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    async function loadNetSniperSchedules() {
+      try {
+        const response = await fetch("/api/netsniper/schedules", {
+          credentials: "same-origin",
+          cache: "no-store"
+        });
+
+        if (response.status === 401 || response.status === 403) {
+          return;
+        }
+
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = await response.json();
+        renderNetSniperSchedules(payload);
+      } catch (error) {
+        const tbody = document.getElementById("netsniper-schedules-body");
+        if (tbody) {
+          tbody.innerHTML = `<tr><td colspan="10">Schedule lookup failed: ${escapeHtml(error.message || error)}</td></tr>`;
+        }
+      }
+    }
+
+
+    function hourlyMonitoringTargetValue() {
+      const hourlyTarget = document.getElementById("netsniper-hourly-monitoring-target");
+      const scheduleTarget = document.getElementById("netsniper-schedule-target");
+      const scanTarget = document.getElementById("netsniper-scan-target");
+
+      const candidates = [
+        hourlyTarget ? hourlyTarget.value.trim() : "",
+        scheduleTarget ? scheduleTarget.value.trim() : "",
+        scanTarget ? scanTarget.value.trim() : ""
+      ];
+
+      return candidates.find(function (value) { return Boolean(value); }) || "";
+    }
+
+    async function setHourlyNetSniperMonitoring(enabled) {
+      const status = document.getElementById("netsniper-status");
+      const output = document.getElementById("netsniper-schedule-result");
+      const enableButton = document.getElementById("netsniper-hourly-monitoring-enable");
+      const disableButton = document.getElementById("netsniper-hourly-monitoring-disable");
+      const target = hourlyMonitoringTargetValue();
+
+      if (enabled && !target) {
+        output.textContent = "Target CIDR is required to enable hourly monitoring.";
+        return;
+      }
+
+      enableButton.disabled = true;
+      disableButton.disabled = true;
+      status.textContent = enabled
+        ? "Enabling hourly balanced monitoring…"
+        : "Disabling hourly balanced monitoring…";
+
+      try {
+        const payload = await postNetSniperSchedule("/api/netsniper/hourly-monitoring", {
+          target: target,
+          enabled: Boolean(enabled)
+        });
+
+        if (!payload) { return; }
+
+        output.textContent = JSON.stringify(payload, null, 2);
+        status.textContent = enabled
+          ? "Hourly balanced monitoring enabled."
+          : "Hourly balanced monitoring disabled.";
+
+        renderNetSniperSchedules(payload);
+        await loadNetSniperSchedules();
+      } catch (error) {
+        status.textContent = `Hourly monitoring action failed: ${error.message || error}`;
+        output.textContent = String(error.message || error);
+      } finally {
+        enableButton.disabled = false;
+        disableButton.disabled = false;
+      }
+    }
+
+
+    async function createNetSniperSchedule(event) {
+      event.preventDefault();
+
+      const status = document.getElementById("netsniper-status");
+      const output = document.getElementById("netsniper-schedule-result");
+      const button = document.getElementById("netsniper-schedule-create");
+
+      const nameInput = document.getElementById("netsniper-schedule-name");
+      const targetInput = document.getElementById("netsniper-schedule-target");
+      const profileInput = document.getElementById("netsniper-schedule-profile");
+      const cadenceInput = document.getElementById("netsniper-schedule-cadence");
+      const enabledInput = document.getElementById("netsniper-schedule-enabled");
+      const autoIngestInput = document.getElementById("netsniper-schedule-auto-ingest");
+
+      const name = nameInput ? nameInput.value.trim() : "";
+      const target = targetInput ? targetInput.value.trim() : "";
+
+      if (!name || !target) {
+        output.textContent = "Schedule name and target CIDR are required.";
+        return;
+      }
+
+      button.disabled = true;
+      status.textContent = "Creating NetSniper scan schedule…";
+
+      try {
+        const payload = await postNetSniperSchedule("/api/netsniper/schedule-create", {
+          name: name,
+          target: target,
+          scan_profile: profileInput ? profileInput.value : "balanced",
+          cadence_minutes: cadenceInput ? Number.parseInt(cadenceInput.value, 10) : 60,
+          enabled: enabledInput ? enabledInput.value === "true" : true,
+          auto_ingest: autoIngestInput ? autoIngestInput.value === "true" : true
+        });
+
+        if (!payload) { return; }
+
+        output.textContent = JSON.stringify(payload, null, 2);
+        status.textContent = `Created scan schedule: ${(payload.schedule || {}).schedule_id || name}`;
+        renderNetSniperSchedules(payload);
+        await loadNetSniperSchedules();
+      } catch (error) {
+        status.textContent = `Schedule create failed: ${error.message || error}`;
+        output.textContent = String(error.message || error);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function runDueNetSniperSchedules() {
+      const status = document.getElementById("netsniper-status");
+      const output = document.getElementById("netsniper-schedule-result");
+      const button = document.getElementById("netsniper-schedules-run-due");
+
+      button.disabled = true;
+      status.textContent = "Running due NetSniper schedules…";
+
+      try {
+        const payload = await postNetSniperSchedule("/api/netsniper/schedule-run-due", {max_runs: 1});
+
+        if (!payload) { return; }
+
+        output.textContent = JSON.stringify(payload, null, 2);
+        status.textContent = `Schedule runner complete: ${(payload.results || []).length} result(s)`;
+        renderNetSniperSchedules(payload);
+
+        if (payload.scan_jobs) {
+          renderNetSniperScanJobs(payload.scan_jobs);
+        }
+
+        await loadNetSniperSchedules();
+        await loadNetSniperScanJobs();
+      } catch (error) {
+        status.textContent = `Schedule runner failed: ${error.message || error}`;
+        output.textContent = String(error.message || error);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function handleNetSniperScheduleAction(event) {
+      const button = event.target.closest("button[data-schedule-action]");
+      if (!button) { return; }
+
+      const action = button.dataset.scheduleAction;
+      const scheduleId = button.dataset.scheduleId;
+      const status = document.getElementById("netsniper-status");
+      const output = document.getElementById("netsniper-schedule-result");
+
+      if (!scheduleId) {
+        output.textContent = "Schedule ID is missing.";
+        return;
+      }
+
+      if (action === "delete" && !window.confirm(`Delete scan schedule ${scheduleId}?`)) {
+        return;
+      }
+
+      button.disabled = true;
+      status.textContent = `Applying schedule action: ${action}`;
+
+      try {
+        const payload = await postNetSniperSchedule(`/api/netsniper/schedule-${action}`, {
+          schedule_id: scheduleId
+        });
+
+        if (!payload) { return; }
+
+        output.textContent = JSON.stringify(payload, null, 2);
+        status.textContent = `Schedule action complete: ${action}`;
+        renderNetSniperSchedules(payload);
+      } catch (error) {
+        status.textContent = `Schedule action failed: ${error.message || error}`;
+        output.textContent = String(error.message || error);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+
     async function startNetSniperScan(event) {
       event.preventDefault();
 
@@ -18434,15 +19873,110 @@ def render_netsniper_page() -> str:
     document.getElementById("netsniper-refresh").addEventListener("click", function () {
       loadNetSniperStatus();
       loadNetSniperScanJobs();
+      loadNetSniperSchedules();
     });
     document.getElementById("netsniper-import-latest").addEventListener("click", importLatestNetSniperRun);
     document.getElementById("netsniper-scan-start-form").addEventListener("submit", startNetSniperScan);
+    document.getElementById("netsniper-schedule-create-form").addEventListener("submit", createNetSniperSchedule);
+    document.getElementById("netsniper-schedules-refresh").addEventListener("click", loadNetSniperSchedules);
+    document.getElementById("netsniper-schedules-run-due").addEventListener("click", runDueNetSniperSchedules);
+    document.getElementById("netsniper-hourly-monitoring-enable").addEventListener("click", function () { setHourlyNetSniperMonitoring(true); });
+    document.getElementById("netsniper-hourly-monitoring-disable").addEventListener("click", function () { setHourlyNetSniperMonitoring(false); });
+    document.getElementById("netsniper-schedules-body").addEventListener("click", handleNetSniperScheduleAction);
     loadNetSniperStatus();
     loadNetSniperScanJobs();
+    loadNetSniperSchedules();
     window.setInterval(loadNetSniperScanJobs, 5000);
+    window.setInterval(loadNetSniperSchedules, 15000);
   </script>
 </body>
 </html>"""
+
+
+
+
+DASHBOARD_SCHEDULE_WORKER_INTERVAL_SECONDS = 60
+
+
+def dashboard_run_due_schedule_tick(
+    db_path: Path,
+    events_path: Path,
+    netsniper_path: Path | None = None,
+    runs_dir: Path | None = None,
+    logs_dir: Path | None = None,
+    max_runs: int = 1,
+) -> list[dict[str, Any]]:
+    connection = connect(db_path)
+
+    try:
+        return run_due_scan_schedules(
+            connection,
+            netsniper_path=netsniper_path or (dashboard_netsniper_root_path() / "netsniper.sh"),
+            runs_dir=runs_dir or dashboard_netsniper_runs_dir(),
+            logs_dir=logs_dir or DEFAULT_SCAN_LOGS,
+            events_path=events_path,
+            max_runs=max_runs,
+        )
+    finally:
+        connection.close()
+
+
+def dashboard_schedule_worker_loop(
+    db_path: Path,
+    events_path: Path,
+    stop_event: threading.Event,
+    interval_seconds: int = DASHBOARD_SCHEDULE_WORKER_INTERVAL_SECONDS,
+    quiet: bool = False,
+) -> None:
+    safe_interval = max(1, int(interval_seconds or DASHBOARD_SCHEDULE_WORKER_INTERVAL_SECONDS))
+
+    while not stop_event.is_set():
+        try:
+            results = dashboard_run_due_schedule_tick(
+                db_path=db_path,
+                events_path=events_path,
+                max_runs=1,
+            )
+
+            if results and not quiet:
+                print(
+                    f"[DeltaAegis] dashboard schedule worker processed "
+                    f"{len(results)} due schedule(s)",
+                    flush=True,
+                )
+        except Exception as exc:
+            if not quiet:
+                print(
+                    f"[DeltaAegis] dashboard schedule worker error: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+        stop_event.wait(safe_interval)
+
+
+def dashboard_start_schedule_worker_thread(
+    db_path: Path,
+    events_path: Path,
+    interval_seconds: int = DASHBOARD_SCHEDULE_WORKER_INTERVAL_SECONDS,
+    quiet: bool = False,
+) -> tuple[threading.Thread, threading.Event]:
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        name="deltaaegis-dashboard-schedule-worker",
+        target=dashboard_schedule_worker_loop,
+        kwargs={
+            "db_path": db_path,
+            "events_path": events_path,
+            "stop_event": stop_event,
+            "interval_seconds": interval_seconds,
+            "quiet": quiet,
+        },
+        daemon=True,
+    )
+    thread.start()
+
+    return thread, stop_event
 
 
 
@@ -18734,6 +20268,22 @@ def command_dashboard(args):
 
             if route == "/netsniper":
                 dashboard_html_response(self, render_netsniper_page())
+                return
+
+            if route == "/api/netsniper/schedules":
+                connection = self.open_connection()
+
+                try:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": True,
+                            "schedules": dashboard_scan_schedules_payload(connection),
+                        },
+                    )
+                finally:
+                    connection.close()
+
                 return
 
             if route == "/api/netsniper/status":
@@ -19147,6 +20697,59 @@ def command_dashboard(args):
                 dashboard_json_response(self, result)
                 return
 
+            if route in {
+                "/api/netsniper/schedule-create",
+                "/api/netsniper/schedule-enable",
+                "/api/netsniper/schedule-disable",
+                "/api/netsniper/schedule-delete",
+                "/api/netsniper/schedule-run-due",
+                "/api/netsniper/hourly-monitoring",
+            }:
+                if not self.require_permission("scan.start"):
+                    return
+
+                try:
+                    payload = dashboard_read_request_payload(self)
+                except DashboardAdminUserActionError as exc:
+                    dashboard_admin_json_error_response(
+                        self,
+                        str(exc),
+                        status_code=exc.status_code,
+                    )
+                    return
+
+                connection = self.open_connection()
+
+                try:
+                    result = dashboard_netsniper_schedule_action_payload(
+                        connection,
+                        route,
+                        payload,
+                        args.events,
+                    )
+                    connection.commit()
+                except DashboardAdminUserActionError as exc:
+                    connection.rollback()
+                    dashboard_admin_json_error_response(
+                        self,
+                        str(exc),
+                        status_code=exc.status_code,
+                    )
+                    return
+                except DeltaAegisError as exc:
+                    connection.rollback()
+                    dashboard_admin_json_error_response(
+                        self,
+                        str(exc),
+                        status_code=400,
+                    )
+                    return
+                finally:
+                    connection.close()
+
+                dashboard_json_response(self, result)
+                return
+
             if route == "/api/netsniper/scan-start":
                 if not self.require_permission("scan.start"):
                     return
@@ -19467,6 +21070,11 @@ def command_dashboard(args):
 
     server_address = (args.host, args.port)
     server = ThreadingHTTPServer(server_address, DeltaAegisDashboardHandler)
+    dashboard_schedule_worker_thread, dashboard_schedule_worker_stop = dashboard_start_schedule_worker_thread(
+        db_path=db_path,
+        events_path=args.events,
+        quiet=args.quiet,
+    )
 
     print("DeltaAegis dashboard starting")
     print("============================")
@@ -19497,12 +21105,14 @@ def command_dashboard(args):
     except KeyboardInterrupt:
         print("\nStopping dashboard.")
     finally:
+        dashboard_schedule_worker_stop.set()
+        dashboard_schedule_worker_thread.join(timeout=2.0)
         server.server_close()
 
     return 0
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.28.0 — Dashboard NetSniper Import Setup, Dashboard User Management, Dashboard Session UX, Enterprise Access Control, Operator Triage Intelligence, Evidence Timeline Intelligence, Workflow Filters and Operator Views, Investigation Workflow Actions, Executive SIEM Dashboard Refresh, Investigation Command Center, MAC-port behavior correlation, NetSniper telemetry intake, current-state SIEM dashboard, classification storage, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.31.0 — Scheduled Profile-Aware Scans, dashboard schedule worker, one-click hourly monitoring, guarded NetSniper scan jobs, dashboard user management, RBAC, investigation intelligence, current-state SIEM dashboard, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
@@ -19552,6 +21162,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--status", choices=sorted(SCAN_JOB_STATUSES))
     p.add_argument("--scope")
+    p = sub.add_parser("schedule-create", help="Create a saved profile-aware NetSniper scan schedule")
+    p.add_argument("--name", required=True)
+    p.add_argument("--target", required=True, help="Private IPv4 CIDR target, such as 192.168.5.0/24")
+    p.add_argument("--profile", choices=["quick", "balanced", "accurate"], default="balanced")
+    p.add_argument("--cadence-minutes", type=int, choices=sorted(ALLOWED_SCAN_SCHEDULE_CADENCE_MINUTES), default=60)
+    p.add_argument("--disabled", action="store_true", help="Create the schedule disabled")
+    p.add_argument("--no-auto-ingest", dest="auto_ingest", action="store_false", default=True, help="Do not auto-ingest completed scheduled scan bundles")
+    p = sub.add_parser("schedule-list", help="List saved NetSniper scan schedules")
+    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--enabled", choices=["all", "enabled", "disabled"], default="all")
+    p.add_argument("--scope")
+    p = sub.add_parser("schedule-enable", help="Enable a saved NetSniper scan schedule")
+    p.add_argument("schedule_id")
+    p = sub.add_parser("schedule-disable", help="Disable a saved NetSniper scan schedule")
+    p.add_argument("schedule_id")
+    p = sub.add_parser("schedule-delete", help="Delete a saved NetSniper scan schedule")
+    p.add_argument("schedule_id")
+    p = sub.add_parser("schedule-run-due", help="Run due saved NetSniper scan schedules once")
+    p.add_argument("--max-runs", type=int, default=1)
+    p.add_argument("--netsniper-path", type=Path, default=DEFAULT_NETSNIPER)
+    p.add_argument("--scan-logs-dir", type=Path, default=DEFAULT_SCAN_LOGS)
     p = sub.add_parser("ticket-status", help="Show or update persistent investigation ticket workflow status")
     p.add_argument("subject_key")
     p.add_argument("--status", choices=["OPEN", "IN_REVIEW", "RESOLVED", "SUPPRESSED"])
@@ -19706,6 +21337,12 @@ def main() -> int:
         if args.command == "ingest": return command_ingest(args)
         if args.command == "scan-start": return command_scan_start(args)
         if args.command == "scan-jobs": return command_scan_jobs(args)
+        if args.command == "schedule-create": return command_schedule_create(args)
+        if args.command == "schedule-list": return command_schedule_list(args)
+        if args.command == "schedule-enable": return command_schedule_enable(args)
+        if args.command == "schedule-disable": return command_schedule_disable(args)
+        if args.command == "schedule-delete": return command_schedule_delete(args)
+        if args.command == "schedule-run-due": return command_schedule_run_due(args)
         if args.command == "ticket-status": return command_ticket_status(args)
         if args.command == "ticket-evidence": return command_ticket_evidence(args)
         if args.command == "ticket-history": return command_ticket_history(args)
