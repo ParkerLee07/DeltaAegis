@@ -73,6 +73,7 @@ required_validators = [
     "validate_v0_31_hourly_monitoring.sh",
     "validate_v0_31_dashboard_schedule_worker.sh",
     "validate_v0_31_schedule_failure_persistence.sh",
+    "validate_v0_31_scan_result_capture.sh",
     "validate_v0_31_release_metadata.sh",
     "validate_v0_30_scan_profile_backend.sh",
     "validate_v0_30_dashboard_scan_profile_ui.sh",

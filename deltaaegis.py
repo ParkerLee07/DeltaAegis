@@ -3851,28 +3851,38 @@ def update_scan_job(
 
 
 def extract_netsniper_status_json(stdout_text: str) -> dict[str, Any]:
-    for raw_line in reversed((stdout_text or "").splitlines()):
-        line = raw_line.strip()
+    text = stdout_text or ""
+    decoder = json.JSONDecoder()
+    best: dict[str, Any] | None = None
 
-        if not line:
+    index = text.find("{")
+
+    while index != -1:
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            index = text.find("{", index + 1)
             continue
 
-        candidates = [line]
+        if isinstance(value, dict):
+            best = value
 
-        if "{" in line and "}" in line:
-            candidates.append(line[line.find("{"): line.rfind("}") + 1])
+            if any(
+                key in value
+                for key in (
+                    "bundle_path",
+                    "manifest_path",
+                    "run_dir",
+                    "run_directory",
+                    "return_code",
+                    "status",
+                )
+            ):
+                best = value
 
-        for candidate in candidates:
-            try:
-                value = json.loads(candidate)
-            except json.JSONDecodeError:
-                continue
+        index = text.find("{", index + 1)
 
-            if isinstance(value, dict):
-                return value
-
-    return {}
-
+    return best or {}
 
 def extract_netsniper_bundle_path(status_json: dict[str, Any]) -> str | None:
     for key in ("bundle_path", "bundle_dir", "run_dir", "run_directory"):
@@ -3882,6 +3892,132 @@ def extract_netsniper_bundle_path(status_json: dict[str, Any]) -> str | None:
             return str(value)
 
     return None
+
+
+def netsniper_manifest_runtime_profile(manifest: dict[str, Any]) -> str:
+    for key in (
+        "scan_profile_effective",
+        "scan_profile_requested",
+        "effective_scan_profile",
+        "requested_scan_profile",
+        "profile",
+    ):
+        value = manifest.get(key)
+
+        if value:
+            return str(value).strip().lower()
+
+    return ""
+
+
+def netsniper_manifest_is_complete(manifest: dict[str, Any]) -> bool:
+    return str(
+        manifest.get("status")
+        or manifest.get("run_status")
+        or ""
+    ).strip().upper() in {"COMPLETE", "COMPLETED"}
+
+
+def netsniper_manifest_matches_scan_job(
+    manifest: dict[str, Any],
+    target: str,
+    scan_profile: str,
+) -> bool:
+    manifest_target = str(
+        manifest.get("target")
+        or manifest.get("network_scope")
+        or ""
+    ).strip()
+
+    if manifest_target != target:
+        return False
+
+    if not netsniper_manifest_is_complete(manifest):
+        return False
+
+    runtime_profile = netsniper_manifest_runtime_profile(manifest)
+
+    if runtime_profile in ALLOWED_NETSNIPER_SCAN_PROFILES:
+        return runtime_profile == scan_profile
+
+    return True
+
+
+def utc_text_to_epoch(value: str) -> float:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    return parsed.timestamp()
+
+
+def find_completed_netsniper_manifest_for_scan(
+    runs_dir: Path,
+    target: str,
+    scan_profile: str,
+    started_at: str,
+) -> Path | None:
+    runs_dir = Path(runs_dir).expanduser()
+    threshold = max(0.0, utc_text_to_epoch(started_at) - 300.0)
+    candidates: list[tuple[float, Path]] = []
+
+    if not runs_dir.is_dir():
+        return None
+
+    for manifest_path in runs_dir.glob("*/manifest.json"):
+        try:
+            modified_at = manifest_path.stat().st_mtime
+        except OSError:
+            continue
+
+        if modified_at < threshold:
+            continue
+
+        manifest = load_json_file(manifest_path, {})
+
+        if not isinstance(manifest, dict):
+            continue
+
+        if not netsniper_manifest_matches_scan_job(manifest, target, scan_profile):
+            continue
+
+        candidates.append((modified_at, manifest_path))
+
+    if not candidates:
+        return None
+
+    candidates.sort(reverse=True, key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def enrich_netsniper_status_from_manifest(
+    status_json: dict[str, Any],
+    manifest_path: Path,
+) -> dict[str, Any]:
+    manifest = load_json_file(manifest_path, {})
+    enriched = dict(status_json or {})
+
+    enriched.setdefault("status", manifest.get("status") or "COMPLETE")
+    enriched.setdefault("target", manifest.get("target"))
+    enriched.setdefault("return_code", 0)
+    enriched["run_dir"] = str(manifest_path.parent)
+    enriched["manifest_path"] = str(manifest_path)
+
+    if manifest.get("scan_id"):
+        enriched.setdefault("scan_id", manifest.get("scan_id"))
+
+    if manifest.get("scan_profile_effective"):
+        enriched.setdefault("scan_profile_effective", manifest.get("scan_profile_effective"))
+
+    if manifest.get("scan_profile_requested"):
+        enriched.setdefault("scan_profile_requested", manifest.get("scan_profile_requested"))
+
+    return enriched
+
 
 
 def execute_scan_job(
@@ -3934,6 +4070,17 @@ def execute_scan_job(
             stderr=subprocess.PIPE,
             check=False,
         )
+    except KeyboardInterrupt as exc:
+        update_scan_job(
+            connection,
+            job_id,
+            status="FAILED",
+            finished_at=utc_now_text(),
+            exit_code=130,
+            message=f"NetSniper scan interrupted by operator profile={safe_profile}",
+        )
+        connection.commit()
+        raise DeltaAegisError("NetSniper scan interrupted by operator") from exc
     except OSError as exc:
         update_scan_job(
             connection,
@@ -3951,6 +4098,19 @@ def execute_scan_job(
 
     status_json = extract_netsniper_status_json(completed.stdout)
     bundle_path = extract_netsniper_bundle_path(status_json)
+
+    if completed.returncode == 0 and not bundle_path:
+        manifest_path = find_completed_netsniper_manifest_for_scan(
+            runs_dir,
+            safe_target,
+            safe_profile,
+            started_at,
+        )
+
+        if manifest_path is not None:
+            status_json = enrich_netsniper_status_from_manifest(status_json, manifest_path)
+            bundle_path = str(manifest_path.parent)
+
     final_status = "COMPLETED" if completed.returncode == 0 else "FAILED"
 
     message_parts = []

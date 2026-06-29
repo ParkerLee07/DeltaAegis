@@ -35,6 +35,9 @@ echo "[INFO] Running DeltaAegis v0.31 release validation..."
 ./tools/validate_v0_31_schedule_failure_persistence.sh \
     || fail "v0.31 scheduled scan failure persistence validator failed"
 
+./tools/validate_v0_31_scan_result_capture.sh \
+    || fail "v0.31 scan result capture validator failed"
+
 ./tools/validate_v0_31_release_metadata.sh \
     || fail "v0.31 release metadata validator failed"
 
