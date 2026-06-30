@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.31.0: Scheduled Profile-Aware Scans, saved NetSniper scan schedules, dashboard schedule controls, one-click hourly monitoring, automatic due-schedule execution, and guarded scan-job persistence.
+"""DeltaAegis v0.32.0: NetSniper v2 telemetry compatibility, v3 bundle ingest, bundle-quality readiness gates, and profile runtime metadata storage.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -44,6 +44,8 @@ IDENTITY_DROP_REVIEW_THRESHOLD = 0.25
 REMOVAL_THRESHOLD = 3
 MAC_RE = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
 SCAN_JOB_STATUSES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED"}
+NETSNIPER_SUPPORTED_SCHEMAS = {"netsniper-run-v1", "netsniper-run-v2", "netsniper-run-v3"}
+NETSNIPER_PROFILE_AWARE_SCHEMAS = {"netsniper-run-v2", "netsniper-run-v3"}
 
 ACCESS_ROLES = ("ADMIN", "ANALYST", "VIEWER")
 
@@ -224,6 +226,18 @@ class Snapshot:
     hosts_down: int
     hosts_total: int
     assets: dict[str, AssetObservation]
+
+    # NetSniper v2 / manifest v3 downstream-ingest metadata.
+    requested_profile: str | None = None
+    effective_profile: str | None = None
+    profile_contract: str | None = None
+    profile_runtime_budget_seconds: int | None = None
+    profile_host_timeout_seconds: int | None = None
+    profile_duration_seconds: int | None = None
+    profile_budget_exceeded: bool | None = None
+    bundle_quality_schema_version: str | None = None
+    bundle_deltaaegis_ready: bool | None = None
+    bundle_quality_json: str = "{}"
 
     @property
     def mac_backed_assets(self) -> int:
@@ -1357,6 +1371,18 @@ def connect(db_path: Path) -> sqlite3.Connection:
     ensure_column(connection, "asset_observations", "identity_class", "identity_class TEXT NOT NULL DEFAULT 'IP_ONLY'")
     ensure_column(connection, "scan_jobs", "scan_profile", "scan_profile TEXT NOT NULL DEFAULT 'balanced'")
 
+    # NetSniper v2 / manifest v3 bundle-quality and profile runtime metadata.
+    ensure_column(connection, "snapshots", "requested_profile", "requested_profile TEXT")
+    ensure_column(connection, "snapshots", "effective_profile", "effective_profile TEXT")
+    ensure_column(connection, "snapshots", "profile_contract", "profile_contract TEXT")
+    ensure_column(connection, "snapshots", "profile_runtime_budget_seconds", "profile_runtime_budget_seconds INTEGER")
+    ensure_column(connection, "snapshots", "profile_host_timeout_seconds", "profile_host_timeout_seconds INTEGER")
+    ensure_column(connection, "snapshots", "profile_duration_seconds", "profile_duration_seconds INTEGER")
+    ensure_column(connection, "snapshots", "profile_budget_exceeded", "profile_budget_exceeded INTEGER")
+    ensure_column(connection, "snapshots", "bundle_quality_schema_version", "bundle_quality_schema_version TEXT")
+    ensure_column(connection, "snapshots", "bundle_deltaaegis_ready", "bundle_deltaaegis_ready INTEGER")
+    ensure_column(connection, "snapshots", "bundle_quality_json", "bundle_quality_json TEXT NOT NULL DEFAULT '{}'")
+
     # NetSniper v1.4 classification intelligence columns.
     ensure_column(connection, "asset_observations", "device_type_confidence", "device_type_confidence INTEGER")
     ensure_column(connection, "asset_observations", "classification_type", "classification_type TEXT")
@@ -1867,57 +1893,216 @@ def legacy_profile_fingerprint(scan_profile: str, target: str) -> str:
     return "legacy:" + hashlib.sha256(f"{scan_profile}|{target}".encode()).hexdigest()
 
 
+
+
+def _first_nonempty_text(*values: Any, default: str = "") -> str:
+    for value in values:
+        if value is None or isinstance(value, dict):
+            continue
+        clean = str(value).strip()
+        if clean:
+            return clean
+    return default
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    lowered = str(value).strip().lower()
+    if lowered in {"true", "yes", "1"}:
+        return True
+    if lowered in {"false", "no", "0"}:
+        return False
+    return None
+
+
+def load_netsniper_bundle_quality(bundle_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    files = manifest.get("files", {})
+    if not isinstance(files, dict):
+        files = {}
+
+    for key in ("bundle_quality_json", "bundle_quality"):
+        filename = files.get(key)
+        if isinstance(filename, str) and filename.strip():
+            candidate = bundle_dir / filename
+            if candidate.is_file():
+                loaded = load_json(candidate)
+                return loaded if isinstance(loaded, dict) else {}
+
+    candidate = bundle_dir / "bundle_quality.json"
+    if candidate.is_file():
+        loaded = load_json(candidate)
+        return loaded if isinstance(loaded, dict) else {}
+
+    embedded = manifest.get("quality")
+    return embedded if isinstance(embedded, dict) else {}
+
+
+def netsniper_profile_contract(manifest: dict[str, Any]) -> dict[str, Any]:
+    for key in ("profile_contract", "profile"):
+        value = manifest.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
 def load_snapshot(manifest_path: Path) -> Snapshot:
     manifest = load_json(manifest_path)
     if not isinstance(manifest, dict):
         raise DeltaAegisError(f"manifest must contain an object: {manifest_path}")
+
     schema = str(manifest.get("schema_version", ""))
-    if schema not in {"netsniper-run-v1", "netsniper-run-v2"}:
+    if schema not in NETSNIPER_SUPPORTED_SCHEMAS:
         raise DeltaAegisError(f"unsupported manifest schema: {schema!r}")
+
     if manifest.get("status") != "COMPLETE":
         raise DeltaAegisError(f"bundle is not finalized: {manifest_path}")
+
     bundle_dir = manifest_path.parent
+    bundle_quality = load_netsniper_bundle_quality(bundle_dir, manifest)
+    bundle_deltaaegis_ready = _optional_bool(bundle_quality.get("deltaaegis_ready"))
+
+    if bundle_deltaaegis_ready is False:
+        raise DeltaAegisError(
+            "NetSniper bundle_quality.json marked deltaaegis_ready=false; "
+            "rejecting bundle before ingest."
+        )
+
     services_xml = require_file(bundle_dir, manifest, "services_xml")
     discovery_xml = require_file(bundle_dir, manifest, "discovery_xml")
     analysis_json = require_file(bundle_dir, manifest, "analysis_json")
-    target = str(manifest["target"])
+
+    target = _first_nonempty_text(manifest.get("target"), manifest.get("network_scope"))
+    if not target:
+        raise DeltaAegisError("manifest missing target or network_scope")
+
     target_network = parse_target_network(target)
     analysis = analysis_by_ip(analysis_json)
     discovery = parse_discovery_xml(discovery_xml, target_network)
     neighbors = parse_neighbors(optional_file(bundle_dir, manifest, "neighbors"), target_network)
-    exit_status, hosts_up, hosts_down, hosts_total, assets = parse_service_xml(services_xml, analysis, target_network, discovery, neighbors)
+    exit_status, hosts_up, hosts_down, hosts_total, assets = parse_service_xml(
+        services_xml,
+        analysis,
+        target_network,
+        discovery,
+        neighbors,
+    )
 
-    # NetSniper v1.8 preserves discovery-only hosts in analysis.json.
-    # Treat the merged asset inventory as the current live inventory so
-    # service-less-but-discovered hosts remain visible in DeltaAegis.
     counts = manifest.get("counts", {}) if isinstance(manifest.get("counts"), dict) else {}
     discovered_hosts = safe_int(counts.get("discovered_hosts"))
     inventory_hosts = max(len(assets), discovered_hosts or 0)
-
     if inventory_hosts > hosts_up:
         hosts_up = inventory_hosts
-
     if hosts_total < hosts_up:
         hosts_total = hosts_up
 
-    scan_profile = str(manifest.get("scan_profile", "UNKNOWN"))
-    profile = manifest.get("profile", {}) if isinstance(manifest.get("profile"), dict) else {}
-    monitored_ports = tuple(sorted(int(port) for port in profile.get("monitored_ports", []) if isinstance(port, int) or str(port).isdigit()))
-    protocols = tuple(sorted(str(item).lower() for item in profile.get("protocols", []) if isinstance(item, str)))
-    fingerprint = str(profile.get("fingerprint") or manifest.get("profile_fingerprint") or legacy_profile_fingerprint(scan_profile, target))
-    timestamps = manifest.get("timestamps", {}) if isinstance(manifest.get("timestamps"), dict) else {}
-    telemetry = manifest.get("telemetry", {}) if isinstance(manifest.get("telemetry"), dict) else {}
-    return Snapshot(
-        scan_id=str(manifest["scan_id"]), manifest_path=str(manifest_path), manifest_schema_version=schema,
-        target=target, scanner_version=str(manifest.get("scanner_version", "unknown")), scan_profile=scan_profile,
-        profile_fingerprint=fingerprint, monitored_ports=monitored_ports, protocols=protocols,
-        created_at=str(manifest.get("created_at") or timestamps.get("archived_at") or utc_now()),
-        scan_started_at=timestamps.get("service_started_at"), scan_completed_at=timestamps.get("service_completed_at"),
-        neighbors_captured_at=timestamps.get("neighbors_captured_at"), discovery_interface=telemetry.get("discovery_interface"),
-        nmap_version=telemetry.get("nmap_version"), bundle_status=str(manifest.get("status", "UNKNOWN")),
-        xml_exit_status=exit_status, hosts_up=hosts_up, hosts_down=hosts_down, hosts_total=hosts_total, assets=assets,
+    profile = netsniper_profile_contract(manifest)
+
+    effective_profile = _first_nonempty_text(
+        manifest.get("effective_profile"),
+        manifest.get("scan_profile_effective"),
+        manifest.get("effective_scan_profile"),
+        manifest.get("scan_profile"),
+        manifest.get("requested_profile"),
+        manifest.get("scan_profile_requested"),
+        default="UNKNOWN",
+    )
+    requested_profile = _first_nonempty_text(
+        manifest.get("requested_profile"),
+        manifest.get("scan_profile_requested"),
+        manifest.get("requested_scan_profile"),
+        effective_profile,
+        default=effective_profile,
     )
 
+    monitored_ports = tuple(
+        sorted(
+            int(port)
+            for port in profile.get("monitored_ports", [])
+            if isinstance(port, int) or str(port).isdigit()
+        )
+    )
+    protocols = tuple(
+        sorted(
+            str(item).lower()
+            for item in profile.get("protocols", [])
+            if isinstance(item, str)
+        )
+    )
+    fingerprint = str(
+        profile.get("fingerprint")
+        or manifest.get("profile_fingerprint")
+        or legacy_profile_fingerprint(effective_profile, target)
+    )
+
+    telemetry = manifest.get("telemetry", {}) if isinstance(manifest.get("telemetry"), dict) else {}
+    timestamps = manifest.get("timestamps", {}) if isinstance(manifest.get("timestamps"), dict) else {}
+
+    profile_contract_name = _first_nonempty_text(
+        manifest.get("profile_contract_schema"),
+        manifest.get("scan_profile_contract_schema"),
+        manifest.get("profile_contract"),
+        profile.get("schema_version"),
+        profile.get("contract"),
+        default="",
+    ) or None
+
+    return Snapshot(
+        scan_id=str(manifest["scan_id"]),
+        manifest_path=str(manifest_path),
+        manifest_schema_version=schema,
+        target=target,
+        scanner_version=str(manifest.get("scanner_version", "unknown")),
+        scan_profile=effective_profile,
+        profile_fingerprint=fingerprint,
+        monitored_ports=monitored_ports,
+        protocols=protocols,
+        created_at=str(
+            manifest.get("created_at")
+            or manifest.get("timestamp")
+            or manifest.get("started_at")
+            or timestamps.get("archived_at")
+            or utc_now()
+        ),
+        scan_started_at=telemetry.get("started_at") or manifest.get("started_at"),
+        scan_completed_at=telemetry.get("completed_at") or manifest.get("completed_at"),
+        neighbors_captured_at=telemetry.get("neighbors_captured_at"),
+        discovery_interface=telemetry.get("discovery_interface"),
+        nmap_version=telemetry.get("nmap_version"),
+        bundle_status=str(manifest.get("status", "UNKNOWN")),
+        xml_exit_status=exit_status,
+        hosts_up=hosts_up,
+        hosts_down=hosts_down,
+        hosts_total=hosts_total,
+        assets=assets,
+        requested_profile=requested_profile,
+        effective_profile=effective_profile,
+        profile_contract=profile_contract_name,
+        profile_runtime_budget_seconds=safe_int(
+            manifest.get("profile_runtime_budget_seconds")
+            or profile.get("runtime_budget_seconds")
+        ),
+        profile_host_timeout_seconds=safe_int(
+            manifest.get("profile_host_timeout_seconds")
+            or profile.get("host_timeout_seconds")
+        ),
+        profile_duration_seconds=safe_int(
+            manifest.get("profile_duration_seconds")
+            or manifest.get("duration_seconds")
+        ),
+        profile_budget_exceeded=_optional_bool(manifest.get("profile_budget_exceeded")),
+        bundle_quality_schema_version=(
+            str(bundle_quality.get("schema_version"))
+            if bundle_quality.get("schema_version") is not None
+            else None
+        ),
+        bundle_deltaaegis_ready=bundle_deltaaegis_ready,
+        bundle_quality_json=json.dumps(bundle_quality, sort_keys=True),
+    )
 
 
 def manifest_file_path(manifest_path: Path, manifest: dict[str, Any], key: str) -> Path | None:
@@ -2987,6 +3172,8 @@ def latest_accepted_snapshot(connection: sqlite3.Connection, target: str) -> sql
 def assess_quality(snapshot: Snapshot, baseline: sqlite3.Row | None) -> tuple[str, str]:
     if snapshot.bundle_status != "COMPLETE":
         return "REJECTED", "NetSniper bundle status is not COMPLETE."
+    if snapshot.bundle_deltaaegis_ready is False:
+        return "REJECTED", "NetSniper bundle quality is not DeltaAegis-ready."
     if snapshot.xml_exit_status != "success":
         return "REJECTED", f"Nmap XML exit status is {snapshot.xml_exit_status!r}, not 'success'."
     if snapshot.hosts_up <= 0 or not snapshot.assets:
@@ -2999,14 +3186,75 @@ def assess_quality(snapshot: Snapshot, baseline: sqlite3.Row | None) -> tuple[st
         if prior_coverage >= IDENTITY_COVERAGE_THRESHOLD and snapshot.identity_coverage < IDENTITY_DROP_REVIEW_THRESHOLD:
             return "REVIEW_REQUIRED", f"MAC-backed identity coverage dropped from {prior_coverage:.0%} to {snapshot.identity_coverage:.0%}."
         old_fp = str(baseline["profile_fingerprint"] or "")
-        if str(baseline["manifest_schema_version"]) == "netsniper-run-v2" and snapshot.manifest_schema_version == "netsniper-run-v2" and old_fp and old_fp != snapshot.profile_fingerprint:
+        if str(baseline["manifest_schema_version"]) in NETSNIPER_PROFILE_AWARE_SCHEMAS and snapshot.manifest_schema_version in NETSNIPER_PROFILE_AWARE_SCHEMAS and old_fp and old_fp != snapshot.profile_fingerprint:
             return "REVIEW_REQUIRED", "NetSniper scan profile fingerprint changed. Approve a new baseline before comparing monitored services."
     return "ACCEPTED", "Snapshot passed quality checks."
 
 
 def insert_snapshot(connection: sqlite3.Connection, snapshot: Snapshot, quality_status: str, quality_reason: str) -> None:
-    connection.execute("""INSERT INTO snapshots (scan_id, manifest_path, target, network_scope, scanner_version, scan_profile, created_at, imported_at, bundle_status, quality_status, quality_reason, xml_exit_status, hosts_up, hosts_down, hosts_total, mac_backed_assets, identity_coverage, is_accepted_baseline, manifest_schema_version, profile_fingerprint, monitored_ports_json, protocols_json, discovery_interface, nmap_version, scan_started_at, scan_completed_at, neighbors_captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (snapshot.scan_id, snapshot.manifest_path, snapshot.target, snapshot_network_scope(snapshot), snapshot.scanner_version, snapshot.scan_profile, snapshot.created_at, utc_now(), snapshot.bundle_status, quality_status, quality_reason, snapshot.xml_exit_status, snapshot.hosts_up, snapshot.hosts_down, snapshot.hosts_total, snapshot.mac_backed_assets, snapshot.identity_coverage, 1 if quality_status == "ACCEPTED" else 0, snapshot.manifest_schema_version, snapshot.profile_fingerprint, json.dumps(snapshot.monitored_ports), json.dumps(snapshot.protocols), snapshot.discovery_interface, snapshot.nmap_version, snapshot.scan_started_at, snapshot.scan_completed_at, snapshot.neighbors_captured_at))
+    connection.execute(
+        """INSERT INTO snapshots (
+            scan_id, manifest_path, target, network_scope, scanner_version,
+            scan_profile, created_at, imported_at, bundle_status,
+            quality_status, quality_reason, xml_exit_status, hosts_up,
+            hosts_down, hosts_total, mac_backed_assets, identity_coverage,
+            is_accepted_baseline, manifest_schema_version, profile_fingerprint,
+            monitored_ports_json, protocols_json, discovery_interface,
+            nmap_version, scan_started_at, scan_completed_at,
+            neighbors_captured_at, requested_profile, effective_profile,
+            profile_contract, profile_runtime_budget_seconds,
+            profile_host_timeout_seconds, profile_duration_seconds,
+            profile_budget_exceeded, bundle_quality_schema_version,
+            bundle_deltaaegis_ready, bundle_quality_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            snapshot.scan_id,
+            snapshot.manifest_path,
+            snapshot.target,
+            snapshot_network_scope(snapshot),
+            snapshot.scanner_version,
+            snapshot.scan_profile,
+            snapshot.created_at,
+            utc_now(),
+            snapshot.bundle_status,
+            quality_status,
+            quality_reason,
+            snapshot.xml_exit_status,
+            snapshot.hosts_up,
+            snapshot.hosts_down,
+            snapshot.hosts_total,
+            snapshot.mac_backed_assets,
+            snapshot.identity_coverage,
+            1 if quality_status == "ACCEPTED" else 0,
+            snapshot.manifest_schema_version,
+            snapshot.profile_fingerprint,
+            json.dumps(snapshot.monitored_ports),
+            json.dumps(snapshot.protocols),
+            snapshot.discovery_interface,
+            snapshot.nmap_version,
+            snapshot.scan_started_at,
+            snapshot.scan_completed_at,
+            snapshot.neighbors_captured_at,
+            snapshot.requested_profile,
+            snapshot.effective_profile,
+            snapshot.profile_contract,
+            snapshot.profile_runtime_budget_seconds,
+            snapshot.profile_host_timeout_seconds,
+            snapshot.profile_duration_seconds,
+            (
+                (1 if snapshot.profile_budget_exceeded else 0)
+                if snapshot.profile_budget_exceeded is not None
+                else None
+            ),
+            snapshot.bundle_quality_schema_version,
+            (
+                (1 if snapshot.bundle_deltaaegis_ready else 0)
+                if snapshot.bundle_deltaaegis_ready is not None
+                else None
+            ),
+            snapshot.bundle_quality_json,
+        ),
+    )
     for asset in snapshot.assets.values():
         connection.execute(
             """INSERT INTO asset_observations (
@@ -3618,7 +3866,7 @@ def identity_transition(previous_coverage: float, current_coverage: float) -> bo
 
 
 def profile_transition(baseline: sqlite3.Row, snapshot: Snapshot) -> bool:
-    return str(baseline["manifest_schema_version"]) != "netsniper-run-v2" and snapshot.manifest_schema_version == "netsniper-run-v2"
+    return str(baseline["manifest_schema_version"]) not in NETSNIPER_PROFILE_AWARE_SCHEMAS and snapshot.manifest_schema_version in NETSNIPER_PROFILE_AWARE_SCHEMAS
 
 
 def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_path: Path) -> str:
@@ -3639,7 +3887,7 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
             initialize_lifecycle(connection, snapshot)
         elif profile_transition(baseline, snapshot):
             initialize_lifecycle(connection, snapshot)
-            events.append(event("PROFILE_BASELINE_RESET", "INFO", f"scan:{snapshot.scan_id}", "NetSniper telemetry contract upgraded to netsniper-run-v2. This snapshot becomes the new profile baseline without generating service-change deltas."))
+            events.append(event("PROFILE_BASELINE_RESET", "INFO", f"scan:{snapshot.scan_id}", "NetSniper telemetry contract upgraded to a profile-aware manifest. This snapshot becomes the new profile baseline without generating service-change deltas."))
         elif identity_transition(float(baseline["identity_coverage"]), snapshot.identity_coverage):
             initialize_lifecycle(connection, snapshot)
             events.append(event("IDENTITY_BASELINE_RESET", "INFO", f"scan:{snapshot.scan_id}", f"MAC-backed identity coverage increased from {float(baseline['identity_coverage']):.0%} to {snapshot.identity_coverage:.0%}. This snapshot becomes the new identity baseline without generating asset-change deltas."))
