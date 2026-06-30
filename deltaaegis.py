@@ -16215,6 +16215,7 @@ def dashboard_index_html_base_v025_operator_link():
       <button type="button" class="tab-button" data-tab-target="intelligence">Intelligence</button>
       <button type="button" class="tab-button" data-tab-target="events">Security Events</button>
       <button type="button" class="tab-button" data-tab-target="alerts">Alarms</button>
+      <button type="button" class="tab-button" data-tab-target="trueaegis">TrueAegis</button>
       <button type="button" class="tab-button" data-tab-target="scan-jobs">Data Sources</button>
     </nav>
 
@@ -16373,6 +16374,34 @@ def dashboard_index_html_base_v025_operator_link():
       <div class="scan-grid" id="scan-context"></div>
     </section>
 
+
+    <section class="card" data-tab-panel="trueaegis" id="trueaegis-validation-foundation-panel">
+      <div class="section-header">
+        <div>
+          <div class="eyebrow">TrueAegis Foundation</div>
+          <h2>TrueAegis Validation Evidence</h2>
+          <p class="muted">Imported TrueAegis validation observations are displayed here as evidence only. v0.33 does not alter risk scoring or correlate observations with NetSniper services yet.</p>
+        </div>
+        <a href="/api/validation-summary">Raw summary JSON</a>
+      </div>
+      <div class="summary" id="trueaegis-validation-summary-cards">
+        <div class="card"><div class="card-label">Runs</div><div class="card-value" id="trueaegis-validation-run-count">0</div></div>
+        <div class="card"><div class="card-label">Observations</div><div class="card-value" id="trueaegis-validation-observation-count">0</div></div>
+        <div class="card"><div class="card-label">Confirmed</div><div class="card-value" id="trueaegis-validation-confirmed-count">0</div></div>
+        <div class="card"><div class="card-label">Protected</div><div class="card-value" id="trueaegis-validation-protected-count">0</div></div>
+      </div>
+      <div id="trueaegis-validation-status-counts" class="chips"></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Host</th><th>Port</th><th>Finding</th><th>Status</th><th>Validated</th><th>Confidence</th><th>Summary</th></tr>
+          </thead>
+          <tbody id="trueaegis-validation-observations-body">
+            <tr><td colspan="7" class="muted">Loading validation evidence…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
 
     <section class="card" data-tab-panel="scan-jobs">
       <h2>Data Sources: Scan Jobs</h2>
@@ -16579,8 +16608,8 @@ def dashboard_index_html_base_v025_operator_link():
       "intelligence",
       "events",
       "alerts",
-      "scan-jobs"
-    ];
+      "scan-jobs", "trueaegis"
+];
 
     let activeDashboardTab = null;
 
@@ -19026,15 +19055,14 @@ def dashboard_index_html_base_v025_operator_link():
       if (panel) { return panel; }
 
       const anchor =
-        document.getElementById("current-risk-panel") ||
-        document.getElementById("risk-panel") ||
-        document.querySelector("main section:last-of-type") ||
         document.querySelector("main") ||
         document.body;
 
       panel = document.createElement("section");
       panel.id = "trueaegis-validation-foundation-panel";
       panel.className = "panel";
+      panel.dataset.tabPanel = "trueaegis";
+      panel.hidden = (typeof activeDashboardTab !== "undefined" && activeDashboardTab !== "trueaegis");
       panel.innerHTML = `
         <div class="section-header">
           <div>
@@ -19063,10 +19091,9 @@ def dashboard_index_html_base_v025_operator_link():
         </div>
       `;
 
-      if (anchor && anchor.parentNode && anchor !== document.body && anchor.tagName !== "MAIN") {
-        anchor.parentNode.insertBefore(panel, anchor.nextSibling);
-      } else {
-        anchor.appendChild(panel);
+      anchor.appendChild(panel);
+      if (typeof applyDashboardTabVisibility === "function") {
+        applyDashboardTabVisibility(activeDashboardTab || "overview");
       }
 
       return panel;

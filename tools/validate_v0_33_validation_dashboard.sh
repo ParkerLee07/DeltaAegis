@@ -20,6 +20,10 @@ grep -Fq 'route == "/api/validations"' deltaaegis.py
 grep -Fq 'function renderTrueAegisValidationPanel' deltaaegis.py
 grep -Fq 'trueaegis-validation-foundation-panel' deltaaegis.py
 
+grep -Fq 'data-tab-target="trueaegis"' deltaaegis.py
+grep -Fq 'panel.dataset.tabPanel = "trueaegis"' deltaaegis.py
+grep -Fq 'TrueAegis</button>' deltaaegis.py
+
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
@@ -127,6 +131,29 @@ assert any(row["status"] == "PROTECTED" for row in validations["observations"]),
 
 print("[PASS] v0.33 validation dashboard HTTP API checks passed")
 PY_HTTP
+
+python3 - "$port" <<'PY_HOME'
+import sys
+import urllib.request
+
+port = sys.argv[1]
+base = f"http://127.0.0.1:{port}"
+
+with urllib.request.urlopen(base + "/", timeout=2) as response:
+    html = response.read().decode("utf-8")
+
+required = [
+    'data-tab-target="trueaegis"',
+    'TrueAegis</button>',
+    'trueaegis-validation-foundation-panel',
+    'data-tab-panel="trueaegis"',
+]
+missing = [item for item in required if item not in html]
+if missing:
+    raise SystemExit(f"missing TrueAegis dashboard tab markers: {missing}")
+
+print("[PASS] v0.33 TrueAegis dashboard tab visibility checks passed")
+PY_HOME
 
 cleanup_server
 trap 'rm -rf "$tmpdir"' EXIT
