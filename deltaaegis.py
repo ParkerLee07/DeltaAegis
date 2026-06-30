@@ -46,6 +46,7 @@ MAC_RE = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
 SCAN_JOB_STATUSES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED"}
 NETSNIPER_SUPPORTED_SCHEMAS = {"netsniper-run-v1", "netsniper-run-v2", "netsniper-run-v3"}
 NETSNIPER_PROFILE_AWARE_SCHEMAS = {"netsniper-run-v2", "netsniper-run-v3"}
+TRUEAEGIS_VALIDATION_STATUSES = {"CONFIRMED", "REACHABLE", "PROTECTED", "PROTOCOL_MISMATCH", "NOT_REACHABLE", "TIMEOUT", "INCONCLUSIVE", "PARTIALLY_CONFIRMED", "DEPENDENCY_MISSING", "UNKNOWN"}
 
 ACCESS_ROLES = ("ADMIN", "ANALYST", "VIEWER")
 
@@ -1358,6 +1359,55 @@ def connect(db_path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(db_path)
     connection.row_factory = sqlite3.Row
     connection.executescript(SCHEMA_SQL)
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS validation_runs (
+            validation_run_id TEXT PRIMARY KEY,
+            source_path TEXT NOT NULL,
+            source_filename TEXT NOT NULL,
+            source_sha256 TEXT NOT NULL,
+            source_format TEXT NOT NULL,
+            inferred_created_at TEXT,
+            imported_at TEXT NOT NULL,
+            result_count INTEGER NOT NULL,
+            status_counts_json TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE TABLE IF NOT EXISTS validation_observations (
+            observation_id TEXT PRIMARY KEY,
+            validation_run_id TEXT NOT NULL,
+            row_index INTEGER NOT NULL,
+            finding_id TEXT NOT NULL,
+            host TEXT NOT NULL,
+            port INTEGER,
+            protocol TEXT,
+            transport TEXT,
+            status TEXT NOT NULL,
+            validated INTEGER,
+            safe INTEGER,
+            confidence TEXT,
+            summary TEXT,
+            reachability TEXT,
+            exposure TEXT,
+            authentication TEXT,
+            details_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            raw_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY(validation_run_id) REFERENCES validation_runs(validation_run_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_validation_observations_run
+            ON validation_observations(validation_run_id);
+
+        CREATE INDEX IF NOT EXISTS idx_validation_observations_host_port
+            ON validation_observations(host, port, protocol);
+
+        CREATE INDEX IF NOT EXISTS idx_validation_observations_status
+            ON validation_observations(status);
+        """
+    )
     ensure_column(connection, "snapshots", "manifest_schema_version", "manifest_schema_version TEXT NOT NULL DEFAULT 'netsniper-run-v1'")
     ensure_column(connection, "snapshots", "profile_fingerprint", "profile_fingerprint TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "snapshots", "monitored_ports_json", "monitored_ports_json TEXT NOT NULL DEFAULT '[]'")
@@ -21447,6 +21497,262 @@ def command_dashboard(args):
 
     return 0
 
+
+def trueaegis_source_hash(path: Path) -> str:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise DeltaAegisError(f"could not read TrueAegis validation file {path}: {exc}") from exc
+    return hashlib.sha256(data).hexdigest()
+
+
+def trueaegis_infer_created_at(path: Path) -> str | None:
+    match = re.search(r"validation_(\d{8}-\d{6})", path.name)
+    if not match:
+        return None
+
+    try:
+        parsed = datetime.strptime(match.group(1), "%Y%m%d-%H%M%S")
+    except ValueError:
+        return None
+
+    return parsed.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def trueaegis_json_dump(value: Any, fallback: Any) -> str:
+    if value is None:
+        value = fallback
+    return json.dumps(value, sort_keys=True)
+
+
+def trueaegis_optional_bool_int(value: Any) -> int | None:
+    parsed = _optional_bool(value)
+    if parsed is None:
+        return None
+    return 1 if parsed else 0
+
+
+def trueaegis_normalize_status(value: Any) -> str:
+    status = str(value or "UNKNOWN").strip().upper()
+    if status not in TRUEAEGIS_VALIDATION_STATUSES:
+        return "UNKNOWN"
+    return status
+
+
+def load_trueaegis_validation_results(path: Path) -> list[dict[str, Any]]:
+    data = load_json(path)
+
+    if isinstance(data, dict):
+        for key in ("validation_results", "results", "findings"):
+            value = data.get(key)
+            if isinstance(value, list):
+                data = value
+                break
+
+    if not isinstance(data, list):
+        raise DeltaAegisError(
+            f"TrueAegis validation results must be a JSON list or wrapped result list: {path}"
+        )
+
+    rows: list[dict[str, Any]] = []
+    for index, item in enumerate(data):
+        if not isinstance(item, dict):
+            raise DeltaAegisError(
+                f"TrueAegis validation row {index} must be an object: {path}"
+            )
+
+        host = str(item.get("host") or "").strip()
+        if not host:
+            raise DeltaAegisError(
+                f"TrueAegis validation row {index} is missing host: {path}"
+            )
+
+        rows.append(item)
+
+    return rows
+
+
+def import_trueaegis_validation_results(
+    connection: sqlite3.Connection,
+    validation_path: Path,
+) -> dict[str, Any]:
+    validation_path = validation_path.expanduser().resolve()
+    rows = load_trueaegis_validation_results(validation_path)
+
+    source_hash = trueaegis_source_hash(validation_path)
+    validation_run_id = "trueaegis-" + source_hash[:16]
+    imported_at = utc_now()
+    inferred_created_at = trueaegis_infer_created_at(validation_path)
+
+    status_counts: dict[str, int] = {}
+    for row in rows:
+        status = trueaegis_normalize_status(row.get("status"))
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    connection.execute(
+        """
+        INSERT OR REPLACE INTO validation_runs (
+            validation_run_id, source_path, source_filename, source_sha256,
+            source_format, inferred_created_at, imported_at, result_count,
+            status_counts_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            validation_run_id,
+            str(validation_path),
+            validation_path.name,
+            source_hash,
+            "trueaegis-validation-list-v1",
+            inferred_created_at,
+            imported_at,
+            len(rows),
+            json.dumps(status_counts, sort_keys=True),
+        ),
+    )
+
+    connection.execute(
+        "DELETE FROM validation_observations WHERE validation_run_id = ?",
+        (validation_run_id,),
+    )
+
+    for index, row in enumerate(rows):
+        status = trueaegis_normalize_status(row.get("status"))
+        host = str(row.get("host") or "").strip()
+        port = safe_int(row.get("port"))
+        finding_id = str(row.get("finding_id") or "UNKNOWN").strip() or "UNKNOWN"
+
+        observation_seed = "|".join(
+            [
+                validation_run_id,
+                str(index),
+                finding_id,
+                host,
+                str(port or ""),
+                status,
+            ]
+        )
+        observation_id = "trueaegis-observation-" + hashlib.sha256(
+            observation_seed.encode("utf-8")
+        ).hexdigest()[:24]
+
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO validation_observations (
+                observation_id, validation_run_id, row_index, finding_id, host,
+                port, protocol, transport, status, validated, safe, confidence,
+                summary, reachability, exposure, authentication, details_json,
+                evidence_json, metadata_json, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                observation_id,
+                validation_run_id,
+                index,
+                finding_id,
+                host,
+                port,
+                str(row.get("protocol") or "").strip() or None,
+                str(row.get("transport") or "").strip() or None,
+                status,
+                trueaegis_optional_bool_int(row.get("validated")),
+                trueaegis_optional_bool_int(row.get("safe")),
+                str(row.get("confidence") or "").strip().upper() or None,
+                str(row.get("summary") or "").strip() or None,
+                str(row.get("reachability") or "").strip().upper() or None,
+                str(row.get("exposure") or "").strip().upper() or None,
+                str(row.get("authentication") or "").strip().upper() or None,
+                trueaegis_json_dump(row.get("details"), []),
+                trueaegis_json_dump(row.get("evidence"), []),
+                trueaegis_json_dump(row.get("metadata"), {}),
+                trueaegis_json_dump(row, {}),
+            ),
+        )
+
+    connection.commit()
+
+    return {
+        "validation_run_id": validation_run_id,
+        "source_path": str(validation_path),
+        "result_count": len(rows),
+        "status_counts": status_counts,
+    }
+
+
+def command_validation_ingest(args) -> int:
+    connection = connect(args.db)
+    result = import_trueaegis_validation_results(connection, args.validation_results)
+
+    print(f"Imported TrueAegis validation run: {result['validation_run_id']}")
+    print(f"Source: {result['source_path']}")
+    print(f"Results: {result['result_count']}")
+
+    if result["status_counts"]:
+        for status, count in sorted(result["status_counts"].items()):
+            print(f"{status}: {count}")
+
+    return 0
+
+
+def command_validations(args) -> int:
+    connection = connect(args.db)
+
+    where = []
+    params: list[Any] = []
+
+    if args.status:
+        where.append("status = ?")
+        params.append(args.status.upper())
+
+    if args.host:
+        where.append("host = ?")
+        params.append(args.host)
+
+    where_sql = "WHERE " + " AND ".join(where) if where else ""
+
+    rows = connection.execute(
+        f"""
+        SELECT
+            validation_run_id, finding_id, host, port, protocol, transport,
+            status, validated, safe, confidence, summary
+        FROM validation_observations
+        {where_sql}
+        ORDER BY validation_run_id DESC, row_index ASC
+        LIMIT ?
+        """,
+        tuple(params + [args.limit]),
+    ).fetchall()
+
+    if not rows:
+        print("No TrueAegis validation observations found.")
+        return 0
+
+    for row in rows:
+        validated = (
+            "yes" if row["validated"] == 1
+            else "no" if row["validated"] == 0
+            else "unknown"
+        )
+        safe = (
+            "yes" if row["safe"] == 1
+            else "no" if row["safe"] == 0
+            else "unknown"
+        )
+        port = row["port"] if row["port"] is not None else "-"
+        print(
+            f"{row['host']}:{port} "
+            f"{row['finding_id']} "
+            f"status={row['status']} "
+            f"validated={validated} "
+            f"safe={safe} "
+            f"confidence={row['confidence'] or '-'} "
+            f"transport={row['transport'] or '-'}"
+        )
+        if row["summary"]:
+            print(f"  {row['summary']}")
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DeltaAegis v0.32.0 — NetSniper v2 Compatibility, v3 bundle ingest, bundle-quality readiness metadata, dashboard scan-context visibility, scheduled scans, guarded NetSniper scan jobs, dashboard user management, RBAC, investigation intelligence, current-state SIEM dashboard, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -21488,6 +21794,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--target-type")
 
     sub.add_parser("ingest")
+    p = sub.add_parser("validation-ingest", help="Import a TrueAegis validation_results JSON file")
+    p.add_argument("validation_results", type=Path)
+    p = sub.add_parser("validations", help="List imported TrueAegis validation observations")
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--status", choices=sorted(TRUEAEGIS_VALIDATION_STATUSES))
+    p.add_argument("--host")
     p = sub.add_parser("scan-start", help="Run a safe NetSniper v1.9 profile-aware headless scan job")
     p.add_argument("--target", required=True, help="Private IPv4 CIDR target, such as 192.168.5.0/24")
     p.add_argument("--profile", choices=["quick", "balanced", "accurate"], default="balanced", help="NetSniper v1.9 scan profile. Default: balanced")
@@ -21671,6 +21983,8 @@ def main() -> int:
         if args.command == "api-tokens": return command_api_tokens(args)
         if args.command == "access-audit": return command_access_audit(args)
         if args.command == "ingest": return command_ingest(args)
+        if args.command == "validation-ingest": return command_validation_ingest(args)
+        if args.command == "validations": return command_validations(args)
         if args.command == "scan-start": return command_scan_start(args)
         if args.command == "scan-jobs": return command_scan_jobs(args)
         if args.command == "schedule-create": return command_schedule_create(args)

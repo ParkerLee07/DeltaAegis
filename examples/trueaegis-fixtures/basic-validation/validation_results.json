@@ -1,0 +1,188 @@
+[
+  {
+    "authentication": "UNKNOWN",
+    "confidence": "MEDIUM",
+    "details": [
+      "HTTP response observed: HTTP/1.1 200 OK",
+      "HTTP response latency: 28.52 ms."
+    ],
+    "evidence": [
+      "HTTP response observed: HTTP/1.1 200 OK",
+      "HTTP response latency: 28.52 ms."
+    ],
+    "exposure": "PRESENT",
+    "finding_id": "HTTP_EXPOSED",
+    "host": "192.168.4.1",
+    "metadata": {
+      "headers": {
+        "accept-ranges": "bytes",
+        "cache-control": "no-store, no-cache, must-revalidate, post-check=0, pre-check=0",
+        "connection": "close",
+        "content-length": "103700",
+        "content-type": "text/html",
+        "last-modified": "Thu, 24 Jul 2025 05:55:46 GMT",
+        "x-frame-options": "deny"
+      },
+      "latency_ms": 28.52,
+      "product_signals": [],
+      "server": "",
+      "status_code": 200,
+      "status_line": "HTTP/1.1 200 OK",
+      "title": ""
+    },
+    "port": 80,
+    "protocol": "CONFIRMED",
+    "reachability": "CONFIRMED",
+    "safe": true,
+    "status": "CONFIRMED",
+    "summary": "Web protocol response was confirmed.",
+    "transport": "HTTP",
+    "validated": true
+  },
+  {
+    "authentication": "UNKNOWN",
+    "confidence": "LOW",
+    "details": [
+      "Generic TCP connection succeeded.",
+      "TCP connection latency: 9.13 ms.",
+      "The expected application protocol has not been confirmed."
+    ],
+    "evidence": [
+      "Generic TCP connection succeeded.",
+      "TCP connection latency: 9.13 ms.",
+      "The expected application protocol has not been confirmed."
+    ],
+    "exposure": "UNKNOWN",
+    "finding_id": "SSH_EXPOSED",
+    "host": "192.168.4.10",
+    "metadata": {
+      "latency_ms": 9.13,
+      "probe_type": "generic_tcp"
+    },
+    "port": 22,
+    "protocol": "UNKNOWN",
+    "reachability": "CONFIRMED",
+    "safe": true,
+    "status": "REACHABLE",
+    "summary": "Port is reachable, but no service-specific validator is available yet.",
+    "transport": "TCP",
+    "validated": false
+  },
+  {
+    "authentication": "REQUIRED",
+    "confidence": "HIGH",
+    "details": [
+      "TCP connection to the suspected SMB port succeeded.",
+      "smbclient return code: 1",
+      "SMB authentication or authorization rejection observed.",
+      "session setup failed: NT_STATUS_LOGON_FAILURE"
+    ],
+    "evidence": [
+      "TCP connection to the suspected SMB port succeeded.",
+      "smbclient return code: 1",
+      "SMB authentication or authorization rejection observed.",
+      "session setup failed: NT_STATUS_LOGON_FAILURE"
+    ],
+    "exposure": "PROTECTED",
+    "finding_id": "SMB_EXPOSED",
+    "host": "192.168.4.10",
+    "metadata": {
+      "command": [
+        "smbclient",
+        "-L",
+        "192.168.4.10",
+        "-N",
+        "-g",
+        "-p",
+        "445"
+      ],
+      "probe_type": "smbclient_anonymous_list",
+      "return_code": 1,
+      "stderr": "",
+      "stdout": "session setup failed: NT_STATUS_LOGON_FAILURE",
+      "tcp": {
+        "error": "",
+        "latency_ms": 5.76,
+        "reachable": true,
+        "transport": "TCP"
+      }
+    },
+    "port": 445,
+    "protocol": "CONFIRMED",
+    "reachability": "CONFIRMED",
+    "safe": true,
+    "status": "PROTECTED",
+    "summary": "SMB protocol appears reachable, but anonymous service enumeration was denied.",
+    "transport": "TCP",
+    "validated": true
+  },
+  {
+    "authentication": "UNKNOWN",
+    "confidence": "LOW",
+    "details": [
+      "TCP connection succeeded.",
+      "HTTP probe error: [Errno 104] Connection reset by peer"
+    ],
+    "evidence": [
+      "TCP connection succeeded.",
+      "HTTP probe error: [Errno 104] Connection reset by peer"
+    ],
+    "exposure": "UNKNOWN",
+    "finding_id": "PORTAINER_CANDIDATE",
+    "host": "192.168.4.107",
+    "metadata": {
+      "http": {
+        "body": "",
+        "error": "[Errno 104] Connection reset by peer",
+        "headers": {},
+        "latency_ms": null,
+        "raw_response": "",
+        "status_line": "",
+        "success": false,
+        "transport": "HTTP"
+      },
+      "probe_type": "http",
+      "tcp": {
+        "error": "",
+        "latency_ms": 1.86,
+        "reachable": true,
+        "transport": "TCP"
+      }
+    },
+    "port": 9000,
+    "protocol": "MISMATCH",
+    "reachability": "CONFIRMED",
+    "safe": true,
+    "status": "PROTOCOL_MISMATCH",
+    "summary": "Port is reachable, but a valid plaintext HTTP response was not observed.",
+    "transport": "TCP",
+    "validated": false
+  },
+  {
+    "authentication": "UNKNOWN",
+    "confidence": "NONE",
+    "details": [
+      "Generic TCP connection failed.",
+      "Reason: Connection timed out."
+    ],
+    "evidence": [
+      "Generic TCP connection failed.",
+      "Reason: Connection timed out."
+    ],
+    "exposure": "UNKNOWN",
+    "finding_id": "IPP_EXPOSED",
+    "host": "192.168.4.124",
+    "metadata": {
+      "error": "Connection timed out.",
+      "probe_type": "generic_tcp"
+    },
+    "port": 631,
+    "protocol": "UNKNOWN",
+    "reachability": "NOT_REACHABLE",
+    "safe": true,
+    "status": "NOT_REACHABLE",
+    "summary": "Port is not reachable from this system.",
+    "transport": "TCP",
+    "validated": false
+  }
+]
