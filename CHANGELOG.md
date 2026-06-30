@@ -1,5 +1,13 @@
 ## v0.30.0 - 2026-06-26
 
+## v0.32.0 — NetSniper v2 Compatibility
+
+- Added ingest support for NetSniper `netsniper-run-v3` manifests while preserving `netsniper-run-v1` and `netsniper-run-v2` compatibility.
+- Added snapshot storage for `bundle_quality.json` schema/readiness metadata and raw bundle-quality JSON.
+- Added requested/effective scan profile, profile contract, runtime budget, host timeout, profile duration, and budget-exceeded snapshot metadata.
+- Added dashboard and `/api/scan-context` visibility for NetSniper v2 schema/profile/runtime/readiness metadata.
+- Added v0.32 validators: `validate_v0_32_netsniper_v2_ingest.sh`, `validate_v0_32_dashboard_v2_metadata.sh`, `validate_v0_32_release_metadata.sh`, and `validate_v0_32_release.sh`.
+
 DeltaAegis v0.30.0 adds profile-aware NetSniper scan jobs for the NetSniper v1.9 scan-profile model.
 
 ### Added
