@@ -4,25 +4,27 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.32.0
+## Current Release — v0.33.0
 
-**DeltaAegis v0.32.0 — NetSniper v2 Compatibility**
+**DeltaAegis v0.33.0 — TrueAegis Integration Foundation**
 
-DeltaAegis v0.32.0 adds downstream compatibility for NetSniper v2 telemetry bundles and the `netsniper-run-v3` manifest contract. This release keeps older NetSniper v1/v2 bundle compatibility, stores `bundle_quality.json` readiness evidence, records requested/effective scan profile and runtime metadata, and exposes schema/profile/readiness context in `/api/scan-context` and the dashboard scan cards.
+DeltaAegis v0.33.0 introduces the first TrueAegis integration foundation. It imports TrueAegis `validation_results.json` output, stores validation runs and observations in SQLite, exposes validation evidence through CLI commands, adds dashboard/API visibility, and includes validation evidence in Markdown reports. This release intentionally does not change risk scoring or correlate TrueAegis observations with NetSniper services yet; it establishes the storage and visibility contract for later validation-aware correlation.
 
 ### Highlights
 
-- Accepts NetSniper `netsniper-run-v3` manifests while preserving `netsniper-run-v1` and `netsniper-run-v2` ingest support.
-- Stores requested/effective scan profile, profile contract, profile fingerprint, runtime budget, host timeout, profile duration, and budget-exceeded status.
-- Stores `bundle_quality.json` schema/readiness metadata and raw bundle-quality JSON for auditability.
-- Rejects or blocks invalid/unready NetSniper v2 fixture bundles before they can become trusted baselines.
-- Exposes NetSniper v2 schema, profile, runtime, and DeltaAegis-readiness metadata in `/api/scan-context` and dashboard scan cards.
-- Adds v0.32 validators for NetSniper v2 ingest/storage, dashboard metadata visibility, and release metadata.
+- Adds `validation_runs` and `validation_observations` storage for TrueAegis validation output.
+- Adds `validation-ingest` and `validations` CLI commands.
+- Accepts TrueAegis top-level JSON-list validation files and wrapped result-list variants.
+- Preserves validation fields including finding ID, host, port, status, validated/safe booleans, confidence, reachability, exposure, authentication, evidence, details, metadata, and raw JSON.
+- Adds `/api/validation-summary` and `/api/validations` dashboard APIs.
+- Adds a dashboard validation evidence panel with run counts, observation counts, status counts, and recent observations.
+- Adds TrueAegis validation evidence to Markdown investigation reports.
+- Adds v0.33 validators for storage, dashboard/API visibility, report visibility, release metadata, and the full release gate.
 
 ### Validate
 
 ```bash
-./tools/validate_v0_32_release.sh
+./tools/validate_v0_33_release.sh
 ```
 
 ## What DeltaAegis Does

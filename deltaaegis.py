@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.32.0: NetSniper v2 telemetry compatibility, v3 bundle ingest, bundle-quality readiness gates, and profile runtime metadata storage.
+"""DeltaAegis v0.33.0: TrueAegis integration foundation, validation-result ingestion, dashboard validation evidence, and report visibility.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -46,6 +46,7 @@ MAC_RE = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
 SCAN_JOB_STATUSES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED"}
 NETSNIPER_SUPPORTED_SCHEMAS = {"netsniper-run-v1", "netsniper-run-v2", "netsniper-run-v3"}
 NETSNIPER_PROFILE_AWARE_SCHEMAS = {"netsniper-run-v2", "netsniper-run-v3"}
+TRUEAEGIS_VALIDATION_STATUSES = {"CONFIRMED", "REACHABLE", "PROTECTED", "PROTOCOL_MISMATCH", "NOT_REACHABLE", "TIMEOUT", "INCONCLUSIVE", "PARTIALLY_CONFIRMED", "DEPENDENCY_MISSING", "UNKNOWN"}
 
 ACCESS_ROLES = ("ADMIN", "ANALYST", "VIEWER")
 
@@ -72,6 +73,9 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("GET", "/operator/users", "admin.users.read"),
     ("GET", "/netsniper", "dashboard.read"),
     ("GET", "/api/netsniper/status", "dashboard.read"),
+    ("GET", "/api/validation-summary", "dashboard.read"),
+    ("GET", "/api/validations", "dashboard.read"),
+    ("POST", "/api/validation-ingest", "workflow.write"),
     ("GET", "/api/session", "session.read"),
     ("GET", "/api/admin/users", "admin.users.read"),
     ("GET", "/api/access-audit", "admin.audit.read"),
@@ -1358,6 +1362,55 @@ def connect(db_path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(db_path)
     connection.row_factory = sqlite3.Row
     connection.executescript(SCHEMA_SQL)
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS validation_runs (
+            validation_run_id TEXT PRIMARY KEY,
+            source_path TEXT NOT NULL,
+            source_filename TEXT NOT NULL,
+            source_sha256 TEXT NOT NULL,
+            source_format TEXT NOT NULL,
+            inferred_created_at TEXT,
+            imported_at TEXT NOT NULL,
+            result_count INTEGER NOT NULL,
+            status_counts_json TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE TABLE IF NOT EXISTS validation_observations (
+            observation_id TEXT PRIMARY KEY,
+            validation_run_id TEXT NOT NULL,
+            row_index INTEGER NOT NULL,
+            finding_id TEXT NOT NULL,
+            host TEXT NOT NULL,
+            port INTEGER,
+            protocol TEXT,
+            transport TEXT,
+            status TEXT NOT NULL,
+            validated INTEGER,
+            safe INTEGER,
+            confidence TEXT,
+            summary TEXT,
+            reachability TEXT,
+            exposure TEXT,
+            authentication TEXT,
+            details_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            raw_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY(validation_run_id) REFERENCES validation_runs(validation_run_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_validation_observations_run
+            ON validation_observations(validation_run_id);
+
+        CREATE INDEX IF NOT EXISTS idx_validation_observations_host_port
+            ON validation_observations(host, port, protocol);
+
+        CREATE INDEX IF NOT EXISTS idx_validation_observations_status
+            ON validation_observations(status);
+        """
+    )
     ensure_column(connection, "snapshots", "manifest_schema_version", "manifest_schema_version TEXT NOT NULL DEFAULT 'netsniper-run-v1'")
     ensure_column(connection, "snapshots", "profile_fingerprint", "profile_fingerprint TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "snapshots", "monitored_ports_json", "monitored_ports_json TEXT NOT NULL DEFAULT '[]'")
@@ -8023,6 +8076,8 @@ def append_report_dashboard_usage_section(lines, scope=None):
     lines.append("- The dashboard remains read-only and is intended for local or trusted-access investigation.")
     lines.append("- Port behavior API: `/api/port-behavior?limit=25&lookback=5`")
     lines.append("- Investigation Center API: `/api/investigation-center?limit=25`")
+    lines.append("- TrueAegis validation summary API: `/api/validation-summary`")
+    lines.append("- TrueAegis validation observation API: `/api/validations?limit=25`")
     lines.append("- Investigation Center workflow filter API: `/api/investigation-center?limit=25&ticket_status=OPEN`")
     lines.append("- Investigation Center signal filter API: `/api/investigation-center?limit=25&ticket_signal=ACTIONABLE`")
     lines.append("- Combined ticket filters are supported with `ticket_status` and `ticket_signal` query parameters.")
@@ -8171,6 +8226,107 @@ def append_report_classification_summary_section(lines, classification_summary):
         "Use weak, unknown, or contradictory classifications as review targets. "
         "They usually require vendor confirmation, service validation, or asset annotation."
     )
+    lines.append("")
+
+
+def report_trueaegis_validation_summary(connection):
+    return dashboard_validation_summary_payload(connection)
+
+
+def report_trueaegis_validation_rows(connection, limit=10):
+    payload = dashboard_validations_payload(connection, limit=limit)
+    return list(payload.get("observations") or [])
+
+
+def append_report_trueaegis_validation_section(lines, validation_summary, validation_rows):
+    lines.append("## TrueAegis Validation Evidence")
+    lines.append("")
+    lines.append(
+        "This section summarizes imported TrueAegis validation output. In v0.33, "
+        "this evidence is stored and displayed as a foundation layer only; it does "
+        "not yet alter DeltaAegis risk scoring or correlate findings with NetSniper "
+        "service observations."
+    )
+    lines.append("")
+
+    if not validation_summary or int(validation_summary.get("observation_count") or 0) == 0:
+        lines.append("No TrueAegis validation observations have been imported yet.")
+        lines.append("")
+        lines.append("Import validation output with:")
+        lines.append("")
+        lines.append("```bash")
+        lines.append("python3 deltaaegis.py validation-ingest /path/to/validation_results.json")
+        lines.append("```")
+        lines.append("")
+        return
+
+    lines.append("| Metric | Value |")
+    lines.append("|---|---:|")
+    lines.append(f"| Validation runs | {safe_markdown(validation_summary.get('validation_run_count') or 0)} |")
+    lines.append(f"| Observations | {safe_markdown(validation_summary.get('observation_count') or 0)} |")
+    lines.append(f"| Validated observations | {safe_markdown(validation_summary.get('validated_count') or 0)} |")
+    lines.append(f"| Confirmed observations | {safe_markdown(validation_summary.get('confirmed_count') or 0)} |")
+    lines.append(f"| Protected observations | {safe_markdown(validation_summary.get('protected_count') or 0)} |")
+    lines.append("")
+
+    status_counts = list(validation_summary.get("status_counts") or [])
+    lines.append("### Validation Status Counts")
+    lines.append("")
+
+    if status_counts:
+        lines.append("| Status | Count |")
+        lines.append("|---|---:|")
+        for row in status_counts:
+            lines.append(
+                "| "
+                f"{safe_markdown(row.get('status') or 'UNKNOWN')} | "
+                f"{safe_markdown(row.get('count') or 0)} |"
+            )
+        lines.append("")
+    else:
+        lines.append("No validation status counts were available.")
+        lines.append("")
+
+    latest_run = validation_summary.get("latest_run") or {}
+    if latest_run:
+        lines.append("### Latest Imported Validation Run")
+        lines.append("")
+        lines.append(f"- Run ID: `{safe_markdown(latest_run.get('validation_run_id') or '-')}`")
+        lines.append(f"- Source file: `{safe_markdown(latest_run.get('source_filename') or '-')}`")
+        lines.append(f"- Imported at: `{safe_markdown(latest_run.get('imported_at') or '-')}`")
+        lines.append(f"- Results: **{safe_markdown(latest_run.get('result_count') or 0)}**")
+        lines.append("")
+
+    rows = list(validation_rows or [])
+    lines.append("### Recent Validation Observations")
+    lines.append("")
+
+    if not rows:
+        lines.append("No validation observation rows were available.")
+        lines.append("")
+        return
+
+    lines.append("| Host | Port | Finding | Status | Validated | Safe | Confidence | Summary |")
+    lines.append("|---|---:|---|---|---|---|---|---|")
+
+    for row in rows:
+        validated = row.get("validated")
+        safe = row.get("safe")
+        validated_text = "yes" if validated is True else "no" if validated is False else "unknown"
+        safe_text = "yes" if safe is True else "no" if safe is False else "unknown"
+
+        lines.append(
+            "| "
+            f"`{safe_markdown(row.get('host') or '-')}` | "
+            f"{safe_markdown(row.get('port') or '-')} | "
+            f"{safe_markdown(row.get('finding_id') or '-')} | "
+            f"{safe_markdown(row.get('status') or '-')} | "
+            f"{safe_markdown(validated_text)} | "
+            f"{safe_markdown(safe_text)} | "
+            f"{safe_markdown(row.get('confidence') or '-')} | "
+            f"{safe_markdown(row.get('summary') or '-')} |"
+        )
+
     lines.append("")
 
 def append_report_asset_inventory_section(lines, asset_rows, limit):
@@ -8743,6 +8899,9 @@ def command_report(args):
         scope=scope,
     )
 
+    report_validation_summary = report_trueaegis_validation_summary(connection)
+    report_validation_rows = report_trueaegis_validation_rows(connection, limit=10)
+
     event_type_counts = Counter(row["event_type"] for row in events)
     severity_counts = Counter(row["severity"] for row in events)
 
@@ -8777,6 +8936,8 @@ def command_report(args):
     lines.append(f"- Events included in this report: **{len(events)}**")
     lines.append(f"- Open alerts: **{len(open_alerts)}**")
     lines.append(f"- Assets included: **{len(report_asset_rows)}**")
+    lines.append(f"- TrueAegis validation observations: **{report_validation_summary.get('observation_count', 0)}**")
+    lines.append(f"- TrueAegis confirmed/protected observations: **{report_validation_summary.get('confirmed_count', 0)} confirmed / {report_validation_summary.get('protected_count', 0)} protected**")
     lines.append("")
 
     lines.append("## Report Scope")
@@ -8793,6 +8954,7 @@ def command_report(args):
     append_report_network_scope_summary(lines, connection, scope=scope)
     append_report_asset_lifecycle_section(lines, report_lifecycle_rows)
     append_report_classification_summary_section(lines, report_classification_summary)
+    append_report_trueaegis_validation_section(lines, report_validation_summary, report_validation_rows)
     append_report_asset_inventory_section(lines, report_asset_rows, args.asset_limit)
     append_report_investigation_center_section(lines, report_investigation_center_rows)
     append_report_ticket_evidence_appendix(lines, report_ticket_evidence_payloads)
@@ -10872,6 +11034,188 @@ def dashboard_delta_scan_pairs(connection, limit=10, scope=None):
         return []
 
     return [dict(row) for row in rows]
+
+
+def dashboard_validation_summary_payload(
+    connection: sqlite3.Connection,
+    limit: int = 10,
+) -> dict[str, Any]:
+    limit = max(1, min(safe_int(limit) or 10, 50))
+
+    run_count_row = connection.execute(
+        "SELECT COUNT(*) AS count FROM validation_runs"
+    ).fetchone()
+    observation_count_row = connection.execute(
+        "SELECT COUNT(*) AS count FROM validation_observations"
+    ).fetchone()
+    validated_count_row = connection.execute(
+        "SELECT COUNT(*) AS count FROM validation_observations WHERE validated = 1"
+    ).fetchone()
+    protected_count_row = connection.execute(
+        "SELECT COUNT(*) AS count FROM validation_observations WHERE status = 'PROTECTED'"
+    ).fetchone()
+    confirmed_count_row = connection.execute(
+        "SELECT COUNT(*) AS count FROM validation_observations WHERE status = 'CONFIRMED'"
+    ).fetchone()
+
+    status_rows = connection.execute(
+        """
+        SELECT status, COUNT(*) AS count
+        FROM validation_observations
+        GROUP BY status
+        ORDER BY count DESC, status ASC
+        """
+    ).fetchall()
+
+    latest_run = connection.execute(
+        """
+        SELECT validation_run_id, source_filename, source_path, source_format,
+               inferred_created_at, imported_at, result_count, status_counts_json
+        FROM validation_runs
+        ORDER BY imported_at DESC, validation_run_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+
+    recent_runs = connection.execute(
+        """
+        SELECT validation_run_id, source_filename, source_format,
+               inferred_created_at, imported_at, result_count, status_counts_json
+        FROM validation_runs
+        ORDER BY imported_at DESC, validation_run_id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+    def run_payload(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        try:
+            status_counts = json.loads(row["status_counts_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            status_counts = {}
+        return {
+            "validation_run_id": row["validation_run_id"],
+            "source_filename": row["source_filename"],
+            "source_path": row["source_path"] if "source_path" in row.keys() else None,
+            "source_format": row["source_format"],
+            "inferred_created_at": row["inferred_created_at"],
+            "imported_at": row["imported_at"],
+            "result_count": int(row["result_count"] or 0),
+            "status_counts": status_counts,
+        }
+
+    return {
+        "schema_version": "deltaaegis-trueaegis-validation-summary-v1",
+        "validation_run_count": int(run_count_row["count"] or 0) if run_count_row else 0,
+        "observation_count": int(observation_count_row["count"] or 0) if observation_count_row else 0,
+        "validated_count": int(validated_count_row["count"] or 0) if validated_count_row else 0,
+        "confirmed_count": int(confirmed_count_row["count"] or 0) if confirmed_count_row else 0,
+        "protected_count": int(protected_count_row["count"] or 0) if protected_count_row else 0,
+        "status_counts": [
+            {"status": row["status"], "count": int(row["count"] or 0)}
+            for row in status_rows
+        ],
+        "latest_run": run_payload(latest_run),
+        "recent_runs": [run_payload(row) for row in recent_runs],
+    }
+
+
+def dashboard_validations_payload(
+    connection: sqlite3.Connection,
+    limit: int = 25,
+    status: str | None = None,
+    host: str | None = None,
+) -> dict[str, Any]:
+    limit = max(1, min(safe_int(limit) or 25, 100))
+
+    where: list[str] = []
+    params: list[Any] = []
+
+    if status:
+        where.append("o.status = ?")
+        params.append(trueaegis_normalize_status(status))
+
+    if host:
+        where.append("o.host = ?")
+        params.append(str(host).strip())
+
+    where_sql = "WHERE " + " AND ".join(where) if where else ""
+
+    rows = connection.execute(
+        f"""
+        SELECT
+            o.observation_id,
+            o.validation_run_id,
+            r.source_filename,
+            r.imported_at,
+            o.row_index,
+            o.finding_id,
+            o.host,
+            o.port,
+            o.protocol,
+            o.transport,
+            o.status,
+            o.validated,
+            o.safe,
+            o.confidence,
+            o.summary,
+            o.reachability,
+            o.exposure,
+            o.authentication,
+            o.details_json,
+            o.evidence_json,
+            o.metadata_json
+        FROM validation_observations o
+        JOIN validation_runs r ON r.validation_run_id = o.validation_run_id
+        {where_sql}
+        ORDER BY r.imported_at DESC, o.row_index ASC
+        LIMIT ?
+        """,
+        tuple(params + [limit]),
+    ).fetchall()
+
+    def decode_json(value: Any, fallback: Any) -> Any:
+        try:
+            return json.loads(value or "")
+        except (TypeError, json.JSONDecodeError):
+            return fallback
+
+    observations = []
+    for row in rows:
+        observations.append(
+            {
+                "observation_id": row["observation_id"],
+                "validation_run_id": row["validation_run_id"],
+                "source_filename": row["source_filename"],
+                "imported_at": row["imported_at"],
+                "row_index": int(row["row_index"] or 0),
+                "finding_id": row["finding_id"],
+                "host": row["host"],
+                "port": row["port"],
+                "protocol": row["protocol"],
+                "transport": row["transport"],
+                "status": row["status"],
+                "validated": bool(row["validated"]) if row["validated"] is not None else None,
+                "safe": bool(row["safe"]) if row["safe"] is not None else None,
+                "confidence": row["confidence"],
+                "summary": row["summary"],
+                "reachability": row["reachability"],
+                "exposure": row["exposure"],
+                "authentication": row["authentication"],
+                "details": decode_json(row["details_json"], []),
+                "evidence": decode_json(row["evidence_json"], []),
+                "metadata": decode_json(row["metadata_json"], {}),
+            }
+        )
+
+    return {
+        "schema_version": "deltaaegis-trueaegis-validations-v1",
+        "limit": limit,
+        "count": len(observations),
+        "observations": observations,
+    }
 
 def dashboard_scan_context_payload(connection, scope=None):
     snapshots = dashboard_snapshot_rows(connection, 2, scope=scope)
@@ -15843,7 +16187,133 @@ def dashboard_index_html_base_v025_operator_link():
       color: #94a3b8;
     }
 
-  </style>
+
+    /* v0.33 TrueAegis dashboard import controls */
+    .trueaegis-validation-import-controls {
+      align-items: end;
+      background:
+        linear-gradient(135deg, rgba(34, 211, 238, 0.10), rgba(14, 165, 233, 0.03)),
+        rgba(2, 6, 23, 0.42);
+      border: 1px solid rgba(34, 211, 238, 0.22);
+      border-radius: 18px;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+      display: grid;
+      grid-template-columns: max-content minmax(280px, 1fr) max-content;
+      gap: 12px;
+      margin: 18px 0 12px;
+      padding: 14px;
+    }
+
+    .trueaegis-validation-import-controls label {
+      align-self: center;
+      color: #93c5fd;
+      font-size: 11px;
+      font-weight: 950;
+      letter-spacing: 0.09em;
+      margin: 0;
+      text-transform: uppercase;
+    }
+
+    .trueaegis-validation-import-controls input {
+      background: rgba(2, 6, 23, 0.72);
+      border: 1px solid rgba(148, 163, 184, 0.28);
+      border-radius: 14px;
+      color: #e2e8f0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      font-weight: 800;
+      min-height: 40px;
+      min-width: 0;
+      padding: 10px 12px;
+      width: 100%;
+    }
+
+    .trueaegis-validation-import-controls input:focus {
+      border-color: rgba(34, 211, 238, 0.75);
+      box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.12);
+      outline: none;
+    }
+
+    .trueaegis-validation-import-controls button {
+      background: rgba(8, 145, 178, 0.16);
+      border: 1px solid rgba(34, 211, 238, 0.34);
+      border-radius: 999px;
+      color: #a5f3fc;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 950;
+      min-height: 40px;
+      padding: 10px 14px;
+      white-space: nowrap;
+    }
+
+    .trueaegis-validation-import-controls button:hover:not(:disabled) {
+      background: rgba(8, 145, 178, 0.28);
+      border-color: rgba(103, 232, 249, 0.52);
+    }
+
+    .trueaegis-validation-import-controls button:disabled {
+      cursor: wait;
+      opacity: 0.58;
+    }
+
+    #trueaegis-validation-import-status {
+      background: rgba(15, 23, 42, 0.72);
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 14px;
+      color: #cbd5e1;
+      font-size: 12px;
+      font-weight: 750;
+      line-height: 1.45;
+      margin: 0 0 18px;
+      padding: 11px 13px;
+    }
+
+    #trueaegis-validation-import-status.error {
+      background: rgba(127, 29, 29, 0.22);
+      border-color: rgba(248, 113, 113, 0.34);
+      color: #fecaca;
+    }
+
+    #trueaegis-validation-status-counts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 10px 0 14px;
+    }
+
+    #trueaegis-validation-foundation-panel .section-header {
+      align-items: flex-start;
+      gap: 16px;
+    }
+
+    #trueaegis-validation-foundation-panel .section-header a {
+      background: rgba(15, 23, 42, 0.58);
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: 999px;
+      color: #bae6fd;
+      font-size: 12px;
+      font-weight: 900;
+      padding: 8px 11px;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+
+    @media (max-width: 900px) {
+      .trueaegis-validation-import-controls {
+        grid-template-columns: 1fr;
+      }
+
+      .trueaegis-validation-import-controls button {
+        width: 100%;
+      }
+
+      #trueaegis-validation-foundation-panel .section-header {
+        align-items: stretch;
+      }
+    }
+
+</style>
 </head>
 <body class="dashboard-shell-refresh-v017">
   <header class="executive-header">
@@ -15855,7 +16325,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.32 NetSniper v2 Compatibility</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.33 TrueAegis Integration Foundation</span></div>
     </div>
   </header>
 
@@ -15872,6 +16342,7 @@ def dashboard_index_html_base_v025_operator_link():
       <button type="button" class="tab-button" data-tab-target="intelligence">Intelligence</button>
       <button type="button" class="tab-button" data-tab-target="events">Security Events</button>
       <button type="button" class="tab-button" data-tab-target="alerts">Alarms</button>
+      <button type="button" class="tab-button" data-tab-target="trueaegis">TrueAegis</button>
       <button type="button" class="tab-button" data-tab-target="scan-jobs">Data Sources</button>
     </nav>
 
@@ -16030,6 +16501,41 @@ def dashboard_index_html_base_v025_operator_link():
       <div class="scan-grid" id="scan-context"></div>
     </section>
 
+
+    <section class="card" data-tab-panel="trueaegis" id="trueaegis-validation-foundation-panel">
+      <div class="section-header">
+        <div>
+          <div class="eyebrow">TrueAegis Foundation</div>
+          <h2>TrueAegis Validation Evidence</h2>
+          <p class="muted">Imported TrueAegis validation observations are displayed here as evidence only. v0.33 does not alter risk scoring or correlate observations with NetSniper services yet.</p>
+        </div>
+        <a href="/api/validation-summary">Raw summary JSON</a>
+      </div>
+      <div class="actions trueaegis-validation-import-controls" id="trueaegis-validation-import-controls">
+        <button type="button" id="trueaegis-validation-import-latest">Import latest TrueAegis validation</button>
+        <label class="muted" for="trueaegis-validation-import-path">validation_results.json path</label>
+        <input id="trueaegis-validation-import-path" type="text" value="~/TrueAegis/validation_results/latest" placeholder="~/TrueAegis/validation_results/validation_YYYYMMDD-HHMMSS.json">
+        <button type="button" id="trueaegis-validation-import-path-button">Import path</button>
+      </div>
+      <div class="muted" id="trueaegis-validation-import-status">Use the buttons above to import TrueAegis validation output into DeltaAegis.</div>
+      <div class="summary" id="trueaegis-validation-summary-cards">
+        <div class="card"><div class="card-label">Runs</div><div class="card-value" id="trueaegis-validation-run-count">0</div></div>
+        <div class="card"><div class="card-label">Observations</div><div class="card-value" id="trueaegis-validation-observation-count">0</div></div>
+        <div class="card"><div class="card-label">Confirmed</div><div class="card-value" id="trueaegis-validation-confirmed-count">0</div></div>
+        <div class="card"><div class="card-label">Protected</div><div class="card-value" id="trueaegis-validation-protected-count">0</div></div>
+      </div>
+      <div id="trueaegis-validation-status-counts" class="chips"></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Host</th><th>Port</th><th>Finding</th><th>Status</th><th>Validated</th><th>Confidence</th><th>Summary</th></tr>
+          </thead>
+          <tbody id="trueaegis-validation-observations-body">
+            <tr><td colspan="7" class="muted">Loading validation evidence…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
 
     <section class="card" data-tab-panel="scan-jobs">
       <h2>Data Sources: Scan Jobs</h2>
@@ -16236,8 +16742,8 @@ def dashboard_index_html_base_v025_operator_link():
       "intelligence",
       "events",
       "alerts",
-      "scan-jobs"
-    ];
+      "scan-jobs", "trueaegis"
+];
 
     let activeDashboardTab = null;
 
@@ -18658,6 +19164,224 @@ def dashboard_index_html_base_v025_operator_link():
       `;
     }
 
+
+    function trueAegisValidationText(value) {
+      if (value === null || value === undefined || value === "") { return "—"; }
+      return String(value);
+    }
+
+    function trueAegisValidationEscape(value) {
+      return trueAegisValidationText(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function trueAegisValidationSetText(id, value) {
+      const element = document.getElementById(id);
+      if (element) { element.textContent = trueAegisValidationText(value); }
+    }
+
+    function ensureTrueAegisValidationPanel() {
+      let panel = document.getElementById("trueaegis-validation-foundation-panel");
+      if (panel) { return panel; }
+
+      const anchor =
+        document.querySelector("main") ||
+        document.body;
+
+      panel = document.createElement("section");
+      panel.id = "trueaegis-validation-foundation-panel";
+      panel.className = "panel";
+      panel.dataset.tabPanel = "trueaegis";
+      panel.hidden = (typeof activeDashboardTab !== "undefined" && activeDashboardTab !== "trueaegis");
+      panel.innerHTML = `
+        <div class="section-header">
+          <div>
+            <div class="eyebrow">TrueAegis Foundation</div>
+            <h2>Validation Evidence</h2>
+            <p class="muted">Imported TrueAegis validation observations are displayed here as evidence only. v0.33 does not alter risk scoring or correlate observations with NetSniper services yet.</p>
+          </div>
+          <a href="/api/validation-summary">Raw summary JSON</a>
+        </div>
+        <div class="actions trueaegis-validation-import-controls" id="trueaegis-validation-import-controls">
+          <button type="button" id="trueaegis-validation-import-latest">Import latest TrueAegis validation</button>
+          <label class="muted" for="trueaegis-validation-import-path">validation_results.json path</label>
+          <input id="trueaegis-validation-import-path" type="text" value="~/TrueAegis/validation_results/latest" placeholder="~/TrueAegis/validation_results/validation_YYYYMMDD-HHMMSS.json">
+          <button type="button" id="trueaegis-validation-import-path-button">Import path</button>
+        </div>
+        <div class="muted" id="trueaegis-validation-import-status">Use the buttons above to import TrueAegis validation output into DeltaAegis.</div>
+        <div class="summary" id="trueaegis-validation-summary-cards">
+          <div class="card"><div class="card-label">Runs</div><div class="card-value" id="trueaegis-validation-run-count">0</div></div>
+          <div class="card"><div class="card-label">Observations</div><div class="card-value" id="trueaegis-validation-observation-count">0</div></div>
+          <div class="card"><div class="card-label">Confirmed</div><div class="card-value" id="trueaegis-validation-confirmed-count">0</div></div>
+          <div class="card"><div class="card-label">Protected</div><div class="card-value" id="trueaegis-validation-protected-count">0</div></div>
+        </div>
+        <div id="trueaegis-validation-status-counts" class="chips"></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Host</th><th>Port</th><th>Finding</th><th>Status</th><th>Validated</th><th>Confidence</th><th>Summary</th></tr>
+            </thead>
+            <tbody id="trueaegis-validation-observations-body">
+              <tr><td colspan="7" class="muted">Loading validation evidence…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      `;
+
+      anchor.appendChild(panel);
+      if (typeof applyDashboardTabVisibility === "function") {
+        applyDashboardTabVisibility(activeDashboardTab || "overview");
+      }
+
+      return panel;
+    }
+
+
+    function trueAegisValidationSetImportStatus(message, isError) {
+      const status = document.getElementById("trueaegis-validation-import-status");
+      if (!status) { return; }
+      status.textContent = message || "";
+      status.classList.toggle("error", !!isError);
+    }
+
+    async function importTrueAegisValidation(mode) {
+      const latestButton = document.getElementById("trueaegis-validation-import-latest");
+      const pathButton = document.getElementById("trueaegis-validation-import-path-button");
+      const pathInput = document.getElementById("trueaegis-validation-import-path");
+
+      const payload = { mode: mode };
+      if (mode !== "latest") {
+        payload.path = pathInput ? pathInput.value : "";
+      }
+
+      if (latestButton) { latestButton.disabled = true; }
+      if (pathButton) { pathButton.disabled = true; }
+
+      trueAegisValidationSetImportStatus("Importing TrueAegis validation output…", false);
+
+      try {
+        const response = await fetch(scopedPath("/api/validation-ingest"), {
+          method: "POST",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        let result = {};
+        try {
+          result = await response.json();
+        } catch (error) {
+          result = {};
+        }
+
+        if (response.status === 401 || response.status === 403) {
+          window.location.href = "/login";
+          return;
+        }
+
+        if (!response.ok || result.ok === false) {
+          throw new Error(result.message || result.error || `Import failed with HTTP ${response.status}`);
+        }
+
+        const imported = result.import_result || {};
+        const count = imported.observation_count || imported.imported_observation_count || 0;
+        trueAegisValidationSetImportStatus(
+          `Imported ${count} TrueAegis validation observation(s) from ${result.source_path || "selected file"}.`,
+          false
+        );
+
+        await renderTrueAegisValidationPanel();
+      } catch (error) {
+        trueAegisValidationSetImportStatus(`Import failed: ${error.message || error}`, true);
+      } finally {
+        if (latestButton) { latestButton.disabled = false; }
+        if (pathButton) { pathButton.disabled = false; }
+      }
+    }
+
+    function bindTrueAegisValidationImportControls() {
+      const latestButton = document.getElementById("trueaegis-validation-import-latest");
+      const pathButton = document.getElementById("trueaegis-validation-import-path-button");
+
+      if (latestButton && latestButton.dataset.boundTrueAegisImport !== "1") {
+        latestButton.dataset.boundTrueAegisImport = "1";
+        latestButton.addEventListener("click", function () {
+          importTrueAegisValidation("latest");
+        });
+      }
+
+      if (pathButton && pathButton.dataset.boundTrueAegisImport !== "1") {
+        pathButton.dataset.boundTrueAegisImport = "1";
+        pathButton.addEventListener("click", function () {
+          importTrueAegisValidation("path");
+        });
+      }
+    }
+
+    async function renderTrueAegisValidationPanel() {
+      ensureTrueAegisValidationPanel();
+      bindTrueAegisValidationImportControls();
+
+      const body = document.getElementById("trueaegis-validation-observations-body");
+      const statusCounts = document.getElementById("trueaegis-validation-status-counts");
+
+      try {
+        const summary = await api(scopedPath("/api/validation-summary"));
+        const validations = await api(scopedPath("/api/validations?limit=25"));
+
+        trueAegisValidationSetText("trueaegis-validation-run-count", summary.validation_run_count || 0);
+        trueAegisValidationSetText("trueaegis-validation-observation-count", summary.observation_count || 0);
+        trueAegisValidationSetText("trueaegis-validation-confirmed-count", summary.confirmed_count || 0);
+        trueAegisValidationSetText("trueaegis-validation-protected-count", summary.protected_count || 0);
+
+        const counts = summary.status_counts || [];
+        statusCounts.innerHTML = counts.length
+          ? counts.map(function (row) {
+              return `<span class="pill">${trueAegisValidationEscape(row.status)}: ${trueAegisValidationEscape(row.count)}</span>`;
+            }).join(" ")
+          : '<span class="muted">No imported TrueAegis validation statuses yet.</span>';
+
+        const observations = validations.observations || [];
+        body.innerHTML = observations.length
+          ? observations.map(function (row) {
+              const validated = row.validated === true ? "yes" : row.validated === false ? "no" : "unknown";
+              return `
+                <tr>
+                  <td>${trueAegisValidationEscape(row.host)}</td>
+                  <td>${trueAegisValidationEscape(row.port)}</td>
+                  <td>${trueAegisValidationEscape(row.finding_id)}</td>
+                  <td><span class="pill">${trueAegisValidationEscape(row.status)}</span></td>
+                  <td>${trueAegisValidationEscape(validated)}</td>
+                  <td>${trueAegisValidationEscape(row.confidence)}</td>
+                  <td>${trueAegisValidationEscape(row.summary)}</td>
+                </tr>
+              `;
+            }).join("")
+          : '<tr><td colspan="7" class="muted">No imported TrueAegis validation observations yet. Use validation-ingest first.</td></tr>';
+      } catch (error) {
+        if (body) {
+          body.innerHTML = `<tr><td colspan="7" class="muted">Validation evidence lookup failed: ${trueAegisValidationEscape(error.message || error)}</td></tr>`;
+        }
+      }
+    }
+
+    function startTrueAegisValidationPanel() {
+      if (typeof api !== "function" || typeof scopedPath !== "function") { return; }
+      renderTrueAegisValidationPanel();
+    }
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", startTrueAegisValidationPanel);
+    } else {
+      startTrueAegisValidationPanel();
+    }
+
+
     function renderRecommendations(summary, scanContext, riskRows) {
       const steps = [];
       const latest = scanContext && scanContext.latest_scan ? scanContext.latest_scan : null;
@@ -20697,6 +21421,10 @@ def command_dashboard(args):
                     dashboard_json_response(self, dashboard_summary_payload(connection, scope=scope))
                 elif route == "/api/scan-context":
                     dashboard_json_response(self, dashboard_scan_context_payload(connection, scope=scope))
+                elif route == "/api/validation-summary":
+                    dashboard_json_response(self, dashboard_validation_summary_payload(connection))
+                elif route == "/api/validations":
+                    dashboard_json_response(self, dashboard_validations_payload(connection, limit=25))
                 elif route == "/api/current-state":
                     dashboard_json_response(self, dashboard_current_state_payload(connection, scope=scope))
                 elif route == "/api/scan-jobs":
@@ -21165,7 +21893,7 @@ def command_dashboard(args):
             if not self.require_permission("workflow.write"):
                 return
 
-            if route not in {"/api/investigate-asset", "/api/ticket-status", "/api/netsniper/import-latest"}:
+            if route not in {"/api/investigate-asset", "/api/ticket-status", "/api/netsniper/import-latest", "/api/validation-ingest"}:
                 dashboard_json_response(
                     self,
                     {
@@ -21217,6 +21945,33 @@ def command_dashboard(args):
                 )
                 return
 
+
+            if route == "/api/validation-ingest":
+                connection = self.open_connection()
+
+                try:
+                    try:
+                        result = dashboard_trueaegis_validation_ingest_payload(
+                            connection,
+                            payload,
+                        )
+                    except DeltaAegisError as exc:
+                        connection.rollback()
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "validation_ingest_failed",
+                                "message": str(exc),
+                            },
+                            status=400,
+                        )
+                        return
+
+                    dashboard_json_response(self, result)
+                    return
+                finally:
+                    connection.close()
 
             if route == "/api/netsniper/import-latest":
                 connection = self.open_connection()
@@ -21447,8 +22202,330 @@ def command_dashboard(args):
 
     return 0
 
+
+def trueaegis_source_hash(path: Path) -> str:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise DeltaAegisError(f"could not read TrueAegis validation file {path}: {exc}") from exc
+    return hashlib.sha256(data).hexdigest()
+
+
+def trueaegis_infer_created_at(path: Path) -> str | None:
+    match = re.search(r"validation_(\d{8}-\d{6})", path.name)
+    if not match:
+        return None
+
+    try:
+        parsed = datetime.strptime(match.group(1), "%Y%m%d-%H%M%S")
+    except ValueError:
+        return None
+
+    return parsed.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def trueaegis_json_dump(value: Any, fallback: Any) -> str:
+    if value is None:
+        value = fallback
+    return json.dumps(value, sort_keys=True)
+
+
+def trueaegis_optional_bool_int(value: Any) -> int | None:
+    parsed = _optional_bool(value)
+    if parsed is None:
+        return None
+    return 1 if parsed else 0
+
+
+def trueaegis_normalize_status(value: Any) -> str:
+    status = str(value or "UNKNOWN").strip().upper()
+    if status not in TRUEAEGIS_VALIDATION_STATUSES:
+        return "UNKNOWN"
+    return status
+
+
+def load_trueaegis_validation_results(path: Path) -> list[dict[str, Any]]:
+    data = load_json(path)
+
+    if isinstance(data, dict):
+        for key in ("validation_results", "results", "findings"):
+            value = data.get(key)
+            if isinstance(value, list):
+                data = value
+                break
+
+    if not isinstance(data, list):
+        raise DeltaAegisError(
+            f"TrueAegis validation results must be a JSON list or wrapped result list: {path}"
+        )
+
+    rows: list[dict[str, Any]] = []
+    for index, item in enumerate(data):
+        if not isinstance(item, dict):
+            raise DeltaAegisError(
+                f"TrueAegis validation row {index} must be an object: {path}"
+            )
+
+        host = str(item.get("host") or "").strip()
+        if not host:
+            raise DeltaAegisError(
+                f"TrueAegis validation row {index} is missing host: {path}"
+            )
+
+        rows.append(item)
+
+    return rows
+
+
+def import_trueaegis_validation_results(
+    connection: sqlite3.Connection,
+    validation_path: Path,
+) -> dict[str, Any]:
+    validation_path = validation_path.expanduser().resolve()
+    rows = load_trueaegis_validation_results(validation_path)
+
+    source_hash = trueaegis_source_hash(validation_path)
+    validation_run_id = "trueaegis-" + source_hash[:16]
+    imported_at = utc_now()
+    inferred_created_at = trueaegis_infer_created_at(validation_path)
+
+    status_counts: dict[str, int] = {}
+    for row in rows:
+        status = trueaegis_normalize_status(row.get("status"))
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    connection.execute(
+        """
+        INSERT OR REPLACE INTO validation_runs (
+            validation_run_id, source_path, source_filename, source_sha256,
+            source_format, inferred_created_at, imported_at, result_count,
+            status_counts_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            validation_run_id,
+            str(validation_path),
+            validation_path.name,
+            source_hash,
+            "trueaegis-validation-list-v1",
+            inferred_created_at,
+            imported_at,
+            len(rows),
+            json.dumps(status_counts, sort_keys=True),
+        ),
+    )
+
+    connection.execute(
+        "DELETE FROM validation_observations WHERE validation_run_id = ?",
+        (validation_run_id,),
+    )
+
+    for index, row in enumerate(rows):
+        status = trueaegis_normalize_status(row.get("status"))
+        host = str(row.get("host") or "").strip()
+        port = safe_int(row.get("port"))
+        finding_id = str(row.get("finding_id") or "UNKNOWN").strip() or "UNKNOWN"
+
+        observation_seed = "|".join(
+            [
+                validation_run_id,
+                str(index),
+                finding_id,
+                host,
+                str(port or ""),
+                status,
+            ]
+        )
+        observation_id = "trueaegis-observation-" + hashlib.sha256(
+            observation_seed.encode("utf-8")
+        ).hexdigest()[:24]
+
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO validation_observations (
+                observation_id, validation_run_id, row_index, finding_id, host,
+                port, protocol, transport, status, validated, safe, confidence,
+                summary, reachability, exposure, authentication, details_json,
+                evidence_json, metadata_json, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                observation_id,
+                validation_run_id,
+                index,
+                finding_id,
+                host,
+                port,
+                str(row.get("protocol") or "").strip() or None,
+                str(row.get("transport") or "").strip() or None,
+                status,
+                trueaegis_optional_bool_int(row.get("validated")),
+                trueaegis_optional_bool_int(row.get("safe")),
+                str(row.get("confidence") or "").strip().upper() or None,
+                str(row.get("summary") or "").strip() or None,
+                str(row.get("reachability") or "").strip().upper() or None,
+                str(row.get("exposure") or "").strip().upper() or None,
+                str(row.get("authentication") or "").strip().upper() or None,
+                trueaegis_json_dump(row.get("details"), []),
+                trueaegis_json_dump(row.get("evidence"), []),
+                trueaegis_json_dump(row.get("metadata"), {}),
+                trueaegis_json_dump(row, {}),
+            ),
+        )
+
+    connection.commit()
+
+    return {
+        "validation_run_id": validation_run_id,
+        "source_path": str(validation_path),
+        "result_count": len(rows),
+        "status_counts": status_counts,
+    }
+
+
+
+def dashboard_trueaegis_latest_validation_results_path() -> Path:
+    validation_dir = Path.home() / "TrueAegis" / "validation_results"
+
+    if not validation_dir.is_dir():
+        raise DeltaAegisError(
+            f"TrueAegis validation_results directory was not found: {validation_dir}"
+        )
+
+    candidates = sorted(
+        validation_dir.glob("validation_*.json"),
+        key=lambda candidate: candidate.stat().st_mtime,
+        reverse=True,
+    )
+
+    if not candidates:
+        raise DeltaAegisError(
+            f"No TrueAegis validation_*.json files were found in {validation_dir}"
+        )
+
+    return candidates[0]
+
+
+def dashboard_trueaegis_validation_ingest_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    mode = str(payload.get("mode") or "").strip().lower()
+    raw_path = str(payload.get("path") or payload.get("validation_results") or "").strip()
+
+    if mode == "latest":
+        validation_path = dashboard_trueaegis_latest_validation_results_path()
+    else:
+        if not raw_path:
+            raise DeltaAegisError(
+                "Provide a TrueAegis validation_results.json path or use mode=latest."
+            )
+        validation_path = Path(raw_path).expanduser()
+
+    if validation_path.suffix.lower() != ".json":
+        raise DeltaAegisError(
+            f"TrueAegis validation import only accepts JSON files: {validation_path}"
+        )
+
+    if not validation_path.is_file():
+        raise DeltaAegisError(
+            f"TrueAegis validation file was not found: {validation_path}"
+        )
+
+    result = import_trueaegis_validation_results(connection, validation_path)
+    connection.commit()
+
+    summary = dashboard_validation_summary_payload(connection)
+    observations = dashboard_validations_payload(connection, limit=25)
+
+    return {
+        "ok": True,
+        "schema_version": "deltaaegis-trueaegis-validation-ingest-v1",
+        "mode": mode or "path",
+        "source_path": str(validation_path),
+        "validation_run_id": result.get("validation_run_id"),
+        "import_result": result,
+        "summary": summary,
+        "observations": observations,
+    }
+
+def command_validation_ingest(args) -> int:
+    connection = connect(args.db)
+    result = import_trueaegis_validation_results(connection, args.validation_results)
+
+    print(f"Imported TrueAegis validation run: {result['validation_run_id']}")
+    print(f"Source: {result['source_path']}")
+    print(f"Results: {result['result_count']}")
+
+    if result["status_counts"]:
+        for status, count in sorted(result["status_counts"].items()):
+            print(f"{status}: {count}")
+
+    return 0
+
+
+def command_validations(args) -> int:
+    connection = connect(args.db)
+
+    where = []
+    params: list[Any] = []
+
+    if args.status:
+        where.append("status = ?")
+        params.append(args.status.upper())
+
+    if args.host:
+        where.append("host = ?")
+        params.append(args.host)
+
+    where_sql = "WHERE " + " AND ".join(where) if where else ""
+
+    rows = connection.execute(
+        f"""
+        SELECT
+            validation_run_id, finding_id, host, port, protocol, transport,
+            status, validated, safe, confidence, summary
+        FROM validation_observations
+        {where_sql}
+        ORDER BY validation_run_id DESC, row_index ASC
+        LIMIT ?
+        """,
+        tuple(params + [args.limit]),
+    ).fetchall()
+
+    if not rows:
+        print("No TrueAegis validation observations found.")
+        return 0
+
+    for row in rows:
+        validated = (
+            "yes" if row["validated"] == 1
+            else "no" if row["validated"] == 0
+            else "unknown"
+        )
+        safe = (
+            "yes" if row["safe"] == 1
+            else "no" if row["safe"] == 0
+            else "unknown"
+        )
+        port = row["port"] if row["port"] is not None else "-"
+        print(
+            f"{row['host']}:{port} "
+            f"{row['finding_id']} "
+            f"status={row['status']} "
+            f"validated={validated} "
+            f"safe={safe} "
+            f"confidence={row['confidence'] or '-'} "
+            f"transport={row['transport'] or '-'}"
+        )
+        if row["summary"]:
+            print(f"  {row['summary']}")
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.32.0 — NetSniper v2 Compatibility, v3 bundle ingest, bundle-quality readiness metadata, dashboard scan-context visibility, scheduled scans, guarded NetSniper scan jobs, dashboard user management, RBAC, investigation intelligence, current-state SIEM dashboard, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.33.0 — TrueAegis Integration Foundation, v3 bundle ingest, bundle-quality readiness metadata, dashboard scan-context visibility, scheduled scans, guarded NetSniper scan jobs, dashboard user management, RBAC, investigation intelligence, current-state SIEM dashboard, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
@@ -21488,6 +22565,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--target-type")
 
     sub.add_parser("ingest")
+    p = sub.add_parser("validation-ingest", help="Import a TrueAegis validation_results JSON file")
+    p.add_argument("validation_results", type=Path)
+    p = sub.add_parser("validations", help="List imported TrueAegis validation observations")
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--status", choices=sorted(TRUEAEGIS_VALIDATION_STATUSES))
+    p.add_argument("--host")
     p = sub.add_parser("scan-start", help="Run a safe NetSniper v1.9 profile-aware headless scan job")
     p.add_argument("--target", required=True, help="Private IPv4 CIDR target, such as 192.168.5.0/24")
     p.add_argument("--profile", choices=["quick", "balanced", "accurate"], default="balanced", help="NetSniper v1.9 scan profile. Default: balanced")
@@ -21671,6 +22754,8 @@ def main() -> int:
         if args.command == "api-tokens": return command_api_tokens(args)
         if args.command == "access-audit": return command_access_audit(args)
         if args.command == "ingest": return command_ingest(args)
+        if args.command == "validation-ingest": return command_validation_ingest(args)
+        if args.command == "validations": return command_validations(args)
         if args.command == "scan-start": return command_scan_start(args)
         if args.command == "scan-jobs": return command_scan_jobs(args)
         if args.command == "schedule-create": return command_schedule_create(args)
