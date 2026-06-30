@@ -4,26 +4,25 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.31.0
+## Current Release — v0.32.0
 
-**DeltaAegis v0.31.0 — Scheduled Profile-Aware Scans**
+**DeltaAegis v0.32.0 — NetSniper v2 Compatibility**
 
-DeltaAegis v0.31.0 adds saved, profile-aware NetSniper scan schedules with dashboard controls, one-click hourly balanced monitoring, automatic due-schedule execution from the dashboard process, and persisted scheduled scan success/failure state.
+DeltaAegis v0.32.0 adds downstream compatibility for NetSniper v2 telemetry bundles and the `netsniper-run-v3` manifest contract. This release keeps older NetSniper v1/v2 bundle compatibility, stores `bundle_quality.json` readiness evidence, records requested/effective scan profile and runtime metadata, and exposes schema/profile/readiness context in `/api/scan-context` and the dashboard scan cards.
 
 ### Highlights
 
-- Saved NetSniper scan schedules with private-CIDR validation, profile selection, cadence, enabled state, and auto-ingest controls.
-- Dashboard schedule API and UI for creating, enabling, disabling, deleting, listing, and manually running due schedules.
-- One-click **Hourly Balanced Monitoring** using the balanced profile, a 60-minute cadence, and auto-ingest enabled.
-- Dashboard schedule worker that wakes periodically, runs at most one due schedule per tick, skips when another scan is active, and reuses the guarded v0.30 scan-job path.
-- Scheduled scan failure persistence so execution errors mark both the scan job and schedule as failed instead of leaving stale `RUNNING` jobs.
+- Accepts NetSniper `netsniper-run-v3` manifests while preserving `netsniper-run-v1` and `netsniper-run-v2` ingest support.
+- Stores requested/effective scan profile, profile contract, profile fingerprint, runtime budget, host timeout, profile duration, and budget-exceeded status.
+- Stores `bundle_quality.json` schema/readiness metadata and raw bundle-quality JSON for auditability.
+- Rejects or blocks invalid/unready NetSniper v2 fixture bundles before they can become trusted baselines.
+- Exposes NetSniper v2 schema, profile, runtime, and DeltaAegis-readiness metadata in `/api/scan-context` and dashboard scan cards.
+- Adds v0.32 validators for NetSniper v2 ingest/storage, dashboard metadata visibility, and release metadata.
 
-### Validation
-
-Run the v0.31 release gate:
+### Validate
 
 ```bash
-./tools/validate_v0_31_release.sh
+./tools/validate_v0_32_release.sh
 ```
 
 ## What DeltaAegis Does
