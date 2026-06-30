@@ -23,6 +23,15 @@ grep -Fq 'trueaegis-validation-foundation-panel' deltaaegis.py
 grep -Fq 'data-tab-target="trueaegis"' deltaaegis.py
 grep -Fq 'panel.dataset.tabPanel = "trueaegis"' deltaaegis.py
 grep -Fq 'TrueAegis</button>' deltaaegis.py
+grep -Fq '"/api/validation-ingest"' deltaaegis.py
+grep -Fq 'def dashboard_trueaegis_validation_ingest_payload' deltaaegis.py
+grep -Fq 'id="trueaegis-validation-import-latest"' deltaaegis.py
+grep -Fq 'id="trueaegis-validation-import-path"' deltaaegis.py
+grep -Fq 'v0.33 TrueAegis dashboard import controls' deltaaegis.py
+grep -Fq '.trueaegis-validation-import-controls' deltaaegis.py
+grep -Fq '#trueaegis-validation-import-status.error' deltaaegis.py
+grep -Fq 'function importTrueAegisValidation(mode)' deltaaegis.py
+grep -Fq 'route == "/api/validation-ingest"' deltaaegis.py
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -98,13 +107,14 @@ cleanup_server() {
 }
 trap 'cleanup_server; rm -rf "$tmpdir"' EXIT
 
-python3 - "$port" <<'PY_HTTP'
+python3 - "$port" "$fixture" <<'PY_HTTP'
 import json
 import sys
 import time
 import urllib.request
 
 port = sys.argv[1]
+fixture = sys.argv[2]
 base = f"http://127.0.0.1:{port}"
 
 deadline = time.time() + 8
@@ -128,6 +138,35 @@ with urllib.request.urlopen(base + "/api/validations?limit=25", timeout=2) as re
 
 assert validations["count"] == 5, validations
 assert any(row["status"] == "PROTECTED" for row in validations["observations"]), validations
+
+
+def post_json(path, payload):
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        base + path,
+        data=data,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=2) as response:
+        return response.status, json.loads(response.read().decode("utf-8"))
+
+try:
+    post_json("/api/validation-ingest", {"path": "/tmp/not-a-validation-file.txt"})
+except urllib.error.HTTPError as exc:
+    assert exc.code == 400, exc.code
+    error_payload = json.loads(exc.read().decode("utf-8"))
+    assert error_payload["ok"] is False, error_payload
+    assert error_payload["error"] == "validation_ingest_failed", error_payload
+else:
+    raise AssertionError("invalid validation ingest path should fail")
+
+status, import_payload = post_json("/api/validation-ingest", {"path": fixture})
+assert status == 200, status
+assert import_payload["ok"] is True, import_payload
+assert import_payload["schema_version"] == "deltaaegis-trueaegis-validation-ingest-v1"
+assert import_payload["summary"]["observation_count"] == 5, import_payload
+assert import_payload["observations"]["count"] == 5, import_payload
 
 print("[PASS] v0.33 validation dashboard HTTP API checks passed")
 PY_HTTP

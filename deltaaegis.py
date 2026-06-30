@@ -75,6 +75,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("GET", "/api/netsniper/status", "dashboard.read"),
     ("GET", "/api/validation-summary", "dashboard.read"),
     ("GET", "/api/validations", "dashboard.read"),
+    ("POST", "/api/validation-ingest", "workflow.write"),
     ("GET", "/api/session", "session.read"),
     ("GET", "/api/admin/users", "admin.users.read"),
     ("GET", "/api/access-audit", "admin.audit.read"),
@@ -16186,7 +16187,133 @@ def dashboard_index_html_base_v025_operator_link():
       color: #94a3b8;
     }
 
-  </style>
+
+    /* v0.33 TrueAegis dashboard import controls */
+    .trueaegis-validation-import-controls {
+      align-items: end;
+      background:
+        linear-gradient(135deg, rgba(34, 211, 238, 0.10), rgba(14, 165, 233, 0.03)),
+        rgba(2, 6, 23, 0.42);
+      border: 1px solid rgba(34, 211, 238, 0.22);
+      border-radius: 18px;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+      display: grid;
+      grid-template-columns: max-content minmax(280px, 1fr) max-content;
+      gap: 12px;
+      margin: 18px 0 12px;
+      padding: 14px;
+    }
+
+    .trueaegis-validation-import-controls label {
+      align-self: center;
+      color: #93c5fd;
+      font-size: 11px;
+      font-weight: 950;
+      letter-spacing: 0.09em;
+      margin: 0;
+      text-transform: uppercase;
+    }
+
+    .trueaegis-validation-import-controls input {
+      background: rgba(2, 6, 23, 0.72);
+      border: 1px solid rgba(148, 163, 184, 0.28);
+      border-radius: 14px;
+      color: #e2e8f0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      font-weight: 800;
+      min-height: 40px;
+      min-width: 0;
+      padding: 10px 12px;
+      width: 100%;
+    }
+
+    .trueaegis-validation-import-controls input:focus {
+      border-color: rgba(34, 211, 238, 0.75);
+      box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.12);
+      outline: none;
+    }
+
+    .trueaegis-validation-import-controls button {
+      background: rgba(8, 145, 178, 0.16);
+      border: 1px solid rgba(34, 211, 238, 0.34);
+      border-radius: 999px;
+      color: #a5f3fc;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 950;
+      min-height: 40px;
+      padding: 10px 14px;
+      white-space: nowrap;
+    }
+
+    .trueaegis-validation-import-controls button:hover:not(:disabled) {
+      background: rgba(8, 145, 178, 0.28);
+      border-color: rgba(103, 232, 249, 0.52);
+    }
+
+    .trueaegis-validation-import-controls button:disabled {
+      cursor: wait;
+      opacity: 0.58;
+    }
+
+    #trueaegis-validation-import-status {
+      background: rgba(15, 23, 42, 0.72);
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 14px;
+      color: #cbd5e1;
+      font-size: 12px;
+      font-weight: 750;
+      line-height: 1.45;
+      margin: 0 0 18px;
+      padding: 11px 13px;
+    }
+
+    #trueaegis-validation-import-status.error {
+      background: rgba(127, 29, 29, 0.22);
+      border-color: rgba(248, 113, 113, 0.34);
+      color: #fecaca;
+    }
+
+    #trueaegis-validation-status-counts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 10px 0 14px;
+    }
+
+    #trueaegis-validation-foundation-panel .section-header {
+      align-items: flex-start;
+      gap: 16px;
+    }
+
+    #trueaegis-validation-foundation-panel .section-header a {
+      background: rgba(15, 23, 42, 0.58);
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: 999px;
+      color: #bae6fd;
+      font-size: 12px;
+      font-weight: 900;
+      padding: 8px 11px;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+
+    @media (max-width: 900px) {
+      .trueaegis-validation-import-controls {
+        grid-template-columns: 1fr;
+      }
+
+      .trueaegis-validation-import-controls button {
+        width: 100%;
+      }
+
+      #trueaegis-validation-foundation-panel .section-header {
+        align-items: stretch;
+      }
+    }
+
+</style>
 </head>
 <body class="dashboard-shell-refresh-v017">
   <header class="executive-header">
@@ -16384,6 +16511,13 @@ def dashboard_index_html_base_v025_operator_link():
         </div>
         <a href="/api/validation-summary">Raw summary JSON</a>
       </div>
+      <div class="actions trueaegis-validation-import-controls" id="trueaegis-validation-import-controls">
+        <button type="button" id="trueaegis-validation-import-latest">Import latest TrueAegis validation</button>
+        <label class="muted" for="trueaegis-validation-import-path">validation_results.json path</label>
+        <input id="trueaegis-validation-import-path" type="text" value="~/TrueAegis/validation_results/latest" placeholder="~/TrueAegis/validation_results/validation_YYYYMMDD-HHMMSS.json">
+        <button type="button" id="trueaegis-validation-import-path-button">Import path</button>
+      </div>
+      <div class="muted" id="trueaegis-validation-import-status">Use the buttons above to import TrueAegis validation output into DeltaAegis.</div>
       <div class="summary" id="trueaegis-validation-summary-cards">
         <div class="card"><div class="card-label">Runs</div><div class="card-value" id="trueaegis-validation-run-count">0</div></div>
         <div class="card"><div class="card-label">Observations</div><div class="card-value" id="trueaegis-validation-observation-count">0</div></div>
@@ -19072,6 +19206,13 @@ def dashboard_index_html_base_v025_operator_link():
           </div>
           <a href="/api/validation-summary">Raw summary JSON</a>
         </div>
+        <div class="actions trueaegis-validation-import-controls" id="trueaegis-validation-import-controls">
+          <button type="button" id="trueaegis-validation-import-latest">Import latest TrueAegis validation</button>
+          <label class="muted" for="trueaegis-validation-import-path">validation_results.json path</label>
+          <input id="trueaegis-validation-import-path" type="text" value="~/TrueAegis/validation_results/latest" placeholder="~/TrueAegis/validation_results/validation_YYYYMMDD-HHMMSS.json">
+          <button type="button" id="trueaegis-validation-import-path-button">Import path</button>
+        </div>
+        <div class="muted" id="trueaegis-validation-import-status">Use the buttons above to import TrueAegis validation output into DeltaAegis.</div>
         <div class="summary" id="trueaegis-validation-summary-cards">
           <div class="card"><div class="card-label">Runs</div><div class="card-value" id="trueaegis-validation-run-count">0</div></div>
           <div class="card"><div class="card-label">Observations</div><div class="card-value" id="trueaegis-validation-observation-count">0</div></div>
@@ -19099,8 +19240,92 @@ def dashboard_index_html_base_v025_operator_link():
       return panel;
     }
 
+
+    function trueAegisValidationSetImportStatus(message, isError) {
+      const status = document.getElementById("trueaegis-validation-import-status");
+      if (!status) { return; }
+      status.textContent = message || "";
+      status.classList.toggle("error", !!isError);
+    }
+
+    async function importTrueAegisValidation(mode) {
+      const latestButton = document.getElementById("trueaegis-validation-import-latest");
+      const pathButton = document.getElementById("trueaegis-validation-import-path-button");
+      const pathInput = document.getElementById("trueaegis-validation-import-path");
+
+      const payload = { mode: mode };
+      if (mode !== "latest") {
+        payload.path = pathInput ? pathInput.value : "";
+      }
+
+      if (latestButton) { latestButton.disabled = true; }
+      if (pathButton) { pathButton.disabled = true; }
+
+      trueAegisValidationSetImportStatus("Importing TrueAegis validation output…", false);
+
+      try {
+        const response = await fetch(scopedPath("/api/validation-ingest"), {
+          method: "POST",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        let result = {};
+        try {
+          result = await response.json();
+        } catch (error) {
+          result = {};
+        }
+
+        if (response.status === 401 || response.status === 403) {
+          window.location.href = "/login";
+          return;
+        }
+
+        if (!response.ok || result.ok === false) {
+          throw new Error(result.message || result.error || `Import failed with HTTP ${response.status}`);
+        }
+
+        const imported = result.import_result || {};
+        const count = imported.observation_count || imported.imported_observation_count || 0;
+        trueAegisValidationSetImportStatus(
+          `Imported ${count} TrueAegis validation observation(s) from ${result.source_path || "selected file"}.`,
+          false
+        );
+
+        await renderTrueAegisValidationPanel();
+      } catch (error) {
+        trueAegisValidationSetImportStatus(`Import failed: ${error.message || error}`, true);
+      } finally {
+        if (latestButton) { latestButton.disabled = false; }
+        if (pathButton) { pathButton.disabled = false; }
+      }
+    }
+
+    function bindTrueAegisValidationImportControls() {
+      const latestButton = document.getElementById("trueaegis-validation-import-latest");
+      const pathButton = document.getElementById("trueaegis-validation-import-path-button");
+
+      if (latestButton && latestButton.dataset.boundTrueAegisImport !== "1") {
+        latestButton.dataset.boundTrueAegisImport = "1";
+        latestButton.addEventListener("click", function () {
+          importTrueAegisValidation("latest");
+        });
+      }
+
+      if (pathButton && pathButton.dataset.boundTrueAegisImport !== "1") {
+        pathButton.dataset.boundTrueAegisImport = "1";
+        pathButton.addEventListener("click", function () {
+          importTrueAegisValidation("path");
+        });
+      }
+    }
+
     async function renderTrueAegisValidationPanel() {
       ensureTrueAegisValidationPanel();
+      bindTrueAegisValidationImportControls();
 
       const body = document.getElementById("trueaegis-validation-observations-body");
       const statusCounts = document.getElementById("trueaegis-validation-status-counts");
@@ -21668,7 +21893,7 @@ def command_dashboard(args):
             if not self.require_permission("workflow.write"):
                 return
 
-            if route not in {"/api/investigate-asset", "/api/ticket-status", "/api/netsniper/import-latest"}:
+            if route not in {"/api/investigate-asset", "/api/ticket-status", "/api/netsniper/import-latest", "/api/validation-ingest"}:
                 dashboard_json_response(
                     self,
                     {
@@ -21720,6 +21945,33 @@ def command_dashboard(args):
                 )
                 return
 
+
+            if route == "/api/validation-ingest":
+                connection = self.open_connection()
+
+                try:
+                    try:
+                        result = dashboard_trueaegis_validation_ingest_payload(
+                            connection,
+                            payload,
+                        )
+                    except DeltaAegisError as exc:
+                        connection.rollback()
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "validation_ingest_failed",
+                                "message": str(exc),
+                            },
+                            status=400,
+                        )
+                        return
+
+                    dashboard_json_response(self, result)
+                    return
+                finally:
+                    connection.close()
 
             if route == "/api/netsniper/import-latest":
                 connection = self.open_connection()
@@ -22130,6 +22382,72 @@ def import_trueaegis_validation_results(
         "status_counts": status_counts,
     }
 
+
+
+def dashboard_trueaegis_latest_validation_results_path() -> Path:
+    validation_dir = Path.home() / "TrueAegis" / "validation_results"
+
+    if not validation_dir.is_dir():
+        raise DeltaAegisError(
+            f"TrueAegis validation_results directory was not found: {validation_dir}"
+        )
+
+    candidates = sorted(
+        validation_dir.glob("validation_*.json"),
+        key=lambda candidate: candidate.stat().st_mtime,
+        reverse=True,
+    )
+
+    if not candidates:
+        raise DeltaAegisError(
+            f"No TrueAegis validation_*.json files were found in {validation_dir}"
+        )
+
+    return candidates[0]
+
+
+def dashboard_trueaegis_validation_ingest_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    mode = str(payload.get("mode") or "").strip().lower()
+    raw_path = str(payload.get("path") or payload.get("validation_results") or "").strip()
+
+    if mode == "latest":
+        validation_path = dashboard_trueaegis_latest_validation_results_path()
+    else:
+        if not raw_path:
+            raise DeltaAegisError(
+                "Provide a TrueAegis validation_results.json path or use mode=latest."
+            )
+        validation_path = Path(raw_path).expanduser()
+
+    if validation_path.suffix.lower() != ".json":
+        raise DeltaAegisError(
+            f"TrueAegis validation import only accepts JSON files: {validation_path}"
+        )
+
+    if not validation_path.is_file():
+        raise DeltaAegisError(
+            f"TrueAegis validation file was not found: {validation_path}"
+        )
+
+    result = import_trueaegis_validation_results(connection, validation_path)
+    connection.commit()
+
+    summary = dashboard_validation_summary_payload(connection)
+    observations = dashboard_validations_payload(connection, limit=25)
+
+    return {
+        "ok": True,
+        "schema_version": "deltaaegis-trueaegis-validation-ingest-v1",
+        "mode": mode or "path",
+        "source_path": str(validation_path),
+        "validation_run_id": result.get("validation_run_id"),
+        "import_result": result,
+        "summary": summary,
+        "observations": observations,
+    }
 
 def command_validation_ingest(args) -> int:
     connection = connect(args.db)
