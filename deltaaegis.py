@@ -16198,10 +16198,31 @@ def dashboard_index_html_base_v025_operator_link():
       border-radius: 18px;
       box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
       display: grid;
-      grid-template-columns: max-content minmax(280px, 1fr) max-content;
-      gap: 12px;
+      grid-template-columns: minmax(220px, 260px) minmax(320px, 1fr) minmax(140px, 180px);
+      grid-template-areas:
+        "latest label label"
+        "latest path import";
+      gap: 10px 14px;
       margin: 18px 0 12px;
       padding: 14px;
+    }
+
+    #trueaegis-validation-import-latest {
+      grid-area: latest;
+      align-self: stretch;
+      justify-content: center;
+    }
+
+    .trueaegis-validation-import-controls label {
+      grid-area: label;
+    }
+
+    #trueaegis-validation-import-path {
+      grid-area: path;
+    }
+
+    #trueaegis-validation-import-path-button {
+      grid-area: import;
     }
 
     .trueaegis-validation-import-controls label {
@@ -16302,6 +16323,11 @@ def dashboard_index_html_base_v025_operator_link():
     @media (max-width: 900px) {
       .trueaegis-validation-import-controls {
         grid-template-columns: 1fr;
+        grid-template-areas:
+          "latest"
+          "label"
+          "path"
+          "import";
       }
 
       .trueaegis-validation-import-controls button {
