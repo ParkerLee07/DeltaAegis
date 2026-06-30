@@ -74,6 +74,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("GET", "/netsniper", "dashboard.read"),
     ("GET", "/api/netsniper/status", "dashboard.read"),
     ("GET", "/api/validation-summary", "dashboard.read"),
+    ("GET", "/api/validation-correlations", "dashboard.read"),
     ("GET", "/api/validations", "dashboard.read"),
     ("POST", "/api/validation-ingest", "workflow.write"),
     ("GET", "/api/session", "session.read"),
@@ -16938,6 +16939,8 @@ def dashboard_index_html_base_v025_operator_link():
         <div class="card"><div class="card-label">Observations</div><div class="card-value" id="trueaegis-validation-observation-count">0</div></div>
         <div class="card"><div class="card-label">Confirmed</div><div class="card-value" id="trueaegis-validation-confirmed-count">0</div></div>
         <div class="card"><div class="card-label">Protected</div><div class="card-value" id="trueaegis-validation-protected-count">0</div></div>
+        <div class="card"><div class="card-label">Correlations</div><div class="card-value" id="trueaegis-validation-correlation-count">0</div></div>
+        <div class="card"><div class="card-label">Correlated Assets</div><div class="card-value" id="trueaegis-validation-correlated-asset-count">0</div></div>
       </div>
       <div id="trueaegis-validation-status-counts" class="chips"></div>
       <div class="table-wrap">
@@ -16949,6 +16952,28 @@ def dashboard_index_html_base_v025_operator_link():
             <tr><td colspan="7" class="muted">Loading validation evidence…</td></tr>
           </tbody>
         </table>
+      <h3>Correlated Current Services</h3>
+      <p class="muted">TrueAegis observations matched to the latest accepted NetSniper service inventory. This is evidence only; v0.34 does not change risk scoring.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Asset</th>
+            <th>Host</th>
+            <th>Service</th>
+            <th>Finding</th>
+            <th>Status</th>
+            <th>Validated</th>
+            <th>Safe</th>
+            <th>Confidence</th>
+            <th>Match</th>
+            <th>Scan</th>
+          </tr>
+        </thead>
+        <tbody id="trueaegis-validation-correlations-body">
+          <tr><td colspan="10" class="muted">No TrueAegis observations have been correlated with current NetSniper services yet.</td></tr>
+        </tbody>
+      </table>
+
       </div>
     </section>
 
@@ -19594,6 +19619,42 @@ def dashboard_index_html_base_v025_operator_link():
         .replaceAll("'", "&#039;");
     }
 
+
+    function renderTrueAegisValidationCorrelations(payload) {
+      const body = document.getElementById("trueaegis-validation-correlations-body");
+      const summary = (payload && payload.summary) || {};
+      const rows = (payload && payload.correlations) || [];
+
+      trueAegisValidationSetText("trueaegis-validation-correlation-count", summary.correlation_count || 0);
+      trueAegisValidationSetText("trueaegis-validation-correlated-asset-count", summary.asset_count || 0);
+
+      if (!body) {
+        return;
+      }
+
+      if (!rows.length) {
+        body.innerHTML = `<tr><td colspan="10" class="muted">No TrueAegis observations have been correlated with current NetSniper services yet.</td></tr>`;
+        return;
+      }
+
+      body.innerHTML = rows.map(row => `
+        <tr>
+          <td>${subjectButton(row.asset_key || "-")}</td>
+          <td><code>${esc(row.host || row.ip_address || "-")}</code></td>
+          <td><code>${esc(row.service_protocol || "tcp")}/${esc(row.port || "-")}</code><br><span class="muted">${esc(row.service_name || "-")}</span></td>
+          <td>${esc(row.finding_id || "-")}</td>
+          <td>${esc(row.validation_status || "-")}</td>
+          <td>${row.validated === true ? "yes" : row.validated === false ? "no" : "-"}</td>
+          <td>${row.safe === true ? "yes" : row.safe === false ? "no" : "-"}</td>
+          <td>${esc(row.confidence || "-")}</td>
+          <td>${esc(row.match_method || "-")}</td>
+          <td><code>${esc(row.scan_id || "-")}</code></td>
+        </tr>
+      `).join("");
+
+      bindSubjectLinks(body);
+    }
+
     function trueAegisValidationSetText(id, value) {
       const element = document.getElementById(id);
       if (element) { element.textContent = trueAegisValidationText(value); }
@@ -19633,6 +19694,10 @@ def dashboard_index_html_base_v025_operator_link():
           <div class="card"><div class="card-label">Observations</div><div class="card-value" id="trueaegis-validation-observation-count">0</div></div>
           <div class="card"><div class="card-label">Confirmed</div><div class="card-value" id="trueaegis-validation-confirmed-count">0</div></div>
           <div class="card"><div class="card-label">Protected</div><div class="card-value" id="trueaegis-validation-protected-count">0</div></div>
+          <div class="card"><div class="card-label">Correlations</div><div class="card-value" id="trueaegis-validation-correlation-count">0</div></div>
+          <div class="card"><div class="card-label">Correlated Assets</div><div class="card-value" id="trueaegis-validation-correlated-asset-count">0</div></div>
+        <div class="card"><div class="card-label">Correlations</div><div class="card-value" id="trueaegis-validation-correlation-count">0</div></div>
+        <div class="card"><div class="card-label">Correlated Assets</div><div class="card-value" id="trueaegis-validation-correlated-asset-count">0</div></div>
         </div>
         <div id="trueaegis-validation-status-counts" class="chips"></div>
         <div class="table-wrap">
@@ -19644,6 +19709,28 @@ def dashboard_index_html_base_v025_operator_link():
               <tr><td colspan="7" class="muted">Loading validation evidence…</td></tr>
             </tbody>
           </table>
+      <h3>Correlated Current Services</h3>
+      <p class="muted">TrueAegis observations matched to the latest accepted NetSniper service inventory. This is evidence only; v0.34 does not change risk scoring.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Asset</th>
+            <th>Host</th>
+            <th>Service</th>
+            <th>Finding</th>
+            <th>Status</th>
+            <th>Validated</th>
+            <th>Safe</th>
+            <th>Confidence</th>
+            <th>Match</th>
+            <th>Scan</th>
+          </tr>
+        </thead>
+        <tbody id="trueaegis-validation-correlations-body">
+          <tr><td colspan="10" class="muted">No TrueAegis observations have been correlated with current NetSniper services yet.</td></tr>
+        </tbody>
+      </table>
+
         </div>
       `;
 
@@ -19748,6 +19835,8 @@ def dashboard_index_html_base_v025_operator_link():
       try {
         const summary = await api(scopedPath("/api/validation-summary"));
         const validations = await api(scopedPath("/api/validations?limit=25"));
+        const correlations = await api(scopedPath("/api/validation-correlations?limit=25"));
+        renderTrueAegisValidationCorrelations(correlations);
 
         trueAegisValidationSetText("trueaegis-validation-run-count", summary.validation_run_count || 0);
         trueAegisValidationSetText("trueaegis-validation-observation-count", summary.observation_count || 0);
@@ -21840,6 +21929,32 @@ def command_dashboard(args):
                     dashboard_json_response(self, dashboard_validation_summary_payload(connection))
                 elif route == "/api/validations":
                     dashboard_json_response(self, dashboard_validations_payload(connection, limit=25))
+
+                elif route == "/api/validation-correlations":
+                    query = parse_qs(parsed.query)
+                    try:
+                        limit = int(query.get("limit", ["50"])[0] or "50")
+                    except (TypeError, ValueError):
+                        limit = 50
+                    scope = query.get("scope", [""])[0].strip() or None
+                    status = query.get("status", [""])[0].strip() or None
+                    connection = self.open_connection()
+                    try:
+                        refresh_summary = refresh_trueaegis_validation_correlations(
+                            connection,
+                            scope=scope,
+                        )
+                        connection.commit()
+                        payload = dashboard_validation_correlations_payload(
+                            connection,
+                            limit=limit,
+                            scope=scope,
+                            status=status,
+                        )
+                        payload["refresh_summary"] = refresh_summary
+                        dashboard_json_response(self, payload)
+                    finally:
+                        connection.close()
                 elif route == "/api/current-state":
                     dashboard_json_response(self, dashboard_current_state_payload(connection, scope=scope))
                 elif route == "/api/scan-jobs":
