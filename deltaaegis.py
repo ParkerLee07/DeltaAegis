@@ -73,6 +73,8 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("GET", "/operator/users", "admin.users.read"),
     ("GET", "/netsniper", "dashboard.read"),
     ("GET", "/api/netsniper/status", "dashboard.read"),
+    ("GET", "/api/validation-summary", "dashboard.read"),
+    ("GET", "/api/validations", "dashboard.read"),
     ("GET", "/api/session", "session.read"),
     ("GET", "/api/admin/users", "admin.users.read"),
     ("GET", "/api/access-audit", "admin.audit.read"),
@@ -10923,6 +10925,188 @@ def dashboard_delta_scan_pairs(connection, limit=10, scope=None):
 
     return [dict(row) for row in rows]
 
+
+def dashboard_validation_summary_payload(
+    connection: sqlite3.Connection,
+    limit: int = 10,
+) -> dict[str, Any]:
+    limit = max(1, min(safe_int(limit) or 10, 50))
+
+    run_count_row = connection.execute(
+        "SELECT COUNT(*) AS count FROM validation_runs"
+    ).fetchone()
+    observation_count_row = connection.execute(
+        "SELECT COUNT(*) AS count FROM validation_observations"
+    ).fetchone()
+    validated_count_row = connection.execute(
+        "SELECT COUNT(*) AS count FROM validation_observations WHERE validated = 1"
+    ).fetchone()
+    protected_count_row = connection.execute(
+        "SELECT COUNT(*) AS count FROM validation_observations WHERE status = 'PROTECTED'"
+    ).fetchone()
+    confirmed_count_row = connection.execute(
+        "SELECT COUNT(*) AS count FROM validation_observations WHERE status = 'CONFIRMED'"
+    ).fetchone()
+
+    status_rows = connection.execute(
+        """
+        SELECT status, COUNT(*) AS count
+        FROM validation_observations
+        GROUP BY status
+        ORDER BY count DESC, status ASC
+        """
+    ).fetchall()
+
+    latest_run = connection.execute(
+        """
+        SELECT validation_run_id, source_filename, source_path, source_format,
+               inferred_created_at, imported_at, result_count, status_counts_json
+        FROM validation_runs
+        ORDER BY imported_at DESC, validation_run_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+
+    recent_runs = connection.execute(
+        """
+        SELECT validation_run_id, source_filename, source_format,
+               inferred_created_at, imported_at, result_count, status_counts_json
+        FROM validation_runs
+        ORDER BY imported_at DESC, validation_run_id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+    def run_payload(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        try:
+            status_counts = json.loads(row["status_counts_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            status_counts = {}
+        return {
+            "validation_run_id": row["validation_run_id"],
+            "source_filename": row["source_filename"],
+            "source_path": row["source_path"] if "source_path" in row.keys() else None,
+            "source_format": row["source_format"],
+            "inferred_created_at": row["inferred_created_at"],
+            "imported_at": row["imported_at"],
+            "result_count": int(row["result_count"] or 0),
+            "status_counts": status_counts,
+        }
+
+    return {
+        "schema_version": "deltaaegis-trueaegis-validation-summary-v1",
+        "validation_run_count": int(run_count_row["count"] or 0) if run_count_row else 0,
+        "observation_count": int(observation_count_row["count"] or 0) if observation_count_row else 0,
+        "validated_count": int(validated_count_row["count"] or 0) if validated_count_row else 0,
+        "confirmed_count": int(confirmed_count_row["count"] or 0) if confirmed_count_row else 0,
+        "protected_count": int(protected_count_row["count"] or 0) if protected_count_row else 0,
+        "status_counts": [
+            {"status": row["status"], "count": int(row["count"] or 0)}
+            for row in status_rows
+        ],
+        "latest_run": run_payload(latest_run),
+        "recent_runs": [run_payload(row) for row in recent_runs],
+    }
+
+
+def dashboard_validations_payload(
+    connection: sqlite3.Connection,
+    limit: int = 25,
+    status: str | None = None,
+    host: str | None = None,
+) -> dict[str, Any]:
+    limit = max(1, min(safe_int(limit) or 25, 100))
+
+    where: list[str] = []
+    params: list[Any] = []
+
+    if status:
+        where.append("o.status = ?")
+        params.append(trueaegis_normalize_status(status))
+
+    if host:
+        where.append("o.host = ?")
+        params.append(str(host).strip())
+
+    where_sql = "WHERE " + " AND ".join(where) if where else ""
+
+    rows = connection.execute(
+        f"""
+        SELECT
+            o.observation_id,
+            o.validation_run_id,
+            r.source_filename,
+            r.imported_at,
+            o.row_index,
+            o.finding_id,
+            o.host,
+            o.port,
+            o.protocol,
+            o.transport,
+            o.status,
+            o.validated,
+            o.safe,
+            o.confidence,
+            o.summary,
+            o.reachability,
+            o.exposure,
+            o.authentication,
+            o.details_json,
+            o.evidence_json,
+            o.metadata_json
+        FROM validation_observations o
+        JOIN validation_runs r ON r.validation_run_id = o.validation_run_id
+        {where_sql}
+        ORDER BY r.imported_at DESC, o.row_index ASC
+        LIMIT ?
+        """,
+        tuple(params + [limit]),
+    ).fetchall()
+
+    def decode_json(value: Any, fallback: Any) -> Any:
+        try:
+            return json.loads(value or "")
+        except (TypeError, json.JSONDecodeError):
+            return fallback
+
+    observations = []
+    for row in rows:
+        observations.append(
+            {
+                "observation_id": row["observation_id"],
+                "validation_run_id": row["validation_run_id"],
+                "source_filename": row["source_filename"],
+                "imported_at": row["imported_at"],
+                "row_index": int(row["row_index"] or 0),
+                "finding_id": row["finding_id"],
+                "host": row["host"],
+                "port": row["port"],
+                "protocol": row["protocol"],
+                "transport": row["transport"],
+                "status": row["status"],
+                "validated": bool(row["validated"]) if row["validated"] is not None else None,
+                "safe": bool(row["safe"]) if row["safe"] is not None else None,
+                "confidence": row["confidence"],
+                "summary": row["summary"],
+                "reachability": row["reachability"],
+                "exposure": row["exposure"],
+                "authentication": row["authentication"],
+                "details": decode_json(row["details_json"], []),
+                "evidence": decode_json(row["evidence_json"], []),
+                "metadata": decode_json(row["metadata_json"], {}),
+            }
+        )
+
+    return {
+        "schema_version": "deltaaegis-trueaegis-validations-v1",
+        "limit": limit,
+        "count": len(observations),
+        "observations": observations,
+    }
+
 def dashboard_scan_context_payload(connection, scope=None):
     snapshots = dashboard_snapshot_rows(connection, 2, scope=scope)
 
@@ -18708,6 +18892,135 @@ def dashboard_index_html_base_v025_operator_link():
       `;
     }
 
+
+    function trueAegisValidationText(value) {
+      if (value === null || value === undefined || value === "") { return "—"; }
+      return String(value);
+    }
+
+    function trueAegisValidationEscape(value) {
+      return trueAegisValidationText(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function trueAegisValidationSetText(id, value) {
+      const element = document.getElementById(id);
+      if (element) { element.textContent = trueAegisValidationText(value); }
+    }
+
+    function ensureTrueAegisValidationPanel() {
+      let panel = document.getElementById("trueaegis-validation-foundation-panel");
+      if (panel) { return panel; }
+
+      const anchor =
+        document.getElementById("current-risk-panel") ||
+        document.getElementById("risk-panel") ||
+        document.querySelector("main section:last-of-type") ||
+        document.querySelector("main") ||
+        document.body;
+
+      panel = document.createElement("section");
+      panel.id = "trueaegis-validation-foundation-panel";
+      panel.className = "panel";
+      panel.innerHTML = `
+        <div class="section-header">
+          <div>
+            <div class="eyebrow">TrueAegis Foundation</div>
+            <h2>Validation Evidence</h2>
+            <p class="muted">Imported TrueAegis validation observations are displayed here as evidence only. v0.33 does not alter risk scoring or correlate observations with NetSniper services yet.</p>
+          </div>
+          <a href="/api/validation-summary">Raw summary JSON</a>
+        </div>
+        <div class="summary" id="trueaegis-validation-summary-cards">
+          <div class="card"><div class="card-label">Runs</div><div class="card-value" id="trueaegis-validation-run-count">0</div></div>
+          <div class="card"><div class="card-label">Observations</div><div class="card-value" id="trueaegis-validation-observation-count">0</div></div>
+          <div class="card"><div class="card-label">Confirmed</div><div class="card-value" id="trueaegis-validation-confirmed-count">0</div></div>
+          <div class="card"><div class="card-label">Protected</div><div class="card-value" id="trueaegis-validation-protected-count">0</div></div>
+        </div>
+        <div id="trueaegis-validation-status-counts" class="chips"></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Host</th><th>Port</th><th>Finding</th><th>Status</th><th>Validated</th><th>Confidence</th><th>Summary</th></tr>
+            </thead>
+            <tbody id="trueaegis-validation-observations-body">
+              <tr><td colspan="7" class="muted">Loading validation evidence…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      `;
+
+      if (anchor && anchor.parentNode && anchor !== document.body && anchor.tagName !== "MAIN") {
+        anchor.parentNode.insertBefore(panel, anchor.nextSibling);
+      } else {
+        anchor.appendChild(panel);
+      }
+
+      return panel;
+    }
+
+    async function renderTrueAegisValidationPanel() {
+      ensureTrueAegisValidationPanel();
+
+      const body = document.getElementById("trueaegis-validation-observations-body");
+      const statusCounts = document.getElementById("trueaegis-validation-status-counts");
+
+      try {
+        const summary = await api(scopedPath("/api/validation-summary"));
+        const validations = await api(scopedPath("/api/validations?limit=25"));
+
+        trueAegisValidationSetText("trueaegis-validation-run-count", summary.validation_run_count || 0);
+        trueAegisValidationSetText("trueaegis-validation-observation-count", summary.observation_count || 0);
+        trueAegisValidationSetText("trueaegis-validation-confirmed-count", summary.confirmed_count || 0);
+        trueAegisValidationSetText("trueaegis-validation-protected-count", summary.protected_count || 0);
+
+        const counts = summary.status_counts || [];
+        statusCounts.innerHTML = counts.length
+          ? counts.map(function (row) {
+              return `<span class="pill">${trueAegisValidationEscape(row.status)}: ${trueAegisValidationEscape(row.count)}</span>`;
+            }).join(" ")
+          : '<span class="muted">No imported TrueAegis validation statuses yet.</span>';
+
+        const observations = validations.observations || [];
+        body.innerHTML = observations.length
+          ? observations.map(function (row) {
+              const validated = row.validated === true ? "yes" : row.validated === false ? "no" : "unknown";
+              return `
+                <tr>
+                  <td>${trueAegisValidationEscape(row.host)}</td>
+                  <td>${trueAegisValidationEscape(row.port)}</td>
+                  <td>${trueAegisValidationEscape(row.finding_id)}</td>
+                  <td><span class="pill">${trueAegisValidationEscape(row.status)}</span></td>
+                  <td>${trueAegisValidationEscape(validated)}</td>
+                  <td>${trueAegisValidationEscape(row.confidence)}</td>
+                  <td>${trueAegisValidationEscape(row.summary)}</td>
+                </tr>
+              `;
+            }).join("")
+          : '<tr><td colspan="7" class="muted">No imported TrueAegis validation observations yet. Use validation-ingest first.</td></tr>';
+      } catch (error) {
+        if (body) {
+          body.innerHTML = `<tr><td colspan="7" class="muted">Validation evidence lookup failed: ${trueAegisValidationEscape(error.message || error)}</td></tr>`;
+        }
+      }
+    }
+
+    function startTrueAegisValidationPanel() {
+      if (typeof api !== "function" || typeof scopedPath !== "function") { return; }
+      renderTrueAegisValidationPanel();
+    }
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", startTrueAegisValidationPanel);
+    } else {
+      startTrueAegisValidationPanel();
+    }
+
+
     function renderRecommendations(summary, scanContext, riskRows) {
       const steps = [];
       const latest = scanContext && scanContext.latest_scan ? scanContext.latest_scan : null;
@@ -20747,6 +21060,10 @@ def command_dashboard(args):
                     dashboard_json_response(self, dashboard_summary_payload(connection, scope=scope))
                 elif route == "/api/scan-context":
                     dashboard_json_response(self, dashboard_scan_context_payload(connection, scope=scope))
+                elif route == "/api/validation-summary":
+                    dashboard_json_response(self, dashboard_validation_summary_payload(connection))
+                elif route == "/api/validations":
+                    dashboard_json_response(self, dashboard_validations_payload(connection, limit=25))
                 elif route == "/api/current-state":
                     dashboard_json_response(self, dashboard_current_state_payload(connection, scope=scope))
                 elif route == "/api/scan-jobs":
