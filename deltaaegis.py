@@ -1409,6 +1409,39 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
         CREATE INDEX IF NOT EXISTS idx_validation_observations_status
             ON validation_observations(status);
+
+        CREATE TABLE IF NOT EXISTS validation_correlations (
+            correlation_id TEXT PRIMARY KEY,
+            observation_id TEXT NOT NULL,
+            validation_run_id TEXT NOT NULL,
+            scan_id TEXT NOT NULL,
+            asset_key TEXT NOT NULL,
+            network_scope TEXT NOT NULL DEFAULT '',
+            host TEXT NOT NULL,
+            ip_address TEXT NOT NULL,
+            port INTEGER NOT NULL,
+            service_protocol TEXT NOT NULL,
+            service_name TEXT,
+            product TEXT,
+            version TEXT,
+            finding_id TEXT NOT NULL,
+            validation_status TEXT NOT NULL,
+            validated INTEGER,
+            safe INTEGER,
+            confidence TEXT,
+            match_method TEXT NOT NULL,
+            matched_at TEXT NOT NULL,
+            UNIQUE(observation_id, scan_id, asset_key, service_protocol, port)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_validation_correlations_observation
+            ON validation_correlations(observation_id);
+
+        CREATE INDEX IF NOT EXISTS idx_validation_correlations_scan_asset
+            ON validation_correlations(scan_id, asset_key);
+
+        CREATE INDEX IF NOT EXISTS idx_validation_correlations_status
+            ON validation_correlations(validation_status);
         """
     )
     ensure_column(connection, "snapshots", "manifest_schema_version", "manifest_schema_version TEXT NOT NULL DEFAULT 'netsniper-run-v1'")
@@ -11035,6 +11068,362 @@ def dashboard_delta_scan_pairs(connection, limit=10, scope=None):
 
     return [dict(row) for row in rows]
 
+
+def trueaegis_validation_service_protocol(
+    transport: Any,
+    protocol: Any,
+) -> str | None:
+    state_words = {
+        "confirmed",
+        "unknown",
+        "mismatch",
+        "not_reachable",
+        "reachable",
+        "protected",
+        "safe",
+        "unsafe",
+        "protocol_mismatch",
+    }
+
+    tcp_aliases = {
+        "http", "https", "tls", "ssl", "ssh", "smb", "cifs",
+        "redis", "mongodb", "mongo", "docker", "portainer", "ipp",
+        "printer", "rtsp", "smtp", "imap", "pop3", "mysql",
+        "postgres", "postgresql", "mssql", "oracle", "rdp", "vnc",
+        "web", "tcpwrapped",
+    }
+
+    udp_aliases = {"dns-udp", "snmp", "mdns", "ssdp", "ntp"}
+
+    for candidate in (transport, protocol):
+        value = str(candidate or "").strip().lower()
+        if not value or value in state_words:
+            continue
+        if value in {"tcp", "udp"}:
+            return value
+        if value in tcp_aliases:
+            return "tcp"
+        if value in udp_aliases:
+            return "udp"
+
+    return None
+
+
+def trueaegis_latest_accepted_snapshots(
+    connection: sqlite3.Connection,
+    scope: str | None = None,
+) -> list[sqlite3.Row]:
+    clauses = ["(quality_status = 'ACCEPTED' OR is_accepted_baseline = 1)"]
+    params: list[Any] = []
+
+    if scope:
+        clauses.append("network_scope = ?")
+        params.append(scope)
+
+    rows = connection.execute(
+        f"""
+        SELECT scan_id, network_scope, created_at, imported_at
+        FROM snapshots
+        WHERE {" AND ".join(clauses)}
+        ORDER BY network_scope ASC, created_at DESC, imported_at DESC, scan_id DESC
+        """,
+        tuple(params),
+    ).fetchall()
+
+    latest_by_scope: dict[str, sqlite3.Row] = {}
+
+    for row in rows:
+        network_scope = str(row["network_scope"] or "")
+        if network_scope not in latest_by_scope:
+            latest_by_scope[network_scope] = row
+
+    return list(latest_by_scope.values())
+
+
+def refresh_trueaegis_validation_correlations(
+    connection: sqlite3.Connection,
+    scope: str | None = None,
+) -> dict[str, Any]:
+    matched_at = utc_now()
+    latest_snapshots = trueaegis_latest_accepted_snapshots(connection, scope=scope)
+    latest_scan_ids = [row["scan_id"] for row in latest_snapshots]
+
+    if scope:
+        connection.execute(
+            "DELETE FROM validation_correlations WHERE network_scope = ?",
+            (scope,),
+        )
+    else:
+        connection.execute("DELETE FROM validation_correlations")
+
+    if not latest_scan_ids:
+        return {
+            "schema_version": "deltaaegis-trueaegis-validation-correlation-summary-v1",
+            "matched_at": matched_at,
+            "latest_snapshot_count": 0,
+            "current_service_count": 0,
+            "observation_count": 0,
+            "correlation_count": 0,
+            "correlated_observation_count": 0,
+            "unmatched_observation_count": 0,
+            "status_counts": {},
+        }
+
+    placeholders = ",".join("?" for _ in latest_scan_ids)
+
+    service_rows = [
+        dict(row)
+        for row in connection.execute(
+            f"""
+            SELECT
+                s.network_scope,
+                so.scan_id,
+                ao.asset_key,
+                ao.ip_address,
+                so.protocol,
+                so.port,
+                so.state,
+                so.service_name,
+                so.product,
+                so.version
+            FROM service_observations so
+            JOIN asset_observations ao
+              ON ao.scan_id = so.scan_id
+             AND ao.asset_key = so.asset_key
+            JOIN snapshots s
+              ON s.scan_id = so.scan_id
+            WHERE so.scan_id IN ({placeholders})
+            ORDER BY s.network_scope ASC, ao.ip_address ASC, so.protocol ASC, so.port ASC
+            """,
+            tuple(latest_scan_ids),
+        )
+    ]
+
+    services_by_host_port: dict[tuple[str, int], list[dict[str, Any]]] = {}
+
+    for service in service_rows:
+        try:
+            port = int(service.get("port"))
+        except (TypeError, ValueError):
+            continue
+
+        host = str(service.get("ip_address") or "").strip()
+        if not host:
+            continue
+
+        services_by_host_port.setdefault((host, port), []).append(service)
+
+    observation_rows = [
+        dict(row)
+        for row in connection.execute(
+            """
+            SELECT o.*
+            FROM validation_observations o
+            JOIN validation_runs r
+              ON r.validation_run_id = o.validation_run_id
+            WHERE o.host IS NOT NULL
+              AND TRIM(o.host) != ''
+              AND o.port IS NOT NULL
+            ORDER BY r.imported_at DESC, o.row_index ASC
+            """
+        )
+    ]
+
+    correlation_count = 0
+    correlated_observation_ids: set[str] = set()
+    status_counts: Counter[str] = Counter()
+
+    for observation in observation_rows:
+        host = str(observation.get("host") or "").strip()
+
+        try:
+            port = int(observation.get("port"))
+        except (TypeError, ValueError):
+            continue
+
+        desired_protocol = trueaegis_validation_service_protocol(
+            observation.get("transport"),
+            observation.get("protocol"),
+        )
+
+        candidate_services = services_by_host_port.get((host, port), [])
+
+        if desired_protocol:
+            matches = [
+                service
+                for service in candidate_services
+                if str(service.get("protocol") or "").lower() == desired_protocol
+            ]
+            match_method = "host_port_transport"
+        else:
+            matches = candidate_services
+            match_method = "host_port"
+
+        for service in matches:
+            service_protocol = str(service.get("protocol") or "").lower()
+            correlation_basis = "|".join(
+                [
+                    str(observation.get("observation_id") or ""),
+                    str(service.get("scan_id") or ""),
+                    str(service.get("asset_key") or ""),
+                    service_protocol,
+                    str(port),
+                ]
+            )
+            correlation_id = (
+                "trueaegis-correlation-"
+                + hashlib.sha256(correlation_basis.encode("utf-8")).hexdigest()[:24]
+            )
+
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO validation_correlations (
+                    correlation_id,
+                    observation_id,
+                    validation_run_id,
+                    scan_id,
+                    asset_key,
+                    network_scope,
+                    host,
+                    ip_address,
+                    port,
+                    service_protocol,
+                    service_name,
+                    product,
+                    version,
+                    finding_id,
+                    validation_status,
+                    validated,
+                    safe,
+                    confidence,
+                    match_method,
+                    matched_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    correlation_id,
+                    observation.get("observation_id"),
+                    observation.get("validation_run_id"),
+                    service.get("scan_id"),
+                    service.get("asset_key"),
+                    service.get("network_scope") or "",
+                    host,
+                    service.get("ip_address"),
+                    port,
+                    service_protocol,
+                    service.get("service_name"),
+                    service.get("product"),
+                    service.get("version"),
+                    observation.get("finding_id"),
+                    observation.get("status"),
+                    observation.get("validated"),
+                    observation.get("safe"),
+                    observation.get("confidence"),
+                    match_method,
+                    matched_at,
+                ),
+            )
+
+            correlation_count += 1
+            correlated_observation_ids.add(str(observation.get("observation_id")))
+            status_counts[str(observation.get("status") or "UNKNOWN")] += 1
+
+    return {
+        "schema_version": "deltaaegis-trueaegis-validation-correlation-summary-v1",
+        "matched_at": matched_at,
+        "latest_snapshot_count": len(latest_snapshots),
+        "current_service_count": len(service_rows),
+        "observation_count": len(observation_rows),
+        "correlation_count": correlation_count,
+        "correlated_observation_count": len(correlated_observation_ids),
+        "unmatched_observation_count": max(
+            len(observation_rows) - len(correlated_observation_ids),
+            0,
+        ),
+        "status_counts": dict(sorted(status_counts.items())),
+    }
+
+
+def dashboard_validation_correlations_payload(
+    connection: sqlite3.Connection,
+    limit: int = 50,
+    scope: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    if scope:
+        clauses.append("c.network_scope = ?")
+        params.append(scope)
+
+    if status:
+        normalized_status = str(status or "").strip().upper().replace("-", "_").replace(" ", "_")
+        clauses.append("c.validation_status = ?")
+        params.append(normalized_status)
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    safe_limit = max(1, min(int(limit or 50), 250))
+    params.append(safe_limit)
+
+    rows = [
+        dict(row)
+        for row in connection.execute(
+            f"""
+            SELECT
+                c.correlation_id,
+                c.observation_id,
+                c.validation_run_id,
+                c.scan_id,
+                c.asset_key,
+                c.network_scope,
+                c.host,
+                c.ip_address,
+                c.port,
+                c.service_protocol,
+                c.service_name,
+                c.product,
+                c.version,
+                c.finding_id,
+                c.validation_status,
+                c.validated,
+                c.safe,
+                c.confidence,
+                c.match_method,
+                c.matched_at
+            FROM validation_correlations c
+            {where}
+            ORDER BY c.matched_at DESC, c.network_scope ASC, c.host ASC, c.port ASC
+            LIMIT ?
+            """,
+            tuple(params),
+        )
+    ]
+
+    for row in rows:
+        row["validated"] = (
+            None if row.get("validated") is None else bool(row.get("validated"))
+        )
+        row["safe"] = None if row.get("safe") is None else bool(row.get("safe"))
+
+    summary = connection.execute(
+        """
+        SELECT
+            COUNT(*) AS correlation_count,
+            COUNT(DISTINCT observation_id) AS correlated_observation_count,
+            COUNT(DISTINCT scan_id) AS scan_count,
+            COUNT(DISTINCT asset_key) AS asset_count
+        FROM validation_correlations
+        """
+    ).fetchone()
+
+    return {
+        "schema_version": "deltaaegis-trueaegis-validation-correlations-v1",
+        "count": len(rows),
+        "limit": safe_limit,
+        "summary": dict(summary) if summary else {},
+        "correlations": rows,
+    }
 
 def dashboard_validation_summary_payload(
     connection: sqlite3.Connection,
