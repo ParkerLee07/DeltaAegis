@@ -10656,9 +10656,26 @@ def dashboard_snapshot_select_columns(connection):
         "source_file",
         "bundle_path",
         "manifest_path",
+        "target",
+        "network_scope",
         "scanner_version",
         "telemetry_contract",
         "schema_version",
+        "manifest_schema_version",
+        "scan_profile",
+        "requested_profile",
+        "effective_profile",
+        "profile_contract",
+        "profile_fingerprint",
+        "profile_runtime_budget_seconds",
+        "profile_host_timeout_seconds",
+        "profile_duration_seconds",
+        "profile_budget_exceeded",
+        "bundle_status",
+        "quality_status",
+        "quality_reason",
+        "bundle_quality_schema_version",
+        "bundle_deltaaegis_ready",
     ]
 
     selected = [column for column in preferred if column in columns]
@@ -10670,7 +10687,6 @@ def dashboard_snapshot_select_columns(connection):
         selected = ["rowid"]
 
     return selected
-
 
 def dashboard_snapshot_rows(connection, limit=2, scope=None):
     selected = dashboard_snapshot_select_columns(connection)
@@ -10792,15 +10808,37 @@ def dashboard_snapshot_asset_summary(connection, scan_id):
 
 
 def dashboard_enrich_snapshot(connection, snapshot):
-    if snapshot is None:
+    if not snapshot:
         return None
 
     item = dict(snapshot)
     scan_id = item.get("scan_id")
+
+    contract = (
+        item.get("manifest_schema_version")
+        or item.get("telemetry_contract")
+        or item.get("schema_version")
+    )
+    if contract:
+        item["telemetry_contract"] = contract
+        item["schema_version"] = contract
+
+    if not item.get("effective_profile"):
+        item["effective_profile"] = item.get("scan_profile")
+
+    if not item.get("requested_profile"):
+        item["requested_profile"] = item.get("scan_profile")
+
+    ready = item.get("bundle_deltaaegis_ready")
+    if ready in {1, True, "1", "true", "True"}:
+        item["bundle_deltaaegis_ready_label"] = "Ready"
+    elif ready in {0, False, "0", "false", "False"}:
+        item["bundle_deltaaegis_ready_label"] = "Not ready"
+    else:
+        item["bundle_deltaaegis_ready_label"] = "Unknown"
+
     item["asset_summary"] = dashboard_snapshot_asset_summary(connection, scan_id)
-
     return item
-
 
 def dashboard_delta_scan_pairs(connection, limit=10, scope=None):
     where = ""
@@ -16616,22 +16654,72 @@ def dashboard_index_html_base_v025_operator_link():
       const summary = scan.asset_summary || {};
       const freshness = scanFreshness(scan);
 
+      function scanValue(...values) {
+        for (const value of values) {
+          if (value !== null && value !== undefined && String(value).trim() !== "") {
+            return value;
+          }
+        }
+        return "-";
+      }
+
+      function boolLabel(value) {
+        if (value === true || value === 1 || value === "1" || value === "true" || value === "True") return "Yes";
+        if (value === false || value === 0 || value === "0" || value === "false" || value === "False") return "No";
+        return "-";
+      }
+
+      function secondsLabel(value) {
+        if (value === null || value === undefined || value === "") return "-";
+        const number = Number(value);
+        if (!Number.isFinite(number)) return String(value);
+        return `${Math.round(number)}s`;
+      }
+
+      const sourcePath = scanValue(
+        scan.source_path,
+        scan.source_file,
+        scan.bundle_path,
+        scan.manifest_path
+      );
+
+      const contract = scanValue(
+        scan.manifest_schema_version,
+        scan.telemetry_contract,
+        scan.schema_version
+      );
+
+      const requestedProfile = scanValue(scan.requested_profile, scan.scan_profile);
+      const effectiveProfile = scanValue(scan.effective_profile, scan.scan_profile);
+      const readyLabel = scan.bundle_deltaaegis_ready_label || boolLabel(scan.bundle_deltaaegis_ready);
+
       return `<div class="card">
         <div class="label">${esc(title)}</div>
         <div class="kv">
           <div><span>Status</span><span class="status ${freshness.className}">${esc(freshness.label)}</span></div>
+          <div><span>Quality</span><span>${esc(scanValue(scan.quality_status))}</span></div>
           <div><span>Scan age</span><span>${esc(freshness.detail)}</span></div>
           <div><span>Scan ID</span><code>${esc(scan.scan_id)}</code></div>
           <div><span>Created</span><span>${esc(scan.created_at)}</span></div>
           <div><span>Imported</span><span>${esc(scan.imported_at)}</span></div>
           <div><span>Scanner</span><span>${esc(scan.scanner_version)}</span></div>
-          <div><span>Contract</span><span>${esc(scan.telemetry_contract)}</span></div>
+          <div><span>Contract</span><span>${esc(contract)}</span></div>
+          <div><span>Manifest schema</span><span>${esc(contract)}</span></div>
+          <div><span>Requested profile</span><span>${esc(requestedProfile)}</span></div>
+          <div><span>Effective profile</span><span>${esc(effectiveProfile)}</span></div>
+          <div><span>Profile contract</span><span>${esc(scanValue(scan.profile_contract))}</span></div>
+          <div><span>Runtime budget</span><span>${esc(secondsLabel(scan.profile_runtime_budget_seconds))}</span></div>
+          <div><span>Host timeout</span><span>${esc(secondsLabel(scan.profile_host_timeout_seconds))}</span></div>
+          <div><span>Profile duration</span><span>${esc(secondsLabel(scan.profile_duration_seconds))}</span></div>
+          <div><span>Budget exceeded</span><span>${esc(boolLabel(scan.profile_budget_exceeded))}</span></div>
+          <div><span>Bundle quality</span><span>${esc(scanValue(scan.bundle_quality_schema_version))}</span></div>
+          <div><span>DeltaAegis ready</span><span>${esc(readyLabel)}</span></div>
           <div><span>Observed Assets</span><span>${esc(summary.observed_assets)}</span></div>
           <div><span>Observed IPs</span><span>${esc(summary.observed_ips)}</span></div>
           <div><span>Observed MACs</span><span>${esc(summary.observed_macs)}</span></div>
           <div><span>IP + MAC Assets</span><span>${esc(summary.assets_with_ip_and_mac)}</span></div>
           <div><span>Identity Coverage</span><span>${esc(identityCoverage(summary))}</span></div>
-          <div><span>Source</span><code>${esc(scan.source_path || scan.source_file || scan.bundle_path || scan.manifest_path)}</code></div>
+          <div><span>Source</span><code>${esc(sourcePath)}</code></div>
         </div>
       </div>`;
     }
