@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.32.0: NetSniper v2 telemetry compatibility, v3 bundle ingest, bundle-quality readiness gates, and profile runtime metadata storage.
+"""DeltaAegis v0.33.0: TrueAegis integration foundation, validation-result ingestion, dashboard validation evidence, and report visibility.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -8075,6 +8075,8 @@ def append_report_dashboard_usage_section(lines, scope=None):
     lines.append("- The dashboard remains read-only and is intended for local or trusted-access investigation.")
     lines.append("- Port behavior API: `/api/port-behavior?limit=25&lookback=5`")
     lines.append("- Investigation Center API: `/api/investigation-center?limit=25`")
+    lines.append("- TrueAegis validation summary API: `/api/validation-summary`")
+    lines.append("- TrueAegis validation observation API: `/api/validations?limit=25`")
     lines.append("- Investigation Center workflow filter API: `/api/investigation-center?limit=25&ticket_status=OPEN`")
     lines.append("- Investigation Center signal filter API: `/api/investigation-center?limit=25&ticket_signal=ACTIONABLE`")
     lines.append("- Combined ticket filters are supported with `ticket_status` and `ticket_signal` query parameters.")
@@ -8223,6 +8225,107 @@ def append_report_classification_summary_section(lines, classification_summary):
         "Use weak, unknown, or contradictory classifications as review targets. "
         "They usually require vendor confirmation, service validation, or asset annotation."
     )
+    lines.append("")
+
+
+def report_trueaegis_validation_summary(connection):
+    return dashboard_validation_summary_payload(connection)
+
+
+def report_trueaegis_validation_rows(connection, limit=10):
+    payload = dashboard_validations_payload(connection, limit=limit)
+    return list(payload.get("observations") or [])
+
+
+def append_report_trueaegis_validation_section(lines, validation_summary, validation_rows):
+    lines.append("## TrueAegis Validation Evidence")
+    lines.append("")
+    lines.append(
+        "This section summarizes imported TrueAegis validation output. In v0.33, "
+        "this evidence is stored and displayed as a foundation layer only; it does "
+        "not yet alter DeltaAegis risk scoring or correlate findings with NetSniper "
+        "service observations."
+    )
+    lines.append("")
+
+    if not validation_summary or int(validation_summary.get("observation_count") or 0) == 0:
+        lines.append("No TrueAegis validation observations have been imported yet.")
+        lines.append("")
+        lines.append("Import validation output with:")
+        lines.append("")
+        lines.append("```bash")
+        lines.append("python3 deltaaegis.py validation-ingest /path/to/validation_results.json")
+        lines.append("```")
+        lines.append("")
+        return
+
+    lines.append("| Metric | Value |")
+    lines.append("|---|---:|")
+    lines.append(f"| Validation runs | {safe_markdown(validation_summary.get('validation_run_count') or 0)} |")
+    lines.append(f"| Observations | {safe_markdown(validation_summary.get('observation_count') or 0)} |")
+    lines.append(f"| Validated observations | {safe_markdown(validation_summary.get('validated_count') or 0)} |")
+    lines.append(f"| Confirmed observations | {safe_markdown(validation_summary.get('confirmed_count') or 0)} |")
+    lines.append(f"| Protected observations | {safe_markdown(validation_summary.get('protected_count') or 0)} |")
+    lines.append("")
+
+    status_counts = list(validation_summary.get("status_counts") or [])
+    lines.append("### Validation Status Counts")
+    lines.append("")
+
+    if status_counts:
+        lines.append("| Status | Count |")
+        lines.append("|---|---:|")
+        for row in status_counts:
+            lines.append(
+                "| "
+                f"{safe_markdown(row.get('status') or 'UNKNOWN')} | "
+                f"{safe_markdown(row.get('count') or 0)} |"
+            )
+        lines.append("")
+    else:
+        lines.append("No validation status counts were available.")
+        lines.append("")
+
+    latest_run = validation_summary.get("latest_run") or {}
+    if latest_run:
+        lines.append("### Latest Imported Validation Run")
+        lines.append("")
+        lines.append(f"- Run ID: `{safe_markdown(latest_run.get('validation_run_id') or '-')}`")
+        lines.append(f"- Source file: `{safe_markdown(latest_run.get('source_filename') or '-')}`")
+        lines.append(f"- Imported at: `{safe_markdown(latest_run.get('imported_at') or '-')}`")
+        lines.append(f"- Results: **{safe_markdown(latest_run.get('result_count') or 0)}**")
+        lines.append("")
+
+    rows = list(validation_rows or [])
+    lines.append("### Recent Validation Observations")
+    lines.append("")
+
+    if not rows:
+        lines.append("No validation observation rows were available.")
+        lines.append("")
+        return
+
+    lines.append("| Host | Port | Finding | Status | Validated | Safe | Confidence | Summary |")
+    lines.append("|---|---:|---|---|---|---|---|---|")
+
+    for row in rows:
+        validated = row.get("validated")
+        safe = row.get("safe")
+        validated_text = "yes" if validated is True else "no" if validated is False else "unknown"
+        safe_text = "yes" if safe is True else "no" if safe is False else "unknown"
+
+        lines.append(
+            "| "
+            f"`{safe_markdown(row.get('host') or '-')}` | "
+            f"{safe_markdown(row.get('port') or '-')} | "
+            f"{safe_markdown(row.get('finding_id') or '-')} | "
+            f"{safe_markdown(row.get('status') or '-')} | "
+            f"{safe_markdown(validated_text)} | "
+            f"{safe_markdown(safe_text)} | "
+            f"{safe_markdown(row.get('confidence') or '-')} | "
+            f"{safe_markdown(row.get('summary') or '-')} |"
+        )
+
     lines.append("")
 
 def append_report_asset_inventory_section(lines, asset_rows, limit):
@@ -8795,6 +8898,9 @@ def command_report(args):
         scope=scope,
     )
 
+    report_validation_summary = report_trueaegis_validation_summary(connection)
+    report_validation_rows = report_trueaegis_validation_rows(connection, limit=10)
+
     event_type_counts = Counter(row["event_type"] for row in events)
     severity_counts = Counter(row["severity"] for row in events)
 
@@ -8829,6 +8935,8 @@ def command_report(args):
     lines.append(f"- Events included in this report: **{len(events)}**")
     lines.append(f"- Open alerts: **{len(open_alerts)}**")
     lines.append(f"- Assets included: **{len(report_asset_rows)}**")
+    lines.append(f"- TrueAegis validation observations: **{report_validation_summary.get('observation_count', 0)}**")
+    lines.append(f"- TrueAegis confirmed/protected observations: **{report_validation_summary.get('confirmed_count', 0)} confirmed / {report_validation_summary.get('protected_count', 0)} protected**")
     lines.append("")
 
     lines.append("## Report Scope")
@@ -8845,6 +8953,7 @@ def command_report(args):
     append_report_network_scope_summary(lines, connection, scope=scope)
     append_report_asset_lifecycle_section(lines, report_lifecycle_rows)
     append_report_classification_summary_section(lines, report_classification_summary)
+    append_report_trueaegis_validation_section(lines, report_validation_summary, report_validation_rows)
     append_report_asset_inventory_section(lines, report_asset_rows, args.asset_limit)
     append_report_investigation_center_section(lines, report_investigation_center_rows)
     append_report_ticket_evidence_appendix(lines, report_ticket_evidence_payloads)
@@ -16089,7 +16198,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.32 NetSniper v2 Compatibility</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.33 TrueAegis Integration Foundation</span></div>
     </div>
   </header>
 
@@ -22071,7 +22180,7 @@ def command_validations(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.32.0 — NetSniper v2 Compatibility, v3 bundle ingest, bundle-quality readiness metadata, dashboard scan-context visibility, scheduled scans, guarded NetSniper scan jobs, dashboard user management, RBAC, investigation intelligence, current-state SIEM dashboard, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.33.0 — TrueAegis Integration Foundation, v3 bundle ingest, bundle-quality readiness metadata, dashboard scan-context visibility, scheduled scans, guarded NetSniper scan jobs, dashboard user management, RBAC, investigation intelligence, current-state SIEM dashboard, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)

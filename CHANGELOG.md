@@ -1,3 +1,13 @@
+## v0.33.0 — TrueAegis Integration Foundation
+
+- Added `validation_runs` and `validation_observations` storage for imported TrueAegis validation output.
+- Added `validation-ingest` and `validations` CLI commands for TrueAegis `validation_results.json` files.
+- Preserved TrueAegis validation fields including finding ID, host, port, status, validated/safe booleans, confidence, reachability, exposure, authentication, evidence, details, metadata, and raw JSON.
+- Added `/api/validation-summary` and `/api/validations` read-only dashboard APIs.
+- Added a dashboard TrueAegis validation evidence panel with run counts, observation counts, status counts, and recent observations.
+- Added TrueAegis validation evidence to Markdown investigation reports without changing risk scoring or NetSniper correlation behavior.
+- Added v0.33 validators: `validate_v0_33_trueaegis_storage.sh`, `validate_v0_33_validation_dashboard.sh`, `validate_v0_33_report_validation.sh`, `validate_v0_33_release_metadata.sh`, and `validate_v0_33_release.sh`.
+
 ## v0.30.0 - 2026-06-26
 
 ## v0.32.0 — NetSniper v2 Compatibility
