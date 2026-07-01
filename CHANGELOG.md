@@ -1,3 +1,21 @@
+## v0.34.0 — TrueAegis Validation Correlation
+
+- Added `validation_correlations` storage for matching imported TrueAegis observations to current NetSniper services.
+- Added transport-aware protocol normalization so TrueAegis validation rows match NetSniper `tcp`/`udp` service observations without confusing validation-state protocol values.
+- Added `/api/validation-correlations` for dashboard access to correlated validation evidence.
+- Added TrueAegis dashboard correlation summary cards and a correlated current-services table.
+- Added asset-detail visibility for TrueAegis validation correlations through `payload.validation_correlations` and `validation_correlation_count`.
+- Added Markdown report visibility for TrueAegis validation correlations.
+- Added v0.34 validators for correlation storage, dashboard/API visibility, asset detail visibility, report visibility, release metadata, and the full v0.34 release gate.
+- Preserved v0.33 TrueAegis import/storage behavior and v0.32 NetSniper v2 compatibility.
+- Scope note: v0.34 correlates validation evidence with observed services but does not alter DeltaAegis risk scoring or recommendations yet.
+
+Validate:
+
+```bash
+./tools/validate_v0_34_release.sh
+```
+
 ## v0.33.0 — TrueAegis Integration Foundation
 
 - Added `validation_runs` and `validation_observations` storage for imported TrueAegis validation output.

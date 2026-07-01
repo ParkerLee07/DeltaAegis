@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.33.0: TrueAegis integration foundation, validation-result ingestion, dashboard validation evidence, and report visibility.
+"""DeltaAegis v0.34.0: TrueAegis validation correlation, service-level validation evidence, dashboard/API visibility, asset detail context, reports, and release validation.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -8112,6 +8112,7 @@ def append_report_dashboard_usage_section(lines, scope=None):
     lines.append("- Investigation Center API: `/api/investigation-center?limit=25`")
     lines.append("- TrueAegis validation summary API: `/api/validation-summary`")
     lines.append("- TrueAegis validation observation API: `/api/validations?limit=25`")
+    lines.append("- TrueAegis validation correlation API: `/api/validation-correlations?limit=25`")
     lines.append("- Investigation Center workflow filter API: `/api/investigation-center?limit=25&ticket_status=OPEN`")
     lines.append("- Investigation Center signal filter API: `/api/investigation-center?limit=25&ticket_signal=ACTIONABLE`")
     lines.append("- Combined ticket filters are supported with `ticket_status` and `ticket_signal` query parameters.")
@@ -8276,9 +8277,9 @@ def append_report_trueaegis_validation_section(lines, validation_summary, valida
     lines.append("## TrueAegis Validation Evidence")
     lines.append("")
     lines.append(
-        "This section summarizes imported TrueAegis validation output. In v0.33, "
+        "This section summarizes imported TrueAegis validation output. In v0.34, "
         "this evidence is stored and displayed as a foundation layer only; it does "
-        "not yet alter DeltaAegis risk scoring or correlate findings with NetSniper "
+        "does not alter DeltaAegis risk scoring. Correlated NetSniper service evidence appears in the next section. "
         "service observations."
     )
     lines.append("")
@@ -8359,6 +8360,153 @@ def append_report_trueaegis_validation_section(lines, validation_summary, valida
             f"{safe_markdown(safe_text)} | "
             f"{safe_markdown(row.get('confidence') or '-')} | "
             f"{safe_markdown(row.get('summary') or '-')} |"
+        )
+
+    lines.append("")
+
+def report_trueaegis_validation_correlation_summary(connection):
+    row = connection.execute(
+        """
+        SELECT
+            COUNT(*) AS correlation_count,
+            COUNT(DISTINCT observation_id) AS correlated_observation_count,
+            COUNT(DISTINCT scan_id) AS scan_count,
+            COUNT(DISTINCT asset_key) AS asset_count
+        FROM validation_correlations
+        """
+    ).fetchone()
+
+    status_rows = connection.execute(
+        """
+        SELECT validation_status, COUNT(*) AS count
+        FROM validation_correlations
+        GROUP BY validation_status
+        ORDER BY validation_status ASC
+        """
+    ).fetchall()
+
+    summary = dict(row) if row else {
+        "correlation_count": 0,
+        "correlated_observation_count": 0,
+        "scan_count": 0,
+        "asset_count": 0,
+    }
+
+    summary["status_counts"] = {
+        str(item["validation_status"] or "UNKNOWN"): int(item["count"] or 0)
+        for item in status_rows
+    }
+
+    return summary
+
+
+def report_trueaegis_validation_correlation_rows(connection, limit=10):
+    rows = connection.execute(
+        """
+        SELECT
+            correlation_id,
+            observation_id,
+            validation_run_id,
+            scan_id,
+            asset_key,
+            network_scope,
+            host,
+            ip_address,
+            port,
+            service_protocol,
+            service_name,
+            product,
+            version,
+            finding_id,
+            validation_status,
+            validated,
+            safe,
+            confidence,
+            match_method,
+            matched_at
+        FROM validation_correlations
+        ORDER BY matched_at DESC, network_scope ASC, host ASC, port ASC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+    result = []
+
+    for row in rows:
+        item = dict(row)
+        item["validated"] = (
+            None if item.get("validated") is None else bool(item.get("validated"))
+        )
+        item["safe"] = None if item.get("safe") is None else bool(item.get("safe"))
+        result.append(item)
+
+    return result
+
+
+def append_report_trueaegis_validation_correlation_section(
+    lines,
+    correlation_summary,
+    correlation_rows,
+):
+    lines.append("## TrueAegis Validation Correlations")
+    lines.append("")
+    lines.append(
+        "This section lists TrueAegis validation observations that currently match "
+        "NetSniper-observed services. In v0.34, these correlations are evidence "
+        "only and do not alter DeltaAegis risk scoring."
+    )
+    lines.append("")
+
+    correlation_count = int(correlation_summary.get("correlation_count") or 0)
+    correlated_observation_count = int(
+        correlation_summary.get("correlated_observation_count") or 0
+    )
+    asset_count = int(correlation_summary.get("asset_count") or 0)
+    scan_count = int(correlation_summary.get("scan_count") or 0)
+
+    if correlation_count <= 0:
+        lines.append("No TrueAegis validation observations are currently correlated with NetSniper services.")
+        lines.append("")
+        return
+
+    lines.append(f"- Correlations: **{correlation_count}**")
+    lines.append(f"- Correlated observations: **{correlated_observation_count}**")
+    lines.append(f"- Correlated assets: **{asset_count}**")
+    lines.append(f"- Current scans represented: **{scan_count}**")
+
+    status_counts = correlation_summary.get("status_counts") or {}
+
+    if status_counts:
+        status_text = ", ".join(
+            f"`{safe_markdown(status)}`={int(count)}"
+            for status, count in sorted(status_counts.items())
+        )
+        lines.append(f"- Status counts: {status_text}")
+
+    lines.append("")
+
+    if not correlation_rows:
+        lines.append("No recent correlated validation rows were available.")
+        lines.append("")
+        return
+
+    lines.append("| Asset | Host | Service | Finding | Status | Validated | Safe | Confidence | Match |")
+    lines.append("|---|---:|---:|---|---|---:|---:|---|---|")
+
+    for row in correlation_rows:
+        service = f"{row.get('service_protocol') or 'tcp'}/{row.get('port') or '-'}"
+        lines.append(
+            "| "
+            f"`{safe_markdown(row.get('asset_key') or '-')}` | "
+            f"`{safe_markdown(row.get('host') or row.get('ip_address') or '-')}` | "
+            f"`{safe_markdown(service)}` | "
+            f"{safe_markdown(row.get('finding_id') or '-')} | "
+            f"{safe_markdown(row.get('validation_status') or '-')} | "
+            f"{safe_markdown(row.get('validated'))} | "
+            f"{safe_markdown(row.get('safe'))} | "
+            f"{safe_markdown(row.get('confidence') or '-')} | "
+            f"{safe_markdown(row.get('match_method') or '-')} |"
         )
 
     lines.append("")
@@ -8935,6 +9083,8 @@ def command_report(args):
 
     report_validation_summary = report_trueaegis_validation_summary(connection)
     report_validation_rows = report_trueaegis_validation_rows(connection, limit=10)
+    report_validation_correlation_summary = report_trueaegis_validation_correlation_summary(connection)
+    report_validation_correlation_rows = report_trueaegis_validation_correlation_rows(connection, limit=10)
 
     event_type_counts = Counter(row["event_type"] for row in events)
     severity_counts = Counter(row["severity"] for row in events)
@@ -8972,6 +9122,7 @@ def command_report(args):
     lines.append(f"- Assets included: **{len(report_asset_rows)}**")
     lines.append(f"- TrueAegis validation observations: **{report_validation_summary.get('observation_count', 0)}**")
     lines.append(f"- TrueAegis confirmed/protected observations: **{report_validation_summary.get('confirmed_count', 0)} confirmed / {report_validation_summary.get('protected_count', 0)} protected**")
+    lines.append(f"- TrueAegis validation correlations: **{report_validation_correlation_summary.get('correlation_count', 0)}** across **{report_validation_correlation_summary.get('asset_count', 0)}** asset(s)")
     lines.append("")
 
     lines.append("## Report Scope")
@@ -8989,6 +9140,7 @@ def command_report(args):
     append_report_asset_lifecycle_section(lines, report_lifecycle_rows)
     append_report_classification_summary_section(lines, report_classification_summary)
     append_report_trueaegis_validation_section(lines, report_validation_summary, report_validation_rows)
+    append_report_trueaegis_validation_correlation_section(lines, report_validation_correlation_summary, report_validation_correlation_rows)
     append_report_asset_inventory_section(lines, report_asset_rows, args.asset_limit)
     append_report_investigation_center_section(lines, report_investigation_center_rows)
     append_report_ticket_evidence_appendix(lines, report_ticket_evidence_payloads)
@@ -16785,7 +16937,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.33 TrueAegis Integration Foundation</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.34 TrueAegis Validation Correlation</span></div>
     </div>
   </header>
 
@@ -16967,7 +17119,7 @@ def dashboard_index_html_base_v025_operator_link():
         <div>
           <div class="eyebrow">TrueAegis Foundation</div>
           <h2>TrueAegis Validation Evidence</h2>
-          <p class="muted">Imported TrueAegis validation observations are displayed here as evidence only. v0.33 does not alter risk scoring or correlate observations with NetSniper services yet.</p>
+          <p class="muted">Imported TrueAegis validation observations are correlated with current NetSniper services as evidence only. v0.34 does not alter risk scoring yet.</p>
         </div>
         <a href="/api/validation-summary">Raw summary JSON</a>
       </div>
@@ -19735,7 +19887,7 @@ def dashboard_index_html_base_v025_operator_link():
           <div>
             <div class="eyebrow">TrueAegis Foundation</div>
             <h2>Validation Evidence</h2>
-            <p class="muted">Imported TrueAegis validation observations are displayed here as evidence only. v0.33 does not alter risk scoring or correlate observations with NetSniper services yet.</p>
+            <p class="muted">Imported TrueAegis validation observations are correlated with current NetSniper services as evidence only. v0.34 does not alter risk scoring yet.</p>
           </div>
           <a href="/api/validation-summary">Raw summary JSON</a>
         </div>
@@ -23112,7 +23264,7 @@ def command_validations(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.33.0 — TrueAegis Integration Foundation, v3 bundle ingest, bundle-quality readiness metadata, dashboard scan-context visibility, scheduled scans, guarded NetSniper scan jobs, dashboard user management, RBAC, investigation intelligence, current-state SIEM dashboard, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.34.0 — TrueAegis Validation Correlation, v3 bundle ingest, bundle-quality readiness metadata, dashboard scan-context visibility, scheduled scans, guarded NetSniper scan jobs, dashboard user management, RBAC, investigation intelligence, current-state SIEM dashboard, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
