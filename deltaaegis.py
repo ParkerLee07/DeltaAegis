@@ -91,6 +91,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("POST", "/api/investigate-asset", "workflow.write"),
     ("POST", "/api/netsniper/import-latest", "workflow.write"),
     ("POST", "/api/netsniper/scan-start", "scan.start"),
+    ("POST", "/api/trueaegis/run", "scan.start"),
     ("GET", "/api/netsniper/schedules", "dashboard.read"),
     ("POST", "/api/netsniper/schedule-create", "scan.start"),
     ("POST", "/api/netsniper/schedule-enable", "scan.start"),
@@ -11084,6 +11085,289 @@ def dashboard_start_scan_job_thread(
     )
     thread.start()
     return thread
+
+
+def active_trueaegis_job_exists(connection: sqlite3.Connection) -> bool:
+    row = connection.execute(
+        """
+        SELECT job_id
+        FROM trueaegis_jobs
+        WHERE status IN ('QUEUED', 'RUNNING')
+        ORDER BY created_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+
+    return row is not None
+
+
+def latest_trueaegis_validation_results_path(
+    validation_results_dir: Path | str,
+    earliest_mtime: float | None = None,
+    exclude_paths: set[str] | None = None,
+) -> Path | None:
+    results_dir = Path(validation_results_dir).expanduser()
+    excluded = set(exclude_paths or set())
+    candidates: list[tuple[float, Path]] = []
+
+    if not results_dir.is_dir():
+        return None
+
+    for path in results_dir.glob("validation_*.json"):
+        if str(path) in excluded:
+            continue
+
+        try:
+            modified_at = path.stat().st_mtime
+        except OSError:
+            continue
+
+        if earliest_mtime is not None and modified_at < earliest_mtime:
+            continue
+
+        candidates.append((modified_at, path))
+
+    if not candidates:
+        return None
+
+    candidates.sort(reverse=True, key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def execute_trueaegis_job(
+    connection: sqlite3.Connection,
+    job_id: str,
+    manifest_path: Path | str,
+    trueaegis_path: Path | str,
+    logs_dir: Path | str = DEFAULT_TRUEAEGIS_LOGS,
+) -> dict[str, Any]:
+    safe_trueaegis_path = resolve_trueaegis_executable(trueaegis_path)
+    safe_manifest_path = Path(manifest_path).expanduser()
+    logs_path = Path(logs_dir).expanduser()
+    validation_results_dir = safe_trueaegis_path.parent / "validation_results"
+
+    command = build_trueaegis_validation_command(
+        trueaegis_path=safe_trueaegis_path,
+        manifest_path=safe_manifest_path,
+    )
+
+    logs_path.mkdir(parents=True, exist_ok=True)
+    validation_results_dir.mkdir(parents=True, exist_ok=True)
+
+    stdout_log = logs_path / f"{job_id}.stdout.log"
+    stderr_log = logs_path / f"{job_id}.stderr.log"
+
+    before_outputs = {
+        str(path)
+        for path in validation_results_dir.glob("validation_*.json")
+    }
+
+    started_at = utc_now_text()
+    started_epoch = datetime.now(timezone.utc).timestamp() - 1.0
+
+    update_trueaegis_job(
+        connection,
+        job_id,
+        status="RUNNING",
+        started_at=started_at,
+        stdout_log_path=str(stdout_log),
+        stderr_log_path=str(stderr_log),
+        message="TrueAegis validation running",
+    )
+    connection.commit()
+
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(safe_trueaegis_path.parent),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except KeyboardInterrupt as exc:
+        update_trueaegis_job(
+            connection,
+            job_id,
+            status="FAILED",
+            completed_at=utc_now_text(),
+            exit_code=130,
+            message="TrueAegis validation interrupted by operator",
+        )
+        connection.commit()
+        raise DeltaAegisError("TrueAegis validation interrupted by operator") from exc
+    except OSError as exc:
+        update_trueaegis_job(
+            connection,
+            job_id,
+            status="FAILED",
+            completed_at=utc_now_text(),
+            exit_code=127,
+            message=f"failed to launch TrueAegis: {exc}",
+        )
+        connection.commit()
+        raise DeltaAegisError(f"failed to launch TrueAegis: {exc}") from exc
+
+    stdout_log.write_text(completed.stdout or "", encoding="utf-8")
+    stderr_log.write_text(completed.stderr or "", encoding="utf-8")
+
+    validation_results_path = latest_trueaegis_validation_results_path(
+        validation_results_dir,
+        earliest_mtime=started_epoch,
+        exclude_paths=before_outputs,
+    )
+
+    if validation_results_path is None and completed.returncode == 0:
+        validation_results_path = latest_trueaegis_validation_results_path(
+            validation_results_dir,
+            earliest_mtime=started_epoch,
+        )
+
+    final_status = "COMPLETED" if completed.returncode == 0 else "FAILED"
+    message_parts = []
+
+    if final_status == "COMPLETED":
+        message_parts.append("TrueAegis validation completed")
+    else:
+        message_parts.append(f"TrueAegis validation failed with exit code {completed.returncode}")
+
+    if validation_results_path is not None:
+        message_parts.append(f"validation_results={validation_results_path}")
+    elif final_status == "COMPLETED":
+        final_status = "FAILED"
+        message_parts.append(f"validation output was not found in {validation_results_dir}")
+
+    update_trueaegis_job(
+        connection,
+        job_id,
+        status=final_status,
+        completed_at=utc_now_text(),
+        validation_results_path=str(validation_results_path) if validation_results_path else None,
+        exit_code=completed.returncode,
+        message="; ".join(message_parts),
+    )
+    connection.commit()
+
+    row = connection.execute(
+        "SELECT * FROM trueaegis_jobs WHERE job_id = ?",
+        (job_id,),
+    ).fetchone()
+
+    if row is None:
+        raise DeltaAegisError(f"TrueAegis job disappeared unexpectedly: {job_id}")
+
+    return trueaegis_job_to_dict(row)
+
+
+def dashboard_trueaegis_validation_worker(
+    db_path: Path,
+    job_id: str,
+    manifest_path: Path,
+    trueaegis_path: Path,
+    logs_dir: Path = DEFAULT_TRUEAEGIS_LOGS,
+) -> None:
+    connection = connect(db_path)
+
+    try:
+        execute_trueaegis_job(
+            connection,
+            job_id=job_id,
+            manifest_path=manifest_path,
+            trueaegis_path=trueaegis_path,
+            logs_dir=logs_dir,
+        )
+    except Exception as exc:
+        try:
+            update_trueaegis_job(
+                connection,
+                job_id,
+                status="FAILED",
+                completed_at=utc_now_text(),
+                message=f"TrueAegis validation worker failed: {exc}",
+            )
+            connection.commit()
+        except Exception:
+            pass
+    finally:
+        connection.close()
+
+
+def dashboard_start_trueaegis_job_thread(
+    db_path: Path,
+    job_id: str,
+    manifest_path: Path,
+    trueaegis_path: Path,
+    logs_dir: Path = DEFAULT_TRUEAEGIS_LOGS,
+) -> threading.Thread:
+    thread = threading.Thread(
+        name=f"deltaaegis-trueaegis-validation-{job_id}",
+        target=dashboard_trueaegis_validation_worker,
+        kwargs={
+            "db_path": db_path,
+            "job_id": job_id,
+            "manifest_path": manifest_path,
+            "trueaegis_path": trueaegis_path,
+            "logs_dir": logs_dir,
+        },
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def dashboard_trueaegis_validation_start_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+    db_path: Path,
+) -> dict[str, Any]:
+    scope = str(payload.get("scope") or "").strip() or None
+
+    if active_trueaegis_job_exists(connection):
+        raise DeltaAegisError("active TrueAegis validation job already exists")
+
+    context = dashboard_trueaegis_orchestration_context_payload(
+        connection,
+        scope=scope,
+    )
+
+    if not context.get("ready_to_start"):
+        blockers = context.get("blockers") or ["TrueAegis orchestration is not ready."]
+        raise DeltaAegisError("; ".join(str(item) for item in blockers))
+
+    latest_scan = context.get("latest_scan") or {}
+    manifest_path = Path(str(context.get("manifest_path") or "")).expanduser()
+    trueaegis_path = Path(str(context.get("trueaegis_path") or "")).expanduser()
+
+    job = create_trueaegis_job(
+        connection,
+        scan_id=latest_scan.get("scan_id"),
+        network_scope=latest_scan.get("network_scope"),
+        manifest_path=manifest_path,
+        trueaegis_path=trueaegis_path,
+    )
+    connection.commit()
+
+    dashboard_start_trueaegis_job_thread(
+        db_path=db_path,
+        job_id=job["job_id"],
+        manifest_path=manifest_path,
+        trueaegis_path=trueaegis_path,
+        logs_dir=DEFAULT_TRUEAEGIS_LOGS,
+    )
+
+    return {
+        "ok": True,
+        "job": job,
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "scan_id": latest_scan.get("scan_id"),
+        "network_scope": latest_scan.get("network_scope"),
+        "manifest_path": str(manifest_path),
+        "trueaegis_path": str(trueaegis_path),
+        "logs_dir": str(DEFAULT_TRUEAEGIS_LOGS),
+        "message": "TrueAegis validation job queued and started in a guarded dashboard background worker",
+    }
+
 
 
 def dashboard_summary_payload(connection, scope=None):
@@ -23051,6 +23335,43 @@ def command_dashboard(args):
 
                 dashboard_json_response(self, result)
                 return
+
+            if route == "/api/trueaegis/run":
+
+                try:
+
+                    result = dashboard_trueaegis_validation_start_payload(
+
+                        connection,
+
+                        payload,
+
+                        db_path=db_path,
+
+                    )
+
+                    dashboard_json_response(self, result, status=202)
+
+                except DeltaAegisError as exc:
+
+                    dashboard_json_response(
+
+                        self,
+
+                        {
+
+                            "error": "trueaegis_run_failed",
+
+                            "message": str(exc),
+
+                        },
+
+                        status=400,
+
+                    )
+
+                return
+
 
             if route == "/api/netsniper/scan-start":
                 if not self.require_permission("scan.start"):
