@@ -10738,7 +10738,7 @@ def dashboard_netsniper_scan_start_payload(
         safe_target,
         netsniper_path,
         runs_dir,
-        auto_ingest=False,
+        auto_ingest=True,
         scan_profile=safe_profile,
     )
     connection.commit()
@@ -10752,7 +10752,7 @@ def dashboard_netsniper_scan_start_payload(
         runs_dir=runs_dir,
         logs_dir=logs_dir,
         scan_profile=safe_profile,
-        auto_ingest=False,
+        auto_ingest=True,
     )
 
     return {
@@ -10765,7 +10765,8 @@ def dashboard_netsniper_scan_start_payload(
         "netsniper_path": str(netsniper_path),
         "runs_dir": str(runs_dir),
         "logs_dir": str(logs_dir),
-        "message": "scan job queued and started in a guarded dashboard background worker",
+        "auto_ingest": True,
+        "message": "scan job queued and started in a guarded dashboard background worker with auto-ingest enabled",
     }
 
 

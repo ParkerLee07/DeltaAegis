@@ -8,6 +8,8 @@
 - Added Markdown report visibility for TrueAegis validation correlations.
 - Added v0.34 validators for correlation storage, dashboard/API visibility, asset detail visibility, report visibility, release metadata, and the full v0.34 release gate.
 - Preserved v0.33 TrueAegis import/storage behavior and v0.32 NetSniper v2 compatibility.
+- Fixed the v0.34 release-blocking NetSniper scan handoff by making dashboard-launched scans auto-ingest completed bundles by default and adding an auto-ingest regression validator.
+- Added `validate_v0_34_scan_auto_ingest_hotfix.sh` to the v0.34 release gate.
 - Scope note: v0.34 correlates validation evidence with observed services but does not alter DeltaAegis risk scoring or recommendations yet.
 
 Validate:

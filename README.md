@@ -19,6 +19,7 @@ DeltaAegis v0.34.0 promotes the v0.33 TrueAegis evidence foundation into validat
 - Adds per-asset TrueAegis validation correlation context in asset detail.
 - Adds TrueAegis validation correlation evidence to Markdown reports.
 - Preserves v0.33 TrueAegis import/storage behavior and v0.32 NetSniper v2 compatibility.
+- Auto-ingests completed NetSniper dashboard and scheduled scan jobs by default so scan results appear in DeltaAegis without a separate manual import.
 - Keeps risk scoring unchanged while making validation evidence visible and reviewable.
 
 ### Validate

@@ -9,6 +9,7 @@ tools/validate_v0_34_validation_correlation_storage.sh
 tools/validate_v0_34_validation_correlation_dashboard.sh
 tools/validate_v0_34_asset_detail_validation_correlation.sh
 tools/validate_v0_34_report_correlation.sh
+tools/validate_v0_34_scan_auto_ingest_hotfix.sh
 tools/validate_v0_34_release_metadata.sh
 
 echo "[INFO] Running inherited functional regression validators..."

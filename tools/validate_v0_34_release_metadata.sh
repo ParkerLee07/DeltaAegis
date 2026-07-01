@@ -13,6 +13,7 @@ grep -Fq '**DeltaAegis v0.34.0 — TrueAegis Validation Correlation**' README.md
 grep -Fq './tools/validate_v0_34_release.sh' README.md
 grep -Fq '## v0.34.0 — TrueAegis Validation Correlation' CHANGELOG.md
 grep -Fq 'validate_v0_34_release.sh' CHANGELOG.md
+grep -Fq 'validate_v0_34_scan_auto_ingest_hotfix.sh' CHANGELOG.md
 
 if grep -Fq '## Current Release — v0.33.0' README.md; then
     echo "[FAIL] README still advertises v0.33.0 as current release" >&2
