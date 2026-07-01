@@ -47,6 +47,7 @@ SCAN_JOB_STATUSES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED"}
 NETSNIPER_SUPPORTED_SCHEMAS = {"netsniper-run-v1", "netsniper-run-v2", "netsniper-run-v3"}
 NETSNIPER_PROFILE_AWARE_SCHEMAS = {"netsniper-run-v2", "netsniper-run-v3"}
 TRUEAEGIS_VALIDATION_STATUSES = {"CONFIRMED", "REACHABLE", "PROTECTED", "PROTOCOL_MISMATCH", "NOT_REACHABLE", "TIMEOUT", "INCONCLUSIVE", "PARTIALLY_CONFIRMED", "DEPENDENCY_MISSING", "UNKNOWN"}
+TRUEAEGIS_JOB_STATUSES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED"}
 
 ACCESS_ROLES = ("ADMIN", "ANALYST", "VIEWER")
 
@@ -76,6 +77,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("GET", "/api/validation-summary", "dashboard.read"),
     ("GET", "/api/validation-correlations", "dashboard.read"),
     ("GET", "/api/validations", "dashboard.read"),
+    ("GET", "/api/trueaegis-jobs", "dashboard.read"),
     ("POST", "/api/validation-ingest", "workflow.write"),
     ("GET", "/api/session", "session.read"),
     ("GET", "/api/admin/users", "admin.users.read"),
@@ -509,6 +511,39 @@ CREATE INDEX IF NOT EXISTS idx_scan_jobs_status
 
 CREATE INDEX IF NOT EXISTS idx_scan_jobs_scope
     ON scan_jobs(network_scope);
+
+CREATE TABLE IF NOT EXISTS trueaegis_jobs (
+    job_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    scan_id TEXT,
+    network_scope TEXT NOT NULL DEFAULT '',
+    manifest_path TEXT NOT NULL,
+    trueaegis_path TEXT NOT NULL DEFAULT '',
+    validation_results_path TEXT,
+    validation_run_id TEXT,
+    imported_observations INTEGER NOT NULL DEFAULT 0,
+    correlation_count INTEGER NOT NULL DEFAULT 0,
+    stdout_log_path TEXT,
+    stderr_log_path TEXT,
+    exit_code INTEGER,
+    message TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_trueaegis_jobs_created_at
+    ON trueaegis_jobs(created_at);
+
+CREATE INDEX IF NOT EXISTS idx_trueaegis_jobs_status
+    ON trueaegis_jobs(status);
+
+CREATE INDEX IF NOT EXISTS idx_trueaegis_jobs_scope
+    ON trueaegis_jobs(network_scope);
+
+CREATE INDEX IF NOT EXISTS idx_trueaegis_jobs_scan_id
+    ON trueaegis_jobs(scan_id);
 
 CREATE TABLE IF NOT EXISTS scan_schedules (
     schedule_id TEXT PRIMARY KEY,
@@ -4634,6 +4669,212 @@ def dashboard_scan_jobs_payload(
     return [
         scan_job_to_dict(row)
         for row in query_scan_jobs(
+            connection,
+            limit=limit,
+            status=status,
+            scope=scope,
+        )
+    ]
+
+
+
+def trueaegis_job_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+
+    for key in ("imported_observations", "correlation_count"):
+        try:
+            item[key] = int(item.get(key) or 0)
+        except (TypeError, ValueError):
+            item[key] = 0
+
+    if item.get("exit_code") in ("", None):
+        item["exit_code"] = None
+    else:
+        try:
+            item["exit_code"] = int(item.get("exit_code"))
+        except (TypeError, ValueError):
+            item["exit_code"] = None
+
+    return item
+
+
+def create_trueaegis_job(
+    connection: sqlite3.Connection,
+    scan_id: str | None,
+    network_scope: str | None,
+    manifest_path: Path,
+    trueaegis_path: Path,
+) -> dict[str, Any]:
+    safe_manifest_path = Path(manifest_path).expanduser()
+    safe_trueaegis_path = Path(trueaegis_path).expanduser()
+    now = utc_now_text()
+    job_id = f"trueaegis-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+
+    connection.execute(
+        """
+        INSERT INTO trueaegis_jobs (
+            job_id,
+            status,
+            scan_id,
+            network_scope,
+            manifest_path,
+            trueaegis_path,
+            message,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job_id,
+            "QUEUED",
+            str(scan_id or ""),
+            str(network_scope or ""),
+            str(safe_manifest_path),
+            str(safe_trueaegis_path),
+            "TrueAegis validation job queued",
+            now,
+            now,
+        ),
+    )
+
+    row = connection.execute(
+        "SELECT * FROM trueaegis_jobs WHERE job_id = ?",
+        (job_id,),
+    ).fetchone()
+
+    if row is None:
+        raise DeltaAegisError(f"TrueAegis job was not created: {job_id}")
+
+    return trueaegis_job_to_dict(row)
+
+
+def update_trueaegis_job(
+    connection: sqlite3.Connection,
+    job_id: str,
+    **fields: Any,
+) -> None:
+    allowed = {
+        "status",
+        "started_at",
+        "completed_at",
+        "validation_results_path",
+        "validation_run_id",
+        "imported_observations",
+        "correlation_count",
+        "stdout_log_path",
+        "stderr_log_path",
+        "exit_code",
+        "message",
+    }
+
+    updates = []
+    params: list[Any] = []
+
+    for key, value in fields.items():
+        if key not in allowed:
+            raise DeltaAegisError(f"invalid TrueAegis job field update: {key}")
+
+        if key == "status":
+            value = str(value).upper()
+
+            if value not in TRUEAEGIS_JOB_STATUSES:
+                raise DeltaAegisError(f"invalid TrueAegis job status: {value}")
+
+        if key in {"imported_observations", "correlation_count"}:
+            value = max(0, int(value or 0))
+
+        updates.append(f"{key} = ?")
+        params.append(value)
+
+    if not updates:
+        return
+
+    updates.append("updated_at = ?")
+    params.append(utc_now_text())
+    params.append(job_id)
+
+    connection.execute(
+        f"""
+        UPDATE trueaegis_jobs
+        SET {", ".join(updates)}
+        WHERE job_id = ?
+        """,
+        tuple(params),
+    )
+
+
+def query_trueaegis_jobs(
+    connection: sqlite3.Connection,
+    limit: int = 20,
+    status: str | None = None,
+    scope: str | None = None,
+) -> list[sqlite3.Row]:
+    clauses = []
+    params: list[Any] = []
+
+    if status:
+        normalized_status = status.strip().upper()
+
+        if normalized_status not in TRUEAEGIS_JOB_STATUSES:
+            raise DeltaAegisError(f"invalid TrueAegis job status: {status}")
+
+        clauses.append("status = ?")
+        params.append(normalized_status)
+
+    if scope:
+        clauses.append("network_scope = ?")
+        params.append(scope)
+
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+
+    try:
+        safe_limit = int(limit)
+    except (TypeError, ValueError):
+        safe_limit = 20
+
+    safe_limit = max(1, min(safe_limit, 200))
+    params.append(safe_limit)
+
+    return connection.execute(
+        f"""
+        SELECT
+            job_id,
+            status,
+            scan_id,
+            network_scope,
+            manifest_path,
+            trueaegis_path,
+            validation_results_path,
+            validation_run_id,
+            imported_observations,
+            correlation_count,
+            stdout_log_path,
+            stderr_log_path,
+            exit_code,
+            message,
+            created_at,
+            updated_at,
+            started_at,
+            completed_at
+        FROM trueaegis_jobs
+        {where}
+        ORDER BY created_at DESC, updated_at DESC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+
+
+def dashboard_trueaegis_jobs_payload(
+    connection: sqlite3.Connection,
+    limit: int = 20,
+    scope: str | None = None,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    return [
+        trueaegis_job_to_dict(row)
+        for row in query_trueaegis_jobs(
             connection,
             limit=limit,
             status=status,
@@ -22214,6 +22455,17 @@ def command_dashboard(args):
                     dashboard_json_response(
                         self,
                         dashboard_scan_jobs_payload(
+                            connection,
+                            limit=limit,
+                            scope=scope,
+                            status=status_filter,
+                        ),
+                    )
+                elif route == "/api/trueaegis-jobs":
+                    status_filter = query.get("status", [""])[0].strip() or None
+                    dashboard_json_response(
+                        self,
+                        dashboard_trueaegis_jobs_payload(
                             connection,
                             limit=limit,
                             scope=scope,

@@ -1,3 +1,9 @@
+## DeltaAegis v0.35.0 — TrueAegis Orchestration
+
+- Started the v0.35 TrueAegis orchestration foundation with dedicated `trueaegis_jobs` storage.
+- Added read-only `/api/trueaegis-jobs` dashboard visibility for validation job status.
+- Added `validate_v0_35_trueaegis_job_storage.sh` to verify TrueAegis job schema, helpers, route policy, API route, and storage behavior.
+
 ## v0.34.0 — TrueAegis Validation Correlation
 
 - Added `validation_correlations` storage for matching imported TrueAegis observations to current NetSniper services.
