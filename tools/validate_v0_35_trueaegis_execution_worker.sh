@@ -172,7 +172,7 @@ print(f"validation_results={out}")
             trueaegis_path=trueaegis_path,
         )
         assert context["ready_to_start"] is True, context
-        assert context["execution_enabled"] is False
+        assert context["execution_enabled"] is True, context
 
         job = delta.create_trueaegis_job(
             connection,

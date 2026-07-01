@@ -11992,11 +11992,11 @@ def dashboard_trueaegis_orchestration_context_payload(
         "blockers": blockers,
         "command_preview": command_preview,
         "command_preview_kind": "argv",
-        "execution_enabled": False,
+        "execution_enabled": bool(ready_to_start),
         "message": (
-            "TrueAegis orchestration context is ready; execution will be added in a later checkpoint."
+            "TrueAegis orchestration is ready to run."
             if ready_to_start
-            else "TrueAegis orchestration is not ready."
+            else "TrueAegis orchestration context is not ready."
         ),
     }
 

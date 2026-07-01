@@ -36,6 +36,22 @@ for needle in "${required_strings[@]}"; do
   }
 done
 
+
+grep -Fq '"execution_enabled": bool(ready_to_start)' deltaaegis.py || {
+  echo "[FAIL] TrueAegis context must expose execution_enabled based on ready_to_start" >&2
+  exit 1
+}
+
+grep -Fq 'TrueAegis orchestration is ready to run.' deltaaegis.py || {
+  echo "[FAIL] TrueAegis context ready message is missing" >&2
+  exit 1
+}
+
+if grep -Fq 'execution will be added in a later checkpoint' deltaaegis.py; then
+  echo "[FAIL] stale TrueAegis checkpoint message remains" >&2
+  exit 1
+fi
+
 if grep -n 'shell=True' deltaaegis.py; then
   echo "[FAIL] v0.35 release must not use shell=True" >&2
   exit 1
