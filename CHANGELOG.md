@@ -1,5 +1,9 @@
 ## DeltaAegis v0.35.0 — TrueAegis Orchestration
 
+- Added guarded TrueAegis orchestration context discovery for the latest accepted NetSniper manifest.
+- Added safe argv command preview generation for `python3 trueaegis.py <manifest.json> --validate --quiet` without shell execution.
+- Added read-only `/api/trueaegis/context` dashboard visibility for TrueAegis readiness and blockers.
+- Added `validate_v0_35_trueaegis_orchestration_context.sh` to verify context payloads and safe command construction.
 - Started the v0.35 TrueAegis orchestration foundation with dedicated `trueaegis_jobs` storage.
 - Added read-only `/api/trueaegis-jobs` dashboard visibility for validation job status.
 - Added `validate_v0_35_trueaegis_job_storage.sh` to verify TrueAegis job schema, helpers, route policy, API route, and storage behavior.

@@ -33,6 +33,8 @@ DEFAULT_DB = Path.home() / "DeltaAegis" / "data" / "deltaaegis.db"
 DEFAULT_RUNS = Path.home() / "NetSniper" / "runs"
 DEFAULT_NETSNIPER = Path.home() / "NetSniper" / "netsniper.sh"
 DEFAULT_SCAN_LOGS = Path.home() / "DeltaAegis" / "scan-logs"
+DEFAULT_TRUEAEGIS = Path.home() / "TrueAegis" / "trueaegis.py"
+DEFAULT_TRUEAEGIS_LOGS = Path.home() / "DeltaAegis" / "trueaegis-logs"
 DEFAULT_EVENTS = Path.home() / "DeltaAegis" / "events" / "events.jsonl"
 DEFAULT_REPORTS = Path.home() / "DeltaAegis" / "reports"
 DELTAAEGIS_V0_14_COMPATIBILITY_NOTE = "DeltaAegis v0.14.0 — NetSniper Scan Orchestration compatibility retained."
@@ -78,6 +80,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("GET", "/api/validation-correlations", "dashboard.read"),
     ("GET", "/api/validations", "dashboard.read"),
     ("GET", "/api/trueaegis-jobs", "dashboard.read"),
+    ("GET", "/api/trueaegis/context", "dashboard.read"),
     ("POST", "/api/validation-ingest", "workflow.write"),
     ("GET", "/api/session", "session.read"),
     ("GET", "/api/admin/users", "admin.users.read"),
@@ -11464,6 +11467,199 @@ def dashboard_delta_scan_pairs(connection, limit=10, scope=None):
     return [dict(row) for row in rows]
 
 
+def latest_trueaegis_candidate_scan(
+    connection: sqlite3.Connection,
+    scope: str | None = None,
+) -> dict[str, Any] | None:
+    columns = dashboard_table_columns(connection, "snapshots")
+
+    if not {"scan_id", "manifest_path"}.issubset(columns):
+        return None
+
+    preferred = [
+        "scan_id",
+        "target",
+        "network_scope",
+        "manifest_path",
+        "source_path",
+        "source_file",
+        "bundle_path",
+        "scanner_version",
+        "telemetry_contract",
+        "schema_version",
+        "manifest_schema_version",
+        "scan_profile",
+        "requested_profile",
+        "effective_profile",
+        "quality_status",
+        "quality_reason",
+        "hosts_up",
+        "hosts_total",
+        "identity_coverage",
+        "created_at",
+        "imported_at",
+        "is_accepted_baseline",
+    ]
+
+    selected = [column for column in preferred if column in columns]
+
+    clauses = []
+    params: list[Any] = []
+
+    if "quality_status" in columns and "is_accepted_baseline" in columns:
+        clauses.append("(quality_status = 'ACCEPTED' OR is_accepted_baseline = 1)")
+    elif "quality_status" in columns:
+        clauses.append("quality_status = 'ACCEPTED'")
+    elif "is_accepted_baseline" in columns:
+        clauses.append("is_accepted_baseline = 1")
+
+    if scope and "network_scope" in columns:
+        clauses.append("network_scope = ?")
+        params.append(scope)
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    order_columns = [
+        column for column in ["created_at", "imported_at", "scan_id"]
+        if column in columns
+    ]
+    order_clause = ", ".join(f"{column} DESC" for column in order_columns) or "rowid DESC"
+
+    row = connection.execute(
+        f"""
+        SELECT {", ".join(selected)}
+        FROM snapshots
+        {where}
+        ORDER BY {order_clause}
+        LIMIT 1
+        """,
+        tuple(params),
+    ).fetchone()
+
+    if row is None:
+        return None
+
+    item = dict(row)
+
+    for optional in preferred:
+        item.setdefault(optional, None)
+
+    return item
+
+
+def resolve_trueaegis_executable(trueaegis_path: Path | str | None = None) -> Path:
+    candidate = Path(trueaegis_path or DEFAULT_TRUEAEGIS).expanduser()
+
+    if candidate.is_dir():
+        candidate = candidate / "trueaegis.py"
+
+    if candidate.name != "trueaegis.py":
+        raise DeltaAegisError(
+            f"TrueAegis orchestration only accepts the trueaegis.py entrypoint: {candidate}"
+        )
+
+    return candidate
+
+
+def build_trueaegis_validation_command(
+    trueaegis_path: Path | str,
+    manifest_path: Path | str,
+    python_executable: str | None = None,
+) -> list[str]:
+    safe_trueaegis_path = resolve_trueaegis_executable(trueaegis_path)
+    safe_manifest_path = Path(manifest_path).expanduser()
+
+    if safe_manifest_path.name != "manifest.json":
+        raise DeltaAegisError(
+            f"TrueAegis orchestration requires a NetSniper manifest.json path: {safe_manifest_path}"
+        )
+
+    if not safe_manifest_path.is_file():
+        raise DeltaAegisError(f"NetSniper manifest was not found: {safe_manifest_path}")
+
+    if not safe_trueaegis_path.is_file():
+        raise DeltaAegisError(f"TrueAegis executable was not found: {safe_trueaegis_path}")
+
+    python_path = str(python_executable or sys.executable or "python3")
+
+    return [
+        python_path,
+        str(safe_trueaegis_path),
+        str(safe_manifest_path),
+        "--validate",
+        "--quiet",
+    ]
+
+
+def dashboard_trueaegis_orchestration_context_payload(
+    connection: sqlite3.Connection,
+    scope: str | None = None,
+    trueaegis_path: Path | str | None = None,
+) -> dict[str, Any]:
+    latest_scan = latest_trueaegis_candidate_scan(connection, scope=scope)
+    resolved_trueaegis_path = resolve_trueaegis_executable(trueaegis_path)
+    validation_results_dir = resolved_trueaegis_path.parent / "validation_results"
+
+    manifest_path = None
+    manifest_exists = False
+    command_preview: list[str] = []
+    ready_to_start = False
+    blockers: list[str] = []
+
+    trueaegis_exists = resolved_trueaegis_path.is_file()
+    validation_results_dir_exists = validation_results_dir.is_dir()
+
+    if not latest_scan:
+        blockers.append("No accepted NetSniper snapshot is available for TrueAegis validation.")
+    else:
+        manifest_value = str(latest_scan.get("manifest_path") or "").strip()
+        if not manifest_value:
+            blockers.append("Latest accepted NetSniper snapshot does not have a manifest path.")
+        else:
+            manifest_path = Path(manifest_value).expanduser()
+            manifest_exists = manifest_path.is_file()
+            if not manifest_exists:
+                blockers.append(f"Latest accepted NetSniper manifest was not found: {manifest_path}")
+
+    if not trueaegis_exists:
+        blockers.append(f"TrueAegis executable was not found: {resolved_trueaegis_path}")
+
+    if latest_scan and manifest_path and manifest_exists and trueaegis_exists:
+        try:
+            command_preview = build_trueaegis_validation_command(
+                trueaegis_path=resolved_trueaegis_path,
+                manifest_path=manifest_path,
+            )
+            ready_to_start = True
+        except DeltaAegisError as exc:
+            blockers.append(str(exc))
+
+    return {
+        "schema_version": "deltaaegis-trueaegis-orchestration-context-v1",
+        "selected_scope": scope,
+        "latest_scan": latest_scan,
+        "scan_id": latest_scan.get("scan_id") if latest_scan else None,
+        "network_scope": latest_scan.get("network_scope") if latest_scan else None,
+        "manifest_path": str(manifest_path) if manifest_path else None,
+        "manifest_exists": manifest_exists,
+        "trueaegis_path": str(resolved_trueaegis_path),
+        "trueaegis_exists": trueaegis_exists,
+        "validation_results_dir": str(validation_results_dir),
+        "validation_results_dir_exists": validation_results_dir_exists,
+        "ready_to_start": ready_to_start,
+        "blockers": blockers,
+        "command_preview": command_preview,
+        "command_preview_kind": "argv",
+        "execution_enabled": False,
+        "message": (
+            "TrueAegis orchestration context is ready; execution will be added in a later checkpoint."
+            if ready_to_start
+            else "TrueAegis orchestration is not ready."
+        ),
+    }
+
+
+
 def trueaegis_validation_service_protocol(
     transport: Any,
     protocol: Any,
@@ -22418,6 +22614,14 @@ def command_dashboard(args):
                     dashboard_json_response(self, dashboard_summary_payload(connection, scope=scope))
                 elif route == "/api/scan-context":
                     dashboard_json_response(self, dashboard_scan_context_payload(connection, scope=scope))
+                elif route == "/api/trueaegis/context":
+                    dashboard_json_response(
+                        self,
+                        dashboard_trueaegis_orchestration_context_payload(
+                            connection,
+                            scope=scope,
+                        ),
+                    )
                 elif route == "/api/validation-summary":
                     dashboard_json_response(self, dashboard_validation_summary_payload(connection))
                 elif route == "/api/validations":
