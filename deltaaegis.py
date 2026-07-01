@@ -20206,7 +20206,7 @@ def dashboard_index_html_base_v025_operator_link():
           api(investigationCenterFilterPath()),
           api(scopedPath("/api/scan-jobs?limit=10")),
           api(scopedPath("/api/assets?limit=25")),
-          api(scopedPath("/api/current-risk?limit=10")),
+          api(scopedPath("/api/current-risk?limit=10000")),
           api(scopedPath("/api/risk?limit=10")),
           api(scopedPath("/api/port-behavior?limit=25&lookback=5")),
           api(scopedPath("/api/events?limit=20")),

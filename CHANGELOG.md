@@ -12,6 +12,8 @@
 - Added `validate_v0_34_scan_auto_ingest_hotfix.sh` to the v0.34 release gate.
 - Fixed the executive dashboard donut chart so slice colors are generated from the actual distribution instead of a static placeholder gradient.
 - Added `validate_v0_34_dashboard_donut_chart.sh` to guard dashboard donut-chart rendering before release.
+- Fixed the executive dashboard risk-distribution source so the donut chart summarizes the full current-risk inventory instead of only the top 10 highest-risk rows.
+- Added `validate_v0_34_dashboard_risk_distribution_scope.sh` to prevent dashboard risk-distribution scope regressions.
 - Scope note: v0.34 correlates validation evidence with observed services but does not alter DeltaAegis risk scoring or recommendations yet.
 
 Validate:
