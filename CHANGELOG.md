@@ -10,6 +10,8 @@
 - Preserved v0.33 TrueAegis import/storage behavior and v0.32 NetSniper v2 compatibility.
 - Fixed the v0.34 release-blocking NetSniper scan handoff by making dashboard-launched scans auto-ingest completed bundles by default and adding an auto-ingest regression validator.
 - Added `validate_v0_34_scan_auto_ingest_hotfix.sh` to the v0.34 release gate.
+- Fixed the executive dashboard donut chart so slice colors are generated from the actual distribution instead of a static placeholder gradient.
+- Added `validate_v0_34_dashboard_donut_chart.sh` to guard dashboard donut-chart rendering before release.
 - Scope note: v0.34 correlates validation evidence with observed services but does not alter DeltaAegis risk scoring or recommendations yet.
 
 Validate:

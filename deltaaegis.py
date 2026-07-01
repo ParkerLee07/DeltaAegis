@@ -16269,6 +16269,21 @@ def dashboard_index_html_base_v025_operator_link():
       color: #cbd5e1;
     }
 
+    .siem-legend-label {
+      align-items: center;
+      display: inline-flex;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .siem-legend-swatch {
+      border-radius: 999px;
+      display: inline-block;
+      flex: 0 0 auto;
+      height: 10px;
+      width: 10px;
+    }
+
     .siem-legend-row strong {
       color: #f8fafc;
       font-variant-numeric: tabular-nums;
@@ -17610,18 +17625,45 @@ def dashboard_index_html_base_v025_operator_link():
       }
 
       const total = items.reduce((sum, row) => sum + Number(row.value || 0), 0);
+      const donutColors = ["#22d3ee", "#3b82f6", "#a855f7", "#f59e0b", "#22c55e", "#ef4444"];
+      let cursor = 0;
+
+      const enrichedItems = items.map((row, index) => {
+        const value = Number(row.value || 0);
+        const percent = total ? Math.round((value / total) * 100) : 0;
+        const span = total ? (value / total) * 360 : 0;
+        const start = cursor;
+        const end = index === items.length - 1 ? 360 : cursor + span;
+        const color = donutColors[index % donutColors.length];
+        cursor = end;
+
+        return {
+          label: row.label,
+          value,
+          percent,
+          color,
+          start,
+          end
+        };
+      });
+
+      const stops = enrichedItems
+        .map(item => `${item.color} ${item.start.toFixed(2)}deg, ${item.color} ${item.end.toFixed(2)}deg`)
+        .join(", ");
+      const donutBackground = `conic-gradient(${stops})`;
 
       target.innerHTML = `
         <div class="siem-donut-wrap">
-          <div class="siem-donut" aria-hidden="true"></div>
+          <div class="siem-donut" aria-hidden="true" style="background: ${esc(donutBackground)}"></div>
           <div class="siem-legend">
-            ${items.map(row => {
-              const value = Number(row.value || 0);
-              const percent = total ? Math.round((value / total) * 100) : 0;
+            ${enrichedItems.map(item => {
               return `
                 <div class="siem-legend-row">
-                  <span>${esc(row.label)}</span>
-                  <strong>${esc(value)} · ${esc(percent)}%</strong>
+                  <span class="siem-legend-label">
+                    <span class="siem-legend-swatch" style="background: ${esc(item.color)}"></span>
+                    <span>${esc(item.label)}</span>
+                  </span>
+                  <strong>${esc(item.value)} · ${esc(item.percent)}%</strong>
                 </div>
               `;
             }).join("")}
