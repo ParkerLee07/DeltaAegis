@@ -1,5 +1,10 @@
 ## DeltaAegis v0.35.0 — TrueAegis Orchestration
 
+- Added automatic import of completed TrueAegis validation output into DeltaAegis validation tables.
+- Added automatic refresh of TrueAegis validation correlations after job completion.
+- Updated TrueAegis job records with validation run IDs, imported observation counts, and correlation counts.
+- Hardened `POST /api/trueaegis/run` with explicit scan-start permission checks, JSON parsing, rollback, and connection handling.
+- Added `validate_v0_35_trueaegis_auto_import.sh` for end-to-end fake-run import and correlation validation.
 - Added guarded TrueAegis validation execution worker for fixed argv-only `trueaegis.py <manifest.json> --validate --quiet` runs.
 - Added `POST /api/trueaegis/run` using the existing ADMIN-level scan-start permission boundary.
 - Added stdout/stderr logging and validation output detection for completed TrueAegis jobs without auto-importing results yet.

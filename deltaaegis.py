@@ -11134,6 +11134,31 @@ def latest_trueaegis_validation_results_path(
     return candidates[0][1]
 
 
+def import_trueaegis_job_results(
+    connection: sqlite3.Connection,
+    validation_results_path: Path | str,
+    scope: str | None = None,
+) -> dict[str, Any]:
+    validation_path = Path(validation_results_path).expanduser()
+    import_summary = import_trueaegis_validation_results(connection, validation_path)
+    refresh_summary = refresh_trueaegis_validation_correlations(
+        connection,
+        scope=scope,
+    )
+    connection.commit()
+
+    return {
+        "schema_version": "deltaaegis-trueaegis-job-import-v1",
+        "validation_run_id": import_summary.get("validation_run_id"),
+        "source_path": import_summary.get("source_path"),
+        "imported_observations": int(import_summary.get("result_count") or 0),
+        "status_counts": import_summary.get("status_counts") or {},
+        "correlation_count": int(refresh_summary.get("correlation_count") or 0),
+        "refresh_summary": refresh_summary,
+    }
+
+
+
 def execute_trueaegis_job(
     connection: sqlite3.Connection,
     job_id: str,
@@ -11237,12 +11262,45 @@ def execute_trueaegis_job(
         final_status = "FAILED"
         message_parts.append(f"validation output was not found in {validation_results_dir}")
 
+    validation_run_id = None
+    imported_observations = 0
+    correlation_count = 0
+
+    if final_status == "COMPLETED" and validation_results_path is not None:
+        job_row = connection.execute(
+            "SELECT network_scope FROM trueaegis_jobs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        job_scope = (
+            str(job_row["network_scope"] or "").strip()
+            if job_row is not None
+            else None
+        ) or None
+
+        try:
+            import_summary = import_trueaegis_job_results(
+                connection,
+                validation_results_path,
+                scope=job_scope,
+            )
+            validation_run_id = import_summary.get("validation_run_id")
+            imported_observations = int(import_summary.get("imported_observations") or 0)
+            correlation_count = int(import_summary.get("correlation_count") or 0)
+            message_parts.append(f"imported_observations={imported_observations}")
+            message_parts.append(f"correlations={correlation_count}")
+        except Exception as exc:
+            final_status = "FAILED"
+            message_parts.append(f"auto-import failed: {exc}")
+
     update_trueaegis_job(
         connection,
         job_id,
         status=final_status,
         completed_at=utc_now_text(),
         validation_results_path=str(validation_results_path) if validation_results_path else None,
+        validation_run_id=validation_run_id,
+        imported_observations=imported_observations,
+        correlation_count=correlation_count,
         exit_code=completed.returncode,
         message="; ".join(message_parts),
     )
@@ -23337,41 +23395,82 @@ def command_dashboard(args):
                 return
 
             if route == "/api/trueaegis/run":
+                if not self.require_permission("scan.start"):
+                    return
 
                 try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    content_length = 0
 
-                    result = dashboard_trueaegis_validation_start_payload(
-
-                        connection,
-
-                        payload,
-
-                        db_path=db_path,
-
+                if content_length > 65536:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "body_too_large",
+                            "message": "POST body is too large.",
+                        },
+                        status=413,
                     )
+                    return
+
+                payload = {}
+
+                if content_length > 0:
+                    try:
+                        raw_body = self.rfile.read(content_length).decode("utf-8")
+                        payload = json.loads(raw_body)
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "invalid_json",
+                                "message": "POST body must be valid JSON.",
+                            },
+                            status=400,
+                        )
+                        return
+
+                    if not isinstance(payload, dict):
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "invalid_json",
+                                "message": "POST body must be a JSON object.",
+                            },
+                            status=400,
+                        )
+                        return
+
+                connection = self.open_connection()
+
+                try:
+                    try:
+                        result = dashboard_trueaegis_validation_start_payload(
+                            connection,
+                            payload,
+                            args.db,
+                        )
+                    except DeltaAegisError as exc:
+                        connection.rollback()
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "trueaegis_run_failed",
+                                "message": str(exc),
+                            },
+                            status=400,
+                        )
+                        return
 
                     dashboard_json_response(self, result, status=202)
-
-                except DeltaAegisError as exc:
-
-                    dashboard_json_response(
-
-                        self,
-
-                        {
-
-                            "error": "trueaegis_run_failed",
-
-                            "message": str(exc),
-
-                        },
-
-                        status=400,
-
-                    )
-
-                return
-
+                    return
+                finally:
+                    connection.close()
 
             if route == "/api/netsniper/scan-start":
                 if not self.require_permission("scan.start"):

@@ -197,8 +197,8 @@ print(f"validation_results={out}")
         assert Path(result["validation_results_path"]).is_file(), result
         assert Path(result["stdout_log_path"]).is_file(), result
         assert Path(result["stderr_log_path"]).is_file(), result
-        assert result["imported_observations"] == 0, "Checkpoint 3 must not auto-import yet"
-        assert result["validation_run_id"] in ("", None), "Checkpoint 3 must not set validation_run_id yet"
+        assert result["imported_observations"] == 1, result
+        assert result["validation_run_id"], result
 
         active = delta.active_trueaegis_job_exists(connection)
         assert active is False, active
