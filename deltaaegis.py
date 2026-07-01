@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.34.0: TrueAegis validation correlation, service-level validation evidence, dashboard/API visibility, asset detail context, reports, and release validation.
+"""DeltaAegis v0.35.0: TrueAegis orchestration, guarded validation execution, automatic validation import/correlation, dashboard/API visibility, and release validation.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -20634,6 +20634,239 @@ def dashboard_index_html_base_v025_operator_link():
         </table>
       `;
     }
+
+
+    function deltaAegisTrueAegisOrchestrationEsc(value) {
+      if (typeof esc === "function") {
+        return esc(value);
+      }
+
+      return String(value === null || value === undefined ? "" : value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function deltaAegisTrueAegisOrchestrationEnsurePanel() {
+      let panel = document.getElementById("trueaegis-orchestration-panel");
+
+      if (panel) {
+        return panel;
+      }
+
+      panel = document.createElement("section");
+      panel.id = "trueaegis-orchestration-panel";
+      panel.dataset.tabPanel = "intelligence";
+
+      const correlationBody = document.getElementById("trueaegis-validation-correlations-body");
+      const correlationSection = correlationBody ? correlationBody.closest("section") : null;
+      const validationBody = document.getElementById("trueaegis-validation-observations-body");
+      const validationSection = validationBody ? validationBody.closest("section") : null;
+      const anchor = correlationSection || validationSection;
+
+      if (anchor && anchor.parentNode) {
+        anchor.parentNode.insertBefore(panel, anchor);
+      } else {
+        document.body.appendChild(panel);
+      }
+
+      return panel;
+    }
+
+    async function deltaAegisTrueAegisOrchestrationFetchJson(path, options = {}) {
+      const response = await fetch(path, {
+        credentials: "same-origin",
+        ...options
+      });
+
+      const contentType = response.headers.get("content-type") || "";
+      const payload = contentType.includes("application/json")
+        ? await response.json()
+        : { message: await response.text() };
+
+      if (!response.ok) {
+        const message = payload.message || payload.error || `HTTP ${response.status}`;
+        throw new Error(message);
+      }
+
+      return payload;
+    }
+
+    function deltaAegisTrueAegisJobRows(jobs) {
+      if (!jobs || !jobs.length) {
+        return `<tr><td colspan="9" class="muted">No TrueAegis orchestration jobs have been recorded yet.</td></tr>`;
+      }
+
+      return jobs.map(job => `
+        <tr>
+          <td><code>${deltaAegisTrueAegisOrchestrationEsc(job.job_id || "-")}</code></td>
+          <td>${deltaAegisTrueAegisOrchestrationEsc(job.status || "-")}</td>
+          <td><code>${deltaAegisTrueAegisOrchestrationEsc(job.scan_id || "-")}</code></td>
+          <td><code>${deltaAegisTrueAegisOrchestrationEsc(job.validation_run_id || "-")}</code></td>
+          <td>${deltaAegisTrueAegisOrchestrationEsc(job.imported_observations || 0)}</td>
+          <td>${deltaAegisTrueAegisOrchestrationEsc(job.correlation_count || 0)}</td>
+          <td><code>${deltaAegisTrueAegisOrchestrationEsc(job.exit_code === null || job.exit_code === undefined ? "-" : job.exit_code)}</code></td>
+          <td>${deltaAegisTrueAegisOrchestrationEsc(job.completed_at || job.started_at || job.created_at || "-")}</td>
+          <td>${deltaAegisTrueAegisOrchestrationEsc(job.message || "-")}</td>
+        </tr>
+      `).join("");
+    }
+
+    function deltaAegisTrueAegisOrchestrationRender(context, jobsPayload, errorMessage = "") {
+      const panel = deltaAegisTrueAegisOrchestrationEnsurePanel();
+      const jobs = Array.isArray(jobsPayload) ? jobsPayload : ((jobsPayload && jobsPayload.jobs) || []);
+      const blockers = (context && Array.isArray(context.blockers)) ? context.blockers : [];
+      const latestScan = (context && context.latest_scan) || {};
+      const commandPreview = (context && Array.isArray(context.command_preview))
+        ? context.command_preview
+        : [];
+      const ready = !!(context && context.ready_to_start);
+      const runDisabled = ready ? "" : "disabled";
+      const runTitle = ready ? "Run TrueAegis validation" : "Resolve blockers before running TrueAegis";
+
+      const blockerHtml = blockers.length
+        ? `<ul>${blockers.map(item => `<li>${deltaAegisTrueAegisOrchestrationEsc(item)}</li>`).join("")}</ul>`
+        : `<p class="muted">No blockers detected.</p>`;
+
+      panel.innerHTML = `
+        <h2>TrueAegis Orchestration</h2>
+        <p class="muted">Run TrueAegis against the latest accepted NetSniper manifest, import validation output, and refresh DeltaAegis service-level evidence correlations.</p>
+
+        ${errorMessage ? `<div class="alert error">${deltaAegisTrueAegisOrchestrationEsc(errorMessage)}</div>` : ""}
+
+        <div class="cards">
+          <div class="card">
+            <div class="label">Ready</div>
+            <strong>${ready ? "yes" : "no"}</strong>
+          </div>
+          <div class="card">
+            <div class="label">Latest Scan</div>
+            <strong>${deltaAegisTrueAegisOrchestrationEsc((context && context.scan_id) || latestScan.scan_id || "-")}</strong>
+          </div>
+          <div class="card">
+            <div class="label">Network Scope</div>
+            <strong>${deltaAegisTrueAegisOrchestrationEsc((context && context.network_scope) || latestScan.network_scope || "-")}</strong>
+          </div>
+          <div class="card">
+            <div class="label">Manifest</div>
+            <strong>${context && context.manifest_exists ? "found" : "missing"}</strong>
+          </div>
+          <div class="card">
+            <div class="label">TrueAegis</div>
+            <strong>${context && context.trueaegis_exists ? "found" : "missing"}</strong>
+          </div>
+          <div class="card">
+            <div class="label">Recent Jobs</div>
+            <strong>${deltaAegisTrueAegisOrchestrationEsc(jobs.length || 0)}</strong>
+          </div>
+        </div>
+
+        <div class="grid two-col">
+          <div>
+            <h3>Readiness</h3>
+            <p><strong>Manifest:</strong> <code>${deltaAegisTrueAegisOrchestrationEsc((context && context.manifest_path) || "-")}</code></p>
+            <p><strong>TrueAegis:</strong> <code>${deltaAegisTrueAegisOrchestrationEsc((context && context.trueaegis_path) || "-")}</code></p>
+            <p><strong>Validation results:</strong> <code>${deltaAegisTrueAegisOrchestrationEsc((context && context.validation_results_dir) || "-")}</code></p>
+            <h4>Blockers</h4>
+            ${blockerHtml}
+          </div>
+
+          <div>
+            <h3>Action</h3>
+            <p class="muted">The run button starts a guarded background worker. It does not accept arbitrary shell commands or operator-supplied flags.</p>
+            <button
+              type="button"
+              id="trueaegis-run-button"
+              class="primary"
+              ${runDisabled}
+              title="${deltaAegisTrueAegisOrchestrationEsc(runTitle)}"
+            >Run TrueAegis</button>
+            <button
+              type="button"
+              id="trueaegis-refresh-button"
+            >Refresh</button>
+            <h4>Command preview</h4>
+            <pre><code>${deltaAegisTrueAegisOrchestrationEsc(commandPreview.join(" "))}</code></pre>
+          </div>
+        </div>
+
+        <h3>TrueAegis Jobs</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Job</th>
+              <th>Status</th>
+              <th>Scan</th>
+              <th>Validation Run</th>
+              <th>Imported</th>
+              <th>Correlations</th>
+              <th>Exit</th>
+              <th>Time</th>
+              <th>Message</th>
+            </tr>
+          </thead>
+          <tbody>${deltaAegisTrueAegisJobRows(jobs)}</tbody>
+        </table>
+      `;
+
+      const refreshButton = document.getElementById("trueaegis-refresh-button");
+      if (refreshButton) {
+        refreshButton.addEventListener("click", deltaAegisTrueAegisOrchestrationRefresh);
+      }
+
+      const runButton = document.getElementById("trueaegis-run-button");
+      if (runButton) {
+        runButton.addEventListener("click", deltaAegisTrueAegisOrchestrationRun);
+      }
+    }
+
+    async function deltaAegisTrueAegisOrchestrationRefresh() {
+      try {
+        const [context, jobs] = await Promise.all([
+          deltaAegisTrueAegisOrchestrationFetchJson("/api/trueaegis/context"),
+          deltaAegisTrueAegisOrchestrationFetchJson("/api/trueaegis-jobs?limit=10")
+        ]);
+        deltaAegisTrueAegisOrchestrationRender(context, jobs);
+      } catch (error) {
+        deltaAegisTrueAegisOrchestrationRender({}, [], error && error.message ? error.message : String(error));
+      }
+    }
+
+    async function deltaAegisTrueAegisOrchestrationRun() {
+      const button = document.getElementById("trueaegis-run-button");
+      if (button) {
+        button.disabled = true;
+        button.textContent = "Starting...";
+      }
+
+      try {
+        await deltaAegisTrueAegisOrchestrationFetchJson("/api/trueaegis/run", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: "{}"
+        });
+        await deltaAegisTrueAegisOrchestrationRefresh();
+      } catch (error) {
+        await deltaAegisTrueAegisOrchestrationRefresh();
+        const panel = deltaAegisTrueAegisOrchestrationEnsurePanel();
+        const message = error && error.message ? error.message : String(error);
+        panel.insertAdjacentHTML(
+          "afterbegin",
+          `<div class="alert error">${deltaAegisTrueAegisOrchestrationEsc(message)}</div>`
+        );
+      }
+    }
+
+    if (!window.__deltaAegisTrueAegisOrchestrationPanelInitialized) {
+      window.__deltaAegisTrueAegisOrchestrationPanelInitialized = true;
+      document.addEventListener("DOMContentLoaded", () => {
+        deltaAegisTrueAegisOrchestrationRefresh();
+        window.setInterval(deltaAegisTrueAegisOrchestrationRefresh, 15000);
+      });
+    }
+
 
 
     function trueAegisValidationText(value) {

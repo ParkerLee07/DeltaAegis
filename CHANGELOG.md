@@ -1,5 +1,8 @@
 ## DeltaAegis v0.35.0 — TrueAegis Orchestration
 
+- Added dashboard orchestration controls for TrueAegis readiness, latest accepted scan context, guarded run action, and recent job visibility.
+- Added live TrueAegis job status display with validation run IDs, imported observations, correlation counts, exit codes, and worker messages.
+- Added `validate_v0_35_release.sh` to run the full v0.35 validator suite and enforce release-critical route/helper/UI checks.
 - Added automatic import of completed TrueAegis validation output into DeltaAegis validation tables.
 - Added automatic refresh of TrueAegis validation correlations after job completion.
 - Updated TrueAegis job records with validation run IDs, imported observation counts, and correlation counts.
