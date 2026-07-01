@@ -12007,6 +12007,48 @@ def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20)
             (observation_scan_id, asset_key),
         )
 
+
+    validation_correlations = []
+
+    if observation_scan_id:
+        validation_correlations = dashboard_safe_query(
+            connection,
+            """
+            SELECT
+                correlation_id,
+                observation_id,
+                validation_run_id,
+                scan_id,
+                asset_key,
+                network_scope,
+                host,
+                ip_address,
+                port,
+                service_protocol,
+                service_name,
+                product,
+                version,
+                finding_id,
+                validation_status,
+                validated,
+                safe,
+                confidence,
+                match_method,
+                matched_at
+            FROM validation_correlations
+            WHERE scan_id = ?
+              AND asset_key = ?
+            ORDER BY port ASC, service_protocol ASC, validation_status ASC
+            """,
+            (observation_scan_id, asset_key),
+        )
+
+    for row in validation_correlations:
+        if row.get("validated") is not None:
+            row["validated"] = bool(row.get("validated"))
+        if row.get("safe") is not None:
+            row["safe"] = bool(row.get("safe"))
+
     events = dashboard_safe_query(
         connection,
         """
@@ -12235,6 +12277,7 @@ def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20)
             "classification_evidence_count": evidence_count,
             "classification_contradiction_count": contradiction_count,
             "service_count": len(services),
+            "validation_correlation_count": len(validation_correlations),
             "finding_count": len(findings),
             "event_count": len(events),
             "alert_count": len(alerts),
@@ -12250,6 +12293,7 @@ def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20)
         "asset": asset,
         "latest_observation": latest_observation_dict,
         "services": services,
+        "validation_correlations": validation_correlations,
         "findings": findings,
         "events": events,
         "alerts": alerts,
@@ -18046,6 +18090,19 @@ def dashboard_index_html_base_v025_operator_link():
           {key: "service_name", label: "Service"},
           {key: "product", label: "Product"},
           {key: "version", label: "Version"}
+        ])}
+
+
+        ${detailTable("TrueAegis Validation Correlations", payload.validation_correlations || [], [
+          {key: "service_protocol", label: "Proto"},
+          {key: "port", label: "Port"},
+          {key: "finding_id", label: "Finding"},
+          {key: "validation_status", label: "Status"},
+          {key: "validated", label: "Validated"},
+          {key: "safe", label: "Safe"},
+          {key: "confidence", label: "Confidence"},
+          {key: "match_method", label: "Match"},
+          {key: "matched_at", label: "Matched"}
         ])}
 
         ${detailTable("Findings", payload.findings, [
