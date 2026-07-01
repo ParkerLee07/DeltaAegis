@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.33.0: TrueAegis integration foundation, validation-result ingestion, dashboard validation evidence, and report visibility.
+"""DeltaAegis v0.34.0: TrueAegis validation correlation, service-level validation evidence, dashboard/API visibility, asset detail context, reports, and release validation.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -74,6 +74,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("GET", "/netsniper", "dashboard.read"),
     ("GET", "/api/netsniper/status", "dashboard.read"),
     ("GET", "/api/validation-summary", "dashboard.read"),
+    ("GET", "/api/validation-correlations", "dashboard.read"),
     ("GET", "/api/validations", "dashboard.read"),
     ("POST", "/api/validation-ingest", "workflow.write"),
     ("GET", "/api/session", "session.read"),
@@ -1409,6 +1410,39 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
         CREATE INDEX IF NOT EXISTS idx_validation_observations_status
             ON validation_observations(status);
+
+        CREATE TABLE IF NOT EXISTS validation_correlations (
+            correlation_id TEXT PRIMARY KEY,
+            observation_id TEXT NOT NULL,
+            validation_run_id TEXT NOT NULL,
+            scan_id TEXT NOT NULL,
+            asset_key TEXT NOT NULL,
+            network_scope TEXT NOT NULL DEFAULT '',
+            host TEXT NOT NULL,
+            ip_address TEXT NOT NULL,
+            port INTEGER NOT NULL,
+            service_protocol TEXT NOT NULL,
+            service_name TEXT,
+            product TEXT,
+            version TEXT,
+            finding_id TEXT NOT NULL,
+            validation_status TEXT NOT NULL,
+            validated INTEGER,
+            safe INTEGER,
+            confidence TEXT,
+            match_method TEXT NOT NULL,
+            matched_at TEXT NOT NULL,
+            UNIQUE(observation_id, scan_id, asset_key, service_protocol, port)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_validation_correlations_observation
+            ON validation_correlations(observation_id);
+
+        CREATE INDEX IF NOT EXISTS idx_validation_correlations_scan_asset
+            ON validation_correlations(scan_id, asset_key);
+
+        CREATE INDEX IF NOT EXISTS idx_validation_correlations_status
+            ON validation_correlations(validation_status);
         """
     )
     ensure_column(connection, "snapshots", "manifest_schema_version", "manifest_schema_version TEXT NOT NULL DEFAULT 'netsniper-run-v1'")
@@ -8078,6 +8112,7 @@ def append_report_dashboard_usage_section(lines, scope=None):
     lines.append("- Investigation Center API: `/api/investigation-center?limit=25`")
     lines.append("- TrueAegis validation summary API: `/api/validation-summary`")
     lines.append("- TrueAegis validation observation API: `/api/validations?limit=25`")
+    lines.append("- TrueAegis validation correlation API: `/api/validation-correlations?limit=25`")
     lines.append("- Investigation Center workflow filter API: `/api/investigation-center?limit=25&ticket_status=OPEN`")
     lines.append("- Investigation Center signal filter API: `/api/investigation-center?limit=25&ticket_signal=ACTIONABLE`")
     lines.append("- Combined ticket filters are supported with `ticket_status` and `ticket_signal` query parameters.")
@@ -8242,9 +8277,9 @@ def append_report_trueaegis_validation_section(lines, validation_summary, valida
     lines.append("## TrueAegis Validation Evidence")
     lines.append("")
     lines.append(
-        "This section summarizes imported TrueAegis validation output. In v0.33, "
+        "This section summarizes imported TrueAegis validation output. In v0.34, "
         "this evidence is stored and displayed as a foundation layer only; it does "
-        "not yet alter DeltaAegis risk scoring or correlate findings with NetSniper "
+        "does not alter DeltaAegis risk scoring. Correlated NetSniper service evidence appears in the next section. "
         "service observations."
     )
     lines.append("")
@@ -8325,6 +8360,153 @@ def append_report_trueaegis_validation_section(lines, validation_summary, valida
             f"{safe_markdown(safe_text)} | "
             f"{safe_markdown(row.get('confidence') or '-')} | "
             f"{safe_markdown(row.get('summary') or '-')} |"
+        )
+
+    lines.append("")
+
+def report_trueaegis_validation_correlation_summary(connection):
+    row = connection.execute(
+        """
+        SELECT
+            COUNT(*) AS correlation_count,
+            COUNT(DISTINCT observation_id) AS correlated_observation_count,
+            COUNT(DISTINCT scan_id) AS scan_count,
+            COUNT(DISTINCT asset_key) AS asset_count
+        FROM validation_correlations
+        """
+    ).fetchone()
+
+    status_rows = connection.execute(
+        """
+        SELECT validation_status, COUNT(*) AS count
+        FROM validation_correlations
+        GROUP BY validation_status
+        ORDER BY validation_status ASC
+        """
+    ).fetchall()
+
+    summary = dict(row) if row else {
+        "correlation_count": 0,
+        "correlated_observation_count": 0,
+        "scan_count": 0,
+        "asset_count": 0,
+    }
+
+    summary["status_counts"] = {
+        str(item["validation_status"] or "UNKNOWN"): int(item["count"] or 0)
+        for item in status_rows
+    }
+
+    return summary
+
+
+def report_trueaegis_validation_correlation_rows(connection, limit=10):
+    rows = connection.execute(
+        """
+        SELECT
+            correlation_id,
+            observation_id,
+            validation_run_id,
+            scan_id,
+            asset_key,
+            network_scope,
+            host,
+            ip_address,
+            port,
+            service_protocol,
+            service_name,
+            product,
+            version,
+            finding_id,
+            validation_status,
+            validated,
+            safe,
+            confidence,
+            match_method,
+            matched_at
+        FROM validation_correlations
+        ORDER BY matched_at DESC, network_scope ASC, host ASC, port ASC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+    result = []
+
+    for row in rows:
+        item = dict(row)
+        item["validated"] = (
+            None if item.get("validated") is None else bool(item.get("validated"))
+        )
+        item["safe"] = None if item.get("safe") is None else bool(item.get("safe"))
+        result.append(item)
+
+    return result
+
+
+def append_report_trueaegis_validation_correlation_section(
+    lines,
+    correlation_summary,
+    correlation_rows,
+):
+    lines.append("## TrueAegis Validation Correlations")
+    lines.append("")
+    lines.append(
+        "This section lists TrueAegis validation observations that currently match "
+        "NetSniper-observed services. In v0.34, these correlations are evidence "
+        "only and do not alter DeltaAegis risk scoring."
+    )
+    lines.append("")
+
+    correlation_count = int(correlation_summary.get("correlation_count") or 0)
+    correlated_observation_count = int(
+        correlation_summary.get("correlated_observation_count") or 0
+    )
+    asset_count = int(correlation_summary.get("asset_count") or 0)
+    scan_count = int(correlation_summary.get("scan_count") or 0)
+
+    if correlation_count <= 0:
+        lines.append("No TrueAegis validation observations are currently correlated with NetSniper services.")
+        lines.append("")
+        return
+
+    lines.append(f"- Correlations: **{correlation_count}**")
+    lines.append(f"- Correlated observations: **{correlated_observation_count}**")
+    lines.append(f"- Correlated assets: **{asset_count}**")
+    lines.append(f"- Current scans represented: **{scan_count}**")
+
+    status_counts = correlation_summary.get("status_counts") or {}
+
+    if status_counts:
+        status_text = ", ".join(
+            f"`{safe_markdown(status)}`={int(count)}"
+            for status, count in sorted(status_counts.items())
+        )
+        lines.append(f"- Status counts: {status_text}")
+
+    lines.append("")
+
+    if not correlation_rows:
+        lines.append("No recent correlated validation rows were available.")
+        lines.append("")
+        return
+
+    lines.append("| Asset | Host | Service | Finding | Status | Validated | Safe | Confidence | Match |")
+    lines.append("|---|---:|---:|---|---|---:|---:|---|---|")
+
+    for row in correlation_rows:
+        service = f"{row.get('service_protocol') or 'tcp'}/{row.get('port') or '-'}"
+        lines.append(
+            "| "
+            f"`{safe_markdown(row.get('asset_key') or '-')}` | "
+            f"`{safe_markdown(row.get('host') or row.get('ip_address') or '-')}` | "
+            f"`{safe_markdown(service)}` | "
+            f"{safe_markdown(row.get('finding_id') or '-')} | "
+            f"{safe_markdown(row.get('validation_status') or '-')} | "
+            f"{safe_markdown(row.get('validated'))} | "
+            f"{safe_markdown(row.get('safe'))} | "
+            f"{safe_markdown(row.get('confidence') or '-')} | "
+            f"{safe_markdown(row.get('match_method') or '-')} |"
         )
 
     lines.append("")
@@ -8901,6 +9083,8 @@ def command_report(args):
 
     report_validation_summary = report_trueaegis_validation_summary(connection)
     report_validation_rows = report_trueaegis_validation_rows(connection, limit=10)
+    report_validation_correlation_summary = report_trueaegis_validation_correlation_summary(connection)
+    report_validation_correlation_rows = report_trueaegis_validation_correlation_rows(connection, limit=10)
 
     event_type_counts = Counter(row["event_type"] for row in events)
     severity_counts = Counter(row["severity"] for row in events)
@@ -8938,6 +9122,7 @@ def command_report(args):
     lines.append(f"- Assets included: **{len(report_asset_rows)}**")
     lines.append(f"- TrueAegis validation observations: **{report_validation_summary.get('observation_count', 0)}**")
     lines.append(f"- TrueAegis confirmed/protected observations: **{report_validation_summary.get('confirmed_count', 0)} confirmed / {report_validation_summary.get('protected_count', 0)} protected**")
+    lines.append(f"- TrueAegis validation correlations: **{report_validation_correlation_summary.get('correlation_count', 0)}** across **{report_validation_correlation_summary.get('asset_count', 0)}** asset(s)")
     lines.append("")
 
     lines.append("## Report Scope")
@@ -8955,6 +9140,7 @@ def command_report(args):
     append_report_asset_lifecycle_section(lines, report_lifecycle_rows)
     append_report_classification_summary_section(lines, report_classification_summary)
     append_report_trueaegis_validation_section(lines, report_validation_summary, report_validation_rows)
+    append_report_trueaegis_validation_correlation_section(lines, report_validation_correlation_summary, report_validation_correlation_rows)
     append_report_asset_inventory_section(lines, report_asset_rows, args.asset_limit)
     append_report_investigation_center_section(lines, report_investigation_center_rows)
     append_report_ticket_evidence_appendix(lines, report_ticket_evidence_payloads)
@@ -11036,6 +11222,362 @@ def dashboard_delta_scan_pairs(connection, limit=10, scope=None):
     return [dict(row) for row in rows]
 
 
+def trueaegis_validation_service_protocol(
+    transport: Any,
+    protocol: Any,
+) -> str | None:
+    state_words = {
+        "confirmed",
+        "unknown",
+        "mismatch",
+        "not_reachable",
+        "reachable",
+        "protected",
+        "safe",
+        "unsafe",
+        "protocol_mismatch",
+    }
+
+    tcp_aliases = {
+        "http", "https", "tls", "ssl", "ssh", "smb", "cifs",
+        "redis", "mongodb", "mongo", "docker", "portainer", "ipp",
+        "printer", "rtsp", "smtp", "imap", "pop3", "mysql",
+        "postgres", "postgresql", "mssql", "oracle", "rdp", "vnc",
+        "web", "tcpwrapped",
+    }
+
+    udp_aliases = {"dns-udp", "snmp", "mdns", "ssdp", "ntp"}
+
+    for candidate in (transport, protocol):
+        value = str(candidate or "").strip().lower()
+        if not value or value in state_words:
+            continue
+        if value in {"tcp", "udp"}:
+            return value
+        if value in tcp_aliases:
+            return "tcp"
+        if value in udp_aliases:
+            return "udp"
+
+    return None
+
+
+def trueaegis_latest_accepted_snapshots(
+    connection: sqlite3.Connection,
+    scope: str | None = None,
+) -> list[sqlite3.Row]:
+    clauses = ["(quality_status = 'ACCEPTED' OR is_accepted_baseline = 1)"]
+    params: list[Any] = []
+
+    if scope:
+        clauses.append("network_scope = ?")
+        params.append(scope)
+
+    rows = connection.execute(
+        f"""
+        SELECT scan_id, network_scope, created_at, imported_at
+        FROM snapshots
+        WHERE {" AND ".join(clauses)}
+        ORDER BY network_scope ASC, created_at DESC, imported_at DESC, scan_id DESC
+        """,
+        tuple(params),
+    ).fetchall()
+
+    latest_by_scope: dict[str, sqlite3.Row] = {}
+
+    for row in rows:
+        network_scope = str(row["network_scope"] or "")
+        if network_scope not in latest_by_scope:
+            latest_by_scope[network_scope] = row
+
+    return list(latest_by_scope.values())
+
+
+def refresh_trueaegis_validation_correlations(
+    connection: sqlite3.Connection,
+    scope: str | None = None,
+) -> dict[str, Any]:
+    matched_at = utc_now()
+    latest_snapshots = trueaegis_latest_accepted_snapshots(connection, scope=scope)
+    latest_scan_ids = [row["scan_id"] for row in latest_snapshots]
+
+    if scope:
+        connection.execute(
+            "DELETE FROM validation_correlations WHERE network_scope = ?",
+            (scope,),
+        )
+    else:
+        connection.execute("DELETE FROM validation_correlations")
+
+    if not latest_scan_ids:
+        return {
+            "schema_version": "deltaaegis-trueaegis-validation-correlation-summary-v1",
+            "matched_at": matched_at,
+            "latest_snapshot_count": 0,
+            "current_service_count": 0,
+            "observation_count": 0,
+            "correlation_count": 0,
+            "correlated_observation_count": 0,
+            "unmatched_observation_count": 0,
+            "status_counts": {},
+        }
+
+    placeholders = ",".join("?" for _ in latest_scan_ids)
+
+    service_rows = [
+        dict(row)
+        for row in connection.execute(
+            f"""
+            SELECT
+                s.network_scope,
+                so.scan_id,
+                ao.asset_key,
+                ao.ip_address,
+                so.protocol,
+                so.port,
+                so.state,
+                so.service_name,
+                so.product,
+                so.version
+            FROM service_observations so
+            JOIN asset_observations ao
+              ON ao.scan_id = so.scan_id
+             AND ao.asset_key = so.asset_key
+            JOIN snapshots s
+              ON s.scan_id = so.scan_id
+            WHERE so.scan_id IN ({placeholders})
+            ORDER BY s.network_scope ASC, ao.ip_address ASC, so.protocol ASC, so.port ASC
+            """,
+            tuple(latest_scan_ids),
+        )
+    ]
+
+    services_by_host_port: dict[tuple[str, int], list[dict[str, Any]]] = {}
+
+    for service in service_rows:
+        try:
+            port = int(service.get("port"))
+        except (TypeError, ValueError):
+            continue
+
+        host = str(service.get("ip_address") or "").strip()
+        if not host:
+            continue
+
+        services_by_host_port.setdefault((host, port), []).append(service)
+
+    observation_rows = [
+        dict(row)
+        for row in connection.execute(
+            """
+            SELECT o.*
+            FROM validation_observations o
+            JOIN validation_runs r
+              ON r.validation_run_id = o.validation_run_id
+            WHERE o.host IS NOT NULL
+              AND TRIM(o.host) != ''
+              AND o.port IS NOT NULL
+            ORDER BY r.imported_at DESC, o.row_index ASC
+            """
+        )
+    ]
+
+    correlation_count = 0
+    correlated_observation_ids: set[str] = set()
+    status_counts: Counter[str] = Counter()
+
+    for observation in observation_rows:
+        host = str(observation.get("host") or "").strip()
+
+        try:
+            port = int(observation.get("port"))
+        except (TypeError, ValueError):
+            continue
+
+        desired_protocol = trueaegis_validation_service_protocol(
+            observation.get("transport"),
+            observation.get("protocol"),
+        )
+
+        candidate_services = services_by_host_port.get((host, port), [])
+
+        if desired_protocol:
+            matches = [
+                service
+                for service in candidate_services
+                if str(service.get("protocol") or "").lower() == desired_protocol
+            ]
+            match_method = "host_port_transport"
+        else:
+            matches = candidate_services
+            match_method = "host_port"
+
+        for service in matches:
+            service_protocol = str(service.get("protocol") or "").lower()
+            correlation_basis = "|".join(
+                [
+                    str(observation.get("observation_id") or ""),
+                    str(service.get("scan_id") or ""),
+                    str(service.get("asset_key") or ""),
+                    service_protocol,
+                    str(port),
+                ]
+            )
+            correlation_id = (
+                "trueaegis-correlation-"
+                + hashlib.sha256(correlation_basis.encode("utf-8")).hexdigest()[:24]
+            )
+
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO validation_correlations (
+                    correlation_id,
+                    observation_id,
+                    validation_run_id,
+                    scan_id,
+                    asset_key,
+                    network_scope,
+                    host,
+                    ip_address,
+                    port,
+                    service_protocol,
+                    service_name,
+                    product,
+                    version,
+                    finding_id,
+                    validation_status,
+                    validated,
+                    safe,
+                    confidence,
+                    match_method,
+                    matched_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    correlation_id,
+                    observation.get("observation_id"),
+                    observation.get("validation_run_id"),
+                    service.get("scan_id"),
+                    service.get("asset_key"),
+                    service.get("network_scope") or "",
+                    host,
+                    service.get("ip_address"),
+                    port,
+                    service_protocol,
+                    service.get("service_name"),
+                    service.get("product"),
+                    service.get("version"),
+                    observation.get("finding_id"),
+                    observation.get("status"),
+                    observation.get("validated"),
+                    observation.get("safe"),
+                    observation.get("confidence"),
+                    match_method,
+                    matched_at,
+                ),
+            )
+
+            correlation_count += 1
+            correlated_observation_ids.add(str(observation.get("observation_id")))
+            status_counts[str(observation.get("status") or "UNKNOWN")] += 1
+
+    return {
+        "schema_version": "deltaaegis-trueaegis-validation-correlation-summary-v1",
+        "matched_at": matched_at,
+        "latest_snapshot_count": len(latest_snapshots),
+        "current_service_count": len(service_rows),
+        "observation_count": len(observation_rows),
+        "correlation_count": correlation_count,
+        "correlated_observation_count": len(correlated_observation_ids),
+        "unmatched_observation_count": max(
+            len(observation_rows) - len(correlated_observation_ids),
+            0,
+        ),
+        "status_counts": dict(sorted(status_counts.items())),
+    }
+
+
+def dashboard_validation_correlations_payload(
+    connection: sqlite3.Connection,
+    limit: int = 50,
+    scope: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    if scope:
+        clauses.append("c.network_scope = ?")
+        params.append(scope)
+
+    if status:
+        normalized_status = str(status or "").strip().upper().replace("-", "_").replace(" ", "_")
+        clauses.append("c.validation_status = ?")
+        params.append(normalized_status)
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    safe_limit = max(1, min(int(limit or 50), 250))
+    params.append(safe_limit)
+
+    rows = [
+        dict(row)
+        for row in connection.execute(
+            f"""
+            SELECT
+                c.correlation_id,
+                c.observation_id,
+                c.validation_run_id,
+                c.scan_id,
+                c.asset_key,
+                c.network_scope,
+                c.host,
+                c.ip_address,
+                c.port,
+                c.service_protocol,
+                c.service_name,
+                c.product,
+                c.version,
+                c.finding_id,
+                c.validation_status,
+                c.validated,
+                c.safe,
+                c.confidence,
+                c.match_method,
+                c.matched_at
+            FROM validation_correlations c
+            {where}
+            ORDER BY c.matched_at DESC, c.network_scope ASC, c.host ASC, c.port ASC
+            LIMIT ?
+            """,
+            tuple(params),
+        )
+    ]
+
+    for row in rows:
+        row["validated"] = (
+            None if row.get("validated") is None else bool(row.get("validated"))
+        )
+        row["safe"] = None if row.get("safe") is None else bool(row.get("safe"))
+
+    summary = connection.execute(
+        """
+        SELECT
+            COUNT(*) AS correlation_count,
+            COUNT(DISTINCT observation_id) AS correlated_observation_count,
+            COUNT(DISTINCT scan_id) AS scan_count,
+            COUNT(DISTINCT asset_key) AS asset_count
+        FROM validation_correlations
+        """
+    ).fetchone()
+
+    return {
+        "schema_version": "deltaaegis-trueaegis-validation-correlations-v1",
+        "count": len(rows),
+        "limit": safe_limit,
+        "summary": dict(summary) if summary else {},
+        "correlations": rows,
+    }
+
 def dashboard_validation_summary_payload(
     connection: sqlite3.Connection,
     limit: int = 10,
@@ -11617,6 +12159,48 @@ def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20)
             (observation_scan_id, asset_key),
         )
 
+
+    validation_correlations = []
+
+    if observation_scan_id:
+        validation_correlations = dashboard_safe_query(
+            connection,
+            """
+            SELECT
+                correlation_id,
+                observation_id,
+                validation_run_id,
+                scan_id,
+                asset_key,
+                network_scope,
+                host,
+                ip_address,
+                port,
+                service_protocol,
+                service_name,
+                product,
+                version,
+                finding_id,
+                validation_status,
+                validated,
+                safe,
+                confidence,
+                match_method,
+                matched_at
+            FROM validation_correlations
+            WHERE scan_id = ?
+              AND asset_key = ?
+            ORDER BY port ASC, service_protocol ASC, validation_status ASC
+            """,
+            (observation_scan_id, asset_key),
+        )
+
+    for row in validation_correlations:
+        if row.get("validated") is not None:
+            row["validated"] = bool(row.get("validated"))
+        if row.get("safe") is not None:
+            row["safe"] = bool(row.get("safe"))
+
     events = dashboard_safe_query(
         connection,
         """
@@ -11845,6 +12429,7 @@ def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20)
             "classification_evidence_count": evidence_count,
             "classification_contradiction_count": contradiction_count,
             "service_count": len(services),
+            "validation_correlation_count": len(validation_correlations),
             "finding_count": len(findings),
             "event_count": len(events),
             "alert_count": len(alerts),
@@ -11860,6 +12445,7 @@ def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20)
         "asset": asset,
         "latest_observation": latest_observation_dict,
         "services": services,
+        "validation_correlations": validation_correlations,
         "findings": findings,
         "events": events,
         "alerts": alerts,
@@ -16198,10 +16784,31 @@ def dashboard_index_html_base_v025_operator_link():
       border-radius: 18px;
       box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
       display: grid;
-      grid-template-columns: max-content minmax(280px, 1fr) max-content;
-      gap: 12px;
+      grid-template-columns: minmax(220px, 260px) minmax(320px, 1fr) minmax(140px, 180px);
+      grid-template-areas:
+        "latest label label"
+        "latest path import";
+      gap: 10px 14px;
       margin: 18px 0 12px;
       padding: 14px;
+    }
+
+    #trueaegis-validation-import-latest {
+      grid-area: latest;
+      align-self: stretch;
+      justify-content: center;
+    }
+
+    .trueaegis-validation-import-controls label {
+      grid-area: label;
+    }
+
+    #trueaegis-validation-import-path {
+      grid-area: path;
+    }
+
+    #trueaegis-validation-import-path-button {
+      grid-area: import;
     }
 
     .trueaegis-validation-import-controls label {
@@ -16302,6 +16909,11 @@ def dashboard_index_html_base_v025_operator_link():
     @media (max-width: 900px) {
       .trueaegis-validation-import-controls {
         grid-template-columns: 1fr;
+        grid-template-areas:
+          "latest"
+          "label"
+          "path"
+          "import";
       }
 
       .trueaegis-validation-import-controls button {
@@ -16325,7 +16937,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.33 TrueAegis Integration Foundation</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.34 TrueAegis Validation Correlation</span></div>
     </div>
   </header>
 
@@ -16507,7 +17119,7 @@ def dashboard_index_html_base_v025_operator_link():
         <div>
           <div class="eyebrow">TrueAegis Foundation</div>
           <h2>TrueAegis Validation Evidence</h2>
-          <p class="muted">Imported TrueAegis validation observations are displayed here as evidence only. v0.33 does not alter risk scoring or correlate observations with NetSniper services yet.</p>
+          <p class="muted">Imported TrueAegis validation observations are correlated with current NetSniper services as evidence only. v0.34 does not alter risk scoring yet.</p>
         </div>
         <a href="/api/validation-summary">Raw summary JSON</a>
       </div>
@@ -16523,6 +17135,8 @@ def dashboard_index_html_base_v025_operator_link():
         <div class="card"><div class="card-label">Observations</div><div class="card-value" id="trueaegis-validation-observation-count">0</div></div>
         <div class="card"><div class="card-label">Confirmed</div><div class="card-value" id="trueaegis-validation-confirmed-count">0</div></div>
         <div class="card"><div class="card-label">Protected</div><div class="card-value" id="trueaegis-validation-protected-count">0</div></div>
+        <div class="card"><div class="card-label">Correlations</div><div class="card-value" id="trueaegis-validation-correlation-count">0</div></div>
+        <div class="card"><div class="card-label">Correlated Assets</div><div class="card-value" id="trueaegis-validation-correlated-asset-count">0</div></div>
       </div>
       <div id="trueaegis-validation-status-counts" class="chips"></div>
       <div class="table-wrap">
@@ -16534,6 +17148,28 @@ def dashboard_index_html_base_v025_operator_link():
             <tr><td colspan="7" class="muted">Loading validation evidence…</td></tr>
           </tbody>
         </table>
+      <h3>Correlated Current Services</h3>
+      <p class="muted">TrueAegis observations matched to the latest accepted NetSniper service inventory. This is evidence only; v0.34 does not change risk scoring.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Asset</th>
+            <th>Host</th>
+            <th>Service</th>
+            <th>Finding</th>
+            <th>Status</th>
+            <th>Validated</th>
+            <th>Safe</th>
+            <th>Confidence</th>
+            <th>Match</th>
+            <th>Scan</th>
+          </tr>
+        </thead>
+        <tbody id="trueaegis-validation-correlations-body">
+          <tr><td colspan="10" class="muted">No TrueAegis observations have been correlated with current NetSniper services yet.</td></tr>
+        </tbody>
+      </table>
+
       </div>
     </section>
 
@@ -17606,6 +18242,19 @@ def dashboard_index_html_base_v025_operator_link():
           {key: "service_name", label: "Service"},
           {key: "product", label: "Product"},
           {key: "version", label: "Version"}
+        ])}
+
+
+        ${detailTable("TrueAegis Validation Correlations", payload.validation_correlations || [], [
+          {key: "service_protocol", label: "Proto"},
+          {key: "port", label: "Port"},
+          {key: "finding_id", label: "Finding"},
+          {key: "validation_status", label: "Status"},
+          {key: "validated", label: "Validated"},
+          {key: "safe", label: "Safe"},
+          {key: "confidence", label: "Confidence"},
+          {key: "match_method", label: "Match"},
+          {key: "matched_at", label: "Matched"}
         ])}
 
         ${detailTable("Findings", payload.findings, [
@@ -19179,6 +19828,42 @@ def dashboard_index_html_base_v025_operator_link():
         .replaceAll("'", "&#039;");
     }
 
+
+    function renderTrueAegisValidationCorrelations(payload) {
+      const body = document.getElementById("trueaegis-validation-correlations-body");
+      const summary = (payload && payload.summary) || {};
+      const rows = (payload && payload.correlations) || [];
+
+      trueAegisValidationSetText("trueaegis-validation-correlation-count", summary.correlation_count || 0);
+      trueAegisValidationSetText("trueaegis-validation-correlated-asset-count", summary.asset_count || 0);
+
+      if (!body) {
+        return;
+      }
+
+      if (!rows.length) {
+        body.innerHTML = `<tr><td colspan="10" class="muted">No TrueAegis observations have been correlated with current NetSniper services yet.</td></tr>`;
+        return;
+      }
+
+      body.innerHTML = rows.map(row => `
+        <tr>
+          <td>${subjectButton(row.asset_key || "-")}</td>
+          <td><code>${esc(row.host || row.ip_address || "-")}</code></td>
+          <td><code>${esc(row.service_protocol || "tcp")}/${esc(row.port || "-")}</code><br><span class="muted">${esc(row.service_name || "-")}</span></td>
+          <td>${esc(row.finding_id || "-")}</td>
+          <td>${esc(row.validation_status || "-")}</td>
+          <td>${row.validated === true ? "yes" : row.validated === false ? "no" : "-"}</td>
+          <td>${row.safe === true ? "yes" : row.safe === false ? "no" : "-"}</td>
+          <td>${esc(row.confidence || "-")}</td>
+          <td>${esc(row.match_method || "-")}</td>
+          <td><code>${esc(row.scan_id || "-")}</code></td>
+        </tr>
+      `).join("");
+
+      bindSubjectLinks(body);
+    }
+
     function trueAegisValidationSetText(id, value) {
       const element = document.getElementById(id);
       if (element) { element.textContent = trueAegisValidationText(value); }
@@ -19202,7 +19887,7 @@ def dashboard_index_html_base_v025_operator_link():
           <div>
             <div class="eyebrow">TrueAegis Foundation</div>
             <h2>Validation Evidence</h2>
-            <p class="muted">Imported TrueAegis validation observations are displayed here as evidence only. v0.33 does not alter risk scoring or correlate observations with NetSniper services yet.</p>
+            <p class="muted">Imported TrueAegis validation observations are correlated with current NetSniper services as evidence only. v0.34 does not alter risk scoring yet.</p>
           </div>
           <a href="/api/validation-summary">Raw summary JSON</a>
         </div>
@@ -19218,6 +19903,10 @@ def dashboard_index_html_base_v025_operator_link():
           <div class="card"><div class="card-label">Observations</div><div class="card-value" id="trueaegis-validation-observation-count">0</div></div>
           <div class="card"><div class="card-label">Confirmed</div><div class="card-value" id="trueaegis-validation-confirmed-count">0</div></div>
           <div class="card"><div class="card-label">Protected</div><div class="card-value" id="trueaegis-validation-protected-count">0</div></div>
+          <div class="card"><div class="card-label">Correlations</div><div class="card-value" id="trueaegis-validation-correlation-count">0</div></div>
+          <div class="card"><div class="card-label">Correlated Assets</div><div class="card-value" id="trueaegis-validation-correlated-asset-count">0</div></div>
+        <div class="card"><div class="card-label">Correlations</div><div class="card-value" id="trueaegis-validation-correlation-count">0</div></div>
+        <div class="card"><div class="card-label">Correlated Assets</div><div class="card-value" id="trueaegis-validation-correlated-asset-count">0</div></div>
         </div>
         <div id="trueaegis-validation-status-counts" class="chips"></div>
         <div class="table-wrap">
@@ -19229,6 +19918,28 @@ def dashboard_index_html_base_v025_operator_link():
               <tr><td colspan="7" class="muted">Loading validation evidence…</td></tr>
             </tbody>
           </table>
+      <h3>Correlated Current Services</h3>
+      <p class="muted">TrueAegis observations matched to the latest accepted NetSniper service inventory. This is evidence only; v0.34 does not change risk scoring.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Asset</th>
+            <th>Host</th>
+            <th>Service</th>
+            <th>Finding</th>
+            <th>Status</th>
+            <th>Validated</th>
+            <th>Safe</th>
+            <th>Confidence</th>
+            <th>Match</th>
+            <th>Scan</th>
+          </tr>
+        </thead>
+        <tbody id="trueaegis-validation-correlations-body">
+          <tr><td colspan="10" class="muted">No TrueAegis observations have been correlated with current NetSniper services yet.</td></tr>
+        </tbody>
+      </table>
+
         </div>
       `;
 
@@ -19333,6 +20044,8 @@ def dashboard_index_html_base_v025_operator_link():
       try {
         const summary = await api(scopedPath("/api/validation-summary"));
         const validations = await api(scopedPath("/api/validations?limit=25"));
+        const correlations = await api(scopedPath("/api/validation-correlations?limit=25"));
+        renderTrueAegisValidationCorrelations(correlations);
 
         trueAegisValidationSetText("trueaegis-validation-run-count", summary.validation_run_count || 0);
         trueAegisValidationSetText("trueaegis-validation-observation-count", summary.observation_count || 0);
@@ -21425,6 +22138,32 @@ def command_dashboard(args):
                     dashboard_json_response(self, dashboard_validation_summary_payload(connection))
                 elif route == "/api/validations":
                     dashboard_json_response(self, dashboard_validations_payload(connection, limit=25))
+
+                elif route == "/api/validation-correlations":
+                    query = parse_qs(parsed.query)
+                    try:
+                        limit = int(query.get("limit", ["50"])[0] or "50")
+                    except (TypeError, ValueError):
+                        limit = 50
+                    scope = query.get("scope", [""])[0].strip() or None
+                    status = query.get("status", [""])[0].strip() or None
+                    connection = self.open_connection()
+                    try:
+                        refresh_summary = refresh_trueaegis_validation_correlations(
+                            connection,
+                            scope=scope,
+                        )
+                        connection.commit()
+                        payload = dashboard_validation_correlations_payload(
+                            connection,
+                            limit=limit,
+                            scope=scope,
+                            status=status,
+                        )
+                        payload["refresh_summary"] = refresh_summary
+                        dashboard_json_response(self, payload)
+                    finally:
+                        connection.close()
                 elif route == "/api/current-state":
                     dashboard_json_response(self, dashboard_current_state_payload(connection, scope=scope))
                 elif route == "/api/scan-jobs":
@@ -22525,7 +23264,7 @@ def command_validations(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.33.0 — TrueAegis Integration Foundation, v3 bundle ingest, bundle-quality readiness metadata, dashboard scan-context visibility, scheduled scans, guarded NetSniper scan jobs, dashboard user management, RBAC, investigation intelligence, current-state SIEM dashboard, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.34.0 — TrueAegis Validation Correlation, v3 bundle ingest, bundle-quality readiness metadata, dashboard scan-context visibility, scheduled scans, guarded NetSniper scan jobs, dashboard user management, RBAC, investigation intelligence, current-state SIEM dashboard, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)

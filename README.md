@@ -4,28 +4,29 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.33.0
+## Current Release — v0.34.0
 
-**DeltaAegis v0.33.0 — TrueAegis Integration Foundation**
+**DeltaAegis v0.34.0 — TrueAegis Validation Correlation**
 
-DeltaAegis v0.33.0 introduces the first TrueAegis integration foundation. It imports TrueAegis `validation_results.json` output, stores validation runs and observations in SQLite, exposes validation evidence through CLI commands, adds dashboard/API visibility, and includes validation evidence in Markdown reports. This release intentionally does not change risk scoring or correlate TrueAegis observations with NetSniper services yet; it establishes the storage and visibility contract for later validation-aware correlation.
+DeltaAegis v0.34.0 promotes the v0.33 TrueAegis evidence foundation into validation-aware correlation. It matches imported TrueAegis validation observations to the latest accepted NetSniper service inventory, exposes correlated validation evidence through dashboard APIs, shows correlated services in the TrueAegis dashboard and asset detail views, and adds report visibility for correlated evidence. This release intentionally does not change risk scoring yet; risk and recommendation enrichment should remain a later release.
 
 ### Highlights
 
-- Adds `validation_runs` and `validation_observations` storage for TrueAegis validation output.
-- Adds `validation-ingest` and `validations` CLI commands.
-- Accepts TrueAegis top-level JSON-list validation files and wrapped result-list variants.
-- Preserves validation fields including finding ID, host, port, status, validated/safe booleans, confidence, reachability, exposure, authentication, evidence, details, metadata, and raw JSON.
-- Adds `/api/validation-summary` and `/api/validations` dashboard APIs.
-- Adds a dashboard validation evidence panel with run counts, observation counts, status counts, and recent observations.
-- Adds TrueAegis validation evidence to Markdown investigation reports.
-- Adds v0.33 validators for storage, dashboard/API visibility, report visibility, release metadata, and the full release gate.
+- Adds `validation_correlations` storage for TrueAegis-to-NetSniper service matches.
+- Matches TrueAegis observations to current NetSniper services by host/IP, port, and transport-aware protocol mapping.
+- Adds `/api/validation-correlations` for dashboard and operator review.
+- Shows correlated current-service evidence in the TrueAegis dashboard tab.
+- Adds per-asset TrueAegis validation correlation context in asset detail.
+- Adds TrueAegis validation correlation evidence to Markdown reports.
+- Preserves v0.33 TrueAegis import/storage behavior and v0.32 NetSniper v2 compatibility.
+- Keeps risk scoring unchanged while making validation evidence visible and reviewable.
 
 ### Validate
 
 ```bash
-./tools/validate_v0_33_release.sh
+./tools/validate_v0_34_release.sh
 ```
+
 
 ## What DeltaAegis Does
 
