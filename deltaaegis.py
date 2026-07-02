@@ -106,6 +106,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("POST", "/api/netsniper/schedule-disable", "scan.start"),
     ("POST", "/api/netsniper/schedule-delete", "scan.start"),
     ("POST", "/api/netsniper/schedule-run-due", "scan.start"),
+    ("POST", "/api/netsniper/stale-scan-fail", "admin.telemetry.cleanup"),
     ("POST", "/api/netsniper/hourly-monitoring", "scan.start"),
 )
 
@@ -5287,6 +5288,9 @@ def dashboard_netsniper_schedule_action_payload(
     if route == "/api/netsniper/schedule-run-due":
         return dashboard_netsniper_schedule_run_due_payload(connection, payload, events_path)
 
+    if route == "/api/netsniper/stale-scan-fail":
+        return dashboard_netsniper_stale_scan_recovery_payload(connection, payload)
+
     if route == "/api/netsniper/hourly-monitoring":
         return dashboard_netsniper_hourly_monitoring_payload(connection, payload)
 
@@ -5515,6 +5519,228 @@ def active_scan_job_exists(connection: sqlite3.Connection) -> bool:
     ).fetchone()
 
     return row is not None
+
+
+STALE_SCAN_JOB_RECOVERY_CONFIRMATION = "MARK STALE SCANS FAILED"
+STALE_SCAN_JOB_MINIMUM_MINUTES = 60
+STALE_SCAN_JOB_DEFAULT_MINUTES = 360
+STALE_SCAN_JOB_MAXIMUM_MINUTES = 10080
+
+
+def scan_job_parse_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+
+    text_value = str(value).strip()
+
+    if not text_value:
+        return None
+
+    if text_value.endswith("Z"):
+        text_value = text_value[:-1] + "+00:00"
+
+    try:
+        parsed = datetime.fromisoformat(text_value)
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    return parsed.astimezone(timezone.utc)
+
+
+def scan_job_active_reference_time(job: dict[str, Any] | sqlite3.Row) -> datetime | None:
+    item = dict(job)
+
+    for key in ("started_at", "updated_at", "created_at"):
+        parsed = scan_job_parse_datetime(item.get(key))
+        if parsed is not None:
+            return parsed
+
+    return None
+
+
+def normalize_stale_scan_job_minutes(value: Any = None) -> int:
+    try:
+        minutes = int(value or STALE_SCAN_JOB_DEFAULT_MINUTES)
+    except (TypeError, ValueError):
+        minutes = STALE_SCAN_JOB_DEFAULT_MINUTES
+
+    return max(
+        STALE_SCAN_JOB_MINIMUM_MINUTES,
+        min(STALE_SCAN_JOB_MAXIMUM_MINUTES, minutes),
+    )
+
+
+def scan_job_is_stale_active(
+    job: dict[str, Any] | sqlite3.Row,
+    now: datetime | None = None,
+    stale_minutes: int = STALE_SCAN_JOB_DEFAULT_MINUTES,
+) -> bool:
+    item = dict(job)
+    status = str(item.get("status") or "").upper()
+
+    if status not in {"QUEUED", "RUNNING"}:
+        return False
+
+    reference = scan_job_active_reference_time(item)
+
+    if reference is None:
+        return False
+
+    now_value = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    age_seconds = (now_value - reference).total_seconds()
+
+    return age_seconds >= normalize_stale_scan_job_minutes(stale_minutes) * 60
+
+
+def query_stale_active_scan_jobs(
+    connection: sqlite3.Connection,
+    stale_minutes: int = STALE_SCAN_JOB_DEFAULT_MINUTES,
+    now: datetime | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM scan_jobs
+        WHERE status IN ('QUEUED', 'RUNNING')
+        ORDER BY created_at ASC, updated_at ASC
+        LIMIT ?
+        """,
+        (max(1, int(limit or 50)),),
+    ).fetchall()
+
+    now_value = now or datetime.now(timezone.utc)
+    safe_minutes = normalize_stale_scan_job_minutes(stale_minutes)
+
+    stale_jobs: list[dict[str, Any]] = []
+
+    for row in rows:
+        item = scan_job_to_dict(row)
+        reference = scan_job_active_reference_time(item)
+
+        if reference is not None:
+            item["active_reference_at"] = reference.isoformat()
+            item["active_age_minutes"] = max(
+                0,
+                int((now_value.astimezone(timezone.utc) - reference).total_seconds() // 60),
+            )
+        else:
+            item["active_reference_at"] = None
+            item["active_age_minutes"] = None
+
+        if scan_job_is_stale_active(item, now=now_value, stale_minutes=safe_minutes):
+            stale_jobs.append(item)
+
+    return stale_jobs
+
+
+def mark_stale_active_scan_jobs_failed(
+    connection: sqlite3.Connection,
+    confirmation: str,
+    stale_minutes: int = STALE_SCAN_JOB_DEFAULT_MINUTES,
+) -> list[dict[str, Any]]:
+    if str(confirmation or "").strip() != STALE_SCAN_JOB_RECOVERY_CONFIRMATION:
+        raise DashboardAdminUserActionError(
+            f"type {STALE_SCAN_JOB_RECOVERY_CONFIRMATION!r} to mark stale active scan jobs failed",
+            status_code=400,
+        )
+
+    safe_minutes = normalize_stale_scan_job_minutes(stale_minutes)
+    stale_jobs = query_stale_active_scan_jobs(
+        connection,
+        stale_minutes=safe_minutes,
+        limit=100,
+    )
+
+    if not stale_jobs:
+        return []
+
+    now = utc_now_text()
+    recovered: list[dict[str, Any]] = []
+
+    for job in stale_jobs:
+        job_id = str(job.get("job_id") or "").strip()
+
+        if not job_id:
+            continue
+
+        message = (
+            "Marked failed by operator recovery: stale active scan job exceeded "
+            f"{safe_minutes} minutes and was blocking scheduled scans"
+        )
+
+        connection.execute(
+            """
+            UPDATE scan_jobs
+            SET status = ?,
+                updated_at = ?,
+                finished_at = COALESCE(finished_at, ?),
+                exit_code = COALESCE(exit_code, ?),
+                message = ?
+            WHERE job_id = ?
+              AND status IN ('QUEUED', 'RUNNING')
+            """,
+            (
+                "FAILED",
+                now,
+                now,
+                130,
+                message,
+                job_id,
+            ),
+        )
+
+        row = connection.execute(
+            "SELECT * FROM scan_jobs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+
+        if row is not None:
+            recovered.append(scan_job_to_dict(row))
+
+    return recovered
+
+
+def dashboard_netsniper_stale_scan_recovery_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    stale_minutes = normalize_stale_scan_job_minutes(payload.get("stale_minutes"))
+    confirmation = str(payload.get("confirmation") or "")
+
+    before = query_stale_active_scan_jobs(
+        connection,
+        stale_minutes=stale_minutes,
+        limit=100,
+    )
+
+    recovered = mark_stale_active_scan_jobs_failed(
+        connection,
+        confirmation=confirmation,
+        stale_minutes=stale_minutes,
+    )
+
+    after = query_stale_active_scan_jobs(
+        connection,
+        stale_minutes=stale_minutes,
+        limit=100,
+    )
+
+    return {
+        "ok": True,
+        "action": "netsniper.stale_scan_fail",
+        "confirmation_required": STALE_SCAN_JOB_RECOVERY_CONFIRMATION,
+        "stale_threshold_minutes": stale_minutes,
+        "stale_before_count": len(before),
+        "recovered_count": len(recovered),
+        "stale_after_count": len(after),
+        "recovered_jobs": recovered,
+        "remaining_stale_jobs": after,
+        "scan_jobs": dashboard_scan_jobs_payload(connection, limit=20),
+    }
 
 
 def query_due_scan_schedules(
@@ -23796,9 +24022,12 @@ def render_netsniper_page() -> str:
       <div class="actions">
         <button type="button" id="netsniper-schedules-refresh">Refresh schedules</button>
         <button type="button" id="netsniper-schedules-run-due">Run due schedules</button>
+        <button type="button" id="netsniper-stale-scan-fail">Mark stale active scans failed</button>
         <a href="/api/netsniper/schedules">View raw schedules JSON</a>
       </div>
 
+      <p class="muted"><strong>TrueAegis note:</strong> Scheduled scans run NetSniper and optional auto-ingest only. TrueAegis validation is configured and launched separately from the TrueAegis controls; NetSniper schedules do not automatically run TrueAegis.</p>
+      <p class="muted"><strong>Stale scan recovery:</strong> If an old <code>QUEUED</code> or <code>RUNNING</code> scan job blocks schedules and no NetSniper process is active, an ADMIN can mark stale active scan jobs failed after confirmation.</p>
       <pre id="netsniper-schedule-result">No scheduled scan action has run from this page yet.</pre>
 
       <div class="table-wrap">
@@ -24378,6 +24607,50 @@ def render_netsniper_page() -> str:
       }
     }
 
+    async function recoverStaleNetSniperScans() {
+      const status = document.getElementById("netsniper-status");
+      const output = document.getElementById("netsniper-schedule-result");
+      const button = document.getElementById("netsniper-stale-scan-fail");
+      const confirmationText = "MARK STALE SCANS FAILED";
+      const confirmation = window.prompt(
+        "ADMIN recovery action. Confirm no NetSniper process is active, then type: " + confirmationText
+      );
+
+      if (confirmation !== confirmationText) {
+        output.textContent = "Stale scan recovery cancelled.";
+        return;
+      }
+
+      button.disabled = true;
+      status.textContent = "Marking stale active NetSniper scan jobs failed…";
+
+      try {
+        const payload = await postNetSniperSchedule("/api/netsniper/stale-scan-fail", {
+          confirmation: confirmationText,
+          stale_minutes: 360
+        });
+
+        if (!payload) { return; }
+
+        output.textContent = JSON.stringify(payload, null, 2);
+        status.textContent = `Stale scan recovery complete: ${payload.recovered_count || 0} job(s) marked failed`;
+
+        if (payload.scan_jobs) {
+          renderNetSniperScanJobs(payload.scan_jobs);
+        }
+
+        await loadNetSniperSchedules();
+        await loadNetSniperScanJobs();
+        await loadNetSniperScheduleHistory();
+      } catch (error) {
+        status.textContent = `Stale scan recovery failed: ${error.message || error}`;
+        output.textContent = String(error.message || error);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+
     async function handleNetSniperScheduleAction(event) {
       const button = event.target.closest("button[data-schedule-action]");
       if (!button) { return; }
@@ -24492,6 +24765,7 @@ def render_netsniper_page() -> str:
     });
     document.getElementById("netsniper-schedule-history-refresh").addEventListener("click", loadNetSniperScheduleHistory);
     document.getElementById("netsniper-schedules-run-due").addEventListener("click", runDueNetSniperSchedules);
+    document.getElementById("netsniper-stale-scan-fail").addEventListener("click", recoverStaleNetSniperScans);
     document.getElementById("netsniper-hourly-monitoring-enable").addEventListener("click", function () { setHourlyNetSniperMonitoring(true); });
     document.getElementById("netsniper-hourly-monitoring-disable").addEventListener("click", function () { setHourlyNetSniperMonitoring(false); });
     document.getElementById("netsniper-schedules-body").addEventListener("click", handleNetSniperScheduleAction);
@@ -25481,9 +25755,16 @@ def command_dashboard(args):
                 "/api/netsniper/schedule-disable",
                 "/api/netsniper/schedule-delete",
                 "/api/netsniper/schedule-run-due",
+                "/api/netsniper/stale-scan-fail",
                 "/api/netsniper/hourly-monitoring",
             }:
-                if not self.require_permission("scan.start"):
+                required_permission = (
+                    "admin.telemetry.cleanup"
+                    if route == "/api/netsniper/stale-scan-fail"
+                    else "scan.start"
+                )
+
+                if not self.require_permission(required_permission):
                     return
 
                 try:

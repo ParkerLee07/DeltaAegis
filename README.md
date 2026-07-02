@@ -8,7 +8,7 @@ It ingests finalized NetSniper scan bundles, stores normalized historical snapsh
 
 **DeltaAegis v0.37.0 — Operator Evidence Review**
 
-DeltaAegis v0.37.0 improves operator evidence review on top of the v0.36 dashboard-operations foundation. It adds schedule-driven NetSniper run history, telemetry reset audit visibility, latest-network-change summaries, and scan-freshness warnings for the latest accepted scan.
+DeltaAegis v0.37.0 improves operator evidence review on top of the v0.36 dashboard-operations foundation. It adds schedule-driven NetSniper run history, telemetry reset audit visibility, latest-network-change summaries, scan-freshness warnings for the latest accepted scan, and ADMIN-only stale scan-job recovery for old active jobs that block scheduled scans.
 
 This release keeps destructive telemetry cleanup isolated on the ADMIN-only `/operator/reset` page, preserves scheduled scan controls, and does not enable automatic TrueAegis execution from scheduled scans by default.
 
@@ -178,7 +178,7 @@ Dashboard NetSniper scan controls use guarded job records and fixed argument-vec
 
 The `/api/netsniper/import-latest` endpoint imports completed telemetry and is protected by the `workflow.write` permission. ANALYST and ADMIN users can perform workflow write actions.
 
-Automatic TrueAegis execution from scheduled NetSniper scans is not enabled by default.
+Automatic TrueAegis execution from scheduled NetSniper scans is not enabled by default. NetSniper schedules run NetSniper and optional auto-ingest only; TrueAegis validation remains a separate guarded workflow.
 
 ## Core CLI Commands
 

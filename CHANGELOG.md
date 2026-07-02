@@ -10,6 +10,10 @@
 
 - Added `/api/scan-freshness` and a dashboard **Scan Freshness** panel with `FRESH`, `AGING`, `STALE`, and `NO_ACCEPTED_SCAN` states based on the latest accepted scan timestamp.
 
+- Added ADMIN-only stale active NetSniper scan-job recovery so old `QUEUED` or `RUNNING` jobs can be marked failed after explicit confirmation when they block scheduled scans.
+
+- Clarified on the NetSniper schedule page that scheduled scans run NetSniper and optional auto-ingest only; TrueAegis validation is configured and launched separately.
+
 - Preserved the v0.36 dashboard operations foundation: local dashboard time formatting, scheduled NetSniper worker controls, guarded telemetry cleanup, and the dedicated ADMIN-only `/operator/reset` page.
 
 ## DeltaAegis v0.36.0 — Dashboard Operations Automation
