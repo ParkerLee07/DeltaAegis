@@ -88,6 +88,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("GET", "/api/admin/users", "admin.users.read"),
     ("GET", "/api/access-audit", "admin.audit.read"),
     ("GET", "/api/telemetry-cleanup/preview", "admin.telemetry.cleanup"),
+    ("GET", "/api/telemetry-cleanup/audit-events", "admin.telemetry.cleanup"),
     ("POST", "/api/telemetry-cleanup/clear-all", "admin.telemetry.cleanup"),
     ("POST", "/api/admin/users", "admin.users.write"),
     ("POST_PREFIX", "/api/admin/users/", "admin.users.write"),
@@ -11031,6 +11032,167 @@ def telemetry_cleanup_clear_all(
         ),
     }
 
+
+
+
+
+TELEMETRY_CLEANUP_AUDIT_ACTION = "TELEMETRY_CLEANUP_CLEAR_ALL"
+
+
+def telemetry_cleanup_redact_audit_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+
+        for key, child in value.items():
+            lower_key = str(key).lower()
+
+            if (
+                "password" in lower_key
+                or "token" in lower_key
+                or "secret" in lower_key
+                or "hash" in lower_key
+            ):
+                redacted[str(key)] = "[redacted]"
+            else:
+                redacted[str(key)] = telemetry_cleanup_redact_audit_value(child)
+
+        return redacted
+
+    if isinstance(value, list):
+        return [telemetry_cleanup_redact_audit_value(child) for child in value]
+
+    return value
+
+
+def telemetry_cleanup_decode_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+
+    if not value:
+        return {}
+
+    if isinstance(value, str):
+        decoded = decode_json_field(value, {})
+
+        if isinstance(decoded, dict):
+            return decoded
+
+    return {}
+
+
+def telemetry_cleanup_decode_audit_details(item: dict[str, Any]) -> dict[str, Any]:
+    preferred_keys = (
+        "details",
+        "details_json",
+        "metadata",
+        "metadata_json",
+        "context",
+        "context_json",
+        "data",
+        "data_json",
+    )
+
+    for key in preferred_keys:
+        decoded = telemetry_cleanup_decode_json_object(item.get(key))
+
+        if decoded:
+            return telemetry_cleanup_redact_audit_value(decoded)
+
+    for key, value in item.items():
+        lower_key = str(key).lower()
+
+        if (
+            "detail" not in lower_key
+            and "metadata" not in lower_key
+            and "context" not in lower_key
+            and "json" not in lower_key
+            and "data" not in lower_key
+        ):
+            continue
+
+        decoded = telemetry_cleanup_decode_json_object(value)
+
+        if decoded:
+            return telemetry_cleanup_redact_audit_value(decoded)
+
+    return {}
+
+
+def telemetry_cleanup_audit_event_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    details = telemetry_cleanup_decode_audit_details(item)
+    item["details"] = details
+
+    for key in list(item.keys()):
+        lower_key = str(key).lower()
+
+        if (
+            "password" in lower_key
+            or "token" in lower_key
+            or "secret" in lower_key
+            or "hash" in lower_key
+        ):
+            item[key] = "[redacted]"
+            continue
+
+        if (
+            "detail" in lower_key
+            or "metadata" in lower_key
+            or "context" in lower_key
+            or "json" in lower_key
+            or "data" in lower_key
+        ):
+            decoded = telemetry_cleanup_decode_json_object(item.get(key))
+
+            if decoded:
+                item[key] = json.dumps(
+                    telemetry_cleanup_redact_audit_value(decoded),
+                    sort_keys=True,
+                )
+
+    return item
+
+
+def query_telemetry_cleanup_audit_events(
+    connection: sqlite3.Connection,
+    limit: int = 20,
+) -> list[sqlite3.Row]:
+    safe_limit = max(1, min(int(limit or 20), 100))
+
+    return connection.execute(
+        """
+        SELECT *
+        FROM access_audit_log
+        WHERE action = ?
+        ORDER BY audit_id DESC
+        LIMIT ?
+        """,
+        (TELEMETRY_CLEANUP_AUDIT_ACTION, safe_limit),
+    ).fetchall()
+
+
+def dashboard_telemetry_cleanup_audit_events_payload(
+    connection: sqlite3.Connection,
+    limit: int = 20,
+) -> dict[str, Any]:
+    safe_limit = max(1, min(int(limit or 20), 100))
+    events = [
+        telemetry_cleanup_audit_event_to_dict(row)
+        for row in query_telemetry_cleanup_audit_events(
+            connection,
+            limit=safe_limit,
+        )
+    ]
+
+    return {
+        "ok": True,
+        "action": "telemetry.cleanup.audit_events",
+        "audit_action": TELEMETRY_CLEANUP_AUDIT_ACTION,
+        "generated_at": utc_now_text(),
+        "limit": safe_limit,
+        "count": len(events),
+        "events": events,
+    }
 
 
 def dashboard_telemetry_cleanup_preview_payload(
@@ -21990,6 +22152,7 @@ def dashboard_operator_session_shell_html() -> str:
 
           confirmation.value = "";
           renderTelemetryCleanup(payload);
+          loadTelemetryResetAuditEvents();
         } catch (error) {
           if (panel) { panel.textContent = "Telemetry cleanup failed: " + (error.message || error); }
         }
@@ -22091,6 +22254,29 @@ def dashboard_operator_reset_shell_html() -> str:
       </div>
     </section>
   </main>
+
+      <h2>Recent Telemetry Reset Audit Events</h2>
+      <p class="muted">Read-only ADMIN evidence view filtered to <code>TELEMETRY_CLEANUP_CLEAR_ALL</code> events from the preserved access audit log.</p>
+      <div class="actions">
+        <button type="button" id="telemetry-cleanup-audit-refresh">Refresh reset audit</button>
+        <a href="/api/telemetry-cleanup/audit-events?limit=20">View raw reset audit JSON</a>
+      </div>
+      <div id="telemetry-cleanup-audit-status" class="status">Loading telemetry reset audit events…</div>
+      <div class="table-wrap" id="telemetry-cleanup-audit-table-wrap" hidden>
+        <table>
+          <thead>
+            <tr>
+              <th>Timestamp</th>
+              <th>Action</th>
+              <th>Target</th>
+              <th>Actor</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody id="telemetry-cleanup-audit-body"></tbody>
+        </table>
+      </div>
+
   <script>
     function cleanupText(value) {
       if (value === null || value === undefined || value === "") { return "—"; }
@@ -22122,6 +22308,107 @@ def dashboard_operator_reset_shell_html() -> str:
       body.innerHTML = cleanupRowsFromObject(cleanupTables, payload.dry_run === false ? "deleted/now empty" : "will be deleted") + cleanupRowsFromObject(protectedTables, "preserved");
       wrap.hidden = false;
     }
+
+    function cleanupAuditEventsFromPayload(payload) {
+      if (!payload) { return []; }
+      if (Array.isArray(payload.events)) { return payload.events; }
+      if (Array.isArray(payload.audit_events)) { return payload.audit_events; }
+      if (Array.isArray(payload.rows)) { return payload.rows; }
+      if (Array.isArray(payload.items)) { return payload.items; }
+      return [];
+    }
+
+    function cleanupAuditActorText(event) {
+      const details = event.details || {};
+      const actor = details.actor || {};
+
+      return cleanupText(
+        event.actor_username ||
+        event.username ||
+        actor.username ||
+        actor.token_name ||
+        actor.user_id ||
+        "—"
+      );
+    }
+
+    function cleanupAuditTargetText(event) {
+      return cleanupText(
+        event.target_key ||
+        event.target_username ||
+        event.target ||
+        event.resource ||
+        "telemetry_cleanup"
+      );
+    }
+
+    function cleanupAuditSafeDetails(event) {
+      const details = event.details || {};
+      return JSON.stringify(details, null, 2);
+    }
+
+    function renderTelemetryResetAuditEvents(payload) {
+      const status = document.getElementById("telemetry-cleanup-audit-status");
+      const wrap = document.getElementById("telemetry-cleanup-audit-table-wrap");
+      const body = document.getElementById("telemetry-cleanup-audit-body");
+
+      if (!status || !wrap || !body) { return; }
+
+      const events = cleanupAuditEventsFromPayload(payload)
+        .filter(function (event) {
+          return String(event.action || "") === "TELEMETRY_CLEANUP_CLEAR_ALL";
+        })
+        .slice(0, 20);
+
+      body.innerHTML = events.length
+        ? events.map(function (event) {
+            return `
+              <tr>
+                <td>${cleanupEscape(event.created_at || event.timestamp || event.event_time)}</td>
+                <td><span class="pill">${cleanupEscape(event.action)}</span></td>
+                <td>${cleanupEscape(cleanupAuditTargetText(event))}</td>
+                <td>${cleanupEscape(cleanupAuditActorText(event))}</td>
+                <td><pre class="muted">${cleanupEscape(cleanupAuditSafeDetails(event))}</pre></td>
+              </tr>
+            `;
+          }).join("")
+        : '<tr><td colspan="5" class="muted">No telemetry reset audit events found.</td></tr>';
+
+      status.textContent = `Loaded ${events.length} telemetry reset audit event(s).`;
+      wrap.hidden = false;
+    }
+
+    async function loadTelemetryResetAuditEvents() {
+      const status = document.getElementById("telemetry-cleanup-audit-status");
+
+      try {
+        const response = await fetch("/api/telemetry-cleanup/audit-events?limit=20", {
+          credentials: "same-origin",
+          cache: "no-store"
+        });
+
+        if (response.status === 401) {
+          window.location.href = "/login";
+          return;
+        }
+
+        if (response.status === 403) {
+          if (status) { status.textContent = "ADMIN role required for telemetry reset audit visibility."; }
+          return;
+        }
+
+        const payload = await response.json();
+
+        if (!response.ok) {
+          throw new Error(payload.message || payload.error || "Telemetry reset audit lookup failed.");
+        }
+
+        renderTelemetryResetAuditEvents(payload);
+      } catch (error) {
+        if (status) { status.textContent = "Telemetry reset audit lookup failed: " + (error.message || error); }
+      }
+    }
+
     async function loadTelemetryCleanupPreview() {
       const panel = document.getElementById("deltaaegis-telemetry-cleanup-panel");
       try {
@@ -22161,7 +22448,9 @@ def dashboard_operator_reset_shell_html() -> str:
     }
     document.getElementById("telemetry-cleanup-preview").addEventListener("click", loadTelemetryCleanupPreview);
     document.getElementById("telemetry-cleanup-clear-all").addEventListener("click", clearTelemetry);
+    document.getElementById("telemetry-cleanup-audit-refresh").addEventListener("click", loadTelemetryResetAuditEvents);
     loadTelemetryCleanupPreview();
+    loadTelemetryResetAuditEvents();
   </script>
 </body>
 </html>"""
@@ -24036,6 +24325,27 @@ def command_dashboard(args):
                     self,
                     dashboard_session_payload(getattr(self, "current_actor", None)),
                 )
+                return
+
+            if route == "/api/telemetry-cleanup/audit-events":
+                if not self.require_permission("admin.telemetry.cleanup"):
+                    return
+
+                query = urllib.parse.parse_qs(parsed.query or "")
+                limit = int(query.get("limit", ["20"])[0] or 20)
+                connection = self.open_connection()
+
+                try:
+                    dashboard_json_response(
+                        self,
+                        dashboard_telemetry_cleanup_audit_events_payload(
+                            connection,
+                            limit=limit,
+                        ),
+                    )
+                finally:
+                    connection.close()
+
                 return
 
             if route == "/api/telemetry-cleanup/preview":
