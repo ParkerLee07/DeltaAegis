@@ -5508,17 +5508,20 @@ def next_schedule_run_text(cadence_minutes: int, base_time: datetime | None = No
     return utc_datetime_to_text(base + timedelta(minutes=safe_cadence))
 
 
-def active_scan_job_exists(connection: sqlite3.Connection) -> bool:
-    row = connection.execute(
+def active_scan_job_row(connection: sqlite3.Connection) -> sqlite3.Row | None:
+    return connection.execute(
         """
-        SELECT 1
+        SELECT *
         FROM scan_jobs
         WHERE status IN ('QUEUED', 'RUNNING')
+        ORDER BY created_at DESC, updated_at DESC
         LIMIT 1
         """
     ).fetchone()
 
-    return row is not None
+
+def active_scan_job_exists(connection: sqlite3.Connection) -> bool:
+    return active_scan_job_row(connection) is not None
 
 
 STALE_SCAN_JOB_RECOVERY_CONFIRMATION = "MARK STALE SCANS FAILED"
@@ -5878,24 +5881,24 @@ def run_due_scan_schedules(
     for row in query_due_scan_schedules(connection, limit=max_runs):
         schedule = scan_schedule_to_dict(row)
 
-        if active_scan_job_exists(connection):
-            skipped = mark_scan_schedule_skipped(
-                connection,
-                schedule["schedule_id"],
-                schedule["cadence_minutes"],
-                "scheduled scan skipped: another scan job is active",
-            )
-            connection.commit()
+        active_job = active_scan_job_row(connection)
+
+        if active_job is not None:
             results.append(
                 {
                     "schedule_id": schedule["schedule_id"],
                     "name": schedule["name"],
-                    "action": "skipped",
+                    "action": "blocked",
                     "reason": "active scan job exists",
-                    "schedule": skipped,
+                    "message": (
+                        "scheduled scan blocked: another scan job is active; "
+                        "schedule remains due and will retry without cadence delay"
+                    ),
+                    "active_job": scan_job_to_dict(active_job),
+                    "schedule": schedule,
                 }
             )
-            continue
+            break
 
         job = create_scan_job(
             connection,

@@ -11,6 +11,7 @@
 - Added `/api/scan-freshness` and a dashboard **Scan Freshness** panel with `FRESH`, `AGING`, `STALE`, and `NO_ACCEPTED_SCAN` states based on the latest accepted scan timestamp.
 
 - Added ADMIN-only stale active NetSniper scan-job recovery so old `QUEUED` or `RUNNING` jobs can be marked failed after explicit confirmation when they block scheduled scans.
+- Fixed scheduled scan contention handling so a due schedule blocked by another active scan remains due instead of being marked `SKIPPED` and postponed by the full cadence.
 
 - Clarified on the NetSniper schedule page that scheduled scans run NetSniper and optional auto-ingest only; TrueAegis validation is configured and launched separately.
 

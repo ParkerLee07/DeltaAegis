@@ -8,7 +8,7 @@ It ingests finalized NetSniper scan bundles, stores normalized historical snapsh
 
 **DeltaAegis v0.37.0 — Operator Evidence Review**
 
-DeltaAegis v0.37.0 improves operator evidence review on top of the v0.36 dashboard-operations foundation. It adds schedule-driven NetSniper run history, telemetry reset audit visibility, latest-network-change summaries, scan-freshness warnings for the latest accepted scan, and ADMIN-only stale scan-job recovery for old active jobs that block scheduled scans.
+DeltaAegis v0.37.0 improves operator evidence review on top of the v0.36 dashboard-operations foundation. It adds schedule-driven NetSniper run history, telemetry reset audit visibility, latest-network-change summaries, scan-freshness warnings for the latest accepted scan, ADMIN-only stale scan-job recovery for old active jobs that block scheduled scans, and blocked-schedule retry behavior that avoids cadence-postponing due schedules when another scan is already active.
 
 This release keeps destructive telemetry cleanup isolated on the ADMIN-only `/operator/reset` page, preserves scheduled scan controls, and does not enable automatic TrueAegis execution from scheduled scans by default.
 
