@@ -24141,17 +24141,38 @@ def command_dashboard(args):
 
     server_address = (args.host, args.port)
     server = ThreadingHTTPServer(server_address, DeltaAegisDashboardHandler)
-    dashboard_schedule_worker_thread, dashboard_schedule_worker_stop = dashboard_start_schedule_worker_thread(
-        db_path=db_path,
-        events_path=args.events,
-        quiet=args.quiet,
+
+    dashboard_schedule_worker_thread = None
+    dashboard_schedule_worker_stop = None
+    schedule_worker_interval = max(
+        1,
+        int(
+            getattr(
+                args,
+                "schedule_worker_interval_seconds",
+                DASHBOARD_SCHEDULE_WORKER_INTERVAL_SECONDS,
+            )
+            or DASHBOARD_SCHEDULE_WORKER_INTERVAL_SECONDS
+        ),
     )
+
+    if getattr(args, "enable_scheduled_scans", True):
+        dashboard_schedule_worker_thread, dashboard_schedule_worker_stop = dashboard_start_schedule_worker_thread(
+            db_path=db_path,
+            events_path=args.events,
+            interval_seconds=schedule_worker_interval,
+            quiet=args.quiet,
+        )
 
     print("DeltaAegis dashboard starting")
     print("============================")
     print(f"URL:      http://{args.host}:{args.port}")
     print(f"Database: {db_path}")
     print("Mode:     dashboard + investigation status updates")
+    if getattr(args, "enable_scheduled_scans", True):
+        print(f"Scheduler: enabled, checks due NetSniper schedules every {schedule_worker_interval}s")
+    else:
+        print("Scheduler: disabled")
 
     if token:
         print("Auth:     token required")
@@ -24176,8 +24197,10 @@ def command_dashboard(args):
     except KeyboardInterrupt:
         print("\nStopping dashboard.")
     finally:
-        dashboard_schedule_worker_stop.set()
-        dashboard_schedule_worker_thread.join(timeout=2.0)
+        if dashboard_schedule_worker_stop is not None:
+            dashboard_schedule_worker_stop.set()
+        if dashboard_schedule_worker_thread is not None:
+            dashboard_schedule_worker_thread.join(timeout=2.0)
         server.server_close()
 
     return 0
@@ -24685,6 +24708,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--token")
     p.add_argument("--scope")
     p.add_argument("--quiet", action="store_true")
+    p.add_argument(
+        "--enable-scheduled-scans",
+        dest="enable_scheduled_scans",
+        action="store_true",
+        default=True,
+        help="Enable dashboard background worker for due saved NetSniper scan schedules. Enabled by default.",
+    )
+    p.add_argument(
+        "--no-enable-scheduled-scans",
+        dest="enable_scheduled_scans",
+        action="store_false",
+        help="Disable dashboard background worker for due saved NetSniper scan schedules.",
+    )
+    p.add_argument(
+        "--schedule-worker-interval-seconds",
+        type=int,
+        default=DASHBOARD_SCHEDULE_WORKER_INTERVAL_SECONDS,
+        help="Seconds between dashboard scheduled-scan checks. Default: 60.",
+    )
 
     p.add_argument(
         "--require-login",
