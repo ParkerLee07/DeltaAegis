@@ -50,6 +50,28 @@ if "formatDashboardDateTimeCell(job.completed_at || job.started_at || job.create
 if "job.completed_at || job.started_at || job.created_at || \"-\"" in job_block:
     raise SystemExit("[FAIL] TrueAegis job renderer still has raw fallback timestamp rendering")
 
+
+taxonomy_required = [
+    "formatDashboardDateTimeCell(asset.first_seen_at)",
+    "formatDashboardDateTimeCell(asset.last_seen_at)",
+    "formatDashboardDateTimeCell(row.last_seen_at)",
+]
+
+for needle in taxonomy_required:
+    if needle not in text:
+        raise SystemExit(f"[FAIL] missing taxonomy/asset local time formatting: {needle}")
+
+raw_frontend_timestamp_patterns = [
+    "${esc(asset.first_seen_at)}",
+    "${esc(asset.last_seen_at)}",
+    "${esc(row.last_seen_at)}",
+]
+
+for needle in raw_frontend_timestamp_patterns:
+    if needle in text:
+        raise SystemExit(f"[FAIL] raw frontend timestamp render remains: {needle}")
+
+
 print("[PASS] v0.36 local dashboard time formatting python checks passed")
 PY
 

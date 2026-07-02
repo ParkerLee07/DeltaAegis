@@ -19024,8 +19024,8 @@ def dashboard_index_html_base_v025_operator_link():
           <div class="detail-box"><div class="label">MAC</div><code>${esc(asset.mac_address)}</code></div>
           <div class="detail-box"><div class="label">State</div>${esc(asset.state)}</div>
           <div class="detail-box"><div class="label">Identity</div>${esc(asset.identity_class)}</div>
-          <div class="detail-box"><div class="label">First Seen</div>${esc(asset.first_seen_at)}</div>
-          <div class="detail-box"><div class="label">Last Seen</div>${esc(asset.last_seen_at)}</div>
+          <div class="detail-box"><div class="label">First Seen</div>${formatDashboardDateTimeCell(asset.first_seen_at)}</div>
+          <div class="detail-box"><div class="label">Last Seen</div>${formatDashboardDateTimeCell(asset.last_seen_at)}</div>
         </div>
 
         <h3>Latest Observation</h3>
@@ -19458,7 +19458,7 @@ def dashboard_index_html_base_v025_operator_link():
               <code>${esc(row.asset_key)}</code>
             </button>
           </td>
-          <td>${esc(row.last_seen_at)}</td>
+          <td>${formatDashboardDateTimeCell(row.last_seen_at)}</td>
         </tr>
       `).join("");
 
