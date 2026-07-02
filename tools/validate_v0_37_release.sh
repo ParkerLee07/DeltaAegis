@@ -90,6 +90,7 @@ if grep -Fq 'shell=True' deltaaegis.py; then
 fi
 
 echo "[INFO] Running v0.37 checkpoint validators..."
+time tools/validate_v0_37_schedule_id_migration_order.sh
 time tools/validate_v0_37_schedule_history.sh
 time tools/validate_v0_37_reset_audit_visibility.sh
 time tools/validate_v0_37_latest_change_summary.sh

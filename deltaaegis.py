@@ -525,9 +525,6 @@ CREATE INDEX IF NOT EXISTS idx_scan_jobs_status
 CREATE INDEX IF NOT EXISTS idx_scan_jobs_scope
     ON scan_jobs(network_scope);
 
-CREATE INDEX IF NOT EXISTS idx_scan_jobs_schedule_id
-    ON scan_jobs(schedule_id);
-
 CREATE TABLE IF NOT EXISTS trueaegis_jobs (
     job_id TEXT PRIMARY KEY,
     status TEXT NOT NULL,
