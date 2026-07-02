@@ -5,6 +5,23 @@ cd "$(dirname "$0")/.." || exit 1
 
 python3 -m py_compile deltaaegis.py
 
+
+grep -Fq 'v0.35 TrueAegis Orchestration' deltaaegis.py || {
+  echo "[FAIL] dashboard release badge must say v0.35 TrueAegis Orchestration" >&2
+  exit 1
+}
+
+grep -Fq 'panel.dataset.tabPanel = "trueaegis";' deltaaegis.py || {
+  echo "[FAIL] TrueAegis orchestration panel must render on the TrueAegis tab" >&2
+  exit 1
+}
+
+if grep -Fq 'v0.34 TrueAegis Validation Correlation' deltaaegis.py; then
+  echo "[FAIL] stale v0.34 dashboard release badge remains" >&2
+  exit 1
+fi
+
+
 required_strings=(
   'DeltaAegis v0.35.0'
   'DEFAULT_TRUEAEGIS = Path.home() / "TrueAegis" / "trueaegis.py"'

@@ -17732,7 +17732,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.34 TrueAegis Validation Correlation</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.35 TrueAegis Orchestration</span></div>
     </div>
   </header>
 
@@ -17914,7 +17914,7 @@ def dashboard_index_html_base_v025_operator_link():
         <div>
           <div class="eyebrow">TrueAegis Foundation</div>
           <h2>TrueAegis Validation Evidence</h2>
-          <p class="muted">Imported TrueAegis validation observations are correlated with current NetSniper services as evidence only. v0.34 does not alter risk scoring yet.</p>
+          <p class="muted">Imported TrueAegis validation observations are correlated with current NetSniper services as evidence only. v0.35 can orchestrate guarded TrueAegis runs and import validation evidence automatically.</p>
         </div>
         <a href="/api/validation-summary">Raw summary JSON</a>
       </div>
@@ -20658,7 +20658,7 @@ def dashboard_index_html_base_v025_operator_link():
 
       panel = document.createElement("section");
       panel.id = "trueaegis-orchestration-panel";
-      panel.dataset.tabPanel = "intelligence";
+      panel.dataset.tabPanel = "trueaegis";
 
       const correlationBody = document.getElementById("trueaegis-validation-correlations-body");
       const correlationSection = correlationBody ? correlationBody.closest("section") : null;
@@ -20942,7 +20942,7 @@ def dashboard_index_html_base_v025_operator_link():
           <div>
             <div class="eyebrow">TrueAegis Foundation</div>
             <h2>Validation Evidence</h2>
-            <p class="muted">Imported TrueAegis validation observations are correlated with current NetSniper services as evidence only. v0.34 does not alter risk scoring yet.</p>
+            <p class="muted">Imported TrueAegis validation observations are correlated with current NetSniper services as evidence only. v0.35 can orchestrate guarded TrueAegis runs and import validation evidence automatically.</p>
           </div>
           <a href="/api/validation-summary">Raw summary JSON</a>
         </div>
