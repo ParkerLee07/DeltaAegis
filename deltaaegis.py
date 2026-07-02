@@ -75,6 +75,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("GET", "/", "dashboard.read"),
     ("GET", "/operator", "operator.session.read"),
     ("GET", "/operator/users", "admin.users.read"),
+    ("GET", "/operator/reset", "admin.telemetry.cleanup"),
     ("GET", "/netsniper", "dashboard.read"),
     ("GET", "/api/netsniper/status", "dashboard.read"),
     ("GET", "/api/validation-summary", "dashboard.read"),
@@ -21859,6 +21860,169 @@ def dashboard_operator_session_shell_html() -> str:
     return html_text
 
 
+def dashboard_operator_reset_shell_html() -> str:
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DeltaAegis Telemetry Reset</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #020617; color: #e2e8f0; }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, rgba(248, 113, 113, 0.12), transparent 34rem), #020617; }
+    main { width: min(1180px, calc(100vw - 32px)); margin: 0 auto; padding: 44px 0; }
+    .panel { border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 24px; background: rgba(15, 23, 42, 0.92); box-shadow: 0 24px 80px rgba(0, 0, 0, 0.34); padding: 28px; }
+    .eyebrow { color: #fca5a5; font-size: 12px; font-weight: 900; letter-spacing: 0.16em; text-transform: uppercase; }
+    h1 { margin: 8px 0 8px; font-size: 32px; letter-spacing: -0.04em; }
+    h2 { margin: 26px 0 12px; font-size: 20px; }
+    p { margin: 0 0 20px; color: #94a3b8; line-height: 1.55; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 16px 0; }
+    a, button { border: 1px solid rgba(34,211,238,.28); border-radius: 999px; background: rgba(8,145,178,.14); color: #67e8f9; cursor: pointer; padding: 9px 13px; text-decoration: none; font-size: 13px; font-weight: 900; }
+    button:hover, a:hover { background: rgba(8,145,178,.26); }
+    button.danger { border-color: rgba(248,113,113,.45); background: rgba(220,38,38,.16); color: #fecaca; }
+    input { border: 1px solid rgba(148,163,184,.26); border-radius: 12px; background: rgba(2,6,23,.58); color: #e2e8f0; padding: 10px 12px; font-weight: 800; min-width: min(420px, 100%); }
+    input::placeholder { color: #64748b; }
+    .status { border: 1px solid rgba(148,163,184,.18); border-radius: 16px; background: rgba(2,6,23,.46); color: #cbd5e1; margin: 18px 0; padding: 12px 14px; font-weight: 700; white-space: pre-wrap; }
+    .warning { border-color: rgba(248,113,113,.35); background: rgba(127,29,29,.20); color: #fecaca; }
+    .muted { color: #94a3b8; font-weight: 600; }
+    .table-wrap { overflow-x: auto; border: 1px solid rgba(148,163,184,.18); border-radius: 18px; margin-top: 18px; }
+    table { width: 100%; border-collapse: collapse; min-width: 760px; }
+    th, td { border-bottom: 1px solid rgba(148,163,184,.14); padding: 12px 14px; text-align: left; vertical-align: top; }
+    th { color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+    td { color: #e2e8f0; font-size: 13px; font-weight: 700; }
+    code { color: #f8fafc; }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="panel">
+      <div class="eyebrow">DeltaAegis Admin Maintenance</div>
+      <h1>Telemetry Reset</h1>
+      <p>This ADMIN-only page clears imported telemetry while preserving users, sessions, API tokens, scan schedules, audit history, and operator-authored asset context.</p>
+      <div class="actions">
+        <a href="/operator">Back to operator session</a>
+        <a href="/">Back to dashboard</a>
+        <a href="/api/telemetry-cleanup/preview">View raw preview JSON</a>
+      </div>
+      <div class="status warning">Preview is safe. Clearing telemetry requires the exact confirmation phrase: DELETE TELEMETRY.</div>
+      <h2>Preview</h2>
+      <div id="deltaaegis-telemetry-cleanup-panel" class="status">Loading telemetry cleanup preview…</div>
+      <div class="actions"><button type="button" id="telemetry-cleanup-preview">Preview cleanup</button></div>
+      <h2>Clear imported telemetry</h2>
+      <p class="muted">This removes imported snapshots, observations, events, alerts, scan jobs, TrueAegis jobs, validation evidence, and NetSniper intelligence rows. It preserves access/configuration/operator context.</p>
+      <div class="actions">
+        <input id="telemetry-cleanup-confirmation" autocomplete="off" placeholder="Type DELETE TELEMETRY to confirm">
+        <button type="button" class="danger" id="telemetry-cleanup-clear-all">Clear imported telemetry</button>
+      </div>
+      <div class="table-wrap" id="telemetry-cleanup-tables-wrap" hidden>
+        <table>
+          <thead><tr><th>Table</th><th>Rows</th><th>Cleanup behavior</th></tr></thead>
+          <tbody id="telemetry-cleanup-tables-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <script>
+    function cleanupText(value) {
+      if (value === null || value === undefined || value === "") { return "—"; }
+      return String(value);
+    }
+    function cleanupEscape(value) {
+      return cleanupText(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+    }
+    function cleanupRowsFromObject(rows, behavior) {
+      return Object.entries(rows || {}).sort(function (a, b) { return a[0].localeCompare(b[0]); }).map(function (entry) {
+        return "<tr><td><code>" + cleanupEscape(entry[0]) + "</code></td><td>" + cleanupEscape(entry[1]) + "</td><td>" + cleanupEscape(behavior) + "</td></tr>";
+      }).join("");
+    }
+    function renderTelemetryCleanup(payload) {
+      const panel = document.getElementById("deltaaegis-telemetry-cleanup-panel");
+      const wrap = document.getElementById("telemetry-cleanup-tables-wrap");
+      const body = document.getElementById("telemetry-cleanup-tables-body");
+      if (!panel || !body || !wrap) { return; }
+      const protectedTables = payload.protected_tables || payload.protected_tables_after || {};
+      const protectedRows = payload.protected_total_rows ?? Object.values(protectedTables).reduce(function (sum, value) { return sum + Number(value || 0); }, 0);
+      const totalRows = payload.total_rows ?? payload.total_deleted_rows ?? 0;
+      panel.textContent = [
+        payload.message || "Telemetry cleanup preview loaded.",
+        "Cleanup rows: " + totalRows,
+        "Protected rows: " + protectedRows,
+        "Confirmation phrase: " + (payload.confirmation_required || "DELETE TELEMETRY")
+      ].join("\\n");
+      const cleanupTables = payload.tables || payload.tables_after || payload.deleted_rows || {};
+      body.innerHTML = cleanupRowsFromObject(cleanupTables, payload.dry_run === false ? "deleted/now empty" : "will be deleted") + cleanupRowsFromObject(protectedTables, "preserved");
+      wrap.hidden = false;
+    }
+    async function loadTelemetryCleanupPreview() {
+      const panel = document.getElementById("deltaaegis-telemetry-cleanup-panel");
+      try {
+        const response = await fetch("/api/telemetry-cleanup/preview", { credentials: "same-origin", cache: "no-store" });
+        if (response.status === 401) { window.location.href = "/login"; return; }
+        if (response.status === 403) { if (panel) { panel.textContent = "ADMIN role required for telemetry reset."; } return; }
+        const payload = await response.json();
+        if (!response.ok) { throw new Error(payload.message || payload.error || "Preview failed."); }
+        renderTelemetryCleanup(payload);
+      } catch (error) {
+        if (panel) { panel.textContent = "Telemetry cleanup preview failed: " + (error.message || error); }
+      }
+    }
+    async function clearTelemetry() {
+      const panel = document.getElementById("deltaaegis-telemetry-cleanup-panel");
+      const confirmation = document.getElementById("telemetry-cleanup-confirmation");
+      if (!confirmation || confirmation.value.trim() !== "DELETE TELEMETRY") {
+        if (panel) { panel.textContent = "Type DELETE TELEMETRY exactly before clearing imported telemetry."; }
+        return;
+      }
+      try {
+        const response = await fetch("/api/telemetry-cleanup/clear-all", {
+          method: "POST",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ confirmation: confirmation.value.trim(), dry_run: false })
+        });
+        if (response.status === 401) { window.location.href = "/login"; return; }
+        const payload = await response.json();
+        if (!response.ok) { throw new Error(payload.message || payload.error || "Cleanup failed."); }
+        confirmation.value = "";
+        renderTelemetryCleanup(payload);
+      } catch (error) {
+        if (panel) { panel.textContent = "Telemetry cleanup failed: " + (error.message || error); }
+      }
+    }
+    document.getElementById("telemetry-cleanup-preview").addEventListener("click", loadTelemetryCleanupPreview);
+    document.getElementById("telemetry-cleanup-clear-all").addEventListener("click", clearTelemetry);
+    loadTelemetryCleanupPreview();
+  </script>
+</body>
+</html>"""
+
+
+_deltaaegis_operator_session_shell_html_v036_reset_link_base = globals().get(
+    "_deltaaegis_operator_session_shell_html_v036_telemetry_cleanup_base",
+    dashboard_operator_session_shell_html,
+)
+
+
+def dashboard_operator_session_shell_html() -> str:
+    html_text = _deltaaegis_operator_session_shell_html_v036_reset_link_base()
+
+    if 'href="/operator/reset"' not in html_text:
+        marker = '<a id="deltaaegis-admin-control-panel-link" href="/operator/users">Admin control panel</a>'
+        replacement = marker + '\n        <a id="deltaaegis-telemetry-reset-link" href="/operator/reset">Telemetry reset</a>'
+
+        if marker in html_text:
+            html_text = html_text.replace(marker, replacement, 1)
+        elif "</div>" in html_text:
+            html_text = html_text.replace(
+                "</div>",
+                '<a id="deltaaegis-telemetry-reset-link" href="/operator/reset">Telemetry reset</a>\n      </div>',
+                1,
+            )
+
+    return html_text
+
+
 class DashboardAdminUserActionError(DeltaAegisError):
     def __init__(self, message: str, status_code: int = 400):
         super().__init__(message)
@@ -23539,6 +23703,12 @@ def command_dashboard(args):
                 if not self.require_permission("admin.users.read"):
                     return
                 dashboard_html_response(self, dashboard_operator_users_shell_html())
+                return
+
+            if route == "/operator/reset":
+                if not self.require_permission("admin.telemetry.cleanup"):
+                    return
+                dashboard_html_response(self, dashboard_operator_reset_shell_html())
                 return
 
             if route == "/netsniper":
