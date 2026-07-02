@@ -97,6 +97,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("POST", "/api/netsniper/scan-start", "scan.start"),
     ("POST", "/api/trueaegis/run", "scan.start"),
     ("GET", "/api/netsniper/schedules", "dashboard.read"),
+    ("GET", "/api/netsniper/schedule-history", "dashboard.read"),
     ("POST", "/api/netsniper/schedule-create", "scan.start"),
     ("POST", "/api/netsniper/schedule-enable", "scan.start"),
     ("POST", "/api/netsniper/schedule-disable", "scan.start"),
@@ -495,6 +496,7 @@ CREATE TABLE IF NOT EXISTS scan_jobs (
     job_id TEXT PRIMARY KEY,
     target TEXT NOT NULL,
     network_scope TEXT NOT NULL DEFAULT '',
+    schedule_id TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -519,6 +521,9 @@ CREATE INDEX IF NOT EXISTS idx_scan_jobs_status
 
 CREATE INDEX IF NOT EXISTS idx_scan_jobs_scope
     ON scan_jobs(network_scope);
+
+CREATE INDEX IF NOT EXISTS idx_scan_jobs_schedule_id
+    ON scan_jobs(schedule_id);
 
 CREATE TABLE IF NOT EXISTS trueaegis_jobs (
     job_id TEXT PRIMARY KEY,
@@ -1500,6 +1505,13 @@ def connect(db_path: Path) -> sqlite3.Connection:
     ensure_column(connection, "snapshots", "network_scope", "network_scope TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "asset_observations", "identity_class", "identity_class TEXT NOT NULL DEFAULT 'IP_ONLY'")
     ensure_column(connection, "scan_jobs", "scan_profile", "scan_profile TEXT NOT NULL DEFAULT 'balanced'")
+    ensure_column(connection, "scan_jobs", "schedule_id", "schedule_id TEXT NOT NULL DEFAULT ''")
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_scan_jobs_schedule_id
+            ON scan_jobs(schedule_id)
+        """
+    )
 
     # NetSniper v2 / manifest v3 bundle-quality and profile runtime metadata.
     ensure_column(connection, "snapshots", "requested_profile", "requested_profile TEXT")
@@ -4123,9 +4135,15 @@ def create_scan_job(
     runs_dir: Path,
     auto_ingest: bool = False,
     scan_profile: str = "balanced",
+    schedule_id: str | None = None,
 ) -> dict[str, Any]:
     safe_target = validate_private_cidr(target)
     safe_profile = validate_netsniper_scan_profile(scan_profile)
+    safe_schedule_id = str(schedule_id or "").strip()
+
+    if len(safe_schedule_id) > 96:
+        raise DeltaAegisError("scan schedule id is too long")
+
     now = utc_now_text()
     job_id = f"scan-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
 
@@ -4135,6 +4153,7 @@ def create_scan_job(
             job_id,
             target,
             network_scope,
+            schedule_id,
             status,
             created_at,
             updated_at,
@@ -4145,12 +4164,13 @@ def create_scan_job(
             status_json,
             message
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             job_id,
             safe_target,
             safe_target,
+            safe_schedule_id,
             "QUEUED",
             now,
             now,
@@ -4167,6 +4187,7 @@ def create_scan_job(
         "job_id": job_id,
         "target": safe_target,
         "network_scope": safe_target,
+        "schedule_id": safe_schedule_id,
         "status": "QUEUED",
         "created_at": now,
         "updated_at": now,
@@ -4607,6 +4628,7 @@ def scan_job_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 
     item["auto_ingest"] = bool(item.get("auto_ingest"))
     item["scan_profile"] = item.get("scan_profile") or "balanced"
+    item["schedule_id"] = item.get("schedule_id") or ""
     item["status_json"] = decode_json_field(item.get("status_json"), {})
 
     return item
@@ -4644,6 +4666,7 @@ def query_scan_jobs(
             job_id,
             target,
             network_scope,
+            schedule_id,
             status,
             created_at,
             updated_at,
@@ -4909,6 +4932,150 @@ def dashboard_scan_schedules_payload(
     ]
 
 
+
+
+def scan_schedule_history_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+
+    history_item = {
+        "schedule_id": item.get("schedule_id") or "",
+        "name": item.get("name") or "",
+        "target": item.get("target") or "",
+        "network_scope": item.get("network_scope") or "",
+        "scan_profile": item.get("scan_profile") or "balanced",
+        "cadence_minutes": int(item.get("cadence_minutes") or 0),
+        "enabled": bool(item.get("enabled")),
+        "auto_ingest": bool(item.get("auto_ingest")),
+        "last_run_at": item.get("last_run_at"),
+        "next_run_at": item.get("next_run_at"),
+        "last_job_id": item.get("last_job_id") or "",
+        "last_status": item.get("last_status") or "",
+        "failure_count": int(item.get("failure_count") or 0),
+        "skip_count": int(item.get("skip_count") or 0),
+        "created_at": item.get("created_at"),
+        "updated_at": item.get("updated_at"),
+        "message": item.get("schedule_message") or "",
+        "job": None,
+    }
+
+    if item.get("job_id"):
+        history_item["job"] = {
+            "job_id": item.get("job_id") or "",
+            "target": item.get("job_target") or "",
+            "network_scope": item.get("job_network_scope") or "",
+            "schedule_id": item.get("job_schedule_id") or "",
+            "status": item.get("job_status") or "",
+            "created_at": item.get("job_created_at"),
+            "updated_at": item.get("job_updated_at"),
+            "started_at": item.get("job_started_at"),
+            "finished_at": item.get("job_finished_at"),
+            "netsniper_path": item.get("netsniper_path") or "",
+            "runs_dir": item.get("runs_dir") or "",
+            "scan_profile": item.get("job_scan_profile") or "balanced",
+            "bundle_path": item.get("bundle_path"),
+            "exit_code": item.get("exit_code"),
+            "auto_ingest": bool(item.get("job_auto_ingest")),
+            "stdout_log": item.get("stdout_log"),
+            "stderr_log": item.get("stderr_log"),
+            "status_json": decode_json_field(item.get("status_json"), {}),
+            "message": item.get("job_message") or "",
+        }
+
+    return history_item
+
+
+def query_scan_schedule_history(
+    connection: sqlite3.Connection,
+    limit: int = 50,
+    scope: str | None = None,
+) -> list[sqlite3.Row]:
+    safe_limit = max(1, min(int(limit or 50), 200))
+    clauses = []
+    params: list[Any] = []
+
+    if scope:
+        clauses.append("s.network_scope = ?")
+        params.append(scope)
+
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    params.append(safe_limit)
+
+    return connection.execute(
+        f"""
+        SELECT
+            s.schedule_id AS schedule_id,
+            s.name AS name,
+            s.target AS target,
+            s.network_scope AS network_scope,
+            s.scan_profile AS scan_profile,
+            s.cadence_minutes AS cadence_minutes,
+            s.enabled AS enabled,
+            s.auto_ingest AS auto_ingest,
+            s.last_run_at AS last_run_at,
+            s.next_run_at AS next_run_at,
+            s.last_job_id AS last_job_id,
+            s.last_status AS last_status,
+            s.failure_count AS failure_count,
+            s.skip_count AS skip_count,
+            s.created_at AS created_at,
+            s.updated_at AS updated_at,
+            s.message AS schedule_message,
+            j.job_id AS job_id,
+            j.target AS job_target,
+            j.network_scope AS job_network_scope,
+            j.schedule_id AS job_schedule_id,
+            j.status AS job_status,
+            j.created_at AS job_created_at,
+            j.updated_at AS job_updated_at,
+            j.started_at AS job_started_at,
+            j.finished_at AS job_finished_at,
+            j.netsniper_path AS netsniper_path,
+            j.runs_dir AS runs_dir,
+            j.scan_profile AS job_scan_profile,
+            j.bundle_path AS bundle_path,
+            j.exit_code AS exit_code,
+            j.auto_ingest AS job_auto_ingest,
+            j.stdout_log AS stdout_log,
+            j.stderr_log AS stderr_log,
+            j.status_json AS status_json,
+            j.message AS job_message
+        FROM scan_schedules s
+        LEFT JOIN scan_jobs j
+            ON j.schedule_id = s.schedule_id
+            OR j.job_id = s.last_job_id
+        {where}
+        ORDER BY
+            COALESCE(j.created_at, s.last_run_at, s.updated_at, s.created_at) DESC,
+            s.created_at DESC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+
+
+def dashboard_netsniper_schedule_history_payload(
+    connection: sqlite3.Connection,
+    limit: int = 50,
+    scope: str | None = None,
+) -> dict[str, Any]:
+    safe_limit = max(1, min(int(limit or 50), 200))
+
+    return {
+        "ok": True,
+        "generated_at": utc_now_text(),
+        "limit": safe_limit,
+        "scope": scope or "",
+        "history": [
+            scan_schedule_history_row_to_dict(row)
+            for row in query_scan_schedule_history(
+                connection,
+                limit=safe_limit,
+                scope=scope,
+            )
+        ],
+    }
+
+
 def dashboard_schedule_id_from_payload(payload: dict[str, Any]) -> str:
     schedule_id = str(payload.get("schedule_id") or "").strip()
 
@@ -5024,6 +5191,7 @@ def dashboard_netsniper_schedule_run_due_payload(
         "results": results,
         "schedules": dashboard_scan_schedules_payload(connection),
         "scan_jobs": dashboard_scan_jobs_payload(connection, limit=20),
+        "schedule_history": dashboard_netsniper_schedule_history_payload(connection, limit=25)["history"],
     }
 
 
@@ -5510,6 +5678,7 @@ def run_due_scan_schedules(
             runs_dir,
             auto_ingest=schedule["auto_ingest"],
             scan_profile=schedule["scan_profile"],
+            schedule_id=schedule["schedule_id"],
         )
         connection.commit()
 
@@ -22755,6 +22924,34 @@ def render_netsniper_page() -> str:
         </table>
       </div>
 
+      <h2>Schedule run history</h2>
+      <p>Read-only evidence view linking saved schedules to the guarded scan jobs they triggered.</p>
+      <div class="actions">
+        <button type="button" id="netsniper-schedule-history-refresh">Refresh schedule history</button>
+        <a href="/api/netsniper/schedule-history">View raw schedule history JSON</a>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Schedule</th>
+              <th>Schedule status</th>
+              <th>Target</th>
+              <th>Profile</th>
+              <th>Last run</th>
+              <th>Next run</th>
+              <th>Job</th>
+              <th>Job status</th>
+              <th>Finished</th>
+              <th>Message</th>
+            </tr>
+          </thead>
+          <tbody id="netsniper-schedule-history-body">
+            <tr><td colspan="10">Loading schedule history…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
       <h2>Recent scan jobs</h2>
       <p>Recent guarded NetSniper scan jobs from the DeltaAegis scan job ledger.</p>
       <div class="table-wrap">
@@ -23047,6 +23244,73 @@ def render_netsniper_page() -> str:
       }).join("");
     }
 
+
+    function renderNetSniperScheduleHistory(payload) {
+      const tbody = document.getElementById("netsniper-schedule-history-body");
+      if (!tbody) { return; }
+
+      const rows = Array.isArray(payload) ? payload : (payload.history || []);
+
+      if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="10">No schedule history found.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = rows.map(function (item) {
+        const job = item.job || {};
+        const scheduleStatus = item.last_status || (item.enabled ? "ENABLED" : "DISABLED");
+        const jobId = job.job_id || item.last_job_id || "-";
+        const jobStatus = job.status || "-";
+        const finishedAt = job.finished_at || "-";
+        const message = job.message || item.message || "-";
+
+        return `
+          <tr>
+            <td><code>${escapeHtml(item.schedule_id || "-")}</code><br>${escapeHtml(item.name || "-")}</td>
+            <td>${escapeHtml(scheduleStatus)}</td>
+            <td>${escapeHtml(item.target || "-")}</td>
+            <td>${escapeHtml(item.scan_profile || "balanced")}</td>
+            <td>${escapeHtml(item.last_run_at || "-")}</td>
+            <td>${escapeHtml(item.next_run_at || "-")}</td>
+            <td><code>${escapeHtml(jobId)}</code></td>
+            <td>${escapeHtml(jobStatus)}</td>
+            <td>${escapeHtml(finishedAt)}</td>
+            <td>${escapeHtml(message)}</td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    async function loadNetSniperScheduleHistory() {
+      const tbody = document.getElementById("netsniper-schedule-history-body");
+
+      try {
+        const response = await fetch("/api/netsniper/schedule-history?limit=50", {
+          credentials: "same-origin",
+          cache: "no-store"
+        });
+
+        if (response.status === 401 || response.status === 403) {
+          return;
+        }
+
+        if (!response.ok) {
+          if (tbody) {
+            tbody.innerHTML = `<tr><td colspan="10">Schedule history lookup failed with HTTP ${escapeHtml(response.status)}</td></tr>`;
+          }
+          return;
+        }
+
+        const payload = await response.json();
+        renderNetSniperScheduleHistory(payload);
+      } catch (error) {
+        if (tbody) {
+          tbody.innerHTML = `<tr><td colspan="10">Schedule history lookup failed: ${escapeHtml(error.message || error)}</td></tr>`;
+        }
+      }
+    }
+
+
     async function loadNetSniperSchedules() {
       try {
         const response = await fetch("/api/netsniper/schedules", {
@@ -23200,8 +23464,13 @@ def render_netsniper_page() -> str:
           renderNetSniperScanJobs(payload.scan_jobs);
         }
 
+        if (payload.schedule_history) {
+          renderNetSniperScheduleHistory({history: payload.schedule_history});
+        }
+
         await loadNetSniperSchedules();
         await loadNetSniperScanJobs();
+        await loadNetSniperScheduleHistory();
       } catch (error) {
         status.textContent = `Schedule runner failed: ${error.message || error}`;
         output.textContent = String(error.message || error);
@@ -23313,11 +23582,16 @@ def render_netsniper_page() -> str:
       loadNetSniperStatus();
       loadNetSniperScanJobs();
       loadNetSniperSchedules();
+      loadNetSniperScheduleHistory();
     });
     document.getElementById("netsniper-import-latest").addEventListener("click", importLatestNetSniperRun);
     document.getElementById("netsniper-scan-start-form").addEventListener("submit", startNetSniperScan);
     document.getElementById("netsniper-schedule-create-form").addEventListener("submit", createNetSniperSchedule);
-    document.getElementById("netsniper-schedules-refresh").addEventListener("click", loadNetSniperSchedules);
+    document.getElementById("netsniper-schedules-refresh").addEventListener("click", function () {
+      loadNetSniperSchedules();
+      loadNetSniperScheduleHistory();
+    });
+    document.getElementById("netsniper-schedule-history-refresh").addEventListener("click", loadNetSniperScheduleHistory);
     document.getElementById("netsniper-schedules-run-due").addEventListener("click", runDueNetSniperSchedules);
     document.getElementById("netsniper-hourly-monitoring-enable").addEventListener("click", function () { setHourlyNetSniperMonitoring(true); });
     document.getElementById("netsniper-hourly-monitoring-disable").addEventListener("click", function () { setHourlyNetSniperMonitoring(false); });
@@ -23325,8 +23599,10 @@ def render_netsniper_page() -> str:
     loadNetSniperStatus();
     loadNetSniperScanJobs();
     loadNetSniperSchedules();
+    loadNetSniperScheduleHistory();
     window.setInterval(loadNetSniperScanJobs, 5000);
     window.setInterval(loadNetSniperSchedules, 15000);
+    window.setInterval(loadNetSniperScheduleHistory, 15000);
   </script>
 </body>
 </html>"""
@@ -23725,6 +24001,26 @@ def command_dashboard(args):
                             "ok": True,
                             "schedules": dashboard_scan_schedules_payload(connection),
                         },
+                    )
+                finally:
+                    connection.close()
+
+                return
+
+            if route == "/api/netsniper/schedule-history":
+                query = urllib.parse.parse_qs(parsed.query or "")
+                limit = int(query.get("limit", ["50"])[0] or 50)
+                scope = query.get("scope", [""])[0].strip() or None
+                connection = self.open_connection()
+
+                try:
+                    dashboard_json_response(
+                        self,
+                        dashboard_netsniper_schedule_history_payload(
+                            connection,
+                            limit=limit,
+                            scope=scope,
+                        ),
                     )
                 finally:
                     connection.close()
