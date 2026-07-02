@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.36.0: Dashboard operations automation, local-time dashboard rendering, automatic scheduled NetSniper worker controls, and ADMIN-only telemetry reset.
+"""DeltaAegis v0.37.0: Operator evidence review, schedule run history, telemetry reset audit visibility, latest network changes, and scan freshness warnings.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -18584,7 +18584,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.36 Dashboard Operations Automation</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.37 Operator Evidence Review</span></div>
     </div>
   </header>
 
@@ -26343,7 +26343,7 @@ def command_validations(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.36.0 — Dashboard Operations Automation, local dashboard time formatting, automatic scheduled NetSniper worker controls, ADMIN-only telemetry reset, TrueAegis orchestration, validation correlation, v3 bundle ingest, RBAC, current-state SIEM dashboard, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.37.0 — Operator Evidence Review, schedule run history, telemetry reset audit visibility, latest network changes, scan freshness warnings, TrueAegis orchestration, validation correlation, v3 bundle ingest, RBAC, current-state SIEM dashboard, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)

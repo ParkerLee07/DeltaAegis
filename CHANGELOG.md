@@ -1,3 +1,17 @@
+## DeltaAegis v0.37.0 — Operator Evidence Review
+
+- Added `validate_v0_37_release.sh` as the full v0.37 release gate for metadata, dashboard copy, release safety checks, and the v0.37 checkpoint validator suite.
+
+- Added schedule-driven NetSniper run history visibility with `/api/netsniper/schedule-history`, durable schedule-to-job linkage, and a dashboard schedule-history table.
+
+- Added telemetry reset audit visibility with `/api/telemetry-cleanup/audit-events` and a read-only **Recent Telemetry Reset Audit Events** panel on `/operator/reset` filtered to `TELEMETRY_CLEANUP_CLEAR_ALL`.
+
+- Added `/api/latest-network-changes` and a dashboard **Latest Network Changes** panel summarizing delta events from the latest accepted scan without changing event generation, alert state, or risk scoring.
+
+- Added `/api/scan-freshness` and a dashboard **Scan Freshness** panel with `FRESH`, `AGING`, `STALE`, and `NO_ACCEPTED_SCAN` states based on the latest accepted scan timestamp.
+
+- Preserved the v0.36 dashboard operations foundation: local dashboard time formatting, scheduled NetSniper worker controls, guarded telemetry cleanup, and the dedicated ADMIN-only `/operator/reset` page.
+
 ## DeltaAegis v0.36.0 — Dashboard Operations Automation
 
 - Added `validate_v0_36_release.sh` as the full v0.36 release gate for metadata, dashboard copy, reset-route safety, and the v0.36 validator suite.

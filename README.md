@@ -4,13 +4,14 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.36.0
+## Current Release — v0.37.0
 
-**DeltaAegis v0.36.0 — Dashboard Operations Automation**
+**DeltaAegis v0.37.0 — Operator Evidence Review**
 
-DeltaAegis v0.36.0 focuses on day-to-day dashboard operations. It adds local dashboard time formatting, automatic scheduled NetSniper scan worker controls, and an ADMIN-only telemetry reset workflow that can preview and clear imported telemetry while preserving users, sessions, API tokens, scan schedules, audit history, and operator-authored asset context.
+DeltaAegis v0.37.0 improves operator evidence review on top of the v0.36 dashboard-operations foundation. It adds schedule-driven NetSniper run history, telemetry reset audit visibility, latest-network-change summaries, and scan-freshness warnings for the latest accepted scan.
 
-This release keeps the v0.35 TrueAegis orchestration foundation available, but does not enable automatic TrueAegis execution from scheduled scans by default. The dedicated `/operator/reset` page intentionally separates destructive maintenance from the main operator session page.
+This release keeps destructive telemetry cleanup isolated on the ADMIN-only `/operator/reset` page, preserves scheduled scan controls, and does not enable automatic TrueAegis execution from scheduled scans by default.
+
 ## What DeltaAegis Does
 
 DeltaAegis helps answer:
@@ -171,11 +172,13 @@ deltaaegis ingest --runs-dir ~/NetSniper/runs
 
 ## Security Boundary
 
-DeltaAegis v0.28.0 does not expose arbitrary shell command execution from the dashboard.
+DeltaAegis v0.37.0 does not expose arbitrary shell command execution from the dashboard.
+
+Dashboard NetSniper scan controls use guarded job records and fixed argument-vector execution. Scan launch and schedule operations remain protected by the dashboard RBAC policy, and telemetry cleanup remains isolated behind the ADMIN-only `/operator/reset` maintenance page with explicit `DELETE TELEMETRY` confirmation.
 
 The `/api/netsniper/import-latest` endpoint imports completed telemetry and is protected by the `workflow.write` permission. ANALYST and ADMIN users can perform workflow write actions.
 
-Raw NetSniper scan execution from the dashboard is intentionally deferred to a future guarded job-control release.
+Automatic TrueAegis execution from scheduled NetSniper scans is not enabled by default.
 
 ## Core CLI Commands
 
