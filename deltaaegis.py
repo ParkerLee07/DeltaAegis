@@ -5980,6 +5980,11 @@ def run_due_scan_schedules(
                 final_job,
             )
             connection.commit()
+            trueaegis_followup_plan = trueaegis_followup_plan_for_schedule(
+                connection,
+                schedule,
+                final_job,
+            )
             results.append(
                 {
                     "schedule_id": schedule["schedule_id"],
@@ -5987,6 +5992,7 @@ def run_due_scan_schedules(
                     "action": "failed",
                     "job": final_job,
                     "schedule": updated,
+                    "trueaegis_followup": trueaegis_followup_plan,
                 }
             )
             continue
@@ -5999,6 +6005,12 @@ def run_due_scan_schedules(
         )
         connection.commit()
 
+        trueaegis_followup_plan = trueaegis_followup_plan_for_schedule(
+            connection,
+            schedule,
+            final_job,
+        )
+
         results.append(
             {
                 "schedule_id": schedule["schedule_id"],
@@ -6006,6 +6018,7 @@ def run_due_scan_schedules(
                 "action": "ran",
                 "job": final_job,
                 "schedule": updated,
+                "trueaegis_followup": trueaegis_followup_plan,
             }
         )
 
@@ -11870,6 +11883,157 @@ def active_trueaegis_job_exists(connection: sqlite3.Connection) -> bool:
     ).fetchone()
 
     return row is not None
+
+
+def trueaegis_followup_plan_for_schedule(
+    connection: sqlite3.Connection,
+    schedule: dict[str, Any],
+    job: dict[str, Any],
+    trueaegis_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Return a read-only TrueAegis follow-up plan for a scheduled NetSniper job.
+
+    This planner is intentionally side-effect free. It does not create a
+    TrueAegis job, start a thread, import validation results, or modify risk.
+    """
+
+    schedule_id = str(schedule.get("schedule_id") or "").strip()
+    job_id = str(job.get("job_id") or "").strip()
+    status = str(job.get("status") or "").strip().upper()
+    network_scope = str(
+        job.get("network_scope")
+        or schedule.get("network_scope")
+        or schedule.get("target")
+        or ""
+    ).strip()
+    resolved_trueaegis_path = resolve_trueaegis_executable(trueaegis_path)
+
+    plan = {
+        "schema_version": "deltaaegis-trueaegis-followup-plan-v1",
+        "eligible": False,
+        "outcome": "",
+        "schedule_id": schedule_id,
+        "job_id": job_id,
+        "scan_id": job.get("scan_id") or "",
+        "network_scope": network_scope,
+        "manifest_path": None,
+        "manifest_exists": False,
+        "trueaegis_path": str(resolved_trueaegis_path),
+        "trueaegis_exists": resolved_trueaegis_path.is_file(),
+        "command_preview": [],
+        "command_preview_kind": "argv",
+        "execution_enabled": False,
+        "message": "",
+    }
+
+    def finish(outcome: str, message: str) -> dict[str, Any]:
+        plan["outcome"] = outcome
+        plan["message"] = message
+        return plan
+
+    if not bool(schedule.get("run_trueaegis_after_ingest")):
+        return finish(
+            "disabled_by_schedule",
+            "TrueAegis follow-up is disabled for this schedule.",
+        )
+
+    if not bool(schedule.get("auto_ingest")) or not bool(job.get("auto_ingest", True)):
+        return finish(
+            "auto_ingest_disabled",
+            "TrueAegis follow-up requires scheduled NetSniper auto-ingest.",
+        )
+
+    if status != "COMPLETED":
+        return finish(
+            "scan_not_completed",
+            f"TrueAegis follow-up requires a completed NetSniper job; status={status or 'UNKNOWN'}.",
+        )
+
+    status_json = job.get("status_json") or {}
+    if isinstance(status_json, str):
+        try:
+            status_json = json.loads(status_json or "{}")
+        except json.JSONDecodeError:
+            status_json = {}
+
+    ingest_status_candidates = [
+        status_json.get("quality_status") if isinstance(status_json, dict) else None,
+        status_json.get("ingest_status") if isinstance(status_json, dict) else None,
+        status_json.get("auto_ingest_status") if isinstance(status_json, dict) else None,
+        status_json.get("quality") if isinstance(status_json, dict) else None,
+    ]
+
+    normalized_ingest_statuses = {
+        str(item or "").strip().upper()
+        for item in ingest_status_candidates
+        if str(item or "").strip()
+    }
+
+    if normalized_ingest_statuses and "ACCEPTED" not in normalized_ingest_statuses:
+        return finish(
+            "ingest_not_accepted",
+            "TrueAegis follow-up requires an accepted DeltaAegis ingest result.",
+        )
+
+    manifest_candidates: list[Path] = []
+
+    for value in (
+        job.get("manifest_path"),
+        job.get("manifest"),
+        status_json.get("manifest_path") if isinstance(status_json, dict) else None,
+        status_json.get("manifest") if isinstance(status_json, dict) else None,
+    ):
+        raw = str(value or "").strip()
+        if raw:
+            manifest_candidates.append(Path(raw).expanduser())
+
+    bundle_value = str(job.get("bundle_path") or "").strip()
+    if bundle_value:
+        bundle_path = Path(bundle_value).expanduser()
+        if bundle_path.name == "manifest.json":
+            manifest_candidates.append(bundle_path)
+        else:
+            manifest_candidates.append(bundle_path / "manifest.json")
+
+    manifest_path: Path | None = None
+
+    for candidate in manifest_candidates:
+        if candidate.name == "manifest.json" and candidate.is_file():
+            manifest_path = candidate
+            break
+
+    if manifest_path is None:
+        return finish(
+            "missing_manifest",
+            "TrueAegis follow-up requires a NetSniper manifest.json from the completed scan.",
+        )
+
+    plan["manifest_path"] = str(manifest_path)
+    plan["manifest_exists"] = True
+
+    if active_trueaegis_job_exists(connection):
+        return finish(
+            "active_trueaegis_job_exists",
+            "A TrueAegis validation job is already queued or running.",
+        )
+
+    try:
+        command_preview = build_trueaegis_validation_command(
+            trueaegis_path=resolved_trueaegis_path,
+            manifest_path=manifest_path,
+        )
+    except DeltaAegisError as exc:
+        return finish(
+            "trueaegis_not_ready",
+            str(exc),
+        )
+
+    plan["eligible"] = True
+    plan["command_preview"] = command_preview
+    return finish(
+        "eligible",
+        "TrueAegis follow-up is eligible to be queued by a later v0.38 checkpoint.",
+    )
 
 
 def latest_trueaegis_validation_results_path(
