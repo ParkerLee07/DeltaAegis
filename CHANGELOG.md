@@ -1,3 +1,10 @@
+## DeltaAegis v0.36.0 — Dashboard Operations Automation
+
+- Added local dashboard time formatting helpers that convert ISO timestamps into readable local computer time.
+- Added timezone-aware timestamp cells that preserve raw ISO values in HTML tooltips.
+- Updated scan and TrueAegis job time display to use local readable time formatting.
+
+
 ## DeltaAegis v0.35.0 — TrueAegis Orchestration
 
 - Added dashboard orchestration controls for TrueAegis readiness, latest accepted scan context, guarded run action, and recent job visibility.

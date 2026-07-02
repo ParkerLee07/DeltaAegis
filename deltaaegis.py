@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.35.0: TrueAegis orchestration, guarded validation execution, automatic validation import/correlation, dashboard/API visibility, and release validation.
+"""DeltaAegis v0.36.0: TrueAegis orchestration, guarded validation execution, automatic validation import/correlation, dashboard/API visibility, and release validation.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -18257,6 +18257,86 @@ def dashboard_index_html_base_v025_operator_link():
       return `<span class="${identityClass(label)}">${esc(label)}</span>`;
     }
 
+
+    function dashboardLocalTimeZone() {
+      try {
+        return Intl.DateTimeFormat().resolvedOptions().timeZone || "Local";
+      } catch (error) {
+        return "Local";
+      }
+    }
+
+    function parseDashboardDateTime(value) {
+      if (value === null || value === undefined || value === "") {
+        return null;
+      }
+
+      const raw = String(value).trim();
+
+      if (!raw || raw === "-") {
+        return null;
+      }
+
+      const parsed = new Date(raw);
+
+      if (Number.isNaN(parsed.getTime())) {
+        return null;
+      }
+
+      return parsed;
+    }
+
+    function dashboardTimeZoneAbbreviation(dateValue) {
+      const date = dateValue instanceof Date ? dateValue : parseDashboardDateTime(dateValue);
+
+      if (!date) {
+        return dashboardLocalTimeZone();
+      }
+
+      try {
+        const parts = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" }).formatToParts(date);
+        const zone = parts.find(part => part.type === "timeZoneName");
+
+        if (zone && zone.value) {
+          return zone.value;
+        }
+      } catch (error) {
+        return dashboardLocalTimeZone();
+      }
+
+      return dashboardLocalTimeZone();
+    }
+
+    function formatDashboardDateTime(value) {
+      const date = parseDashboardDateTime(value);
+
+      if (!date) {
+        return value === null || value === undefined || value === "" ? "—" : String(value);
+      }
+
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, "0");
+      const day = String(date.getDate()).padStart(2, "0");
+      let hour = date.getHours();
+      const minute = String(date.getMinutes()).padStart(2, "0");
+      const meridiem = hour >= 12 ? "PM" : "AM";
+      hour = hour % 12 || 12;
+
+      return `${year}-${month}-${day} ${hour}:${minute} ${meridiem} ${dashboardTimeZoneAbbreviation(date)}`;
+    }
+
+    function formatDashboardDateTimeCell(value) {
+      const raw = value === null || value === undefined || value === "" ? "" : String(value);
+      const formatted = formatDashboardDateTime(value);
+
+      if (!raw || formatted === raw) {
+        return esc(formatted);
+      }
+
+      return `<time datetime="${esc(raw)}" title="${esc(raw)}">${esc(formatted)}</time>`;
+    }
+
+
     function parseScanTime(value) {
       if (!value) return null;
 
@@ -18272,8 +18352,17 @@ def dashboard_index_html_base_v025_operator_link():
     }
 
     function scanTimestamp(scan) {
-      if (!scan) return null;
-      return scan.created_at || scan.imported_at || scan.last_seen_at || null;
+      if (!scan) {
+        return "—";
+      }
+
+      return formatDashboardDateTime(
+        scan.created_at ||
+        scan.timestamp ||
+        scan.scan_started_at ||
+        scan.imported_at ||
+        ""
+      );
     }
 
     function scanFreshness(scan) {
@@ -20265,7 +20354,7 @@ def dashboard_index_html_base_v025_operator_link():
       <td>${esc(row.ip_address || row.ip || "-")}</td>
       <td>${esc(row.mac_address || row.mac || "-")}</td>
       <td>${esc(row.identity_confidence || row.identity_state || "-")}</td>
-      <td>${esc(row.created_at || "-")}</td>
+      <td>${formatDashboardDateTimeCell(row.created_at)}</td>
       <td>${esc(row.summary || "-")}</td>
     </tr>
   `).join("");
@@ -20594,7 +20683,7 @@ def dashboard_index_html_base_v025_operator_link():
       const rows = items.length
         ? items.map(row => `
             <tr>
-              <td><code>${esc(row.created_at || "-")}</code></td>
+              <td><code>${formatDashboardDateTimeCell(row.created_at)}</code></td>
               <td>${esc(row.action || "-")}</td>
               <td>${esc(row.actor_username || "-")}</td>
               <td>${esc(row.actor_role || "-")}</td>
@@ -20708,7 +20797,7 @@ def dashboard_index_html_base_v025_operator_link():
           <td>${deltaAegisTrueAegisOrchestrationEsc(job.imported_observations || 0)}</td>
           <td>${deltaAegisTrueAegisOrchestrationEsc(job.correlation_count || 0)}</td>
           <td><code>${deltaAegisTrueAegisOrchestrationEsc(job.exit_code === null || job.exit_code === undefined ? "-" : job.exit_code)}</code></td>
-          <td>${deltaAegisTrueAegisOrchestrationEsc(job.completed_at || job.started_at || job.created_at || "-")}</td>
+          <td>${formatDashboardDateTimeCell(job.completed_at || job.started_at || job.created_at)}</td>
           <td>${deltaAegisTrueAegisOrchestrationEsc(job.message || "-")}</td>
         </tr>
       `).join("");
