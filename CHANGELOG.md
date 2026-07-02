@@ -1,5 +1,7 @@
 ## DeltaAegis v0.36.0 — Dashboard Operations Automation
 
+- Added ADMIN-only telemetry cleanup preview and execution APIs with an operator maintenance panel, explicit `DELETE TELEMETRY` confirmation, and access-audit logging while preserving users, sessions, API tokens, scan schedules, audit logs, and operator-authored context.
+
 - Added local dashboard time formatting helpers that convert ISO timestamps into readable local computer time.
 - Added timezone-aware timestamp cells that preserve raw ISO values in HTML tooltips.
 - Updated scan and TrueAegis job time display to use local readable time formatting.

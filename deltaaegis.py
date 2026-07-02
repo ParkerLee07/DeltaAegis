@@ -66,6 +66,7 @@ ACCESS_RBAC_PERMISSIONS = {
     "admin.users.read": "ADMIN",
     "admin.users.write": "ADMIN",
     "admin.audit.read": "ADMIN",
+    "admin.telemetry.cleanup": "ADMIN",
     "workflow.write": "ANALYST",
     "scan.start": "ADMIN",
 }
@@ -85,6 +86,8 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("GET", "/api/session", "session.read"),
     ("GET", "/api/admin/users", "admin.users.read"),
     ("GET", "/api/access-audit", "admin.audit.read"),
+    ("GET", "/api/telemetry-cleanup/preview", "admin.telemetry.cleanup"),
+    ("POST", "/api/telemetry-cleanup/clear-all", "admin.telemetry.cleanup"),
     ("POST", "/api/admin/users", "admin.users.write"),
     ("POST_PREFIX", "/api/admin/users/", "admin.users.write"),
     ("POST", "/api/ticket-status", "workflow.write"),
@@ -10857,6 +10860,50 @@ def telemetry_cleanup_clear_all(
             "schedules, audit logs, and operator-authored context were preserved."
         ),
     }
+
+
+
+def dashboard_telemetry_cleanup_preview_payload(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    return telemetry_cleanup_preview(connection)
+
+
+def dashboard_telemetry_cleanup_clear_all_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+    actor: dict[str, Any] | None = None,
+    source_ip: str | None = None,
+    user_agent: str | None = None,
+) -> dict[str, Any]:
+    dry_run = dashboard_bool_from_payload(payload.get("dry_run"), False)
+    confirmation = str(payload.get("confirmation") or "")
+
+    result = telemetry_cleanup_clear_all(
+        connection,
+        confirmation=confirmation,
+        dry_run=dry_run,
+    )
+
+    if not result.get("dry_run"):
+        record_access_audit_event(
+            connection,
+            actor or {},
+            action="TELEMETRY_CLEANUP_CLEAR_ALL",
+            target_type="telemetry",
+            target_key="all",
+            source_ip=source_ip,
+            user_agent=user_agent,
+            details={
+                "total_deleted_rows": result.get("total_deleted_rows", 0),
+                "deleted_rows": result.get("deleted_rows", {}),
+                "protected_tables_preserved": result.get("protected_tables_preserved"),
+                "protected_tables_after": result.get("protected_tables_after", {}),
+                "confirmation_phrase_required": TELEMETRY_CLEANUP_CONFIRMATION,
+            },
+        )
+
+    return result
 
 
 def dashboard_scopes_payload(connection):
@@ -21640,6 +21687,178 @@ def dashboard_session_payload(actor: dict[str, Any] | None) -> dict[str, Any]:
 
 
 
+
+_deltaaegis_operator_session_shell_html_v036_telemetry_cleanup_base = dashboard_operator_session_shell_html
+
+
+def dashboard_operator_session_shell_html() -> str:
+    html_text = _deltaaegis_operator_session_shell_html_v036_telemetry_cleanup_base()
+
+    if 'id="deltaaegis-telemetry-cleanup-panel"' in html_text:
+        return html_text
+
+    panel = """
+      <h2>Telemetry Cleanup</h2>
+      <p class="muted">ADMIN-only maintenance for deleting imported scan telemetry while preserving access users, sessions, API tokens, scan schedules, audit history, and operator-authored asset context.</p>
+      <div id="deltaaegis-telemetry-cleanup-panel" class="status">
+        Loading telemetry cleanup preview…
+      </div>
+      <div class="actions">
+        <button type="button" id="telemetry-cleanup-preview">Preview cleanup</button>
+        <input id="telemetry-cleanup-confirmation" autocomplete="off" placeholder="Type DELETE TELEMETRY to confirm">
+        <button type="button" class="danger" id="telemetry-cleanup-clear-all">Clear imported telemetry</button>
+      </div>
+      <div class="table-wrap" id="telemetry-cleanup-tables-wrap" hidden>
+        <table>
+          <thead>
+            <tr><th>Table</th><th>Rows</th><th>Cleanup behavior</th></tr>
+          </thead>
+          <tbody id="telemetry-cleanup-tables-body"></tbody>
+        </table>
+      </div>
+    """
+
+    script = """
+  <script id="deltaaegis-telemetry-cleanup-script">
+    (function () {
+      function cleanupText(value) {
+        if (value === null || value === undefined || value === "") { return "—"; }
+        return String(value);
+      }
+
+      function cleanupEscape(value) {
+        return cleanupText(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      function cleanupRowsFromObject(rows, behavior) {
+        return Object.entries(rows || {})
+          .sort(function (a, b) { return a[0].localeCompare(b[0]); })
+          .map(function (entry) {
+            return "<tr><td><code>" + cleanupEscape(entry[0]) + "</code></td><td>" + cleanupEscape(entry[1]) + "</td><td>" + cleanupEscape(behavior) + "</td></tr>";
+          })
+          .join("");
+      }
+
+      function renderTelemetryCleanup(payload) {
+        const panel = document.getElementById("deltaaegis-telemetry-cleanup-panel");
+        const wrap = document.getElementById("telemetry-cleanup-tables-wrap");
+        const body = document.getElementById("telemetry-cleanup-tables-body");
+
+        if (!panel || !body || !wrap) { return; }
+
+        const totalRows = payload.total_rows ?? payload.total_deleted_rows ?? 0;
+        const protectedRows = payload.protected_total_rows ?? Object.values(payload.protected_tables || payload.protected_tables_after || {}).reduce(function (sum, value) {
+          return sum + Number(value || 0);
+        }, 0);
+
+        panel.textContent = [
+          payload.message || "Telemetry cleanup preview loaded.",
+          "Cleanup rows: " + totalRows,
+          "Protected rows: " + protectedRows,
+          "Confirmation phrase: " + (payload.confirmation_required || "DELETE TELEMETRY")
+        ].join("\\n");
+
+        const cleanupTables = payload.tables || payload.tables_after || payload.deleted_rows || {};
+        const protectedTables = payload.protected_tables || payload.protected_tables_after || {};
+
+        body.innerHTML =
+          cleanupRowsFromObject(cleanupTables, payload.dry_run === false ? "deleted/now empty" : "will be deleted") +
+          cleanupRowsFromObject(protectedTables, "preserved");
+
+        wrap.hidden = false;
+      }
+
+      async function loadTelemetryCleanupPreview() {
+        const panel = document.getElementById("deltaaegis-telemetry-cleanup-panel");
+
+        try {
+          const response = await fetch("/api/telemetry-cleanup/preview", {
+            credentials: "same-origin",
+            cache: "no-store"
+          });
+
+          if (response.status === 401) { window.location.href = "/login"; return; }
+          if (response.status === 403) {
+            if (panel) { panel.textContent = "ADMIN role required for telemetry cleanup."; }
+            return;
+          }
+
+          const payload = await response.json();
+          if (!response.ok) { throw new Error(payload.message || payload.error || "Preview failed."); }
+          renderTelemetryCleanup(payload);
+        } catch (error) {
+          if (panel) { panel.textContent = "Telemetry cleanup preview failed: " + (error.message || error); }
+        }
+      }
+
+      async function clearTelemetry() {
+        const panel = document.getElementById("deltaaegis-telemetry-cleanup-panel");
+        const confirmation = document.getElementById("telemetry-cleanup-confirmation");
+
+        if (!confirmation || confirmation.value.trim() !== "DELETE TELEMETRY") {
+          if (panel) { panel.textContent = "Type DELETE TELEMETRY exactly before clearing imported telemetry."; }
+          return;
+        }
+
+        try {
+          const response = await fetch("/api/telemetry-cleanup/clear-all", {
+            method: "POST",
+            credentials: "same-origin",
+            cache: "no-store",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ confirmation: confirmation.value.trim(), dry_run: false })
+          });
+
+          if (response.status === 401) { window.location.href = "/login"; return; }
+          const payload = await response.json();
+          if (!response.ok) { throw new Error(payload.message || payload.error || "Cleanup failed."); }
+
+          confirmation.value = "";
+          renderTelemetryCleanup(payload);
+        } catch (error) {
+          if (panel) { panel.textContent = "Telemetry cleanup failed: " + (error.message || error); }
+        }
+      }
+
+      function wireTelemetryCleanup() {
+        const preview = document.getElementById("telemetry-cleanup-preview");
+        const clear = document.getElementById("telemetry-cleanup-clear-all");
+
+        if (preview) { preview.addEventListener("click", loadTelemetryCleanupPreview); }
+        if (clear) { clear.addEventListener("click", clearTelemetry); }
+
+        if (document.getElementById("deltaaegis-telemetry-cleanup-panel")) {
+          loadTelemetryCleanupPreview();
+        }
+      }
+
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", wireTelemetryCleanup);
+      } else {
+        wireTelemetryCleanup();
+      }
+    })();
+  </script>
+"""
+
+    if "</section>" in html_text:
+        html_text = html_text.replace("</section>", panel + "\n    </section>", 1)
+    else:
+        html_text = html_text.replace("</body>", panel + "\n</body>", 1)
+
+    if "</body>" in html_text:
+        html_text = html_text.replace("</body>", script + "\n</body>", 1)
+    else:
+        html_text += script
+
+    return html_text
+
+
 class DashboardAdminUserActionError(DeltaAegisError):
     def __init__(self, message: str, status_code: int = 400):
         super().__init__(message)
@@ -23353,6 +23572,22 @@ def command_dashboard(args):
                 )
                 return
 
+            if route == "/api/telemetry-cleanup/preview":
+                if not self.require_permission("admin.telemetry.cleanup"):
+                    return
+
+                connection = self.open_connection()
+
+                try:
+                    dashboard_json_response(
+                        self,
+                        dashboard_telemetry_cleanup_preview_payload(connection),
+                    )
+                finally:
+                    connection.close()
+
+                return
+
             try:
                 limit = int(query.get("limit", ["20"])[0])
             except ValueError:
@@ -23800,6 +24035,41 @@ def command_dashboard(args):
                     connection.close()
 
                 dashboard_json_response(self, result)
+                return
+
+            if route == "/api/telemetry-cleanup/clear-all":
+                if not self.require_permission("admin.telemetry.cleanup"):
+                    return
+
+                try:
+                    payload = dashboard_read_request_payload(self)
+                    connection = self.open_connection()
+
+                    try:
+                        result = dashboard_telemetry_cleanup_clear_all_payload(
+                            connection,
+                            payload,
+                            actor=getattr(self, "current_actor", None),
+                            source_ip=self.client_address[0] if self.client_address else None,
+                            user_agent=self.headers.get("User-Agent", ""),
+                        )
+                        connection.commit()
+                    finally:
+                        connection.close()
+
+                    dashboard_json_response(self, result)
+                except DeltaAegisError as exc:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "telemetry_cleanup_failed",
+                            "message": str(exc),
+                            "confirmation_required": TELEMETRY_CLEANUP_CONFIRMATION,
+                        },
+                        status=400,
+                    )
+
                 return
 
             if route in {
