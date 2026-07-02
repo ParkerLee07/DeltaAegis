@@ -1,3 +1,16 @@
+## DeltaAegis v0.36.0 — Dashboard Operations Automation
+
+- Added `validate_v0_36_release.sh` as the full v0.36 release gate for metadata, dashboard copy, reset-route safety, and the v0.36 validator suite.
+
+- Moved telemetry reset controls to a dedicated ADMIN-only `/operator/reset` maintenance page and kept the main operator page limited to a link.
+
+- Added ADMIN-only telemetry cleanup preview and execution APIs with an operator maintenance panel, explicit `DELETE TELEMETRY` confirmation, and access-audit logging while preserving users, sessions, API tokens, scan schedules, audit logs, and operator-authored context.
+
+- Added local dashboard time formatting helpers that convert ISO timestamps into readable local computer time.
+- Added timezone-aware timestamp cells that preserve raw ISO values in HTML tooltips.
+- Updated scan and TrueAegis job time display to use local readable time formatting.
+
+
 ## DeltaAegis v0.35.0 — TrueAegis Orchestration
 
 - Added dashboard orchestration controls for TrueAegis readiness, latest accepted scan context, guarded run action, and recent job visibility.

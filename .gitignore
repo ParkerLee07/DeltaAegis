@@ -49,3 +49,6 @@ deltaaegis.py.backup-v*
 
 # DeltaAegis local scan runtime logs
 scan-logs/
+
+# DeltaAegis TrueAegis runtime logs
+trueaegis-logs/
