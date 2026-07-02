@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.37.0: Operator evidence review, schedule run history, telemetry reset audit visibility, latest network changes, and scan freshness warnings.
+"""DeltaAegis v0.38.0-dev: TrueAegis follow-up automation planning on top of v0.37 operator evidence review.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -569,6 +569,7 @@ CREATE TABLE IF NOT EXISTS scan_schedules (
     cadence_minutes INTEGER NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
     auto_ingest INTEGER NOT NULL DEFAULT 1,
+    run_trueaegis_after_ingest INTEGER NOT NULL DEFAULT 0,
     last_run_at TEXT,
     next_run_at TEXT,
     last_job_id TEXT,
@@ -1508,6 +1509,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
     ensure_column(connection, "asset_observations", "identity_class", "identity_class TEXT NOT NULL DEFAULT 'IP_ONLY'")
     ensure_column(connection, "scan_jobs", "scan_profile", "scan_profile TEXT NOT NULL DEFAULT 'balanced'")
     ensure_column(connection, "scan_jobs", "schedule_id", "schedule_id TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "scan_schedules", "run_trueaegis_after_ingest", "run_trueaegis_after_ingest INTEGER NOT NULL DEFAULT 0")
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_scan_jobs_schedule_id
@@ -5013,6 +5015,7 @@ def query_scan_schedule_history(
             s.cadence_minutes AS cadence_minutes,
             s.enabled AS enabled,
             s.auto_ingest AS auto_ingest,
+            s.run_trueaegis_after_ingest AS run_trueaegis_after_ingest,
             s.last_run_at AS last_run_at,
             s.next_run_at AS next_run_at,
             s.last_job_id AS last_job_id,
@@ -5130,6 +5133,7 @@ def dashboard_netsniper_schedule_create_payload(
         cadence_minutes=int(cadence),
         enabled=dashboard_bool_from_payload(payload.get("enabled"), True),
         auto_ingest=dashboard_bool_from_payload(payload.get("auto_ingest"), True),
+        run_trueaegis_after_ingest=dashboard_bool_from_payload(payload.get("run_trueaegis_after_ingest"), False),
     )
 
     return {
@@ -5379,6 +5383,7 @@ def scan_schedule_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 
     item["enabled"] = bool(item.get("enabled"))
     item["auto_ingest"] = bool(item.get("auto_ingest"))
+    item["run_trueaegis_after_ingest"] = bool(item.get("run_trueaegis_after_ingest"))
     item["cadence_minutes"] = int(item.get("cadence_minutes") or 60)
     item["scan_profile"] = item.get("scan_profile") or "balanced"
 
@@ -5393,6 +5398,7 @@ def create_scan_schedule(
     cadence_minutes: int = 60,
     enabled: bool = True,
     auto_ingest: bool = True,
+    run_trueaegis_after_ingest: bool = False,
 ) -> dict[str, Any]:
     safe_name = validate_scan_schedule_name(name)
     safe_target = validate_private_cidr(target)
@@ -5414,12 +5420,26 @@ def create_scan_schedule(
             cadence_minutes,
             enabled,
             auto_ingest,
+            run_trueaegis_after_ingest,
             next_run_at,
             created_at,
             updated_at,
             message
+        ) VALUES (
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             schedule_id,
@@ -5430,6 +5450,7 @@ def create_scan_schedule(
             safe_cadence,
             1 if enabled else 0,
             1 if auto_ingest else 0,
+            1 if run_trueaegis_after_ingest else 0,
             next_run_at,
             now,
             now,
@@ -5480,6 +5501,7 @@ def query_scan_schedules(
             cadence_minutes,
             enabled,
             auto_ingest,
+            run_trueaegis_after_ingest,
             last_run_at,
             next_run_at,
             last_job_id,
@@ -6117,7 +6139,7 @@ def print_scan_schedule_rows(rows: Iterable[sqlite3.Row]) -> None:
         if item.get("last_job_id"):
             print(f"  last_job={item['last_job_id']}  last_status={item.get('last_status') or '-'}")
 
-        print(f"  auto_ingest={'yes' if item['auto_ingest'] else 'no'}  skips={item['skip_count']}  failures={item['failure_count']}")
+        print(f"  auto_ingest={'yes' if item['auto_ingest'] else 'no'}  trueaegis_after_ingest={'yes' if item['run_trueaegis_after_ingest'] else 'no'}  skips={item['skip_count']}  failures={item['failure_count']}")
 
         if item.get("message"):
             print(f"  message={item['message']}")
@@ -6134,6 +6156,7 @@ def command_schedule_create(args: argparse.Namespace) -> int:
         cadence_minutes=args.cadence_minutes,
         enabled=not args.disabled,
         auto_ingest=args.auto_ingest,
+        run_trueaegis_after_ingest=args.run_trueaegis_after_ingest,
     )
     connection.commit()
 
@@ -6144,6 +6167,7 @@ def command_schedule_create(args: argparse.Namespace) -> int:
     print(f"Cadence: {schedule['cadence_minutes']} minutes")
     print(f"Enabled: {'yes' if schedule['enabled'] else 'no'}")
     print(f"Auto-ingest: {'yes' if schedule['auto_ingest'] else 'no'}")
+    print(f"TrueAegis after ingest: {'yes' if schedule['run_trueaegis_after_ingest'] else 'no'}")
     print(f"Next run: {schedule.get('next_run_at') or '-'}")
 
     return 0
@@ -18811,7 +18835,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.37 Operator Evidence Review</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.38 TrueAegis Follow-Up Automation</span></div>
     </div>
   </header>
 
@@ -24019,6 +24043,11 @@ def render_netsniper_page() -> str:
             <option value="true" selected>Enabled</option>
             <option value="false">Disabled</option>
           </select>
+          <label for="netsniper-schedule-trueaegis-after-ingest">TrueAegis after ingest</label>
+          <select id="netsniper-schedule-trueaegis-after-ingest" name="run_trueaegis_after_ingest">
+            <option value="false" selected>no</option>
+            <option value="true">yes - record follow-up intent</option>
+          </select>
         </label>
         <button type="submit" id="netsniper-schedule-create">Create schedule</button>
       </form>
@@ -24539,6 +24568,7 @@ def render_netsniper_page() -> str:
       const cadenceInput = document.getElementById("netsniper-schedule-cadence");
       const enabledInput = document.getElementById("netsniper-schedule-enabled");
       const autoIngestInput = document.getElementById("netsniper-schedule-auto-ingest");
+        const trueAegisAfterIngestInput = document.getElementById("netsniper-schedule-trueaegis-after-ingest");
 
       const name = nameInput ? nameInput.value.trim() : "";
       const target = targetInput ? targetInput.value.trim() : "";
@@ -24558,7 +24588,8 @@ def render_netsniper_page() -> str:
           scan_profile: profileInput ? profileInput.value : "balanced",
           cadence_minutes: cadenceInput ? Number.parseInt(cadenceInput.value, 10) : 60,
           enabled: enabledInput ? enabledInput.value === "true" : true,
-          auto_ingest: autoIngestInput ? autoIngestInput.value === "true" : true
+          auto_ingest: autoIngestInput ? autoIngestInput.value === "true" : true,
+          run_trueaegis_after_ingest: trueAegisAfterIngestInput ? trueAegisAfterIngestInput.value === "true" : false
         });
 
         if (!payload) { return; }
@@ -26688,6 +26719,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cadence-minutes", type=int, choices=sorted(ALLOWED_SCAN_SCHEDULE_CADENCE_MINUTES), default=60)
     p.add_argument("--disabled", action="store_true", help="Create the schedule disabled")
     p.add_argument("--no-auto-ingest", dest="auto_ingest", action="store_false", default=True, help="Do not auto-ingest completed scheduled scan bundles")
+    p.add_argument("--trueaegis-after-ingest", dest="run_trueaegis_after_ingest", action="store_true", default=False, help="Record intent to run TrueAegis after a completed scheduled scan is auto-ingested; execution is added in a later v0.38 checkpoint")
     p = sub.add_parser("schedule-list", help="List saved NetSniper scan schedules")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--enabled", choices=["all", "enabled", "disabled"], default="all")
