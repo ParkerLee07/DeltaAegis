@@ -21,6 +21,7 @@ import subprocess
 import threading
 import sys
 import uuid
+import urllib.parse
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import asdict, dataclass
