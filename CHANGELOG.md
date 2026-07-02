@@ -1,5 +1,7 @@
 ## DeltaAegis v0.36.0 — Dashboard Operations Automation
 
+- Added `validate_v0_36_release.sh` as the full v0.36 release gate for metadata, dashboard copy, reset-route safety, and the v0.36 validator suite.
+
 - Moved telemetry reset controls to a dedicated ADMIN-only `/operator/reset` maintenance page and kept the main operator page limited to a link.
 
 - Added ADMIN-only telemetry cleanup preview and execution APIs with an operator maintenance panel, explicit `DELETE TELEMETRY` confirmation, and access-audit logging while preserving users, sessions, API tokens, scan schedules, audit logs, and operator-authored context.

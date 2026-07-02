@@ -4,31 +4,13 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.34.0
+## Current Release — v0.36.0
 
-**DeltaAegis v0.34.0 — TrueAegis Validation Correlation**
+**DeltaAegis v0.36.0 — Dashboard Operations Automation**
 
-DeltaAegis v0.34.0 promotes the v0.33 TrueAegis evidence foundation into validation-aware correlation. It matches imported TrueAegis validation observations to the latest accepted NetSniper service inventory, exposes correlated validation evidence through dashboard APIs, shows correlated services in the TrueAegis dashboard and asset detail views, and adds report visibility for correlated evidence. This release intentionally does not change risk scoring yet; risk and recommendation enrichment should remain a later release.
+DeltaAegis v0.36.0 focuses on day-to-day dashboard operations. It adds local dashboard time formatting, automatic scheduled NetSniper scan worker controls, and an ADMIN-only telemetry reset workflow that can preview and clear imported telemetry while preserving users, sessions, API tokens, scan schedules, audit history, and operator-authored asset context.
 
-### Highlights
-
-- Adds `validation_correlations` storage for TrueAegis-to-NetSniper service matches.
-- Matches TrueAegis observations to current NetSniper services by host/IP, port, and transport-aware protocol mapping.
-- Adds `/api/validation-correlations` for dashboard and operator review.
-- Shows correlated current-service evidence in the TrueAegis dashboard tab.
-- Adds per-asset TrueAegis validation correlation context in asset detail.
-- Adds TrueAegis validation correlation evidence to Markdown reports.
-- Preserves v0.33 TrueAegis import/storage behavior and v0.32 NetSniper v2 compatibility.
-- Auto-ingests completed NetSniper dashboard and scheduled scan jobs by default so scan results appear in DeltaAegis without a separate manual import.
-- Keeps risk scoring unchanged while making validation evidence visible and reviewable.
-
-### Validate
-
-```bash
-./tools/validate_v0_34_release.sh
-```
-
-
+This release keeps the v0.35 TrueAegis orchestration foundation available, but does not enable automatic TrueAegis execution from scheduled scans by default. The dedicated `/operator/reset` page intentionally separates destructive maintenance from the main operator session page.
 ## What DeltaAegis Does
 
 DeltaAegis helps answer:

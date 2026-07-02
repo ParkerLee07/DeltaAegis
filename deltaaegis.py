@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.36.0: TrueAegis orchestration, guarded validation execution, automatic validation import/correlation, dashboard/API visibility, and release validation.
+"""DeltaAegis v0.36.0: Dashboard operations automation, local-time dashboard rendering, automatic scheduled NetSniper worker controls, and ADMIN-only telemetry reset.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -8526,7 +8526,7 @@ def append_report_trueaegis_validation_section(lines, validation_summary, valida
     lines.append("## TrueAegis Validation Evidence")
     lines.append("")
     lines.append(
-        "This section summarizes imported TrueAegis validation output. In v0.34, "
+        "This section summarizes imported TrueAegis validation output. These correlations remain evidence-only and "
         "this evidence is stored and displayed as a foundation layer only; it does "
         "does not alter DeltaAegis risk scoring. Correlated NetSniper service evidence appears in the next section. "
         "service observations."
@@ -8702,7 +8702,7 @@ def append_report_trueaegis_validation_correlation_section(
     lines.append("")
     lines.append(
         "This section lists TrueAegis validation observations that currently match "
-        "NetSniper-observed services. In v0.34, these correlations are evidence "
+        "NetSniper-observed services. These correlations are evidence "
         "only and do not alter DeltaAegis risk scoring."
     )
     lines.append("")
@@ -17919,7 +17919,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.35 TrueAegis Orchestration</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.36 Dashboard Operations Automation</span></div>
     </div>
   </header>
 
@@ -18101,7 +18101,7 @@ def dashboard_index_html_base_v025_operator_link():
         <div>
           <div class="eyebrow">TrueAegis Foundation</div>
           <h2>TrueAegis Validation Evidence</h2>
-          <p class="muted">Imported TrueAegis validation observations are correlated with current NetSniper services as evidence only. v0.35 can orchestrate guarded TrueAegis runs and import validation evidence automatically.</p>
+          <p class="muted">Imported TrueAegis validation observations are correlated with current NetSniper services as evidence only. v0.36 keeps guarded TrueAegis orchestration available and adds dashboard operations automation for local-time display, scheduled scan workers, and ADMIN-only telemetry reset.</p>
         </div>
         <a href="/api/validation-summary">Raw summary JSON</a>
       </div>
@@ -18131,7 +18131,7 @@ def dashboard_index_html_base_v025_operator_link():
           </tbody>
         </table>
       <h3>Correlated Current Services</h3>
-      <p class="muted">TrueAegis observations matched to the latest accepted NetSniper service inventory. This is evidence only; v0.34 does not change risk scoring.</p>
+      <p class="muted">TrueAegis observations matched to the latest accepted NetSniper service inventory. This evidence view does not change risk scoring.</p>
       <table>
         <thead>
           <tr>
@@ -21218,7 +21218,7 @@ def dashboard_index_html_base_v025_operator_link():
           <div>
             <div class="eyebrow">TrueAegis Foundation</div>
             <h2>Validation Evidence</h2>
-            <p class="muted">Imported TrueAegis validation observations are correlated with current NetSniper services as evidence only. v0.35 can orchestrate guarded TrueAegis runs and import validation evidence automatically.</p>
+            <p class="muted">Imported TrueAegis validation observations are correlated with current NetSniper services as evidence only. v0.36 keeps guarded TrueAegis orchestration available and adds dashboard operations automation for local-time display, scheduled scan workers, and ADMIN-only telemetry reset.</p>
           </div>
           <a href="/api/validation-summary">Raw summary JSON</a>
         </div>
@@ -21250,7 +21250,7 @@ def dashboard_index_html_base_v025_operator_link():
             </tbody>
           </table>
       <h3>Correlated Current Services</h3>
-      <p class="muted">TrueAegis observations matched to the latest accepted NetSniper service inventory. This is evidence only; v0.34 does not change risk scoring.</p>
+      <p class="muted">TrueAegis observations matched to the latest accepted NetSniper service inventory. This evidence view does not change risk scoring.</p>
       <table>
         <thead>
           <tr>
@@ -25107,7 +25107,7 @@ def command_validations(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.34.0 — TrueAegis Validation Correlation, v3 bundle ingest, bundle-quality readiness metadata, dashboard scan-context visibility, scheduled scans, guarded NetSniper scan jobs, dashboard user management, RBAC, investigation intelligence, current-state SIEM dashboard, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.36.0 — Dashboard Operations Automation, local dashboard time formatting, automatic scheduled NetSniper worker controls, ADMIN-only telemetry reset, TrueAegis orchestration, validation correlation, v3 bundle ingest, RBAC, current-state SIEM dashboard, calibrated risk policy, reporting, and dashboard console")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
