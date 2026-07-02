@@ -10720,6 +10720,145 @@ def dashboard_count(connection, table, where=None):
     return int(row["count"])
 
 
+TELEMETRY_CLEANUP_CONFIRMATION = "DELETE TELEMETRY"
+
+# These tables are intentionally preserved by telemetry cleanup. They contain
+# access control, operator configuration, or user-authored context rather than
+# imported scan evidence.
+TELEMETRY_CLEANUP_PROTECTED_TABLES = {
+    "access_users",
+    "access_api_tokens",
+    "access_sessions",
+    "access_audit_log",
+    "scan_schedules",
+    "asset_annotations",
+    "asset_annotation_history",
+    "asset_investigations",
+    "asset_investigation_history",
+    "investigation_ticket_state",
+    "investigation_ticket_history",
+}
+
+# Delete children/evidence first, then parent scan snapshots last.
+TELEMETRY_CLEANUP_TABLES = [
+    "validation_correlations",
+    "validation_observations",
+    "validation_runs",
+    "netsniper_intelligence_hosts",
+    "netsniper_intelligence_summaries",
+    "trueaegis_jobs",
+    "scan_jobs",
+    "alert_notes",
+    "alerts",
+    "delta_events",
+    "finding_observations",
+    "service_observations",
+    "asset_observations",
+    "asset_lifecycle",
+    "snapshots",
+]
+
+
+def telemetry_cleanup_table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
+    row = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def telemetry_cleanup_table_count(connection: sqlite3.Connection, table_name: str) -> int:
+    if not telemetry_cleanup_table_exists(connection, table_name):
+        return 0
+
+    return int(
+        connection.execute(f"SELECT COUNT(*) AS count FROM {table_name}").fetchone()["count"]
+        or 0
+    )
+
+
+def telemetry_cleanup_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    return {
+        table_name: telemetry_cleanup_table_count(connection, table_name)
+        for table_name in TELEMETRY_CLEANUP_TABLES
+    }
+
+
+def telemetry_cleanup_protected_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    return {
+        table_name: telemetry_cleanup_table_count(connection, table_name)
+        for table_name in sorted(TELEMETRY_CLEANUP_PROTECTED_TABLES)
+    }
+
+
+def telemetry_cleanup_preview(connection: sqlite3.Connection) -> dict[str, Any]:
+    counts = telemetry_cleanup_counts(connection)
+    protected_counts = telemetry_cleanup_protected_counts(connection)
+
+    return {
+        "ok": True,
+        "action": "telemetry.cleanup.preview",
+        "dry_run": True,
+        "confirmation_required": TELEMETRY_CLEANUP_CONFIRMATION,
+        "tables": counts,
+        "total_rows": sum(counts.values()),
+        "protected_tables": protected_counts,
+        "protected_total_rows": sum(protected_counts.values()),
+        "message": (
+            "Dry run only. Telemetry cleanup removes imported scan evidence while "
+            "preserving users, sessions, API tokens, schedules, audit logs, and "
+            "operator-authored annotations/investigation state."
+        ),
+    }
+
+
+def telemetry_cleanup_clear_all(
+    connection: sqlite3.Connection,
+    confirmation: str,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    before = telemetry_cleanup_counts(connection)
+    protected_before = telemetry_cleanup_protected_counts(connection)
+
+    if dry_run:
+        return telemetry_cleanup_preview(connection)
+
+    if str(confirmation or "").strip() != TELEMETRY_CLEANUP_CONFIRMATION:
+        raise DeltaAegisError(
+            f"telemetry cleanup requires confirmation phrase: {TELEMETRY_CLEANUP_CONFIRMATION}"
+        )
+
+    for table_name in TELEMETRY_CLEANUP_TABLES:
+        if telemetry_cleanup_table_exists(connection, table_name):
+            connection.execute(f"DELETE FROM {table_name}")
+
+    after = telemetry_cleanup_counts(connection)
+    protected_after = telemetry_cleanup_protected_counts(connection)
+
+    changed = {
+        table_name: before.get(table_name, 0) - after.get(table_name, 0)
+        for table_name in TELEMETRY_CLEANUP_TABLES
+    }
+
+    return {
+        "ok": True,
+        "action": "telemetry.cleanup.clear_all",
+        "dry_run": False,
+        "confirmation_required": TELEMETRY_CLEANUP_CONFIRMATION,
+        "tables_before": before,
+        "tables_after": after,
+        "deleted_rows": changed,
+        "total_deleted_rows": sum(changed.values()),
+        "protected_tables_before": protected_before,
+        "protected_tables_after": protected_after,
+        "protected_tables_preserved": protected_before == protected_after,
+        "message": (
+            "Telemetry cleanup completed. Access users, sessions, API tokens, "
+            "schedules, audit logs, and operator-authored context were preserved."
+        ),
+    }
+
+
 def dashboard_scopes_payload(connection):
     rows = connection.execute(
         """
