@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.34.0: TrueAegis validation correlation, service-level validation evidence, dashboard/API visibility, asset detail context, reports, and release validation.
+"""DeltaAegis v0.35.0: TrueAegis orchestration, guarded validation execution, automatic validation import/correlation, dashboard/API visibility, and release validation.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -33,6 +33,8 @@ DEFAULT_DB = Path.home() / "DeltaAegis" / "data" / "deltaaegis.db"
 DEFAULT_RUNS = Path.home() / "NetSniper" / "runs"
 DEFAULT_NETSNIPER = Path.home() / "NetSniper" / "netsniper.sh"
 DEFAULT_SCAN_LOGS = Path.home() / "DeltaAegis" / "scan-logs"
+DEFAULT_TRUEAEGIS = Path.home() / "TrueAegis" / "trueaegis.py"
+DEFAULT_TRUEAEGIS_LOGS = Path.home() / "DeltaAegis" / "trueaegis-logs"
 DEFAULT_EVENTS = Path.home() / "DeltaAegis" / "events" / "events.jsonl"
 DEFAULT_REPORTS = Path.home() / "DeltaAegis" / "reports"
 DELTAAEGIS_V0_14_COMPATIBILITY_NOTE = "DeltaAegis v0.14.0 — NetSniper Scan Orchestration compatibility retained."
@@ -47,6 +49,7 @@ SCAN_JOB_STATUSES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED"}
 NETSNIPER_SUPPORTED_SCHEMAS = {"netsniper-run-v1", "netsniper-run-v2", "netsniper-run-v3"}
 NETSNIPER_PROFILE_AWARE_SCHEMAS = {"netsniper-run-v2", "netsniper-run-v3"}
 TRUEAEGIS_VALIDATION_STATUSES = {"CONFIRMED", "REACHABLE", "PROTECTED", "PROTOCOL_MISMATCH", "NOT_REACHABLE", "TIMEOUT", "INCONCLUSIVE", "PARTIALLY_CONFIRMED", "DEPENDENCY_MISSING", "UNKNOWN"}
+TRUEAEGIS_JOB_STATUSES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED"}
 
 ACCESS_ROLES = ("ADMIN", "ANALYST", "VIEWER")
 
@@ -76,6 +79,8 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("GET", "/api/validation-summary", "dashboard.read"),
     ("GET", "/api/validation-correlations", "dashboard.read"),
     ("GET", "/api/validations", "dashboard.read"),
+    ("GET", "/api/trueaegis-jobs", "dashboard.read"),
+    ("GET", "/api/trueaegis/context", "dashboard.read"),
     ("POST", "/api/validation-ingest", "workflow.write"),
     ("GET", "/api/session", "session.read"),
     ("GET", "/api/admin/users", "admin.users.read"),
@@ -86,6 +91,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("POST", "/api/investigate-asset", "workflow.write"),
     ("POST", "/api/netsniper/import-latest", "workflow.write"),
     ("POST", "/api/netsniper/scan-start", "scan.start"),
+    ("POST", "/api/trueaegis/run", "scan.start"),
     ("GET", "/api/netsniper/schedules", "dashboard.read"),
     ("POST", "/api/netsniper/schedule-create", "scan.start"),
     ("POST", "/api/netsniper/schedule-enable", "scan.start"),
@@ -509,6 +515,39 @@ CREATE INDEX IF NOT EXISTS idx_scan_jobs_status
 
 CREATE INDEX IF NOT EXISTS idx_scan_jobs_scope
     ON scan_jobs(network_scope);
+
+CREATE TABLE IF NOT EXISTS trueaegis_jobs (
+    job_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    scan_id TEXT,
+    network_scope TEXT NOT NULL DEFAULT '',
+    manifest_path TEXT NOT NULL,
+    trueaegis_path TEXT NOT NULL DEFAULT '',
+    validation_results_path TEXT,
+    validation_run_id TEXT,
+    imported_observations INTEGER NOT NULL DEFAULT 0,
+    correlation_count INTEGER NOT NULL DEFAULT 0,
+    stdout_log_path TEXT,
+    stderr_log_path TEXT,
+    exit_code INTEGER,
+    message TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_trueaegis_jobs_created_at
+    ON trueaegis_jobs(created_at);
+
+CREATE INDEX IF NOT EXISTS idx_trueaegis_jobs_status
+    ON trueaegis_jobs(status);
+
+CREATE INDEX IF NOT EXISTS idx_trueaegis_jobs_scope
+    ON trueaegis_jobs(network_scope);
+
+CREATE INDEX IF NOT EXISTS idx_trueaegis_jobs_scan_id
+    ON trueaegis_jobs(scan_id);
 
 CREATE TABLE IF NOT EXISTS scan_schedules (
     schedule_id TEXT PRIMARY KEY,
@@ -4634,6 +4673,212 @@ def dashboard_scan_jobs_payload(
     return [
         scan_job_to_dict(row)
         for row in query_scan_jobs(
+            connection,
+            limit=limit,
+            status=status,
+            scope=scope,
+        )
+    ]
+
+
+
+def trueaegis_job_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+
+    for key in ("imported_observations", "correlation_count"):
+        try:
+            item[key] = int(item.get(key) or 0)
+        except (TypeError, ValueError):
+            item[key] = 0
+
+    if item.get("exit_code") in ("", None):
+        item["exit_code"] = None
+    else:
+        try:
+            item["exit_code"] = int(item.get("exit_code"))
+        except (TypeError, ValueError):
+            item["exit_code"] = None
+
+    return item
+
+
+def create_trueaegis_job(
+    connection: sqlite3.Connection,
+    scan_id: str | None,
+    network_scope: str | None,
+    manifest_path: Path,
+    trueaegis_path: Path,
+) -> dict[str, Any]:
+    safe_manifest_path = Path(manifest_path).expanduser()
+    safe_trueaegis_path = Path(trueaegis_path).expanduser()
+    now = utc_now_text()
+    job_id = f"trueaegis-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+
+    connection.execute(
+        """
+        INSERT INTO trueaegis_jobs (
+            job_id,
+            status,
+            scan_id,
+            network_scope,
+            manifest_path,
+            trueaegis_path,
+            message,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job_id,
+            "QUEUED",
+            str(scan_id or ""),
+            str(network_scope or ""),
+            str(safe_manifest_path),
+            str(safe_trueaegis_path),
+            "TrueAegis validation job queued",
+            now,
+            now,
+        ),
+    )
+
+    row = connection.execute(
+        "SELECT * FROM trueaegis_jobs WHERE job_id = ?",
+        (job_id,),
+    ).fetchone()
+
+    if row is None:
+        raise DeltaAegisError(f"TrueAegis job was not created: {job_id}")
+
+    return trueaegis_job_to_dict(row)
+
+
+def update_trueaegis_job(
+    connection: sqlite3.Connection,
+    job_id: str,
+    **fields: Any,
+) -> None:
+    allowed = {
+        "status",
+        "started_at",
+        "completed_at",
+        "validation_results_path",
+        "validation_run_id",
+        "imported_observations",
+        "correlation_count",
+        "stdout_log_path",
+        "stderr_log_path",
+        "exit_code",
+        "message",
+    }
+
+    updates = []
+    params: list[Any] = []
+
+    for key, value in fields.items():
+        if key not in allowed:
+            raise DeltaAegisError(f"invalid TrueAegis job field update: {key}")
+
+        if key == "status":
+            value = str(value).upper()
+
+            if value not in TRUEAEGIS_JOB_STATUSES:
+                raise DeltaAegisError(f"invalid TrueAegis job status: {value}")
+
+        if key in {"imported_observations", "correlation_count"}:
+            value = max(0, int(value or 0))
+
+        updates.append(f"{key} = ?")
+        params.append(value)
+
+    if not updates:
+        return
+
+    updates.append("updated_at = ?")
+    params.append(utc_now_text())
+    params.append(job_id)
+
+    connection.execute(
+        f"""
+        UPDATE trueaegis_jobs
+        SET {", ".join(updates)}
+        WHERE job_id = ?
+        """,
+        tuple(params),
+    )
+
+
+def query_trueaegis_jobs(
+    connection: sqlite3.Connection,
+    limit: int = 20,
+    status: str | None = None,
+    scope: str | None = None,
+) -> list[sqlite3.Row]:
+    clauses = []
+    params: list[Any] = []
+
+    if status:
+        normalized_status = status.strip().upper()
+
+        if normalized_status not in TRUEAEGIS_JOB_STATUSES:
+            raise DeltaAegisError(f"invalid TrueAegis job status: {status}")
+
+        clauses.append("status = ?")
+        params.append(normalized_status)
+
+    if scope:
+        clauses.append("network_scope = ?")
+        params.append(scope)
+
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+
+    try:
+        safe_limit = int(limit)
+    except (TypeError, ValueError):
+        safe_limit = 20
+
+    safe_limit = max(1, min(safe_limit, 200))
+    params.append(safe_limit)
+
+    return connection.execute(
+        f"""
+        SELECT
+            job_id,
+            status,
+            scan_id,
+            network_scope,
+            manifest_path,
+            trueaegis_path,
+            validation_results_path,
+            validation_run_id,
+            imported_observations,
+            correlation_count,
+            stdout_log_path,
+            stderr_log_path,
+            exit_code,
+            message,
+            created_at,
+            updated_at,
+            started_at,
+            completed_at
+        FROM trueaegis_jobs
+        {where}
+        ORDER BY created_at DESC, updated_at DESC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+
+
+def dashboard_trueaegis_jobs_payload(
+    connection: sqlite3.Connection,
+    limit: int = 20,
+    scope: str | None = None,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    return [
+        trueaegis_job_to_dict(row)
+        for row in query_trueaegis_jobs(
             connection,
             limit=limit,
             status=status,
@@ -10842,6 +11087,347 @@ def dashboard_start_scan_job_thread(
     return thread
 
 
+def active_trueaegis_job_exists(connection: sqlite3.Connection) -> bool:
+    row = connection.execute(
+        """
+        SELECT job_id
+        FROM trueaegis_jobs
+        WHERE status IN ('QUEUED', 'RUNNING')
+        ORDER BY created_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+
+    return row is not None
+
+
+def latest_trueaegis_validation_results_path(
+    validation_results_dir: Path | str,
+    earliest_mtime: float | None = None,
+    exclude_paths: set[str] | None = None,
+) -> Path | None:
+    results_dir = Path(validation_results_dir).expanduser()
+    excluded = set(exclude_paths or set())
+    candidates: list[tuple[float, Path]] = []
+
+    if not results_dir.is_dir():
+        return None
+
+    for path in results_dir.glob("validation_*.json"):
+        if str(path) in excluded:
+            continue
+
+        try:
+            modified_at = path.stat().st_mtime
+        except OSError:
+            continue
+
+        if earliest_mtime is not None and modified_at < earliest_mtime:
+            continue
+
+        candidates.append((modified_at, path))
+
+    if not candidates:
+        return None
+
+    candidates.sort(reverse=True, key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def import_trueaegis_job_results(
+    connection: sqlite3.Connection,
+    validation_results_path: Path | str,
+    scope: str | None = None,
+) -> dict[str, Any]:
+    validation_path = Path(validation_results_path).expanduser()
+    import_summary = import_trueaegis_validation_results(connection, validation_path)
+    refresh_summary = refresh_trueaegis_validation_correlations(
+        connection,
+        scope=scope,
+    )
+    connection.commit()
+
+    return {
+        "schema_version": "deltaaegis-trueaegis-job-import-v1",
+        "validation_run_id": import_summary.get("validation_run_id"),
+        "source_path": import_summary.get("source_path"),
+        "imported_observations": int(import_summary.get("result_count") or 0),
+        "status_counts": import_summary.get("status_counts") or {},
+        "correlation_count": int(refresh_summary.get("correlation_count") or 0),
+        "refresh_summary": refresh_summary,
+    }
+
+
+
+def execute_trueaegis_job(
+    connection: sqlite3.Connection,
+    job_id: str,
+    manifest_path: Path | str,
+    trueaegis_path: Path | str,
+    logs_dir: Path | str = DEFAULT_TRUEAEGIS_LOGS,
+) -> dict[str, Any]:
+    safe_trueaegis_path = resolve_trueaegis_executable(trueaegis_path)
+    safe_manifest_path = Path(manifest_path).expanduser()
+    logs_path = Path(logs_dir).expanduser()
+    validation_results_dir = safe_trueaegis_path.parent / "validation_results"
+
+    command = build_trueaegis_validation_command(
+        trueaegis_path=safe_trueaegis_path,
+        manifest_path=safe_manifest_path,
+    )
+
+    logs_path.mkdir(parents=True, exist_ok=True)
+    validation_results_dir.mkdir(parents=True, exist_ok=True)
+
+    stdout_log = logs_path / f"{job_id}.stdout.log"
+    stderr_log = logs_path / f"{job_id}.stderr.log"
+
+    before_outputs = {
+        str(path)
+        for path in validation_results_dir.glob("validation_*.json")
+    }
+
+    started_at = utc_now_text()
+    started_epoch = datetime.now(timezone.utc).timestamp() - 1.0
+
+    update_trueaegis_job(
+        connection,
+        job_id,
+        status="RUNNING",
+        started_at=started_at,
+        stdout_log_path=str(stdout_log),
+        stderr_log_path=str(stderr_log),
+        message="TrueAegis validation running",
+    )
+    connection.commit()
+
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(safe_trueaegis_path.parent),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except KeyboardInterrupt as exc:
+        update_trueaegis_job(
+            connection,
+            job_id,
+            status="FAILED",
+            completed_at=utc_now_text(),
+            exit_code=130,
+            message="TrueAegis validation interrupted by operator",
+        )
+        connection.commit()
+        raise DeltaAegisError("TrueAegis validation interrupted by operator") from exc
+    except OSError as exc:
+        update_trueaegis_job(
+            connection,
+            job_id,
+            status="FAILED",
+            completed_at=utc_now_text(),
+            exit_code=127,
+            message=f"failed to launch TrueAegis: {exc}",
+        )
+        connection.commit()
+        raise DeltaAegisError(f"failed to launch TrueAegis: {exc}") from exc
+
+    stdout_log.write_text(completed.stdout or "", encoding="utf-8")
+    stderr_log.write_text(completed.stderr or "", encoding="utf-8")
+
+    validation_results_path = latest_trueaegis_validation_results_path(
+        validation_results_dir,
+        earliest_mtime=started_epoch,
+        exclude_paths=before_outputs,
+    )
+
+    if validation_results_path is None and completed.returncode == 0:
+        validation_results_path = latest_trueaegis_validation_results_path(
+            validation_results_dir,
+            earliest_mtime=started_epoch,
+        )
+
+    final_status = "COMPLETED" if completed.returncode == 0 else "FAILED"
+    message_parts = []
+
+    if final_status == "COMPLETED":
+        message_parts.append("TrueAegis validation completed")
+    else:
+        message_parts.append(f"TrueAegis validation failed with exit code {completed.returncode}")
+
+    if validation_results_path is not None:
+        message_parts.append(f"validation_results={validation_results_path}")
+    elif final_status == "COMPLETED":
+        final_status = "FAILED"
+        message_parts.append(f"validation output was not found in {validation_results_dir}")
+
+    validation_run_id = None
+    imported_observations = 0
+    correlation_count = 0
+
+    if final_status == "COMPLETED" and validation_results_path is not None:
+        job_row = connection.execute(
+            "SELECT network_scope FROM trueaegis_jobs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        job_scope = (
+            str(job_row["network_scope"] or "").strip()
+            if job_row is not None
+            else None
+        ) or None
+
+        try:
+            import_summary = import_trueaegis_job_results(
+                connection,
+                validation_results_path,
+                scope=job_scope,
+            )
+            validation_run_id = import_summary.get("validation_run_id")
+            imported_observations = int(import_summary.get("imported_observations") or 0)
+            correlation_count = int(import_summary.get("correlation_count") or 0)
+            message_parts.append(f"imported_observations={imported_observations}")
+            message_parts.append(f"correlations={correlation_count}")
+        except Exception as exc:
+            final_status = "FAILED"
+            message_parts.append(f"auto-import failed: {exc}")
+
+    update_trueaegis_job(
+        connection,
+        job_id,
+        status=final_status,
+        completed_at=utc_now_text(),
+        validation_results_path=str(validation_results_path) if validation_results_path else None,
+        validation_run_id=validation_run_id,
+        imported_observations=imported_observations,
+        correlation_count=correlation_count,
+        exit_code=completed.returncode,
+        message="; ".join(message_parts),
+    )
+    connection.commit()
+
+    row = connection.execute(
+        "SELECT * FROM trueaegis_jobs WHERE job_id = ?",
+        (job_id,),
+    ).fetchone()
+
+    if row is None:
+        raise DeltaAegisError(f"TrueAegis job disappeared unexpectedly: {job_id}")
+
+    return trueaegis_job_to_dict(row)
+
+
+def dashboard_trueaegis_validation_worker(
+    db_path: Path,
+    job_id: str,
+    manifest_path: Path,
+    trueaegis_path: Path,
+    logs_dir: Path = DEFAULT_TRUEAEGIS_LOGS,
+) -> None:
+    connection = connect(db_path)
+
+    try:
+        execute_trueaegis_job(
+            connection,
+            job_id=job_id,
+            manifest_path=manifest_path,
+            trueaegis_path=trueaegis_path,
+            logs_dir=logs_dir,
+        )
+    except Exception as exc:
+        try:
+            update_trueaegis_job(
+                connection,
+                job_id,
+                status="FAILED",
+                completed_at=utc_now_text(),
+                message=f"TrueAegis validation worker failed: {exc}",
+            )
+            connection.commit()
+        except Exception:
+            pass
+    finally:
+        connection.close()
+
+
+def dashboard_start_trueaegis_job_thread(
+    db_path: Path,
+    job_id: str,
+    manifest_path: Path,
+    trueaegis_path: Path,
+    logs_dir: Path = DEFAULT_TRUEAEGIS_LOGS,
+) -> threading.Thread:
+    thread = threading.Thread(
+        name=f"deltaaegis-trueaegis-validation-{job_id}",
+        target=dashboard_trueaegis_validation_worker,
+        kwargs={
+            "db_path": db_path,
+            "job_id": job_id,
+            "manifest_path": manifest_path,
+            "trueaegis_path": trueaegis_path,
+            "logs_dir": logs_dir,
+        },
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def dashboard_trueaegis_validation_start_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+    db_path: Path,
+) -> dict[str, Any]:
+    scope = str(payload.get("scope") or "").strip() or None
+
+    if active_trueaegis_job_exists(connection):
+        raise DeltaAegisError("active TrueAegis validation job already exists")
+
+    context = dashboard_trueaegis_orchestration_context_payload(
+        connection,
+        scope=scope,
+    )
+
+    if not context.get("ready_to_start"):
+        blockers = context.get("blockers") or ["TrueAegis orchestration is not ready."]
+        raise DeltaAegisError("; ".join(str(item) for item in blockers))
+
+    latest_scan = context.get("latest_scan") or {}
+    manifest_path = Path(str(context.get("manifest_path") or "")).expanduser()
+    trueaegis_path = Path(str(context.get("trueaegis_path") or "")).expanduser()
+
+    job = create_trueaegis_job(
+        connection,
+        scan_id=latest_scan.get("scan_id"),
+        network_scope=latest_scan.get("network_scope"),
+        manifest_path=manifest_path,
+        trueaegis_path=trueaegis_path,
+    )
+    connection.commit()
+
+    dashboard_start_trueaegis_job_thread(
+        db_path=db_path,
+        job_id=job["job_id"],
+        manifest_path=manifest_path,
+        trueaegis_path=trueaegis_path,
+        logs_dir=DEFAULT_TRUEAEGIS_LOGS,
+    )
+
+    return {
+        "ok": True,
+        "job": job,
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "scan_id": latest_scan.get("scan_id"),
+        "network_scope": latest_scan.get("network_scope"),
+        "manifest_path": str(manifest_path),
+        "trueaegis_path": str(trueaegis_path),
+        "logs_dir": str(DEFAULT_TRUEAEGIS_LOGS),
+        "message": "TrueAegis validation job queued and started in a guarded dashboard background worker",
+    }
+
+
+
 def dashboard_summary_payload(connection, scope=None):
     if scope:
         snapshot_count = connection.execute(
@@ -11221,6 +11807,199 @@ def dashboard_delta_scan_pairs(connection, limit=10, scope=None):
         return []
 
     return [dict(row) for row in rows]
+
+
+def latest_trueaegis_candidate_scan(
+    connection: sqlite3.Connection,
+    scope: str | None = None,
+) -> dict[str, Any] | None:
+    columns = dashboard_table_columns(connection, "snapshots")
+
+    if not {"scan_id", "manifest_path"}.issubset(columns):
+        return None
+
+    preferred = [
+        "scan_id",
+        "target",
+        "network_scope",
+        "manifest_path",
+        "source_path",
+        "source_file",
+        "bundle_path",
+        "scanner_version",
+        "telemetry_contract",
+        "schema_version",
+        "manifest_schema_version",
+        "scan_profile",
+        "requested_profile",
+        "effective_profile",
+        "quality_status",
+        "quality_reason",
+        "hosts_up",
+        "hosts_total",
+        "identity_coverage",
+        "created_at",
+        "imported_at",
+        "is_accepted_baseline",
+    ]
+
+    selected = [column for column in preferred if column in columns]
+
+    clauses = []
+    params: list[Any] = []
+
+    if "quality_status" in columns and "is_accepted_baseline" in columns:
+        clauses.append("(quality_status = 'ACCEPTED' OR is_accepted_baseline = 1)")
+    elif "quality_status" in columns:
+        clauses.append("quality_status = 'ACCEPTED'")
+    elif "is_accepted_baseline" in columns:
+        clauses.append("is_accepted_baseline = 1")
+
+    if scope and "network_scope" in columns:
+        clauses.append("network_scope = ?")
+        params.append(scope)
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    order_columns = [
+        column for column in ["created_at", "imported_at", "scan_id"]
+        if column in columns
+    ]
+    order_clause = ", ".join(f"{column} DESC" for column in order_columns) or "rowid DESC"
+
+    row = connection.execute(
+        f"""
+        SELECT {", ".join(selected)}
+        FROM snapshots
+        {where}
+        ORDER BY {order_clause}
+        LIMIT 1
+        """,
+        tuple(params),
+    ).fetchone()
+
+    if row is None:
+        return None
+
+    item = dict(row)
+
+    for optional in preferred:
+        item.setdefault(optional, None)
+
+    return item
+
+
+def resolve_trueaegis_executable(trueaegis_path: Path | str | None = None) -> Path:
+    candidate = Path(trueaegis_path or DEFAULT_TRUEAEGIS).expanduser()
+
+    if candidate.is_dir():
+        candidate = candidate / "trueaegis.py"
+
+    if candidate.name != "trueaegis.py":
+        raise DeltaAegisError(
+            f"TrueAegis orchestration only accepts the trueaegis.py entrypoint: {candidate}"
+        )
+
+    return candidate
+
+
+def build_trueaegis_validation_command(
+    trueaegis_path: Path | str,
+    manifest_path: Path | str,
+    python_executable: str | None = None,
+) -> list[str]:
+    safe_trueaegis_path = resolve_trueaegis_executable(trueaegis_path)
+    safe_manifest_path = Path(manifest_path).expanduser()
+
+    if safe_manifest_path.name != "manifest.json":
+        raise DeltaAegisError(
+            f"TrueAegis orchestration requires a NetSniper manifest.json path: {safe_manifest_path}"
+        )
+
+    if not safe_manifest_path.is_file():
+        raise DeltaAegisError(f"NetSniper manifest was not found: {safe_manifest_path}")
+
+    if not safe_trueaegis_path.is_file():
+        raise DeltaAegisError(f"TrueAegis executable was not found: {safe_trueaegis_path}")
+
+    python_path = str(python_executable or sys.executable or "python3")
+
+    return [
+        python_path,
+        str(safe_trueaegis_path),
+        str(safe_manifest_path),
+        "--validate",
+        "--quiet",
+    ]
+
+
+def dashboard_trueaegis_orchestration_context_payload(
+    connection: sqlite3.Connection,
+    scope: str | None = None,
+    trueaegis_path: Path | str | None = None,
+) -> dict[str, Any]:
+    latest_scan = latest_trueaegis_candidate_scan(connection, scope=scope)
+    resolved_trueaegis_path = resolve_trueaegis_executable(trueaegis_path)
+    validation_results_dir = resolved_trueaegis_path.parent / "validation_results"
+
+    manifest_path = None
+    manifest_exists = False
+    command_preview: list[str] = []
+    ready_to_start = False
+    blockers: list[str] = []
+
+    trueaegis_exists = resolved_trueaegis_path.is_file()
+    validation_results_dir_exists = validation_results_dir.is_dir()
+
+    if not latest_scan:
+        blockers.append("No accepted NetSniper snapshot is available for TrueAegis validation.")
+    else:
+        manifest_value = str(latest_scan.get("manifest_path") or "").strip()
+        if not manifest_value:
+            blockers.append("Latest accepted NetSniper snapshot does not have a manifest path.")
+        else:
+            manifest_path = Path(manifest_value).expanduser()
+            manifest_exists = manifest_path.is_file()
+            if not manifest_exists:
+                blockers.append(f"Latest accepted NetSniper manifest was not found: {manifest_path}")
+
+    if not trueaegis_exists:
+        blockers.append(f"TrueAegis executable was not found: {resolved_trueaegis_path}")
+
+    if latest_scan and manifest_path and manifest_exists and trueaegis_exists:
+        try:
+            command_preview = build_trueaegis_validation_command(
+                trueaegis_path=resolved_trueaegis_path,
+                manifest_path=manifest_path,
+            )
+            ready_to_start = True
+        except DeltaAegisError as exc:
+            blockers.append(str(exc))
+
+    return {
+        "schema_version": "deltaaegis-trueaegis-orchestration-context-v1",
+        "selected_scope": scope,
+        "latest_scan": latest_scan,
+        "scan_id": latest_scan.get("scan_id") if latest_scan else None,
+        "network_scope": latest_scan.get("network_scope") if latest_scan else None,
+        "manifest_path": str(manifest_path) if manifest_path else None,
+        "manifest_exists": manifest_exists,
+        "trueaegis_path": str(resolved_trueaegis_path),
+        "trueaegis_exists": trueaegis_exists,
+        "validation_results_dir": str(validation_results_dir),
+        "validation_results_dir_exists": validation_results_dir_exists,
+        "ready_to_start": ready_to_start,
+        "blockers": blockers,
+        "command_preview": command_preview,
+        "command_preview_kind": "argv",
+        "execution_enabled": bool(ready_to_start),
+        "message": (
+            "TrueAegis orchestration is ready to run."
+            if ready_to_start
+            else "TrueAegis orchestration context is not ready."
+        ),
+    }
+
 
 
 def trueaegis_validation_service_protocol(
@@ -16953,7 +17732,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.34 TrueAegis Validation Correlation</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.35 TrueAegis Orchestration</span></div>
     </div>
   </header>
 
@@ -17135,7 +17914,7 @@ def dashboard_index_html_base_v025_operator_link():
         <div>
           <div class="eyebrow">TrueAegis Foundation</div>
           <h2>TrueAegis Validation Evidence</h2>
-          <p class="muted">Imported TrueAegis validation observations are correlated with current NetSniper services as evidence only. v0.34 does not alter risk scoring yet.</p>
+          <p class="muted">Imported TrueAegis validation observations are correlated with current NetSniper services as evidence only. v0.35 can orchestrate guarded TrueAegis runs and import validation evidence automatically.</p>
         </div>
         <a href="/api/validation-summary">Raw summary JSON</a>
       </div>
@@ -19857,6 +20636,239 @@ def dashboard_index_html_base_v025_operator_link():
     }
 
 
+    function deltaAegisTrueAegisOrchestrationEsc(value) {
+      if (typeof esc === "function") {
+        return esc(value);
+      }
+
+      return String(value === null || value === undefined ? "" : value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function deltaAegisTrueAegisOrchestrationEnsurePanel() {
+      let panel = document.getElementById("trueaegis-orchestration-panel");
+
+      if (panel) {
+        return panel;
+      }
+
+      panel = document.createElement("section");
+      panel.id = "trueaegis-orchestration-panel";
+      panel.dataset.tabPanel = "trueaegis";
+
+      const correlationBody = document.getElementById("trueaegis-validation-correlations-body");
+      const correlationSection = correlationBody ? correlationBody.closest("section") : null;
+      const validationBody = document.getElementById("trueaegis-validation-observations-body");
+      const validationSection = validationBody ? validationBody.closest("section") : null;
+      const anchor = correlationSection || validationSection;
+
+      if (anchor && anchor.parentNode) {
+        anchor.parentNode.insertBefore(panel, anchor);
+      } else {
+        document.body.appendChild(panel);
+      }
+
+      return panel;
+    }
+
+    async function deltaAegisTrueAegisOrchestrationFetchJson(path, options = {}) {
+      const response = await fetch(path, {
+        credentials: "same-origin",
+        ...options
+      });
+
+      const contentType = response.headers.get("content-type") || "";
+      const payload = contentType.includes("application/json")
+        ? await response.json()
+        : { message: await response.text() };
+
+      if (!response.ok) {
+        const message = payload.message || payload.error || `HTTP ${response.status}`;
+        throw new Error(message);
+      }
+
+      return payload;
+    }
+
+    function deltaAegisTrueAegisJobRows(jobs) {
+      if (!jobs || !jobs.length) {
+        return `<tr><td colspan="9" class="muted">No TrueAegis orchestration jobs have been recorded yet.</td></tr>`;
+      }
+
+      return jobs.map(job => `
+        <tr>
+          <td><code>${deltaAegisTrueAegisOrchestrationEsc(job.job_id || "-")}</code></td>
+          <td>${deltaAegisTrueAegisOrchestrationEsc(job.status || "-")}</td>
+          <td><code>${deltaAegisTrueAegisOrchestrationEsc(job.scan_id || "-")}</code></td>
+          <td><code>${deltaAegisTrueAegisOrchestrationEsc(job.validation_run_id || "-")}</code></td>
+          <td>${deltaAegisTrueAegisOrchestrationEsc(job.imported_observations || 0)}</td>
+          <td>${deltaAegisTrueAegisOrchestrationEsc(job.correlation_count || 0)}</td>
+          <td><code>${deltaAegisTrueAegisOrchestrationEsc(job.exit_code === null || job.exit_code === undefined ? "-" : job.exit_code)}</code></td>
+          <td>${deltaAegisTrueAegisOrchestrationEsc(job.completed_at || job.started_at || job.created_at || "-")}</td>
+          <td>${deltaAegisTrueAegisOrchestrationEsc(job.message || "-")}</td>
+        </tr>
+      `).join("");
+    }
+
+    function deltaAegisTrueAegisOrchestrationRender(context, jobsPayload, errorMessage = "") {
+      const panel = deltaAegisTrueAegisOrchestrationEnsurePanel();
+      const jobs = Array.isArray(jobsPayload) ? jobsPayload : ((jobsPayload && jobsPayload.jobs) || []);
+      const blockers = (context && Array.isArray(context.blockers)) ? context.blockers : [];
+      const latestScan = (context && context.latest_scan) || {};
+      const commandPreview = (context && Array.isArray(context.command_preview))
+        ? context.command_preview
+        : [];
+      const ready = !!(context && context.ready_to_start);
+      const runDisabled = ready ? "" : "disabled";
+      const runTitle = ready ? "Run TrueAegis validation" : "Resolve blockers before running TrueAegis";
+
+      const blockerHtml = blockers.length
+        ? `<ul>${blockers.map(item => `<li>${deltaAegisTrueAegisOrchestrationEsc(item)}</li>`).join("")}</ul>`
+        : `<p class="muted">No blockers detected.</p>`;
+
+      panel.innerHTML = `
+        <h2>TrueAegis Orchestration</h2>
+        <p class="muted">Run TrueAegis against the latest accepted NetSniper manifest, import validation output, and refresh DeltaAegis service-level evidence correlations.</p>
+
+        ${errorMessage ? `<div class="alert error">${deltaAegisTrueAegisOrchestrationEsc(errorMessage)}</div>` : ""}
+
+        <div class="cards">
+          <div class="card">
+            <div class="label">Ready</div>
+            <strong>${ready ? "yes" : "no"}</strong>
+          </div>
+          <div class="card">
+            <div class="label">Latest Scan</div>
+            <strong>${deltaAegisTrueAegisOrchestrationEsc((context && context.scan_id) || latestScan.scan_id || "-")}</strong>
+          </div>
+          <div class="card">
+            <div class="label">Network Scope</div>
+            <strong>${deltaAegisTrueAegisOrchestrationEsc((context && context.network_scope) || latestScan.network_scope || "-")}</strong>
+          </div>
+          <div class="card">
+            <div class="label">Manifest</div>
+            <strong>${context && context.manifest_exists ? "found" : "missing"}</strong>
+          </div>
+          <div class="card">
+            <div class="label">TrueAegis</div>
+            <strong>${context && context.trueaegis_exists ? "found" : "missing"}</strong>
+          </div>
+          <div class="card">
+            <div class="label">Recent Jobs</div>
+            <strong>${deltaAegisTrueAegisOrchestrationEsc(jobs.length || 0)}</strong>
+          </div>
+        </div>
+
+        <div class="grid two-col">
+          <div>
+            <h3>Readiness</h3>
+            <p><strong>Manifest:</strong> <code>${deltaAegisTrueAegisOrchestrationEsc((context && context.manifest_path) || "-")}</code></p>
+            <p><strong>TrueAegis:</strong> <code>${deltaAegisTrueAegisOrchestrationEsc((context && context.trueaegis_path) || "-")}</code></p>
+            <p><strong>Validation results:</strong> <code>${deltaAegisTrueAegisOrchestrationEsc((context && context.validation_results_dir) || "-")}</code></p>
+            <h4>Blockers</h4>
+            ${blockerHtml}
+          </div>
+
+          <div>
+            <h3>Action</h3>
+            <p class="muted">The run button starts a guarded background worker. It does not accept arbitrary shell commands or operator-supplied flags.</p>
+            <button
+              type="button"
+              id="trueaegis-run-button"
+              class="primary"
+              ${runDisabled}
+              title="${deltaAegisTrueAegisOrchestrationEsc(runTitle)}"
+            >Run TrueAegis</button>
+            <button
+              type="button"
+              id="trueaegis-refresh-button"
+            >Refresh</button>
+            <h4>Command preview</h4>
+            <pre><code>${deltaAegisTrueAegisOrchestrationEsc(commandPreview.join(" "))}</code></pre>
+          </div>
+        </div>
+
+        <h3>TrueAegis Jobs</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Job</th>
+              <th>Status</th>
+              <th>Scan</th>
+              <th>Validation Run</th>
+              <th>Imported</th>
+              <th>Correlations</th>
+              <th>Exit</th>
+              <th>Time</th>
+              <th>Message</th>
+            </tr>
+          </thead>
+          <tbody>${deltaAegisTrueAegisJobRows(jobs)}</tbody>
+        </table>
+      `;
+
+      const refreshButton = document.getElementById("trueaegis-refresh-button");
+      if (refreshButton) {
+        refreshButton.addEventListener("click", deltaAegisTrueAegisOrchestrationRefresh);
+      }
+
+      const runButton = document.getElementById("trueaegis-run-button");
+      if (runButton) {
+        runButton.addEventListener("click", deltaAegisTrueAegisOrchestrationRun);
+      }
+    }
+
+    async function deltaAegisTrueAegisOrchestrationRefresh() {
+      try {
+        const [context, jobs] = await Promise.all([
+          deltaAegisTrueAegisOrchestrationFetchJson("/api/trueaegis/context"),
+          deltaAegisTrueAegisOrchestrationFetchJson("/api/trueaegis-jobs?limit=10")
+        ]);
+        deltaAegisTrueAegisOrchestrationRender(context, jobs);
+      } catch (error) {
+        deltaAegisTrueAegisOrchestrationRender({}, [], error && error.message ? error.message : String(error));
+      }
+    }
+
+    async function deltaAegisTrueAegisOrchestrationRun() {
+      const button = document.getElementById("trueaegis-run-button");
+      if (button) {
+        button.disabled = true;
+        button.textContent = "Starting...";
+      }
+
+      try {
+        await deltaAegisTrueAegisOrchestrationFetchJson("/api/trueaegis/run", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: "{}"
+        });
+        await deltaAegisTrueAegisOrchestrationRefresh();
+      } catch (error) {
+        await deltaAegisTrueAegisOrchestrationRefresh();
+        const panel = deltaAegisTrueAegisOrchestrationEnsurePanel();
+        const message = error && error.message ? error.message : String(error);
+        panel.insertAdjacentHTML(
+          "afterbegin",
+          `<div class="alert error">${deltaAegisTrueAegisOrchestrationEsc(message)}</div>`
+        );
+      }
+    }
+
+    if (!window.__deltaAegisTrueAegisOrchestrationPanelInitialized) {
+      window.__deltaAegisTrueAegisOrchestrationPanelInitialized = true;
+      document.addEventListener("DOMContentLoaded", () => {
+        deltaAegisTrueAegisOrchestrationRefresh();
+        window.setInterval(deltaAegisTrueAegisOrchestrationRefresh, 15000);
+      });
+    }
+
+
+
     function trueAegisValidationText(value) {
       if (value === null || value === undefined || value === "") { return "—"; }
       return String(value);
@@ -19930,7 +20942,7 @@ def dashboard_index_html_base_v025_operator_link():
           <div>
             <div class="eyebrow">TrueAegis Foundation</div>
             <h2>Validation Evidence</h2>
-            <p class="muted">Imported TrueAegis validation observations are correlated with current NetSniper services as evidence only. v0.34 does not alter risk scoring yet.</p>
+            <p class="muted">Imported TrueAegis validation observations are correlated with current NetSniper services as evidence only. v0.35 can orchestrate guarded TrueAegis runs and import validation evidence automatically.</p>
           </div>
           <a href="/api/validation-summary">Raw summary JSON</a>
         </div>
@@ -22177,6 +23189,14 @@ def command_dashboard(args):
                     dashboard_json_response(self, dashboard_summary_payload(connection, scope=scope))
                 elif route == "/api/scan-context":
                     dashboard_json_response(self, dashboard_scan_context_payload(connection, scope=scope))
+                elif route == "/api/trueaegis/context":
+                    dashboard_json_response(
+                        self,
+                        dashboard_trueaegis_orchestration_context_payload(
+                            connection,
+                            scope=scope,
+                        ),
+                    )
                 elif route == "/api/validation-summary":
                     dashboard_json_response(self, dashboard_validation_summary_payload(connection))
                 elif route == "/api/validations":
@@ -22214,6 +23234,17 @@ def command_dashboard(args):
                     dashboard_json_response(
                         self,
                         dashboard_scan_jobs_payload(
+                            connection,
+                            limit=limit,
+                            scope=scope,
+                            status=status_filter,
+                        ),
+                    )
+                elif route == "/api/trueaegis-jobs":
+                    status_filter = query.get("status", [""])[0].strip() or None
+                    dashboard_json_response(
+                        self,
+                        dashboard_trueaegis_jobs_payload(
                             connection,
                             limit=limit,
                             scope=scope,
@@ -22595,6 +23626,84 @@ def command_dashboard(args):
 
                 dashboard_json_response(self, result)
                 return
+
+            if route == "/api/trueaegis/run":
+                if not self.require_permission("scan.start"):
+                    return
+
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    content_length = 0
+
+                if content_length > 65536:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "body_too_large",
+                            "message": "POST body is too large.",
+                        },
+                        status=413,
+                    )
+                    return
+
+                payload = {}
+
+                if content_length > 0:
+                    try:
+                        raw_body = self.rfile.read(content_length).decode("utf-8")
+                        payload = json.loads(raw_body)
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "invalid_json",
+                                "message": "POST body must be valid JSON.",
+                            },
+                            status=400,
+                        )
+                        return
+
+                    if not isinstance(payload, dict):
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "invalid_json",
+                                "message": "POST body must be a JSON object.",
+                            },
+                            status=400,
+                        )
+                        return
+
+                connection = self.open_connection()
+
+                try:
+                    try:
+                        result = dashboard_trueaegis_validation_start_payload(
+                            connection,
+                            payload,
+                            args.db,
+                        )
+                    except DeltaAegisError as exc:
+                        connection.rollback()
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "trueaegis_run_failed",
+                                "message": str(exc),
+                            },
+                            status=400,
+                        )
+                        return
+
+                    dashboard_json_response(self, result, status=202)
+                    return
+                finally:
+                    connection.close()
 
             if route == "/api/netsniper/scan-start":
                 if not self.require_permission("scan.start"):

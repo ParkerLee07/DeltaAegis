@@ -1,3 +1,25 @@
+## DeltaAegis v0.35.0 — TrueAegis Orchestration
+
+- Added dashboard orchestration controls for TrueAegis readiness, latest accepted scan context, guarded run action, and recent job visibility.
+- Added live TrueAegis job status display with validation run IDs, imported observations, correlation counts, exit codes, and worker messages.
+- Added `validate_v0_35_release.sh` to run the full v0.35 validator suite and enforce release-critical route/helper/UI checks.
+- Added automatic import of completed TrueAegis validation output into DeltaAegis validation tables.
+- Added automatic refresh of TrueAegis validation correlations after job completion.
+- Updated TrueAegis job records with validation run IDs, imported observation counts, and correlation counts.
+- Hardened `POST /api/trueaegis/run` with explicit scan-start permission checks, JSON parsing, rollback, and connection handling.
+- Added `validate_v0_35_trueaegis_auto_import.sh` for end-to-end fake-run import and correlation validation.
+- Added guarded TrueAegis validation execution worker for fixed argv-only `trueaegis.py <manifest.json> --validate --quiet` runs.
+- Added `POST /api/trueaegis/run` using the existing ADMIN-level scan-start permission boundary.
+- Added stdout/stderr logging and validation output detection for completed TrueAegis jobs without auto-importing results yet.
+- Added `validate_v0_35_trueaegis_execution_worker.sh` with a fake TrueAegis runner so validation does not touch the live network.
+- Added guarded TrueAegis orchestration context discovery for the latest accepted NetSniper manifest.
+- Added safe argv command preview generation for `python3 trueaegis.py <manifest.json> --validate --quiet` without shell execution.
+- Added read-only `/api/trueaegis/context` dashboard visibility for TrueAegis readiness and blockers.
+- Added `validate_v0_35_trueaegis_orchestration_context.sh` to verify context payloads and safe command construction.
+- Started the v0.35 TrueAegis orchestration foundation with dedicated `trueaegis_jobs` storage.
+- Added read-only `/api/trueaegis-jobs` dashboard visibility for validation job status.
+- Added `validate_v0_35_trueaegis_job_storage.sh` to verify TrueAegis job schema, helpers, route policy, API route, and storage behavior.
+
 ## v0.34.0 — TrueAegis Validation Correlation
 
 - Added `validation_correlations` storage for matching imported TrueAegis observations to current NetSniper services.
