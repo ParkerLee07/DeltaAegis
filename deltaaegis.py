@@ -16,6 +16,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import sqlite3
 import subprocess
 import threading
@@ -4554,61 +4555,131 @@ def execute_scan_job(
     stderr_log = logs_dir / f"{job_id}.stderr.log"
 
     started_at = utc_now_text()
-
-    update_scan_job(
-        connection,
-        job_id,
-        status="RUNNING",
-        started_at=started_at,
-        stdout_log=str(stdout_log),
-        stderr_log=str(stderr_log),
-        message="NetSniper scan running",
-    )
-    connection.commit()
+    process = None
 
     try:
-        completed = subprocess.run(
-            command,
-            cwd=str(netsniper_path.parent),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
+        with (
+            stdout_log.open("w", encoding="utf-8") as stdout_handle,
+            stderr_log.open("w", encoding="utf-8") as stderr_handle,
+        ):
+            process = subprocess.Popen(
+                command,
+                cwd=str(netsniper_path.parent),
+                text=True,
+                stdout=stdout_handle,
+                stderr=stderr_handle,
+                start_new_session=True,
+            )
+
+            heartbeat_at = utc_now_text()
+
+            update_scan_job(
+                connection,
+                job_id,
+                status="RUNNING",
+                started_at=started_at,
+                heartbeat_at=heartbeat_at,
+                process_pid=process.pid,
+                stdout_log=str(stdout_log),
+                stderr_log=str(stderr_log),
+                message=f"NetSniper scan running profile={safe_profile}",
+            )
+            connection.commit()
+
+            while True:
+                try:
+                    return_code = process.wait(timeout=5.0)
+                    break
+                except subprocess.TimeoutExpired:
+                    update_scan_job(
+                        connection,
+                        job_id,
+                        heartbeat_at=utc_now_text(),
+                    )
+                    connection.commit()
+
     except KeyboardInterrupt as exc:
+        if process is not None and process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=5.0)
+            except ProcessLookupError:
+                pass
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+
+        finished_at = utc_now_text()
+
         update_scan_job(
             connection,
             job_id,
             status="FAILED",
-            finished_at=utc_now_text(),
+            heartbeat_at=finished_at,
+            finished_at=finished_at,
+            process_pid=process.pid if process is not None else None,
+            stdout_log=str(stdout_log),
+            stderr_log=str(stderr_log),
             exit_code=130,
             message=f"NetSniper scan interrupted by operator profile={safe_profile}",
         )
         connection.commit()
-        raise DeltaAegisError("NetSniper scan interrupted by operator") from exc
+
+        raise DeltaAegisError(
+            "NetSniper scan interrupted by operator"
+        ) from exc
+
     except OSError as exc:
+        if process is not None and process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=5.0)
+            except ProcessLookupError:
+                pass
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+
+        finished_at = utc_now_text()
+
         update_scan_job(
             connection,
             job_id,
             status="FAILED",
-            finished_at=utc_now_text(),
+            started_at=started_at,
+            heartbeat_at=finished_at,
+            finished_at=finished_at,
+            process_pid=process.pid if process is not None else None,
+            stdout_log=str(stdout_log),
+            stderr_log=str(stderr_log),
             exit_code=127,
             message=f"failed to launch NetSniper: {exc}",
         )
         connection.commit()
-        raise DeltaAegisError(f"failed to launch NetSniper: {exc}") from exc
 
-    stdout_log.write_text(completed.stdout or "", encoding="utf-8")
-    stderr_log.write_text(completed.stderr or "", encoding="utf-8")
+        raise DeltaAegisError(
+            f"failed to launch NetSniper: {exc}"
+        ) from exc
 
-    status_json = extract_netsniper_status_json(completed.stdout)
+    stdout_text = stdout_log.read_text(
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    status_json = extract_netsniper_status_json(stdout_text)
 
     if not isinstance(status_json, dict):
         status_json = {}
 
     bundle_path = extract_netsniper_bundle_path(status_json)
 
-    if completed.returncode == 0 and not bundle_path:
+    if return_code == 0 and not bundle_path:
         manifest_path = find_completed_netsniper_manifest_for_scan(
             runs_dir,
             safe_target,
@@ -4620,14 +4691,14 @@ def execute_scan_job(
             status_json = enrich_netsniper_status_from_manifest(status_json, manifest_path)
             bundle_path = str(manifest_path.parent)
 
-    final_status = "COMPLETED" if completed.returncode == 0 else "FAILED"
+    final_status = "COMPLETED" if return_code == 0 else "FAILED"
 
     message_parts = []
 
     if final_status == "COMPLETED":
         message_parts.append(f"NetSniper scan completed profile={safe_profile}")
     else:
-        message_parts.append(f"NetSniper scan failed with exit code {completed.returncode} profile={safe_profile}")
+        message_parts.append(f"NetSniper scan failed with exit code {return_code} profile={safe_profile}")
 
     if bundle_path:
         message_parts.append(f"bundle={bundle_path}")
@@ -4671,13 +4742,16 @@ def execute_scan_job(
 
     status_json["auto_ingest"] = auto_ingest_evidence
 
+    finished_at = utc_now_text()
+
     update_scan_job(
         connection,
         job_id,
         status=final_status,
-        finished_at=utc_now_text(),
+        heartbeat_at=finished_at,
+        finished_at=finished_at,
         bundle_path=bundle_path,
-        exit_code=completed.returncode,
+        exit_code=return_code,
         status_json=status_json,
         message="; ".join(message_parts),
     )
