@@ -19,7 +19,7 @@ required = [
     "def sqlite_connection_database_path(",
     'connection.execute("PRAGMA database_list")',
     "def trueaegis_start_queued_followup_for_schedule(",
-    "deltaaegis-trueaegis-followup-execution-v1",
+    "deltaaegis-trueaegis-followup-execution-v2",
     '"database_path_unavailable"',
     '"thread_start_failed"',
     "dashboard_start_trueaegis_job_thread(",
@@ -62,8 +62,16 @@ helper = text[helper_start:helper_end]
 if "create_trueaegis_job(" in helper:
     raise SystemExit("execution helper must not create a second job")
 
-if "execute_trueaegis_job(" in helper:
-    raise SystemExit("execution helper must use the guarded worker")
+if "dashboard_start_trueaegis_job_thread(" not in helper:
+    raise SystemExit("execution helper must retain the guarded asynchronous worker")
+
+if (
+    "execute_trueaegis_job(" in helper
+    and 'if safe_execution_mode == "synchronous":' not in helper
+):
+    raise SystemExit(
+        "direct TrueAegis execution is only allowed in guarded synchronous mode"
+    )
 
 print("static execution checks passed")
 PY

@@ -5338,7 +5338,8 @@ def dashboard_netsniper_schedule_run_due_payload(
         runs_dir=dashboard_netsniper_runs_dir(),
         logs_dir=DEFAULT_SCAN_LOGS,
         events_path=events_path,
-        max_runs=max_runs,
+        max_runs=max_runs,        trueaegis_execution_mode="asynchronous",
+
     )
 
     return {
@@ -6047,6 +6048,7 @@ def run_due_scan_schedules(
     logs_dir: Path,
     events_path: Path,
     max_runs: int = 1,
+    trueaegis_execution_mode: str = "asynchronous",
 ) -> list[dict[str, Any]]:
     max_runs = max(1, int(max_runs or 1))
     results: list[dict[str, Any]] = []
@@ -6144,6 +6146,7 @@ def run_due_scan_schedules(
             trueaegis_followup_execution = trueaegis_start_queued_followup_for_schedule(
                 connection,
                 trueaegis_followup_queue,
+                execution_mode=trueaegis_execution_mode,
             )
             results.append(
                 {
@@ -6181,6 +6184,7 @@ def run_due_scan_schedules(
         trueaegis_followup_execution = trueaegis_start_queued_followup_for_schedule(
             connection,
             trueaegis_followup_queue,
+            execution_mode=trueaegis_execution_mode,
         )
 
         results.append(
@@ -6222,6 +6226,15 @@ def print_schedule_run_results(results: list[dict[str, Any]]) -> None:
         if schedule:
             print(f"  next_run={schedule.get('next_run_at') or '-'}  last_status={schedule.get('last_status') or '-'}")
 
+        followup = result.get("trueaegis_followup_execution") or {}
+        if followup:
+            followup_job = followup.get("job") or {}
+            print(
+                f"  trueaegis_mode={followup.get('execution_mode') or '-'}  "
+                f"outcome={followup.get('outcome') or '-'}  "
+                f"status={followup_job.get('status') or '-'}"
+            )
+
 
 def command_schedule_run_due(args: argparse.Namespace) -> int:
     connection = connect(args.db)
@@ -6232,13 +6245,39 @@ def command_schedule_run_due(args: argparse.Namespace) -> int:
         runs_dir=Path(args.runs_dir).expanduser(),
         logs_dir=Path(args.scan_logs_dir).expanduser(),
         events_path=args.events,
-        max_runs=args.max_runs,
+        max_runs=args.max_runs,        trueaegis_execution_mode="synchronous",
+
     )
 
     print_schedule_run_results(results)
 
-    failed = any((item.get("job") or {}).get("status") == "FAILED" for item in results)
-    return 1 if failed else 0
+    scan_failed = any(
+        (item.get("job") or {}).get("status") == "FAILED"
+        for item in results
+    )
+    trueaegis_failed = any(
+        (
+            str(
+                (item.get("trueaegis_followup_execution") or {}).get("outcome")
+                or ""
+            ).lower()
+            in {
+                "failed",
+                "execution_failed",
+                "thread_start_failed",
+                "database_path_unavailable",
+            }
+            or (
+                (
+                    (item.get("trueaegis_followup_execution") or {}).get("job")
+                    or {}
+                ).get("status")
+                == "FAILED"
+            )
+        )
+        for item in results
+    )
+    return 1 if scan_failed or trueaegis_failed else 0
 
 
 def set_scan_schedule_enabled(
@@ -12399,19 +12438,31 @@ def trueaegis_start_queued_followup_for_schedule(
     queue_result: dict[str, Any],
     db_path: Path | str | None = None,
     logs_dir: Path | str = DEFAULT_TRUEAEGIS_LOGS,
+    execution_mode: str = "asynchronous",
 ) -> dict[str, Any]:
-    """Start the guarded worker for a TrueAegis job queued by checkpoint 3.
+    """Execute the exact TrueAegis job queued by the scheduled follow-up path.
 
-    This helper never creates a second TrueAegis job. If thread startup fails,
-    the queued job is marked FAILED so it cannot remain stuck as an active job.
+    Dashboard schedule workers use the asynchronous guarded worker. CLI
+    schedule execution uses synchronous mode so the process remains alive
+    until validation, import, and correlation refresh finish.
     """
 
+    safe_execution_mode = str(execution_mode or "asynchronous").strip().lower()
+
+    if safe_execution_mode not in {"asynchronous", "synchronous"}:
+        raise DeltaAegisError(
+            f"invalid TrueAegis follow-up execution mode: {execution_mode}"
+        )
+
     result = {
-        "schema_version": "deltaaegis-trueaegis-followup-execution-v1",
+        "schema_version": "deltaaegis-trueaegis-followup-execution-v2",
+        "execution_mode": safe_execution_mode,
         "started": False,
+        "completed": False,
         "outcome": str(queue_result.get("outcome") or "not_queued"),
         "trueaegis_job_id": queue_result.get("trueaegis_job_id"),
         "thread_name": None,
+        "job": queue_result.get("job"),
         "message": "TrueAegis follow-up execution was not started.",
     }
 
@@ -12430,15 +12481,19 @@ def trueaegis_start_queued_followup_for_schedule(
     ).strip()
     manifest_value = str(trueaegis_job.get("manifest_path") or "").strip()
     trueaegis_value = str(trueaegis_job.get("trueaegis_path") or "").strip()
-    resolved_db_path = sqlite_connection_database_path(
-        connection,
-        explicit_path=db_path,
-    )
 
     if not job_id:
         result["outcome"] = "missing_job_id"
         result["message"] = "Queued TrueAegis follow-up did not include a job id."
         return result
+
+    def persisted_job() -> dict[str, Any] | None:
+        row = connection.execute(
+            "SELECT * FROM trueaegis_jobs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+
+        return trueaegis_job_to_dict(row) if row is not None else None
 
     def mark_start_failed(outcome: str, message: str) -> dict[str, Any]:
         try:
@@ -12453,15 +12508,11 @@ def trueaegis_start_queued_followup_for_schedule(
         except Exception:
             pass
 
+        result["completed"] = True
         result["outcome"] = outcome
+        result["job"] = persisted_job()
         result["message"] = message
         return result
-
-    if resolved_db_path is None:
-        return mark_start_failed(
-            "database_path_unavailable",
-            "TrueAegis follow-up worker could not resolve the DeltaAegis database path.",
-        )
 
     if not manifest_value:
         return mark_start_failed(
@@ -12477,6 +12528,60 @@ def trueaegis_start_queued_followup_for_schedule(
 
     manifest_path = Path(manifest_value).expanduser()
     trueaegis_path = Path(trueaegis_value).expanduser()
+    safe_logs_dir = Path(logs_dir).expanduser()
+
+    if safe_execution_mode == "synchronous":
+        result["started"] = True
+
+        try:
+            final_job = execute_trueaegis_job(
+                connection,
+                job_id=job_id,
+                manifest_path=manifest_path,
+                trueaegis_path=trueaegis_path,
+                logs_dir=safe_logs_dir,
+            )
+        except Exception as exc:
+            return mark_start_failed(
+                "execution_failed",
+                f"TrueAegis synchronous follow-up failed: {exc}",
+            )
+
+        final_status = str(final_job.get("status") or "").strip().upper()
+        completed = final_status in {"COMPLETED", "FAILED"}
+
+        result.update(
+            {
+                "completed": completed,
+                "outcome": (
+                    "completed"
+                    if final_status == "COMPLETED"
+                    else "failed"
+                    if final_status == "FAILED"
+                    else "finished_with_unknown_status"
+                ),
+                "job": final_job,
+                "message": (
+                    "TrueAegis synchronous follow-up completed."
+                    if final_status == "COMPLETED"
+                    else f"TrueAegis synchronous follow-up finished with status "
+                    f"{final_status or 'UNKNOWN'}."
+                ),
+            }
+        )
+
+        return result
+
+    resolved_db_path = sqlite_connection_database_path(
+        connection,
+        explicit_path=db_path,
+    )
+
+    if resolved_db_path is None:
+        return mark_start_failed(
+            "database_path_unavailable",
+            "TrueAegis follow-up worker could not resolve the DeltaAegis database path.",
+        )
 
     try:
         thread = dashboard_start_trueaegis_job_thread(
@@ -12484,7 +12589,7 @@ def trueaegis_start_queued_followup_for_schedule(
             job_id=job_id,
             manifest_path=manifest_path,
             trueaegis_path=trueaegis_path,
-            logs_dir=Path(logs_dir).expanduser(),
+            logs_dir=safe_logs_dir,
         )
     except Exception as exc:
         return mark_start_failed(
@@ -12497,9 +12602,11 @@ def trueaegis_start_queued_followup_for_schedule(
             "started": True,
             "outcome": "started",
             "thread_name": thread.name,
-            "message": "TrueAegis follow-up worker started.",
+            "job": persisted_job() or trueaegis_job,
+            "message": "TrueAegis asynchronous follow-up worker started.",
         }
     )
+
     return result
 
 
@@ -25469,7 +25576,8 @@ def dashboard_run_due_schedule_tick(
             runs_dir=runs_dir or dashboard_netsniper_runs_dir(),
             logs_dir=logs_dir or DEFAULT_SCAN_LOGS,
             events_path=events_path,
-            max_runs=max_runs,
+            max_runs=max_runs,            trueaegis_execution_mode="asynchronous",
+
         )
     finally:
         connection.close()

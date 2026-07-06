@@ -247,6 +247,7 @@ originals = {
     "update_scan_schedule_after_job": deltaaegis.update_scan_schedule_after_job,
     "trueaegis_followup_plan_for_schedule": deltaaegis.trueaegis_followup_plan_for_schedule,
     "trueaegis_queue_followup_for_schedule": deltaaegis.trueaegis_queue_followup_for_schedule,
+    "trueaegis_start_queued_followup_for_schedule": deltaaegis.trueaegis_start_queued_followup_for_schedule,
 }
 
 try:
@@ -304,6 +305,17 @@ try:
         deltaaegis.update_scan_schedule_after_job = lambda *args, **kwargs: schedule
         deltaaegis.trueaegis_followup_plan_for_schedule = lambda *args, **kwargs: plan
         deltaaegis.trueaegis_queue_followup_for_schedule = lambda *args, **kwargs: queue_result
+
+        execution_result = {
+            "schema_version": "deltaaegis-trueaegis-followup-execution-test-v1",
+            "execution_mode": "asynchronous",
+            "started": True,
+            "completed": False,
+            "outcome": "started",
+        }
+        deltaaegis.trueaegis_start_queued_followup_for_schedule = (
+            lambda *args, **kwargs: execution_result
+        )
 
         result = deltaaegis.run_due_scan_schedules(
             conn,
