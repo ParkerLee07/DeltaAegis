@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.38.0: TrueAegis Follow-Up Automation.
+"""DeltaAegis v0.39.0: Scan Job Lifecycle Observability.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -16,6 +16,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import sqlite3
 import subprocess
 import threading
@@ -46,7 +47,7 @@ IDENTITY_COVERAGE_THRESHOLD = 0.50
 IDENTITY_DROP_REVIEW_THRESHOLD = 0.25
 REMOVAL_THRESHOLD = 3
 MAC_RE = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
-SCAN_JOB_STATUSES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED"}
+SCAN_JOB_STATUSES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"}
 NETSNIPER_SUPPORTED_SCHEMAS = {"netsniper-run-v1", "netsniper-run-v2", "netsniper-run-v3"}
 NETSNIPER_PROFILE_AWARE_SCHEMAS = {"netsniper-run-v2", "netsniper-run-v3"}
 TRUEAEGIS_VALIDATION_STATUSES = {"CONFIRMED", "REACHABLE", "PROTECTED", "PROTOCOL_MISMATCH", "NOT_REACHABLE", "TIMEOUT", "INCONCLUSIVE", "PARTIALLY_CONFIRMED", "DEPENDENCY_MISSING", "UNKNOWN"}
@@ -79,6 +80,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("GET", "/operator/reset", "admin.telemetry.cleanup"),
     ("GET", "/netsniper", "dashboard.read"),
     ("GET", "/api/netsniper/status", "dashboard.read"),
+    ("GET", "/api/netsniper/job-detail", "dashboard.read"),
     ("GET", "/api/validation-summary", "dashboard.read"),
     ("GET", "/api/validation-correlations", "dashboard.read"),
     ("GET", "/api/validations", "dashboard.read"),
@@ -97,6 +99,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("POST", "/api/investigate-asset", "workflow.write"),
     ("POST", "/api/netsniper/import-latest", "workflow.write"),
     ("POST", "/api/netsniper/scan-start", "scan.start"),
+    ("POST", "/api/netsniper/scan-cancel", "scan.start"),
     ("POST", "/api/trueaegis/run", "scan.start"),
     ("GET", "/api/netsniper/schedules", "dashboard.read"),
     ("GET", "/api/netsniper/schedule-history", "dashboard.read"),
@@ -506,7 +509,13 @@ CREATE TABLE IF NOT EXISTS scan_jobs (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     started_at TEXT,
+    heartbeat_at TEXT,
+    cancel_requested_at TEXT,
+    cancel_requested_by TEXT NOT NULL DEFAULT '',
+    cancel_reason TEXT NOT NULL DEFAULT '',
+    cancelled_at TEXT,
     finished_at TEXT,
+    process_pid INTEGER,
     netsniper_path TEXT NOT NULL DEFAULT '',
     runs_dir TEXT NOT NULL DEFAULT '',
     bundle_path TEXT,
@@ -592,6 +601,38 @@ CREATE INDEX IF NOT EXISTS idx_scan_schedules_scope
 
 CREATE INDEX IF NOT EXISTS idx_scan_schedules_profile
     ON scan_schedules(scan_profile);
+
+CREATE TABLE IF NOT EXISTS scan_schedule_deletions (
+    schedule_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    target TEXT NOT NULL,
+    network_scope TEXT NOT NULL,
+    scan_profile TEXT NOT NULL DEFAULT 'balanced',
+    cadence_minutes INTEGER NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    auto_ingest INTEGER NOT NULL DEFAULT 1,
+    run_trueaegis_after_ingest INTEGER NOT NULL DEFAULT 0,
+    last_run_at TEXT,
+    next_run_at TEXT,
+    last_job_id TEXT,
+    last_status TEXT,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    skip_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    message TEXT NOT NULL DEFAULT '',
+    deleted_at TEXT NOT NULL,
+    linked_job_count INTEGER NOT NULL DEFAULT 0,
+    linked_active_job_count INTEGER NOT NULL DEFAULT 0,
+    linked_job_status_counts_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_schedule_deletions_deleted_at
+    ON scan_schedule_deletions(deleted_at);
+
+CREATE INDEX IF NOT EXISTS idx_scan_schedule_deletions_scope
+    ON scan_schedule_deletions(network_scope);
+
 
 """
 
@@ -1511,6 +1552,12 @@ def connect(db_path: Path) -> sqlite3.Connection:
     ensure_column(connection, "snapshots", "network_scope", "network_scope TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "asset_observations", "identity_class", "identity_class TEXT NOT NULL DEFAULT 'IP_ONLY'")
     ensure_column(connection, "scan_jobs", "scan_profile", "scan_profile TEXT NOT NULL DEFAULT 'balanced'")
+    ensure_column(connection, "scan_jobs", "process_pid", "process_pid INTEGER")
+    ensure_column(connection, "scan_jobs", "heartbeat_at", "heartbeat_at TEXT")
+    ensure_column(connection, "scan_jobs", "cancel_requested_at", "cancel_requested_at TEXT")
+    ensure_column(connection, "scan_jobs", "cancel_requested_by", "cancel_requested_by TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "scan_jobs", "cancel_reason", "cancel_reason TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "scan_jobs", "cancelled_at", "cancelled_at TEXT")
     ensure_column(connection, "trueaegis_jobs", "scan_job_id", "scan_job_id TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "trueaegis_jobs", "schedule_id", "schedule_id TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "trueaegis_jobs", "trigger_source", "trigger_source TEXT NOT NULL DEFAULT 'manual_dashboard'")
@@ -4207,6 +4254,12 @@ def create_scan_job(
         "status": "QUEUED",
         "created_at": now,
         "updated_at": now,
+        "heartbeat_at": None,
+        "cancel_requested_at": None,
+        "cancel_requested_by": "",
+        "cancel_reason": "",
+        "cancelled_at": None,
+        "process_pid": None,
         "netsniper_path": str(netsniper_path),
         "runs_dir": str(runs_dir),
         "scan_profile": safe_profile,
@@ -4223,7 +4276,13 @@ def update_scan_job(
     allowed = {
         "status",
         "started_at",
+        "heartbeat_at",
+        "cancel_requested_at",
+        "cancel_requested_by",
+        "cancel_reason",
+        "cancelled_at",
         "finished_at",
+        "process_pid",
         "bundle_path",
         "exit_code",
         "stdout_log",
@@ -4517,6 +4576,171 @@ def scan_job_auto_ingest_evidence(
     return evidence
 
 
+
+SCAN_JOB_CANCEL_ACTOR_MAX_LENGTH = 96
+SCAN_JOB_CANCEL_REASON_MAX_LENGTH = 500
+SCAN_JOB_CANCEL_GRACE_SECONDS = 5.0
+
+
+def normalize_scan_job_cancel_actor(value: Any = None) -> str:
+    actor = str(value or "operator").strip() or "operator"
+    if len(actor) > SCAN_JOB_CANCEL_ACTOR_MAX_LENGTH:
+        raise DeltaAegisError(
+            f"scan cancellation requester exceeds "
+            f"{SCAN_JOB_CANCEL_ACTOR_MAX_LENGTH} characters"
+        )
+    return actor
+
+
+def normalize_scan_job_cancel_reason(value: Any = None) -> str:
+    reason = (
+        str(value or "operator requested cancellation").strip()
+        or "operator requested cancellation"
+    )
+    if len(reason) > SCAN_JOB_CANCEL_REASON_MAX_LENGTH:
+        raise DeltaAegisError(
+            f"scan cancellation reason exceeds "
+            f"{SCAN_JOB_CANCEL_REASON_MAX_LENGTH} characters"
+        )
+    return reason
+
+
+def scan_job_row(
+    connection: sqlite3.Connection,
+    job_id: str,
+) -> sqlite3.Row | None:
+    return connection.execute(
+        "SELECT * FROM scan_jobs WHERE job_id = ?",
+        (str(job_id or "").strip(),),
+    ).fetchone()
+
+
+def scan_job_cancellation_request(
+    connection: sqlite3.Connection,
+    job_id: str,
+) -> dict[str, Any]:
+    row = scan_job_row(connection, job_id)
+    if row is None:
+        return {"found": False, "requested": False, "job": None}
+
+    job = scan_job_to_dict(row)
+    return {
+        "found": True,
+        "requested": bool(job.get("cancel_requested_at")),
+        "requested_at": job.get("cancel_requested_at"),
+        "requested_by": job.get("cancel_requested_by") or "",
+        "reason": job.get("cancel_reason") or "",
+        "job": job,
+    }
+
+
+def terminate_scan_process_group(
+    process: subprocess.Popen,
+    grace_seconds: float = SCAN_JOB_CANCEL_GRACE_SECONDS,
+) -> int | None:
+    if process.poll() is not None:
+        return process.returncode
+
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return process.poll()
+
+    try:
+        process.wait(timeout=max(0.1, float(grace_seconds)))
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+    return process.returncode
+
+
+def request_scan_job_cancellation(
+    connection: sqlite3.Connection,
+    job_id: Any,
+    requested_by: Any = None,
+    reason: Any = None,
+) -> dict[str, Any]:
+    safe_job_id = str(job_id or "").strip()
+
+    if (
+        not safe_job_id
+        or len(safe_job_id) > 160
+        or re.fullmatch(r"[A-Za-z0-9._:-]+", safe_job_id) is None
+    ):
+        raise DeltaAegisError("invalid scan job id")
+
+    actor = normalize_scan_job_cancel_actor(requested_by)
+    cancel_reason = normalize_scan_job_cancel_reason(reason)
+    row = scan_job_row(connection, safe_job_id)
+
+    if row is None:
+        raise DeltaAegisError(f"scan job not found: {safe_job_id}")
+
+    job = scan_job_to_dict(row)
+    status = str(job.get("status") or "").upper()
+
+    if status == "CANCELLED":
+        job["cancellation_action"] = "already_cancelled"
+        return job
+
+    if status in {"COMPLETED", "FAILED"}:
+        raise DeltaAegisError(
+            f"cannot cancel terminal scan job {safe_job_id} with status {status}"
+        )
+
+    if job.get("cancel_requested_at"):
+        job["cancellation_action"] = "already_requested"
+        return job
+
+    now = utc_now_text()
+    status_json = dict(job.get("status_json") or {})
+    status_json["cancellation"] = {
+        "requested_at": now,
+        "requested_by": actor,
+        "reason": cancel_reason,
+        "state": "CANCELLED_BEFORE_START" if status == "QUEUED" else "REQUESTED",
+    }
+
+    fields: dict[str, Any] = {
+        "cancel_requested_at": now,
+        "cancel_requested_by": actor,
+        "cancel_reason": cancel_reason,
+        "status_json": status_json,
+        "message": f"scan cancellation requested by {actor}: {cancel_reason}",
+    }
+
+    if status == "QUEUED":
+        fields.update(
+            {
+                "status": "CANCELLED",
+                "cancelled_at": now,
+                "finished_at": now,
+                "heartbeat_at": now,
+                "exit_code": 130,
+                "message": (
+                    f"scan cancelled before process launch by "
+                    f"{actor}: {cancel_reason}"
+                ),
+            }
+        )
+
+    update_scan_job(connection, safe_job_id, **fields)
+    updated_row = scan_job_row(connection, safe_job_id)
+
+    if updated_row is None:
+        raise DeltaAegisError(f"scan job disappeared unexpectedly: {safe_job_id}")
+
+    result = scan_job_to_dict(updated_row)
+    result["cancellation_action"] = (
+        "cancelled_before_start" if status == "QUEUED" else "requested"
+    )
+    return result
+
+
 def execute_scan_job(
     connection: sqlite3.Connection,
     job_id: str,
@@ -4546,61 +4770,263 @@ def execute_scan_job(
     stderr_log = logs_dir / f"{job_id}.stderr.log"
 
     started_at = utc_now_text()
+    process = None
+    cancellation_observed = False
 
-    update_scan_job(
+    initial_cancellation = scan_job_cancellation_request(
         connection,
         job_id,
-        status="RUNNING",
-        started_at=started_at,
-        stdout_log=str(stdout_log),
-        stderr_log=str(stderr_log),
-        message="NetSniper scan running",
     )
-    connection.commit()
+
+    if (
+        initial_cancellation.get("requested")
+        or str(
+            (initial_cancellation.get("job") or {}).get("status")
+            or ""
+        ).upper() == "CANCELLED"
+    ):
+        return initial_cancellation["job"]
 
     try:
-        completed = subprocess.run(
-            command,
-            cwd=str(netsniper_path.parent),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
+        with (
+            stdout_log.open("w", encoding="utf-8") as stdout_handle,
+            stderr_log.open("w", encoding="utf-8") as stderr_handle,
+        ):
+            process = subprocess.Popen(
+                command,
+                cwd=str(netsniper_path.parent),
+                text=True,
+                stdout=stdout_handle,
+                stderr=stderr_handle,
+                start_new_session=True,
+            )
+
+            heartbeat_at = utc_now_text()
+
+            start_cursor = connection.execute(
+                "UPDATE scan_jobs "
+                "SET status = ?, started_at = ?, heartbeat_at = ?, "
+                "process_pid = ?, stdout_log = ?, stderr_log = ?, "
+                "message = ?, updated_at = ? "
+                "WHERE job_id = ? "
+                "AND status = 'QUEUED' "
+                "AND cancel_requested_at IS NULL",
+                (
+                    "RUNNING",
+                    started_at,
+                    heartbeat_at,
+                    process.pid,
+                    str(stdout_log),
+                    str(stderr_log),
+                    f"NetSniper scan running profile={safe_profile}",
+                    heartbeat_at,
+                    job_id,
+                ),
+            )
+            connection.commit()
+
+            if start_cursor.rowcount != 1:
+                terminate_scan_process_group(process)
+                blocked_row = scan_job_row(connection, job_id)
+
+                if blocked_row is not None:
+                    blocked_job = scan_job_to_dict(blocked_row)
+                    if (
+                        blocked_job.get("cancel_requested_at")
+                        or blocked_job.get("status") == "CANCELLED"
+                    ):
+                        return blocked_job
+
+                raise DeltaAegisError(
+                    f"scan job could not transition from QUEUED "
+                    f"to RUNNING: {job_id}"
+                )
+
+            while True:
+                try:
+                    return_code = process.wait(timeout=5.0)
+                    final_request = scan_job_cancellation_request(
+                        connection,
+                        job_id,
+                    )
+                    cancellation_observed = bool(
+                        final_request.get("requested")
+                    )
+                    break
+                except subprocess.TimeoutExpired:
+                    cancellation = scan_job_cancellation_request(
+                        connection,
+                        job_id,
+                    )
+
+                    if cancellation.get("requested"):
+                        cancellation_observed = True
+                        terminate_scan_process_group(process)
+                        return_code = (
+                            process.returncode
+                            if process.returncode is not None
+                            else 130
+                        )
+                        break
+
+                    update_scan_job(
+                        connection,
+                        job_id,
+                        heartbeat_at=utc_now_text(),
+                    )
+                    connection.commit()
+
     except KeyboardInterrupt as exc:
+        if process is not None and process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=5.0)
+            except ProcessLookupError:
+                pass
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+
+        finished_at = utc_now_text()
+
         update_scan_job(
             connection,
             job_id,
-            status="FAILED",
-            finished_at=utc_now_text(),
+            status="CANCELLED",
+            heartbeat_at=finished_at,
+            cancel_requested_at=finished_at,
+            cancel_requested_by="cli",
+            cancel_reason="keyboard interrupt",
+            cancelled_at=finished_at,
+            finished_at=finished_at,
+            process_pid=process.pid if process is not None else None,
+            stdout_log=str(stdout_log),
+            stderr_log=str(stderr_log),
             exit_code=130,
-            message=f"NetSniper scan interrupted by operator profile={safe_profile}",
+            status_json={
+                "cancellation": {
+                    "requested_at": finished_at,
+                    "requested_by": "cli",
+                    "reason": "keyboard interrupt",
+                    "state": "CANCELLED",
+                }
+            },
+            message=f"NetSniper scan cancelled by CLI operator profile={safe_profile}",
         )
         connection.commit()
-        raise DeltaAegisError("NetSniper scan interrupted by operator") from exc
+
+        raise DeltaAegisError(
+            "NetSniper scan interrupted by operator"
+        ) from exc
+
     except OSError as exc:
+        if process is not None and process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=5.0)
+            except ProcessLookupError:
+                pass
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+
+        finished_at = utc_now_text()
+
         update_scan_job(
             connection,
             job_id,
             status="FAILED",
-            finished_at=utc_now_text(),
+            started_at=started_at,
+            heartbeat_at=finished_at,
+            finished_at=finished_at,
+            process_pid=process.pid if process is not None else None,
+            stdout_log=str(stdout_log),
+            stderr_log=str(stderr_log),
             exit_code=127,
             message=f"failed to launch NetSniper: {exc}",
         )
         connection.commit()
-        raise DeltaAegisError(f"failed to launch NetSniper: {exc}") from exc
 
-    stdout_log.write_text(completed.stdout or "", encoding="utf-8")
-    stderr_log.write_text(completed.stderr or "", encoding="utf-8")
+        raise DeltaAegisError(
+            f"failed to launch NetSniper: {exc}"
+        ) from exc
 
-    status_json = extract_netsniper_status_json(completed.stdout)
+    cancellation = scan_job_cancellation_request(
+        connection,
+        job_id,
+    )
+
+    if cancellation_observed or cancellation.get("requested"):
+        finished_at = utc_now_text()
+        cancel_job = cancellation.get("job") or {}
+        requested_at = cancel_job.get("cancel_requested_at") or finished_at
+        requested_by = cancel_job.get("cancel_requested_by") or "operator"
+        cancel_reason = (
+            cancel_job.get("cancel_reason")
+            or "operator requested cancellation"
+        )
+        status_json = dict(cancel_job.get("status_json") or {})
+        cancellation_evidence = dict(status_json.get("cancellation") or {})
+        cancellation_evidence.update(
+            {
+                "requested_at": requested_at,
+                "requested_by": requested_by,
+                "reason": cancel_reason,
+                "cancelled_at": finished_at,
+                "state": "CANCELLED",
+                "process_return_code": return_code,
+            }
+        )
+        status_json["cancellation"] = cancellation_evidence
+
+        update_scan_job(
+            connection,
+            job_id,
+            status="CANCELLED",
+            heartbeat_at=finished_at,
+            cancel_requested_at=requested_at,
+            cancel_requested_by=requested_by,
+            cancel_reason=cancel_reason,
+            cancelled_at=finished_at,
+            finished_at=finished_at,
+            process_pid=process.pid if process is not None else None,
+            stdout_log=str(stdout_log),
+            stderr_log=str(stderr_log),
+            exit_code=130,
+            status_json=status_json,
+            message=(
+                f"NetSniper scan cancelled by {requested_by}: "
+                f"{cancel_reason}; process_return_code={return_code}"
+            ),
+        )
+        connection.commit()
+
+        cancelled_row = scan_job_row(connection, job_id)
+        if cancelled_row is None:
+            raise DeltaAegisError(
+                f"scan job disappeared unexpectedly: {job_id}"
+            )
+        return scan_job_to_dict(cancelled_row)
+
+    stdout_text = stdout_log.read_text(
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    status_json = extract_netsniper_status_json(stdout_text)
 
     if not isinstance(status_json, dict):
         status_json = {}
 
     bundle_path = extract_netsniper_bundle_path(status_json)
 
-    if completed.returncode == 0 and not bundle_path:
+    if return_code == 0 and not bundle_path:
         manifest_path = find_completed_netsniper_manifest_for_scan(
             runs_dir,
             safe_target,
@@ -4612,14 +5038,14 @@ def execute_scan_job(
             status_json = enrich_netsniper_status_from_manifest(status_json, manifest_path)
             bundle_path = str(manifest_path.parent)
 
-    final_status = "COMPLETED" if completed.returncode == 0 else "FAILED"
+    final_status = "COMPLETED" if return_code == 0 else "FAILED"
 
     message_parts = []
 
     if final_status == "COMPLETED":
         message_parts.append(f"NetSniper scan completed profile={safe_profile}")
     else:
-        message_parts.append(f"NetSniper scan failed with exit code {completed.returncode} profile={safe_profile}")
+        message_parts.append(f"NetSniper scan failed with exit code {return_code} profile={safe_profile}")
 
     if bundle_path:
         message_parts.append(f"bundle={bundle_path}")
@@ -4663,13 +5089,16 @@ def execute_scan_job(
 
     status_json["auto_ingest"] = auto_ingest_evidence
 
+    finished_at = utc_now_text()
+
     update_scan_job(
         connection,
         job_id,
         status=final_status,
-        finished_at=utc_now_text(),
+        heartbeat_at=finished_at,
+        finished_at=finished_at,
         bundle_path=bundle_path,
-        exit_code=completed.returncode,
+        exit_code=return_code,
         status_json=status_json,
         message="; ".join(message_parts),
     )
@@ -4760,6 +5189,21 @@ def scan_job_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     item["auto_ingest"] = bool(item.get("auto_ingest"))
     item["scan_profile"] = item.get("scan_profile") or "balanced"
     item["schedule_id"] = item.get("schedule_id") or ""
+
+    process_pid = item.get("process_pid")
+    if process_pid in ("", None):
+        item["process_pid"] = None
+    else:
+        try:
+            item["process_pid"] = int(process_pid)
+        except (TypeError, ValueError):
+            item["process_pid"] = None
+
+    item["heartbeat_at"] = item.get("heartbeat_at") or None
+    item["cancel_requested_at"] = item.get("cancel_requested_at") or None
+    item["cancel_requested_by"] = item.get("cancel_requested_by") or ""
+    item["cancel_reason"] = item.get("cancel_reason") or ""
+    item["cancelled_at"] = item.get("cancelled_at") or None
     item["status_json"] = decode_json_field(item.get("status_json"), {})
 
     return item
@@ -4802,7 +5246,13 @@ def query_scan_jobs(
             created_at,
             updated_at,
             started_at,
+            heartbeat_at,
+            cancel_requested_at,
+            cancel_requested_by,
+            cancel_reason,
+            cancelled_at,
             finished_at,
+            process_pid,
             netsniper_path,
             runs_dir,
             scan_profile,
@@ -4838,6 +5288,246 @@ def dashboard_scan_jobs_payload(
         )
     ]
 
+
+
+
+SCAN_JOB_LOG_TAIL_DEFAULT_BYTES = 16 * 1024
+SCAN_JOB_LOG_TAIL_MINIMUM_BYTES = 1024
+SCAN_JOB_LOG_TAIL_MAXIMUM_BYTES = 64 * 1024
+
+
+def normalize_scan_job_log_tail_bytes(value: Any = None) -> int:
+    try:
+        requested = int(value or SCAN_JOB_LOG_TAIL_DEFAULT_BYTES)
+    except (TypeError, ValueError):
+        requested = SCAN_JOB_LOG_TAIL_DEFAULT_BYTES
+
+    return max(
+        SCAN_JOB_LOG_TAIL_MINIMUM_BYTES,
+        min(SCAN_JOB_LOG_TAIL_MAXIMUM_BYTES, requested),
+    )
+
+
+def scan_job_log_tail_payload(
+    path_value: Any,
+    job_id: str,
+    stream: str,
+    logs_root: Path,
+    max_bytes: Any = None,
+) -> dict[str, Any]:
+    safe_stream = str(stream or "").strip().lower()
+
+    if safe_stream not in {"stdout", "stderr"}:
+        raise DeltaAegisError(
+            f"unsupported scan job log stream: {stream!r}"
+        )
+
+    limit = normalize_scan_job_log_tail_bytes(max_bytes)
+    payload = {
+        "stream": safe_stream,
+        "available": False,
+        "text": "",
+        "truncated": False,
+        "file_size": 0,
+        "bytes_read": 0,
+        "tail_bytes_limit": limit,
+        "updated_at": None,
+        "reason": None,
+    }
+
+    if not path_value:
+        payload["reason"] = "log_path_not_recorded"
+        return payload
+
+    root = Path(logs_root).expanduser().resolve()
+    candidate = Path(str(path_value)).expanduser().resolve()
+    expected_name = f"{job_id}.{safe_stream}.log"
+
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        payload["reason"] = "log_path_outside_allowed_root"
+        return payload
+
+    if candidate.name != expected_name:
+        payload["reason"] = "unexpected_log_filename"
+        return payload
+
+    if not candidate.is_file():
+        payload["reason"] = "log_file_not_found"
+        return payload
+
+    try:
+        stat = candidate.stat()
+        file_size = int(stat.st_size)
+        start = max(0, file_size - limit)
+
+        with candidate.open("rb") as handle:
+            handle.seek(start)
+            content = handle.read(limit)
+
+        payload.update(
+            {
+                "available": True,
+                "text": content.decode(
+                    "utf-8",
+                    errors="replace",
+                ),
+                "truncated": start > 0,
+                "file_size": file_size,
+                "bytes_read": len(content),
+                "updated_at": datetime.fromtimestamp(
+                    stat.st_mtime,
+                    timezone.utc,
+                ).isoformat(timespec="seconds"),
+            }
+        )
+    except OSError as exc:
+        payload["reason"] = f"log_read_failed:{exc.__class__.__name__}"
+
+    return payload
+
+
+
+def dashboard_netsniper_scan_cancel_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+    actor: dict[str, Any] | None = None,
+    source_ip: str | None = None,
+    user_agent: str | None = None,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise DashboardAdminUserActionError(
+            "scan cancellation payload must be a JSON object",
+            status_code=400,
+        )
+
+    job_id = str(payload.get("job_id") or "").strip()
+    reason = payload.get("reason")
+
+    if (
+        not job_id
+        or len(job_id) > 160
+        or re.fullmatch(r"[A-Za-z0-9._:-]+", job_id) is None
+    ):
+        raise DashboardAdminUserActionError(
+            "invalid scan job id",
+            status_code=400,
+        )
+
+    existing_row = scan_job_row(connection, job_id)
+
+    if existing_row is None:
+        raise DashboardAdminUserActionError(
+            f"scan job not found: {job_id}",
+            status_code=404,
+        )
+
+    actor_summary = dashboard_actor_summary(actor)
+    requested_by = actor_summary.get("username") or "dashboard.admin"
+
+    job = request_scan_job_cancellation(
+        connection,
+        job_id,
+        requested_by=requested_by,
+        reason=reason,
+    )
+
+    cancellation_action = str(
+        job.get("cancellation_action") or "requested"
+    )
+
+    record_access_audit_event(
+        connection,
+        action="NETSNIPER_SCAN_CANCEL_REQUEST",
+        actor=actor or actor_summary,
+        target_type="scan_job",
+        target_key=job_id,
+        source_ip=source_ip,
+        user_agent=user_agent,
+        details={
+            "job_id": job_id,
+            "status": job.get("status"),
+            "cancellation_action": cancellation_action,
+            "requested_by": job.get("cancel_requested_by"),
+            "reason": job.get("cancel_reason"),
+            "cancel_requested_at": job.get("cancel_requested_at"),
+            "cancelled_at": job.get("cancelled_at"),
+        },
+    )
+
+    return {
+        "ok": True,
+        "action": "netsniper.scan.cancel",
+        "job_id": job_id,
+        "cancellation_action": cancellation_action,
+        "job": job,
+        "message": (
+            "scan cancellation request accepted"
+            if cancellation_action == "requested"
+            else "scan cancellation state recorded"
+        ),
+    }
+
+def dashboard_scan_job_detail_payload(
+    connection: sqlite3.Connection,
+    job_id: Any,
+    tail_bytes: Any = None,
+    logs_root: Path | None = None,
+) -> dict[str, Any]:
+    safe_job_id = str(job_id or "").strip()
+
+    if (
+        not safe_job_id
+        or len(safe_job_id) > 160
+        or re.fullmatch(r"[A-Za-z0-9._:-]+", safe_job_id) is None
+    ):
+        return {
+            "ok": False,
+            "found": False,
+            "job_id": safe_job_id,
+            "error": "invalid scan job id",
+        }
+
+    row = connection.execute(
+        "SELECT * FROM scan_jobs WHERE job_id = ?",
+        (safe_job_id,),
+    ).fetchone()
+
+    if row is None:
+        return {
+            "ok": False,
+            "found": False,
+            "job_id": safe_job_id,
+            "error": "scan job not found",
+        }
+
+    job = scan_job_to_dict(row)
+    safe_logs_root = Path(
+        logs_root if logs_root is not None else DEFAULT_SCAN_LOGS
+    ).expanduser()
+
+    return {
+        "ok": True,
+        "found": True,
+        "job_id": safe_job_id,
+        "tail_bytes": normalize_scan_job_log_tail_bytes(tail_bytes),
+        "job": job,
+        "stdout": scan_job_log_tail_payload(
+            job.get("stdout_log"),
+            safe_job_id,
+            "stdout",
+            safe_logs_root,
+            tail_bytes,
+        ),
+        "stderr": scan_job_log_tail_payload(
+            job.get("stderr_log"),
+            safe_job_id,
+            "stderr",
+            safe_logs_root,
+            tail_bytes,
+        ),
+    }
 
 
 def trueaegis_job_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -5109,6 +5799,14 @@ def scan_schedule_history_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict
         "created_at": item.get("created_at"),
         "updated_at": item.get("updated_at"),
         "message": item.get("schedule_message") or "",
+        "deleted": bool(item.get("deleted")),
+        "deleted_at": item.get("deleted_at"),
+        "linked_job_count": int(item.get("linked_job_count") or 0),
+        "linked_active_job_count": int(item.get("linked_active_job_count") or 0),
+        "linked_job_status_counts": decode_json_field(
+            item.get("linked_job_status_counts_json"),
+            {},
+        ),
         "job": None,
     }
 
@@ -5156,6 +5854,66 @@ def query_scan_schedule_history(
 
     return connection.execute(
         f"""
+        WITH schedule_sources AS (
+            SELECT
+                schedule_id,
+                name,
+                target,
+                network_scope,
+                scan_profile,
+                cadence_minutes,
+                enabled,
+                auto_ingest,
+                run_trueaegis_after_ingest,
+                last_run_at,
+                next_run_at,
+                last_job_id,
+                last_status,
+                failure_count,
+                skip_count,
+                created_at,
+                updated_at,
+                message,
+                0 AS deleted,
+                NULL AS deleted_at,
+                0 AS linked_job_count,
+                0 AS linked_active_job_count,
+                '{{}}' AS linked_job_status_counts_json
+            FROM scan_schedules
+
+            UNION ALL
+
+            SELECT
+                d.schedule_id,
+                d.name,
+                d.target,
+                d.network_scope,
+                d.scan_profile,
+                d.cadence_minutes,
+                0 AS enabled,
+                d.auto_ingest,
+                d.run_trueaegis_after_ingest,
+                d.last_run_at,
+                NULL AS next_run_at,
+                d.last_job_id,
+                d.last_status,
+                d.failure_count,
+                d.skip_count,
+                d.created_at,
+                d.updated_at,
+                d.message,
+                1 AS deleted,
+                d.deleted_at,
+                d.linked_job_count,
+                d.linked_active_job_count,
+                d.linked_job_status_counts_json
+            FROM scan_schedule_deletions d
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM scan_schedules active
+                WHERE active.schedule_id = d.schedule_id
+            )
+        )
         SELECT
             s.schedule_id AS schedule_id,
             s.name AS name,
@@ -5175,6 +5933,11 @@ def query_scan_schedule_history(
             s.created_at AS created_at,
             s.updated_at AS updated_at,
             s.message AS schedule_message,
+            s.deleted AS deleted,
+            s.deleted_at AS deleted_at,
+            s.linked_job_count AS linked_job_count,
+            s.linked_active_job_count AS linked_active_job_count,
+            s.linked_job_status_counts_json AS linked_job_status_counts_json,
             j.job_id AS job_id,
             j.target AS job_target,
             j.network_scope AS job_network_scope,
@@ -5194,7 +5957,7 @@ def query_scan_schedule_history(
             j.stderr_log AS stderr_log,
             j.status_json AS status_json,
             j.message AS job_message
-        FROM scan_schedules s
+        FROM schedule_sources s
         LEFT JOIN scan_jobs j
             ON j.schedule_id = s.schedule_id
             OR j.job_id = s.last_job_id
@@ -5315,13 +6078,41 @@ def dashboard_netsniper_schedule_delete_payload(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     schedule_id = dashboard_schedule_id_from_payload(payload)
-    delete_scan_schedule(connection, schedule_id)
+    confirmation_required = scan_schedule_delete_confirmation(schedule_id)
+    confirmation = str(payload.get("confirmation") or "")
+
+    if confirmation != confirmation_required:
+        raise DashboardAdminUserActionError(
+            "schedule deletion confirmation must exactly match: "
+            f"{confirmation_required}",
+            status_code=400,
+        )
+
+    deletion = delete_scan_schedule(connection, schedule_id)
 
     return {
         "ok": True,
         "action": "schedule.delete",
         "schedule_id": schedule_id,
+        "confirmation_required": confirmation_required,
+        "deletion": deletion,
+        "linked_job_count": deletion["linked_job_count"],
+        "linked_active_job_count": deletion["linked_active_job_count"],
+        "linked_job_status_counts": deletion["linked_job_status_counts"],
+        "linked_jobs_preserved": True,
+        "active_jobs_cancelled": False,
+        "cancellation_required_for_active_jobs": bool(
+            deletion["linked_active_job_count"]
+        ),
+        "message": (
+            "schedule definition deleted; linked scan jobs and history "
+            "were preserved; active jobs were not cancelled"
+        ),
         "schedules": dashboard_scan_schedules_payload(connection),
+        "schedule_history": dashboard_netsniper_schedule_history_payload(
+            connection,
+            limit=50,
+        )["history"],
     }
 
 
@@ -5500,6 +6291,7 @@ def command_scan_jobs(args: argparse.Namespace) -> int:
 
 
 ALLOWED_SCAN_SCHEDULE_CADENCE_MINUTES = {60, 120, 360, 720, 1440}
+SCAN_SCHEDULE_DELETE_CONFIRMATION_PREFIX = "DELETE SCHEDULE "
 
 
 def validate_scan_schedule_cadence_minutes(value: int | str | None) -> int:
@@ -6006,7 +6798,7 @@ def update_scan_schedule_after_job(
     status = str(job.get("status") or "UNKNOWN").upper()
     failure_increment = 0 if status == "COMPLETED" else 1
 
-    connection.execute(
+    cursor = connection.execute(
         """
         UPDATE scan_schedules
         SET
@@ -6036,10 +6828,59 @@ def update_scan_schedule_after_job(
         (schedule_id,),
     ).fetchone()
 
-    if row is None:
-        raise DeltaAegisError(f"scan schedule disappeared unexpectedly: {schedule_id}")
+    if row is not None:
+        return scan_schedule_to_dict(row)
 
-    return scan_schedule_to_dict(row)
+    if cursor.rowcount == 0:
+        summary = scan_schedule_linked_job_summary(
+            connection,
+            schedule_id,
+        )
+        connection.execute(
+            """
+            UPDATE scan_schedule_deletions
+            SET
+                last_run_at = ?,
+                next_run_at = NULL,
+                last_job_id = ?,
+                last_status = ?,
+                failure_count = failure_count + ?,
+                updated_at = ?,
+                message = ?,
+                linked_job_count = ?,
+                linked_active_job_count = ?,
+                linked_job_status_counts_json = ?
+            WHERE schedule_id = ?
+            """,
+            (
+                now,
+                job.get("job_id"),
+                status,
+                failure_increment,
+                now,
+                job.get("message")
+                or f"deleted schedule job finished with status {status}",
+                summary["linked_job_count"],
+                summary["linked_active_job_count"],
+                json.dumps(
+                    summary["linked_job_status_counts"],
+                    sort_keys=True,
+                ),
+                schedule_id,
+            ),
+        )
+
+        deleted_row = connection.execute(
+            "SELECT * FROM scan_schedule_deletions WHERE schedule_id = ?",
+            (schedule_id,),
+        ).fetchone()
+
+        if deleted_row is not None:
+            return scan_schedule_deletion_to_dict(deleted_row)
+
+    raise DeltaAegisError(
+        f"scan schedule disappeared without deletion evidence: {schedule_id}"
+    )
 
 
 def run_due_scan_schedules(
@@ -6326,17 +7167,169 @@ def set_scan_schedule_enabled(
     return scan_schedule_to_dict(row)
 
 
+
+def scan_schedule_delete_confirmation(schedule_id: Any) -> str:
+    safe_schedule_id = str(schedule_id or "").strip()
+
+    if not safe_schedule_id:
+        raise DeltaAegisError("scan schedule id is required")
+
+    return f"{SCAN_SCHEDULE_DELETE_CONFIRMATION_PREFIX}{safe_schedule_id}"
+
+
+def scan_schedule_deletion_to_dict(
+    row: sqlite3.Row | dict[str, Any],
+) -> dict[str, Any]:
+    item = scan_schedule_to_dict(row)
+    item["deleted"] = True
+    item["deleted_at"] = item.get("deleted_at")
+    item["linked_job_count"] = int(item.get("linked_job_count") or 0)
+    item["linked_active_job_count"] = int(
+        item.get("linked_active_job_count") or 0
+    )
+    item["linked_job_status_counts"] = decode_json_field(
+        item.get("linked_job_status_counts_json"),
+        {},
+    )
+    item["linked_jobs_preserved"] = True
+    item["active_jobs_cancelled"] = False
+    item["cancellation_required_for_active_jobs"] = bool(
+        item["linked_active_job_count"]
+    )
+    return item
+
+
+def scan_schedule_linked_job_summary(
+    connection: sqlite3.Connection,
+    schedule_id: str,
+) -> dict[str, Any]:
+    rows = connection.execute(
+        "SELECT status, COUNT(*) AS count "
+        "FROM scan_jobs "
+        "WHERE schedule_id = ? "
+        "GROUP BY status "
+        "ORDER BY status",
+        (schedule_id,),
+    ).fetchall()
+
+    status_counts = {
+        str(row["status"] or "UNKNOWN").upper(): int(row["count"] or 0)
+        for row in rows
+    }
+    linked_job_count = sum(status_counts.values())
+    linked_active_job_count = sum(
+        status_counts.get(status, 0)
+        for status in ("QUEUED", "RUNNING")
+    )
+
+    return {
+        "linked_job_count": linked_job_count,
+        "linked_active_job_count": linked_active_job_count,
+        "linked_job_status_counts": status_counts,
+    }
+
+
 def delete_scan_schedule(
     connection: sqlite3.Connection,
     schedule_id: str,
-) -> None:
-    cursor = connection.execute(
-        "DELETE FROM scan_schedules WHERE schedule_id = ?",
-        (schedule_id,),
+) -> dict[str, Any]:
+    safe_schedule_id = str(schedule_id or "").strip()
+    row = connection.execute(
+        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
+        (safe_schedule_id,),
+    ).fetchone()
+
+    if row is None:
+        raise DeltaAegisError(
+            f"scan schedule not found: {safe_schedule_id}"
+        )
+
+    schedule = scan_schedule_to_dict(row)
+    summary = scan_schedule_linked_job_summary(
+        connection,
+        safe_schedule_id,
+    )
+    deleted_at = utc_now_text()
+
+    connection.execute(
+        """
+        INSERT OR REPLACE INTO scan_schedule_deletions (
+            schedule_id,
+            name,
+            target,
+            network_scope,
+            scan_profile,
+            cadence_minutes,
+            enabled,
+            auto_ingest,
+            run_trueaegis_after_ingest,
+            last_run_at,
+            next_run_at,
+            last_job_id,
+            last_status,
+            failure_count,
+            skip_count,
+            created_at,
+            updated_at,
+            message,
+            deleted_at,
+            linked_job_count,
+            linked_active_job_count,
+            linked_job_status_counts_json
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+        """,
+        (
+            safe_schedule_id,
+            schedule["name"],
+            schedule["target"],
+            schedule["network_scope"],
+            schedule["scan_profile"],
+            schedule["cadence_minutes"],
+            1 if schedule["enabled"] else 0,
+            1 if schedule["auto_ingest"] else 0,
+            1 if schedule.get("run_trueaegis_after_ingest") else 0,
+            schedule.get("last_run_at"),
+            schedule.get("next_run_at"),
+            schedule.get("last_job_id"),
+            schedule.get("last_status"),
+            int(schedule.get("failure_count") or 0),
+            int(schedule.get("skip_count") or 0),
+            schedule.get("created_at") or deleted_at,
+            schedule.get("updated_at") or deleted_at,
+            schedule.get("message") or "",
+            deleted_at,
+            summary["linked_job_count"],
+            summary["linked_active_job_count"],
+            json.dumps(
+                summary["linked_job_status_counts"],
+                sort_keys=True,
+            ),
+        ),
     )
 
-    if cursor.rowcount == 0:
-        raise DeltaAegisError(f"scan schedule not found: {schedule_id}")
+    cursor = connection.execute(
+        "DELETE FROM scan_schedules WHERE schedule_id = ?",
+        (safe_schedule_id,),
+    )
+
+    if cursor.rowcount != 1:
+        raise DeltaAegisError(
+            f"scan schedule deletion failed: {safe_schedule_id}"
+        )
+
+    deleted_row = connection.execute(
+        "SELECT * FROM scan_schedule_deletions WHERE schedule_id = ?",
+        (safe_schedule_id,),
+    ).fetchone()
+
+    if deleted_row is None:
+        raise DeltaAegisError(
+            f"scan schedule deletion evidence missing: {safe_schedule_id}"
+        )
+
+    return scan_schedule_deletion_to_dict(deleted_row)
 
 
 def print_scan_schedule_rows(rows: Iterable[sqlite3.Row]) -> None:
@@ -19574,7 +20567,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.38 TrueAegis Follow-Up Automation</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.39 Scan Job Lifecycle Observability</span></div>
     </div>
   </header>
 
@@ -24679,7 +25672,20 @@ def render_netsniper_page() -> str:
     .scan-form label { color: #94a3b8; display: grid; gap: 6px; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
     .scan-form input { border: 1px solid rgba(148,163,184,.22); border-radius: 12px; background: rgba(2,6,23,.48); color: #e2e8f0; padding: 10px 12px; min-width: 240px; font-weight: 800; }
     .table-wrap { overflow-x: auto; border: 1px solid rgba(148,163,184,.18); border-radius: 18px; margin-top: 10px; }
-    table { width: 100%; border-collapse: collapse; min-width: 900px; }
+    .live-job-panel { margin-top: 18px; border: 1px solid rgba(34,211,238,.24); border-radius: 20px; background: rgba(2,6,23,.44); padding: 18px; }
+    .live-job-panel[hidden] { display: none; }
+    .live-job-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); gap: 10px; margin: 14px 0; }
+    .live-job-streams { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+    .live-job-stream h3 { margin: 0 0 8px; color: #e2e8f0; font-size: 14px; }
+    .live-job-stream pre { min-height: 160px; max-height: 360px; margin: 0; }
+    .live-job-meta { color: #94a3b8; font-size: 12px; margin: 0 0 8px; }
+    .live-job-cancel-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 14px 0; }
+    .live-job-cancel-form[hidden] { display: none; }
+    .live-job-cancel-form label { color: #94a3b8; display: grid; gap: 6px; flex: 1 1 360px; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+    .live-job-cancel-form input { border: 1px solid rgba(248,113,113,.32); border-radius: 12px; background: rgba(2,6,23,.48); color: #e2e8f0; padding: 10px 12px; min-width: 280px; font-weight: 800; }
+    .danger { border-color: rgba(248,113,113,.42); background: rgba(185,28,28,.18); color: #fecaca; }
+    .danger:hover { background: rgba(185,28,28,.32); }
+    table { width: 100%; border-collapse: collapse; min-width: 980px; }
     th, td { border-bottom: 1px solid rgba(148,163,184,.14); padding: 10px 12px; text-align: left; vertical-align: top; }
     th { color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
     td { color: #e2e8f0; font-size: 13px; font-weight: 700; }
@@ -24861,22 +25867,68 @@ def render_netsniper_page() -> str:
               <th>Job</th>
               <th>Status</th>
               <th>Target</th>
-                            <th>Profile</th>
-<th>Created</th>
+              <th>Profile</th>
+              <th>Created</th>
               <th>Updated</th>
               <th>Exit</th>
               <th>Bundle</th>
               <th>Message</th>
+              <th>Details</th>
             </tr>
           </thead>
           <tbody id="netsniper-scan-jobs-body">
-            <tr><td colspan="9">Loading scan jobs…</td></tr>
+            <tr><td colspan="10">Loading scan jobs…</td></tr>
           </tbody>
         </table>
       </div>
 
+      <section id="netsniper-live-job-panel" class="live-job-panel" hidden>
+        <div class="actions">
+          <strong id="netsniper-live-job-heading">Live scan details</strong>
+          <a id="netsniper-live-job-raw" href="/api/netsniper/job-detail" target="_blank" rel="noopener">View raw job detail JSON</a>
+          <button type="button" id="netsniper-live-job-refresh">Refresh details</button>
+          <button type="button" id="netsniper-live-job-close">Close details</button>
+        </div>
+
+        <div class="status" id="netsniper-live-job-status">Select a scan job to view its lifecycle evidence and bounded log tails.</div>
+
+        <form id="netsniper-live-job-cancel-form" class="live-job-cancel-form" hidden>
+          <label>Cancellation reason
+            <input id="netsniper-live-job-cancel-reason" name="reason" autocomplete="off" maxlength="500" placeholder="Reason for stopping this active scan" required>
+          </label>
+          <button type="submit" id="netsniper-live-job-cancel" class="danger">Cancel active scan</button>
+        </form>
+        <div class="status" id="netsniper-live-job-cancel-result" hidden>No cancellation request has been submitted.</div>
+
+        <div class="live-job-grid">
+          <div class="card"><div class="card-label">Status</div><div class="card-value" id="netsniper-live-job-state">—</div></div>
+          <div class="card"><div class="card-label">Process PID</div><div class="card-value" id="netsniper-live-job-pid">—</div></div>
+          <div class="card"><div class="card-label">Heartbeat</div><div class="card-value" id="netsniper-live-job-heartbeat">—</div></div>
+          <div class="card"><div class="card-label">Updated</div><div class="card-value" id="netsniper-live-job-updated">—</div></div>
+          <div class="card"><div class="card-label">Cancel requested</div><div class="card-value" id="netsniper-live-job-cancel-requested-at">—</div></div>
+          <div class="card"><div class="card-label">Requested by</div><div class="card-value" id="netsniper-live-job-cancel-requested-by">—</div></div>
+          <div class="card"><div class="card-label">Cancelled</div><div class="card-value" id="netsniper-live-job-cancelled-at">—</div></div>
+        </div>
+
+        <h3>Cancellation reason</h3>
+        <pre id="netsniper-live-job-cancel-reason-display">—</pre>
+
+        <div class="live-job-streams">
+          <div class="live-job-stream">
+            <h3>Stdout tail</h3>
+            <p class="live-job-meta" id="netsniper-live-job-stdout-meta">No stdout detail loaded.</p>
+            <pre id="netsniper-live-job-stdout">—</pre>
+          </div>
+          <div class="live-job-stream">
+            <h3>Stderr tail</h3>
+            <p class="live-job-meta" id="netsniper-live-job-stderr-meta">No stderr detail loaded.</p>
+            <pre id="netsniper-live-job-stderr">—</pre>
+          </div>
+        </div>
+      </section>
+
       <h2>Design boundary</h2>
-      <p>This tab does not run arbitrary shell commands. Scan execution uses a guarded NetSniper wrapper with validated private-CIDR input, one active job at a time, and ADMIN-only launch controls.</p>
+      <p>This tab does not run arbitrary shell commands. Scan execution and cancellation use guarded, ADMIN-only APIs with validated job identifiers; the browser never supplies or signals a process PID.</p>
     </section>
   </main>
 
@@ -24999,6 +26051,228 @@ def render_netsniper_page() -> str:
       }
     }
 
+    let selectedNetSniperJobId = "";
+    let selectedNetSniperJob = null;
+    let netSniperJobDetailTimer = null;
+
+    function stopNetSniperJobDetailPolling() {
+      if (netSniperJobDetailTimer !== null) {
+        window.clearTimeout(netSniperJobDetailTimer);
+        netSniperJobDetailTimer = null;
+      }
+    }
+
+    function netSniperJobIsActive(job) {
+      const status = String((job || {}).status || "").toUpperCase();
+      return status === "QUEUED" || status === "RUNNING";
+    }
+
+    function scanJobStreamMeta(stream) {
+      if (!stream || !stream.available) {
+        return `Unavailable: ${(stream || {}).reason || "log not available"}`;
+      }
+
+      const parts = [
+        `${stream.bytes_read || 0} byte(s) returned`,
+        `${stream.file_size || 0} byte file`
+      ];
+
+      if (stream.truncated) { parts.push("tail truncated"); }
+      if (stream.updated_at) { parts.push(`updated ${stream.updated_at}`); }
+      return parts.join(" · ");
+    }
+
+    function renderNetSniperJobDetail(payload) {
+      const panel = document.getElementById("netsniper-live-job-panel");
+      const job = payload.job || {};
+      const stdout = payload.stdout || {};
+      const stderr = payload.stderr || {};
+      const jobId = job.job_id || payload.job_id || selectedNetSniperJobId;
+
+      if (!panel) { return; }
+
+      panel.hidden = false;
+      selectedNetSniperJob = job;
+      setText("netsniper-live-job-heading", `Scan job ${jobId || "detail"}`);
+      setText("netsniper-live-job-status", `${job.status || "UNKNOWN"} · ${job.message || "No job message"}`);
+      setText("netsniper-live-job-state", job.status || "—");
+      setText("netsniper-live-job-pid", job.process_pid || "—");
+      setText("netsniper-live-job-heartbeat", job.heartbeat_at || "—");
+      setText("netsniper-live-job-updated", job.updated_at || "—");
+      setText("netsniper-live-job-cancel-requested-at", job.cancel_requested_at || "—");
+      setText("netsniper-live-job-cancel-requested-by", job.cancel_requested_by || "—");
+      setText("netsniper-live-job-cancelled-at", job.cancelled_at || "—");
+      setText("netsniper-live-job-cancel-reason-display", job.cancel_reason || "—");
+      setText("netsniper-live-job-stdout-meta", scanJobStreamMeta(stdout));
+      setText("netsniper-live-job-stderr-meta", scanJobStreamMeta(stderr));
+      setText("netsniper-live-job-stdout", stdout.available ? stdout.text : "—");
+      setText("netsniper-live-job-stderr", stderr.available ? stderr.text : "—");
+
+      const cancelForm = document.getElementById("netsniper-live-job-cancel-form");
+      const cancelButton = document.getElementById("netsniper-live-job-cancel");
+      const cancelResult = document.getElementById("netsniper-live-job-cancel-result");
+      const canCancel = netSniperJobIsActive(job) && !job.cancel_requested_at;
+
+      if (cancelForm) { cancelForm.hidden = !canCancel; }
+      if (cancelButton) { cancelButton.disabled = !canCancel; }
+
+      if (cancelResult && job.cancel_requested_at) {
+        cancelResult.hidden = false;
+        cancelResult.textContent = job.status === "CANCELLED"
+          ? `Scan cancelled at ${job.cancelled_at || job.finished_at || "unknown time"}.`
+          : `Cancellation requested by ${job.cancel_requested_by || "operator"} at ${job.cancel_requested_at}.`;
+      }
+
+      const rawLink = document.getElementById("netsniper-live-job-raw");
+      if (rawLink && jobId) {
+        rawLink.href = `/api/netsniper/job-detail?job_id=${encodeURIComponent(jobId)}&tail_bytes=16384`;
+      }
+    }
+
+    async function loadNetSniperJobDetail(jobId) {
+      const requestedJobId = String(jobId || selectedNetSniperJobId || "").trim();
+      if (!requestedJobId) { return; }
+
+      selectedNetSniperJobId = requestedJobId;
+      stopNetSniperJobDetailPolling();
+
+      const panel = document.getElementById("netsniper-live-job-panel");
+      if (panel) { panel.hidden = false; }
+      setText("netsniper-live-job-status", `Loading scan job ${requestedJobId}…`);
+
+      try {
+        const response = await fetch(
+          `/api/netsniper/job-detail?job_id=${encodeURIComponent(requestedJobId)}&tail_bytes=16384`,
+          { credentials: "same-origin", cache: "no-store" }
+        );
+
+        if (response.status === 401 || response.status === 403) {
+          window.location.href = "/login";
+          return;
+        }
+
+        let payload = {};
+        try { payload = await response.json(); } catch (error) { payload = {}; }
+
+        if (selectedNetSniperJobId !== requestedJobId) { return; }
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || `Job detail request failed with HTTP ${response.status}`);
+        }
+
+        renderNetSniperJobDetail(payload);
+
+        if (netSniperJobIsActive(payload.job) && selectedNetSniperJobId === requestedJobId) {
+          netSniperJobDetailTimer = window.setTimeout(function () {
+            loadNetSniperJobDetail(requestedJobId);
+          }, 3000);
+        }
+      } catch (error) {
+        if (selectedNetSniperJobId === requestedJobId) {
+          setText("netsniper-live-job-status", `Job detail lookup failed: ${error.message || error}`);
+        }
+      }
+    }
+
+    function closeNetSniperJobDetail() {
+      stopNetSniperJobDetailPolling();
+      selectedNetSniperJobId = "";
+      selectedNetSniperJob = null;
+      const panel = document.getElementById("netsniper-live-job-panel");
+      const cancelForm = document.getElementById("netsniper-live-job-cancel-form");
+      const cancelResult = document.getElementById("netsniper-live-job-cancel-result");
+      const cancelReason = document.getElementById("netsniper-live-job-cancel-reason");
+
+      if (panel) { panel.hidden = true; }
+      if (cancelForm) { cancelForm.hidden = true; }
+      if (cancelResult) { cancelResult.hidden = true; }
+      if (cancelReason) { cancelReason.value = ""; }
+    }
+
+    async function cancelSelectedNetSniperJob(event) {
+      event.preventDefault();
+
+      const job = selectedNetSniperJob || {};
+      const jobId = String(job.job_id || selectedNetSniperJobId || "").trim();
+      const reasonInput = document.getElementById("netsniper-live-job-cancel-reason");
+      const button = document.getElementById("netsniper-live-job-cancel");
+      const result = document.getElementById("netsniper-live-job-cancel-result");
+      const reason = String((reasonInput || {}).value || "").trim();
+
+      if (!jobId || !netSniperJobIsActive(job)) {
+        if (result) {
+          result.hidden = false;
+          result.textContent = "Only an active queued or running scan can be cancelled.";
+        }
+        return;
+      }
+
+      if (!reason) {
+        if (result) {
+          result.hidden = false;
+          result.textContent = "A cancellation reason is required.";
+        }
+        if (reasonInput) { reasonInput.focus(); }
+        return;
+      }
+
+      if (!window.confirm(`Cancel active scan ${jobId}?\n\nReason: ${reason}`)) {
+        return;
+      }
+
+      if (button) { button.disabled = true; }
+      if (reasonInput) { reasonInput.disabled = true; }
+      if (result) {
+        result.hidden = false;
+        result.textContent = `Submitting cancellation request for ${jobId}…`;
+      }
+
+      try {
+        const response = await fetch("/api/netsniper/scan-cancel", {
+          method: "POST",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({job_id: jobId, reason: reason})
+        });
+
+        if (response.status === 401 || response.status === 403) {
+          window.location.href = "/login";
+          return;
+        }
+
+        let payload = {};
+        try { payload = await response.json(); } catch (error) { payload = {}; }
+
+        if (!response.ok || !payload.ok) {
+          throw new Error(
+            payload.error
+            || payload.message
+            || `Cancellation failed with HTTP ${response.status}`
+          );
+        }
+
+        if (result) {
+          result.hidden = false;
+          result.textContent = `${payload.cancellation_action || "requested"}: ${payload.message || "cancellation request accepted"}`;
+        }
+
+        await loadNetSniperScanJobs();
+        await loadNetSniperJobDetail(jobId);
+      } catch (error) {
+        if (result) {
+          result.hidden = false;
+          result.textContent = `Cancellation failed: ${error.message || error}`;
+        }
+      } finally {
+        if (reasonInput) { reasonInput.disabled = false; }
+        if (button && netSniperJobIsActive(selectedNetSniperJob || {})) {
+          button.disabled = Boolean(
+            (selectedNetSniperJob || {}).cancel_requested_at
+          );
+        }
+      }
+    }
+
     function renderNetSniperScanJobs(payload) {
       const tbody = document.getElementById("netsniper-scan-jobs-body");
       if (!tbody) { return; }
@@ -25008,14 +26282,15 @@ def render_netsniper_page() -> str:
         : (payload.jobs || payload.scan_jobs || payload.items || []);
 
       if (!jobs.length) {
-        tbody.innerHTML = '<tr><td colspan="9">No scan jobs found.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10">No scan jobs found.</td></tr>';
         return;
       }
 
       tbody.innerHTML = jobs.slice(0, 10).map(function (job) {
+        const jobId = job.job_id || "";
         return `
           <tr>
-            <td><code>${escapeHtml(job.job_id || "-")}</code></td>
+            <td><code>${escapeHtml(jobId || "-")}</code></td>
             <td><span class="pill">${escapeHtml(job.status || "-")}</span></td>
             <td>${escapeHtml(job.target || job.network_scope || "-")}</td>
             <td>${escapeHtml(job.scan_profile || "balanced")}</td>
@@ -25024,6 +26299,7 @@ def render_netsniper_page() -> str:
             <td>${escapeHtml(job.exit_code === null || job.exit_code === undefined ? "-" : job.exit_code)}</td>
             <td>${escapeHtml(job.bundle_path || "-")}</td>
             <td>${escapeHtml(job.message || "-")}</td>
+            <td><button type="button" data-scan-job-detail="${escapeHtml(jobId)}">View details</button></td>
           </tr>
         `;
       }).join("");
@@ -25049,7 +26325,7 @@ def render_netsniper_page() -> str:
       } catch (error) {
         const tbody = document.getElementById("netsniper-scan-jobs-body");
         if (tbody) {
-          tbody.innerHTML = `<tr><td colspan="9">Scan job lookup failed: ${escapeHtml(error.message || error)}</td></tr>`;
+          tbody.innerHTML = `<tr><td colspan="10">Scan job lookup failed: ${escapeHtml(error.message || error)}</td></tr>`;
         }
       }
     }
@@ -25158,7 +26434,9 @@ def render_netsniper_page() -> str:
 
       tbody.innerHTML = rows.map(function (item) {
         const job = item.job || {};
-        const scheduleStatus = item.last_status || (item.enabled ? "ENABLED" : "DISABLED");
+        const scheduleStatus = item.deleted
+          ? "DELETED"
+          : (item.last_status || (item.enabled ? "ENABLED" : "DISABLED"));
         const jobId = job.job_id || item.last_job_id || "-";
         const jobStatus = job.status || "-";
         const finishedAt = job.finished_at || "-";
@@ -25439,7 +26717,20 @@ def render_netsniper_page() -> str:
         return;
       }
 
-      if (action === "delete" && !window.confirm(`Delete scan schedule ${scheduleId}?`)) {
+      const deleteConfirmation = `DELETE SCHEDULE ${scheduleId}`;
+
+      if (
+        action === "delete"
+        && !window.confirm(
+          `Delete scan schedule ${scheduleId}?
+
+`
+          + "This removes only the saved schedule definition. "
+          + "Existing queued or running scan jobs are not cancelled, "
+          + "and completed job history is preserved. Use the dedicated "
+          + "Cancel active scan control to stop an active job."
+        )
+      ) {
         return;
       }
 
@@ -25447,15 +26738,29 @@ def render_netsniper_page() -> str:
       status.textContent = `Applying schedule action: ${action}`;
 
       try {
-        const payload = await postNetSniperSchedule(`/api/netsniper/schedule-${action}`, {
-          schedule_id: scheduleId
-        });
+        const requestPayload = {schedule_id: scheduleId};
+
+        if (action === "delete") {
+          requestPayload.confirmation = deleteConfirmation;
+        }
+
+        const payload = await postNetSniperSchedule(
+          `/api/netsniper/schedule-${action}`,
+          requestPayload
+        );
 
         if (!payload) { return; }
 
         output.textContent = JSON.stringify(payload, null, 2);
-        status.textContent = `Schedule action complete: ${action}`;
+        status.textContent = action === "delete"
+          ? `Schedule deleted; ${payload.linked_job_count || 0} linked job(s) preserved and no active jobs cancelled.`
+          : `Schedule action complete: ${action}`;
         renderNetSniperSchedules(payload);
+
+        if (action === "delete") {
+          await loadNetSniperScheduleHistory();
+          await loadNetSniperScanJobs();
+        }
       } catch (error) {
         status.textContent = `Schedule action failed: ${error.message || error}`;
         output.textContent = String(error.message || error);
@@ -25516,6 +26821,10 @@ def render_netsniper_page() -> str:
         output.textContent = JSON.stringify(payload, null, 2);
         status.textContent = `Scan job started: ${payload.job_id || "queued"}`;
         await loadNetSniperScanJobs();
+
+        if (payload.job_id) {
+          loadNetSniperJobDetail(payload.job_id);
+        }
       } catch (error) {
         status.textContent = `Scan start failed: ${error.message || error}`;
         output.textContent = String(error.message || error);
@@ -25543,6 +26852,17 @@ def render_netsniper_page() -> str:
     document.getElementById("netsniper-hourly-monitoring-enable").addEventListener("click", function () { setHourlyNetSniperMonitoring(true); });
     document.getElementById("netsniper-hourly-monitoring-disable").addEventListener("click", function () { setHourlyNetSniperMonitoring(false); });
     document.getElementById("netsniper-schedules-body").addEventListener("click", handleNetSniperScheduleAction);
+    document.getElementById("netsniper-scan-jobs-body").addEventListener("click", function (event) {
+      const button = event.target.closest("button[data-scan-job-detail]");
+      if (!button) { return; }
+      loadNetSniperJobDetail(button.dataset.scanJobDetail || "");
+    });
+    document.getElementById("netsniper-live-job-refresh").addEventListener("click", function () {
+      loadNetSniperJobDetail(selectedNetSniperJobId);
+    });
+    document.getElementById("netsniper-live-job-close").addEventListener("click", closeNetSniperJobDetail);
+    document.getElementById("netsniper-live-job-cancel-form").addEventListener("submit", cancelSelectedNetSniperJob);
+    window.addEventListener("beforeunload", stopNetSniperJobDetailPolling);
     loadNetSniperStatus();
     loadNetSniperScanJobs();
     loadNetSniperSchedules();
@@ -25660,7 +26980,7 @@ def command_dashboard(args):
 
 
     class DeltaAegisDashboardHandler(BaseHTTPRequestHandler):
-        server_version = "DeltaAegisDashboard/0.5.0"
+        server_version = "DeltaAegisDashboard/0.39.0"
 
         def log_message(self, fmt, *handler_args):
             if not args.quiet:
@@ -25969,6 +27289,40 @@ def command_dashboard(args):
                             limit=limit,
                             scope=scope,
                         ),
+                    )
+                finally:
+                    connection.close()
+
+                return
+
+            if route == "/api/netsniper/job-detail":
+                query = urllib.parse.parse_qs(parsed.query or "")
+                job_id = query.get("job_id", [""])[0]
+                tail_bytes = query.get(
+                    "tail_bytes",
+                    [str(SCAN_JOB_LOG_TAIL_DEFAULT_BYTES)],
+                )[0]
+                connection = self.open_connection()
+
+                try:
+                    payload = dashboard_scan_job_detail_payload(
+                        connection,
+                        job_id=job_id,
+                        tail_bytes=tail_bytes,
+                        logs_root=DEFAULT_SCAN_LOGS,
+                    )
+
+                    if payload.get("ok"):
+                        response_status = 200
+                    elif payload.get("error") == "scan job not found":
+                        response_status = 404
+                    else:
+                        response_status = 400
+
+                    dashboard_json_response(
+                        self,
+                        payload,
+                        status=response_status,
                     )
                 finally:
                     connection.close()
@@ -26658,6 +28012,96 @@ def command_dashboard(args):
                         return
 
                     dashboard_json_response(self, result, status=202)
+                    return
+                finally:
+                    connection.close()
+
+            if route == "/api/netsniper/scan-cancel":
+                if not self.require_permission("scan.start"):
+                    return
+
+                try:
+                    content_length = int(
+                        self.headers.get("Content-Length", "0")
+                    )
+                except ValueError:
+                    content_length = 0
+
+                if content_length <= 0:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "missing_body",
+                            "message": "POST body must be JSON.",
+                        },
+                        status=400,
+                    )
+                    return
+
+                if content_length > 65536:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "body_too_large",
+                            "message": "POST body is too large.",
+                        },
+                        status=413,
+                    )
+                    return
+
+                try:
+                    payload = dashboard_read_request_payload(self)
+                except DashboardAdminUserActionError as exc:
+                    dashboard_admin_json_error_response(
+                        self,
+                        str(exc),
+                        status_code=exc.status_code,
+                    )
+                    return
+
+                connection = self.open_connection()
+
+                try:
+                    try:
+                        result = dashboard_netsniper_scan_cancel_payload(
+                            connection,
+                            payload,
+                            actor=getattr(
+                                self,
+                                "current_actor",
+                                None,
+                            ),
+                            source_ip=(
+                                self.client_address[0]
+                                if self.client_address
+                                else None
+                            ),
+                            user_agent=self.headers.get(
+                                "User-Agent",
+                                "",
+                            ),
+                        )
+                        connection.commit()
+                    except DashboardAdminUserActionError as exc:
+                        connection.rollback()
+                        dashboard_admin_json_error_response(
+                            self,
+                            str(exc),
+                            status_code=exc.status_code,
+                        )
+                        return
+                    except DeltaAegisError as exc:
+                        connection.rollback()
+                        dashboard_admin_json_error_response(
+                            self,
+                            str(exc),
+                            status_code=400,
+                        )
+                        return
+
+                    dashboard_json_response(self, result)
                     return
                 finally:
                     connection.close()
@@ -27396,7 +28840,7 @@ def command_validations(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.38.0 — TrueAegis Follow-Up Automation, guarded scheduled validation, strict accepted-ingest gating, provenance-linked jobs, validation correlation, reporting, RBAC, and the current-state SIEM dashboard")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.39.0 — Scan Job Lifecycle Observability, live NetSniper execution evidence, authenticated cancellation, non-destructive schedule deletion, guarded TrueAegis follow-up automation, reporting, RBAC, and the current-state SIEM dashboard")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)

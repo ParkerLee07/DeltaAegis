@@ -4,15 +4,15 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.38.0
+## Current Release — v0.39.0
 
-**DeltaAegis v0.38.0 — TrueAegis Follow-Up Automation**
+**DeltaAegis v0.39.0 — Scan Job Lifecycle Observability**
 
-DeltaAegis v0.38.0 adds guarded TrueAegis validation as an optional follow-up to scheduled NetSniper scans. A schedule can enable `run_trueaegis_after_ingest` to request TrueAegis only after NetSniper completes, auto-ingest records structured evidence, the imported snapshot is verified as `ACCEPTED`, the manifest matches the persisted snapshot, no TrueAegis job is already active, and the configured TrueAegis executable is ready.
+DeltaAegis v0.39.0 adds persistent NetSniper scan-job lifecycle state from `QUEUED` through `RUNNING` to `COMPLETED`, `FAILED`, or `CANCELLED`. The worker records process IDs, heartbeats, bounded live stdout and stderr, terminal exit data, and cancellation evidence while retaining the existing fixed argument-vector execution boundary.
 
-Scheduled follow-ups preserve provenance through the originating NetSniper scan job and schedule. Dashboard workers execute asynchronously through the existing guarded worker, while CLI `schedule-run-due` execution is synchronous so the process remains alive through validation, result import, and correlation refresh. The implementation uses fixed argument-vector execution and does not expose arbitrary shell command execution.
+The dashboard adds read-only live job detail, active-job polling, and an authenticated cancellation workflow with a required reason and explicit confirmation. The browser never supplies a process ID or sends operating-system signals; the worker owns process-group termination and escalation.
 
-The v0.38 release was validated with an isolated real NetSniper scan and accepted ingest, followed by a controlled TrueAegis replay with 81 imported observations and 81 refreshed correlations. A later live dashboard-schedule acceptance test completed with 183 imported observations and 711 refreshed correlations.
+Schedule deletion preserves every linked job and its original `schedule_id`. A deletion tombstone keeps the removed definition, linked-job status counts, and schedule history visible. Deleting a schedule does not cancel a queued or running job; cancellation remains a separate explicit action.
 
 ## What DeltaAegis Does
 
@@ -139,7 +139,7 @@ Do not use unauthenticated mode on exposed networks.
 - Intelligence — NetSniper classification quality and device-intelligence context.
 - Events — delta events from accepted scans.
 - Alerts — analyst-facing alert review.
-- NetSniper — telemetry status, guarded scan launch, schedules, job history, and completed-run import.
+- NetSniper — telemetry status, guarded scan launch, live job detail, authenticated cancellation, schedules, preserved schedule history, and completed-run import.
 - Admin/User Management — local users, roles, and access controls.
 
 ## NetSniper Integration
@@ -174,9 +174,13 @@ deltaaegis ingest --runs-dir ~/NetSniper/runs
 
 ## Security Boundary
 
-DeltaAegis v0.38.0 does not expose arbitrary shell command execution from the dashboard.
+DeltaAegis v0.39.0 does not expose arbitrary shell command execution from the dashboard.
 
-Dashboard NetSniper scan controls use guarded job records and fixed argument-vector execution. Scan launch and schedule operations remain protected by the dashboard RBAC policy, and telemetry cleanup remains isolated behind the ADMIN-only `/operator/reset` maintenance page with explicit `DELETE TELEMETRY` confirmation.
+Dashboard NetSniper execution uses guarded job records, validated private IPv4 CIDRs, and fixed argument-vector process creation. Live job-detail reads are bounded and confined to the configured scan-log root.
+
+Cancellation is an authenticated `scan.start` action. The browser submits only the job identifier and reason; it does not supply a PID or send signals. The worker owns process-group termination and preserves cancellation metadata and log evidence.
+
+Schedule deletion preserves linked scan jobs and does not imply cancellation. Operators must use the dedicated cancellation control to stop an active job.
 
 The `/api/netsniper/import-latest` endpoint imports completed telemetry and is protected by the `workflow.write` permission. ANALYST and ADMIN users can perform workflow write actions.
 
@@ -305,15 +309,19 @@ Preview uninstall actions without deleting anything:
 
 ## Validation
 
-Run the complete v0.38 release gate:
+Run the complete v0.39 release gate from a clean checkout:
 
 ```bash
-./tools/validate_v0_38_release.sh
+./tools/validate_v0_39_release_gate.sh
 ```
 
-The release gate chains the v0.38 schedule-intent, planning, queueing,
-execution, ingest-provenance, execution-mode, and due-schedule regression
-validators.
+The release gate validates lifecycle storage, live execution, read-only job detail, dashboard polling, HTTP execution, cancellation backend and API behavior, dashboard cancellation UX, non-destructive schedule deletion, release metadata, the branch-diff path audit, and v0.38 TrueAegis follow-up compatibility.
+
+For the pre-commit release-hardening checkpoint only:
+
+```bash
+./tools/validate_v0_39_release_gate.sh --allow-dirty
+```
 
 Basic syntax check:
 
@@ -334,8 +342,8 @@ DeltaAegis does not currently:
 - Perform machine-learning anomaly detection.
 - Automatically discover business owners for assets.
 - Execute raw shell commands from the dashboard.
-- Stream NetSniper stdout and stderr live while a scan is still running; the current log files are populated after completion.
-- Cancel an already-running scan automatically when its originating schedule is deleted.
+- Run more than one active NetSniper scan job at a time.
+- Treat schedule deletion as scan cancellation; cancellation remains a separate explicit action.
 - Replace manual analyst review.
 
 Its conclusions are limited to NetSniper telemetry, stored historical snapshots, analyst annotations, investigation state, and local DeltaAegis database records.

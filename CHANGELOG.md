@@ -1,3 +1,18 @@
+## DeltaAegis v0.39.0 — Scan Job Lifecycle Observability
+
+- Added persistent scan-job lifecycle storage for `QUEUED`, `RUNNING`, `COMPLETED`, `FAILED`, and `CANCELLED` states.
+- Added worker-owned process IDs, heartbeats, live stdout and stderr, exit codes, and terminal lifecycle evidence.
+- Added a read-only scan-job detail API with bounded log tails and log-root confinement.
+- Added dashboard live-job detail with active-only polling and automatic polling shutdown at terminal state.
+- Added an authenticated cancellation API with server-derived requester identity and required cancellation reasons.
+- Added worker-owned process-group termination with graceful termination and escalation while preserving log evidence.
+- Added dashboard cancellation controls with explicit confirmation, in-flight disabling, and immediate job-ledger refresh.
+- Added a schedule-deletion tombstone so removed schedule definitions and linked-job status summaries remain visible.
+- Preserved queued, running, completed, failed, and cancelled linked jobs when schedules are deleted.
+- Ensured linked jobs remain unchanged and retain their original `schedule_id`; schedule deletion never implies cancellation.
+- Added v0.39 lifecycle, HTTP, cancellation, schedule-deletion, metadata, and branch-diff validators.
+- Added `validate_v0_39_release_gate.sh` as the complete v0.39 release gate with v0.38 TrueAegis follow-up compatibility coverage.
+
 ## DeltaAegis v0.38.0 — TrueAegis Follow-Up Automation
 
 - Added opt-in `run_trueaegis_after_ingest` intent to scheduled NetSniper scans, disabled by default.
