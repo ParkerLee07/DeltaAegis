@@ -6,6 +6,9 @@ cd "$(dirname "$0")/.." || exit 1
 echo "[v0.38 release] checkpoint 7 dependency"
 tools/validate_v0_38_due_schedule_followup_intent.sh
 
+echo "[v0.38 release] documentation accuracy dependency"
+tools/validate_v0_38_documentation_accuracy.sh
+
 echo "[v0.38 release] syntax check"
 python3 -m py_compile deltaaegis.py
 
@@ -22,7 +25,7 @@ required_readme = [
     "## Current Release — v0.38.0",
     "**DeltaAegis v0.38.0 — TrueAegis Follow-Up Automation**",
     "run_trueaegis_after_ingest",
-    "81 imported validation observations",
+    "81 imported observations",
     "does not expose arbitrary shell command execution",
 ]
 
