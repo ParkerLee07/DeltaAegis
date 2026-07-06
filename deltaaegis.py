@@ -5985,6 +5985,12 @@ def run_due_scan_schedules(
                 schedule,
                 final_job,
             )
+            trueaegis_followup_queue = trueaegis_queue_followup_for_schedule(
+                connection,
+                schedule,
+                final_job,
+                trueaegis_followup_plan,
+            )
             results.append(
                 {
                     "schedule_id": schedule["schedule_id"],
@@ -5993,6 +5999,7 @@ def run_due_scan_schedules(
                     "job": final_job,
                     "schedule": updated,
                     "trueaegis_followup": trueaegis_followup_plan,
+                    "trueaegis_followup_queue": trueaegis_followup_queue,
                 }
             )
             continue
@@ -6010,6 +6017,12 @@ def run_due_scan_schedules(
             schedule,
             final_job,
         )
+        trueaegis_followup_queue = trueaegis_queue_followup_for_schedule(
+            connection,
+            schedule,
+            final_job,
+            trueaegis_followup_plan,
+        )
 
         results.append(
             {
@@ -6019,6 +6032,7 @@ def run_due_scan_schedules(
                 "job": final_job,
                 "schedule": updated,
                 "trueaegis_followup": trueaegis_followup_plan,
+                "trueaegis_followup_queue": trueaegis_followup_queue,
             }
         )
 
@@ -12034,6 +12048,90 @@ def trueaegis_followup_plan_for_schedule(
         "eligible",
         "TrueAegis follow-up is eligible to be queued by a later v0.38 checkpoint.",
     )
+
+
+def trueaegis_queue_followup_for_schedule(
+    connection: sqlite3.Connection,
+    schedule: dict[str, Any],
+    job: dict[str, Any],
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    """Queue a TrueAegis follow-up job when the read-only planner is eligible.
+
+    This function creates a QUEUED TrueAegis job only. It intentionally does not
+    start a worker thread, execute TrueAegis, import validation output, or modify
+    risk scoring.
+    """
+
+    result = {
+        "schema_version": "deltaaegis-trueaegis-followup-queue-v1",
+        "queued": False,
+        "outcome": str(plan.get("outcome") or "unknown"),
+        "schedule_id": str(schedule.get("schedule_id") or ""),
+        "scan_job_id": str(job.get("job_id") or ""),
+        "trueaegis_job_id": None,
+        "job": None,
+        "message": "TrueAegis follow-up was not queued.",
+    }
+
+    if not bool(plan.get("eligible")) or str(plan.get("outcome") or "") != "eligible":
+        result["message"] = str(
+            plan.get("message")
+            or "TrueAegis follow-up planner did not mark this scan eligible."
+        )
+        return result
+
+    if active_trueaegis_job_exists(connection):
+        result["outcome"] = "active_trueaegis_job_exists"
+        result["message"] = "A TrueAegis validation job is already queued or running."
+        return result
+
+    manifest_value = str(plan.get("manifest_path") or "").strip()
+    trueaegis_value = str(plan.get("trueaegis_path") or "").strip()
+
+    if not manifest_value:
+        result["outcome"] = "missing_manifest"
+        result["message"] = "TrueAegis follow-up queueing requires a manifest path."
+        return result
+
+    if not trueaegis_value:
+        result["outcome"] = "trueaegis_not_ready"
+        result["message"] = "TrueAegis follow-up queueing requires a TrueAegis path."
+        return result
+
+    manifest_path = Path(manifest_value).expanduser()
+    trueaegis_path = Path(trueaegis_value).expanduser()
+
+    if not manifest_path.is_file():
+        result["outcome"] = "missing_manifest"
+        result["message"] = f"NetSniper manifest was not found: {manifest_path}"
+        return result
+
+    if not trueaegis_path.is_file():
+        result["outcome"] = "trueaegis_not_ready"
+        result["message"] = f"TrueAegis executable was not found: {trueaegis_path}"
+        return result
+
+    trueaegis_job = create_trueaegis_job(
+        connection,
+        scan_id=plan.get("scan_id") or job.get("scan_id") or job.get("job_id"),
+        network_scope=plan.get("network_scope") or job.get("network_scope") or schedule.get("network_scope"),
+        manifest_path=manifest_path,
+        trueaegis_path=trueaegis_path,
+    )
+    connection.commit()
+
+    result.update(
+        {
+            "queued": True,
+            "outcome": "queued",
+            "trueaegis_job_id": trueaegis_job.get("job_id"),
+            "job": trueaegis_job,
+            "message": "TrueAegis follow-up job queued; execution is deferred to a later v0.38 checkpoint.",
+        }
+    )
+
+    return result
 
 
 def latest_trueaegis_validation_results_path(
