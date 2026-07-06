@@ -4,13 +4,15 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.37.0
+## Current Release — v0.38.0
 
-**DeltaAegis v0.37.0 — Operator Evidence Review**
+**DeltaAegis v0.38.0 — TrueAegis Follow-Up Automation**
 
-DeltaAegis v0.37.0 improves operator evidence review on top of the v0.36 dashboard-operations foundation. It adds schedule-driven NetSniper run history, telemetry reset audit visibility, latest-network-change summaries, scan-freshness warnings for the latest accepted scan, ADMIN-only stale scan-job recovery for old active jobs that block scheduled scans, and blocked-schedule retry behavior that avoids cadence-postponing due schedules when another scan is already active.
+DeltaAegis v0.38.0 adds guarded TrueAegis validation as an optional follow-up to scheduled NetSniper scans. A schedule can enable `run_trueaegis_after_ingest` to request TrueAegis only after NetSniper completes, auto-ingest records structured evidence, the imported snapshot is verified as `ACCEPTED`, the manifest matches the persisted snapshot, no TrueAegis job is already active, and the configured TrueAegis executable is ready.
 
-This release keeps destructive telemetry cleanup isolated on the ADMIN-only `/operator/reset` page, preserves scheduled scan controls, and does not enable automatic TrueAegis execution from scheduled scans by default.
+Scheduled follow-ups preserve provenance through the originating NetSniper scan job and schedule. Dashboard workers execute asynchronously through the existing guarded worker, while CLI `schedule-run-due` execution is synchronous so the process remains alive through validation, result import, and correlation refresh. The implementation uses fixed argument-vector execution and does not expose arbitrary shell command execution.
+
+The v0.38 release was validated with an isolated real NetSniper scan and accepted ingest, followed by a controlled TrueAegis replay that completed successfully with 81 imported validation observations and 81 refreshed correlations.
 
 ## What DeltaAegis Does
 
@@ -172,7 +174,7 @@ deltaaegis ingest --runs-dir ~/NetSniper/runs
 
 ## Security Boundary
 
-DeltaAegis v0.37.0 does not expose arbitrary shell command execution from the dashboard.
+DeltaAegis v0.38.0 does not expose arbitrary shell command execution from the dashboard.
 
 Dashboard NetSniper scan controls use guarded job records and fixed argument-vector execution. Scan launch and schedule operations remain protected by the dashboard RBAC policy, and telemetry cleanup remains isolated behind the ADMIN-only `/operator/reset` maintenance page with explicit `DELETE TELEMETRY` confirmation.
 

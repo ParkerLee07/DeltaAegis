@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.37.0: Operator evidence review, schedule run history, telemetry reset audit visibility, latest network changes, and scan freshness warnings.
+"""DeltaAegis v0.38.0: TrueAegis Follow-Up Automation.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -531,6 +531,9 @@ CREATE TABLE IF NOT EXISTS trueaegis_jobs (
     job_id TEXT PRIMARY KEY,
     status TEXT NOT NULL,
     scan_id TEXT,
+    scan_job_id TEXT NOT NULL DEFAULT '',
+    schedule_id TEXT NOT NULL DEFAULT '',
+    trigger_source TEXT NOT NULL DEFAULT 'manual_dashboard',
     network_scope TEXT NOT NULL DEFAULT '',
     manifest_path TEXT NOT NULL,
     trueaegis_path TEXT NOT NULL DEFAULT '',
@@ -569,6 +572,7 @@ CREATE TABLE IF NOT EXISTS scan_schedules (
     cadence_minutes INTEGER NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
     auto_ingest INTEGER NOT NULL DEFAULT 1,
+    run_trueaegis_after_ingest INTEGER NOT NULL DEFAULT 0,
     last_run_at TEXT,
     next_run_at TEXT,
     last_job_id TEXT,
@@ -1507,7 +1511,17 @@ def connect(db_path: Path) -> sqlite3.Connection:
     ensure_column(connection, "snapshots", "network_scope", "network_scope TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "asset_observations", "identity_class", "identity_class TEXT NOT NULL DEFAULT 'IP_ONLY'")
     ensure_column(connection, "scan_jobs", "scan_profile", "scan_profile TEXT NOT NULL DEFAULT 'balanced'")
+    ensure_column(connection, "trueaegis_jobs", "scan_job_id", "scan_job_id TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "trueaegis_jobs", "schedule_id", "schedule_id TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "trueaegis_jobs", "trigger_source", "trigger_source TEXT NOT NULL DEFAULT 'manual_dashboard'")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_trueaegis_jobs_scan_job_id ""ON trueaegis_jobs(scan_job_id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_trueaegis_jobs_schedule_id ""ON trueaegis_jobs(schedule_id)"
+    )
     ensure_column(connection, "scan_jobs", "schedule_id", "schedule_id TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "scan_schedules", "run_trueaegis_after_ingest", "run_trueaegis_after_ingest INTEGER NOT NULL DEFAULT 0")
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_scan_jobs_schedule_id
@@ -4421,6 +4435,88 @@ def enrich_netsniper_status_from_manifest(
 
 
 
+def scan_job_auto_ingest_evidence(
+    connection: sqlite3.Connection,
+    manifest_path: Path | str,
+    ingest_result: Any,
+    status_json: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build durable evidence that a scan bundle was ingested and quality-gated."""
+
+    safe_manifest_path = Path(manifest_path).expanduser()
+    status_payload = status_json if isinstance(status_json, dict) else {}
+    scan_id = str(status_payload.get("scan_id") or "").strip()
+
+    if not scan_id and safe_manifest_path.is_file():
+        try:
+            manifest_payload = json.loads(
+                safe_manifest_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            manifest_payload = {}
+
+        if isinstance(manifest_payload, dict):
+            scan_id = str(manifest_payload.get("scan_id") or "").strip()
+
+    row = None
+
+    if scan_id:
+        row = connection.execute(
+            """
+            SELECT scan_id, quality_status, manifest_path, network_scope
+            FROM snapshots
+            WHERE scan_id = ?
+            LIMIT 1
+            """,
+            (scan_id,),
+        ).fetchone()
+
+    if row is None:
+        row = connection.execute(
+            """
+            SELECT scan_id, quality_status, manifest_path, network_scope
+            FROM snapshots
+            WHERE manifest_path = ?
+            ORDER BY imported_at DESC
+            LIMIT 1
+            """,
+            (str(safe_manifest_path),),
+        ).fetchone()
+
+    evidence = {
+        "schema_version": "deltaaegis-scan-auto-ingest-evidence-v1",
+        "requested": True,
+        "attempted": True,
+        "performed": True,
+        "accepted": False,
+        "quality_status": None,
+        "scan_id": scan_id,
+        "manifest_path": str(safe_manifest_path),
+        "network_scope": None,
+        "result": str(ingest_result),
+    }
+
+    if row is None:
+        return evidence
+
+    row_item = dict(row)
+    quality_status = str(row_item.get("quality_status") or "").strip().upper()
+
+    evidence.update(
+        {
+            "accepted": quality_status == "ACCEPTED",
+            "quality_status": quality_status or None,
+            "scan_id": str(row_item.get("scan_id") or scan_id),
+            "manifest_path": str(
+                row_item.get("manifest_path") or safe_manifest_path
+            ),
+            "network_scope": str(row_item.get("network_scope") or "") or None,
+        }
+    )
+
+    return evidence
+
+
 def execute_scan_job(
     connection: sqlite3.Connection,
     job_id: str,
@@ -4498,6 +4594,10 @@ def execute_scan_job(
     stderr_log.write_text(completed.stderr or "", encoding="utf-8")
 
     status_json = extract_netsniper_status_json(completed.stdout)
+
+    if not isinstance(status_json, dict):
+        status_json = {}
+
     bundle_path = extract_netsniper_bundle_path(status_json)
 
     if completed.returncode == 0 and not bundle_path:
@@ -4524,15 +4624,44 @@ def execute_scan_job(
     if bundle_path:
         message_parts.append(f"bundle={bundle_path}")
 
-    if final_status == "COMPLETED" and auto_ingest and bundle_path:
-        manifest = Path(bundle_path) / "manifest.json"
+    auto_ingest_evidence = {
+        "schema_version": "deltaaegis-scan-auto-ingest-evidence-v1",
+        "requested": bool(auto_ingest),
+        "attempted": False,
+        "performed": False,
+        "accepted": False,
+        "quality_status": None,
+        "scan_id": str(status_json.get("scan_id") or ""),
+        "manifest_path": None,
+        "network_scope": None,
+        "result": None,
+    }
 
-        if manifest.is_file():
-            ingest_result = ingest_manifest(connection, manifest, events_path)
-            message_parts.append(f"auto-ingest={ingest_result}")
-        else:
+    if final_status == "COMPLETED" and auto_ingest:
+        auto_ingest_evidence["attempted"] = True
+
+        if not bundle_path:
             final_status = "FAILED"
-            message_parts.append(f"auto-ingest failed: manifest not found at {manifest}")
+            message_parts.append("auto-ingest failed: completed scan did not provide a bundle path")
+        else:
+            manifest = Path(bundle_path) / "manifest.json"
+            auto_ingest_evidence["manifest_path"] = str(manifest)
+
+            if manifest.is_file():
+                ingest_result = ingest_manifest(connection, manifest, events_path)
+                auto_ingest_evidence = scan_job_auto_ingest_evidence(
+                    connection, manifest, ingest_result, status_json=status_json
+                )
+                message_parts.append(f"auto-ingest={ingest_result}")
+                message_parts.append(
+                    "auto-ingest-quality="
+                    f"{auto_ingest_evidence.get('quality_status') or 'UNKNOWN'}"
+                )
+            else:
+                final_status = "FAILED"
+                message_parts.append(f"auto-ingest failed: manifest not found at {manifest}")
+
+    status_json["auto_ingest"] = auto_ingest_evidence
 
     update_scan_job(
         connection,
@@ -4728,6 +4857,10 @@ def trueaegis_job_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         except (TypeError, ValueError):
             item["exit_code"] = None
 
+    item["scan_job_id"] = str(item.get("scan_job_id") or "")
+    item["schedule_id"] = str(item.get("schedule_id") or "")
+    item["trigger_source"] = str(item.get("trigger_source") or "manual_dashboard")
+
     return item
 
 
@@ -4737,9 +4870,19 @@ def create_trueaegis_job(
     network_scope: str | None,
     manifest_path: Path,
     trueaegis_path: Path,
+    scan_job_id: str | None = None,
+    schedule_id: str | None = None,
+    trigger_source: str = "manual_dashboard",
 ) -> dict[str, Any]:
     safe_manifest_path = Path(manifest_path).expanduser()
     safe_trueaegis_path = Path(trueaegis_path).expanduser()
+    safe_scan_job_id = str(scan_job_id or "").strip()
+    safe_schedule_id = str(schedule_id or "").strip()
+    safe_trigger_source = str(trigger_source or "manual_dashboard").strip().lower()
+
+    if safe_trigger_source not in {"manual_dashboard", "scheduled_followup"}:
+        raise DeltaAegisError(f"invalid TrueAegis trigger source: {trigger_source}")
+
     now = utc_now_text()
     job_id = f"trueaegis-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
 
@@ -4749,6 +4892,9 @@ def create_trueaegis_job(
             job_id,
             status,
             scan_id,
+            scan_job_id,
+            schedule_id,
+            trigger_source,
             network_scope,
             manifest_path,
             trueaegis_path,
@@ -4756,12 +4902,15 @@ def create_trueaegis_job(
             created_at,
             updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             job_id,
             "QUEUED",
             str(scan_id or ""),
+            safe_scan_job_id,
+            safe_schedule_id,
+            safe_trigger_source,
             str(network_scope or ""),
             str(safe_manifest_path),
             str(safe_trueaegis_path),
@@ -4875,6 +5024,9 @@ def query_trueaegis_jobs(
             job_id,
             status,
             scan_id,
+            scan_job_id,
+            schedule_id,
+            trigger_source,
             network_scope,
             manifest_path,
             trueaegis_path,
@@ -5013,6 +5165,7 @@ def query_scan_schedule_history(
             s.cadence_minutes AS cadence_minutes,
             s.enabled AS enabled,
             s.auto_ingest AS auto_ingest,
+            s.run_trueaegis_after_ingest AS run_trueaegis_after_ingest,
             s.last_run_at AS last_run_at,
             s.next_run_at AS next_run_at,
             s.last_job_id AS last_job_id,
@@ -5130,6 +5283,7 @@ def dashboard_netsniper_schedule_create_payload(
         cadence_minutes=int(cadence),
         enabled=dashboard_bool_from_payload(payload.get("enabled"), True),
         auto_ingest=dashboard_bool_from_payload(payload.get("auto_ingest"), True),
+        run_trueaegis_after_ingest=dashboard_bool_from_payload(payload.get("run_trueaegis_after_ingest"), False),
     )
 
     return {
@@ -5184,7 +5338,8 @@ def dashboard_netsniper_schedule_run_due_payload(
         runs_dir=dashboard_netsniper_runs_dir(),
         logs_dir=DEFAULT_SCAN_LOGS,
         events_path=events_path,
-        max_runs=max_runs,
+        max_runs=max_runs,        trueaegis_execution_mode="asynchronous",
+
     )
 
     return {
@@ -5379,6 +5534,7 @@ def scan_schedule_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 
     item["enabled"] = bool(item.get("enabled"))
     item["auto_ingest"] = bool(item.get("auto_ingest"))
+    item["run_trueaegis_after_ingest"] = bool(item.get("run_trueaegis_after_ingest"))
     item["cadence_minutes"] = int(item.get("cadence_minutes") or 60)
     item["scan_profile"] = item.get("scan_profile") or "balanced"
 
@@ -5393,6 +5549,7 @@ def create_scan_schedule(
     cadence_minutes: int = 60,
     enabled: bool = True,
     auto_ingest: bool = True,
+    run_trueaegis_after_ingest: bool = False,
 ) -> dict[str, Any]:
     safe_name = validate_scan_schedule_name(name)
     safe_target = validate_private_cidr(target)
@@ -5414,12 +5571,26 @@ def create_scan_schedule(
             cadence_minutes,
             enabled,
             auto_ingest,
+            run_trueaegis_after_ingest,
             next_run_at,
             created_at,
             updated_at,
             message
+        ) VALUES (
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             schedule_id,
@@ -5430,6 +5601,7 @@ def create_scan_schedule(
             safe_cadence,
             1 if enabled else 0,
             1 if auto_ingest else 0,
+            1 if run_trueaegis_after_ingest else 0,
             next_run_at,
             now,
             now,
@@ -5480,6 +5652,7 @@ def query_scan_schedules(
             cadence_minutes,
             enabled,
             auto_ingest,
+            run_trueaegis_after_ingest,
             last_run_at,
             next_run_at,
             last_job_id,
@@ -5765,6 +5938,7 @@ def query_due_scan_schedules(
             cadence_minutes,
             enabled,
             auto_ingest,
+            run_trueaegis_after_ingest,
             last_run_at,
             next_run_at,
             last_job_id,
@@ -5875,6 +6049,7 @@ def run_due_scan_schedules(
     logs_dir: Path,
     events_path: Path,
     max_runs: int = 1,
+    trueaegis_execution_mode: str = "asynchronous",
 ) -> list[dict[str, Any]]:
     max_runs = max(1, int(max_runs or 1))
     results: list[dict[str, Any]] = []
@@ -5958,6 +6133,22 @@ def run_due_scan_schedules(
                 final_job,
             )
             connection.commit()
+            trueaegis_followup_plan = trueaegis_followup_plan_for_schedule(
+                connection,
+                schedule,
+                final_job,
+            )
+            trueaegis_followup_queue = trueaegis_queue_followup_for_schedule(
+                connection,
+                schedule,
+                final_job,
+                trueaegis_followup_plan,
+            )
+            trueaegis_followup_execution = trueaegis_start_queued_followup_for_schedule(
+                connection,
+                trueaegis_followup_queue,
+                execution_mode=trueaegis_execution_mode,
+            )
             results.append(
                 {
                     "schedule_id": schedule["schedule_id"],
@@ -5965,6 +6156,9 @@ def run_due_scan_schedules(
                     "action": "failed",
                     "job": final_job,
                     "schedule": updated,
+                    "trueaegis_followup": trueaegis_followup_plan,
+                    "trueaegis_followup_queue": trueaegis_followup_queue,
+                    "trueaegis_followup_execution": trueaegis_followup_execution,
                 }
             )
             continue
@@ -5977,6 +6171,23 @@ def run_due_scan_schedules(
         )
         connection.commit()
 
+        trueaegis_followup_plan = trueaegis_followup_plan_for_schedule(
+            connection,
+            schedule,
+            final_job,
+        )
+        trueaegis_followup_queue = trueaegis_queue_followup_for_schedule(
+            connection,
+            schedule,
+            final_job,
+            trueaegis_followup_plan,
+        )
+        trueaegis_followup_execution = trueaegis_start_queued_followup_for_schedule(
+            connection,
+            trueaegis_followup_queue,
+            execution_mode=trueaegis_execution_mode,
+        )
+
         results.append(
             {
                 "schedule_id": schedule["schedule_id"],
@@ -5984,6 +6195,9 @@ def run_due_scan_schedules(
                 "action": "ran",
                 "job": final_job,
                 "schedule": updated,
+                "trueaegis_followup": trueaegis_followup_plan,
+                "trueaegis_followup_queue": trueaegis_followup_queue,
+                "trueaegis_followup_execution": trueaegis_followup_execution,
             }
         )
 
@@ -6013,6 +6227,15 @@ def print_schedule_run_results(results: list[dict[str, Any]]) -> None:
         if schedule:
             print(f"  next_run={schedule.get('next_run_at') or '-'}  last_status={schedule.get('last_status') or '-'}")
 
+        followup = result.get("trueaegis_followup_execution") or {}
+        if followup:
+            followup_job = followup.get("job") or {}
+            print(
+                f"  trueaegis_mode={followup.get('execution_mode') or '-'}  "
+                f"outcome={followup.get('outcome') or '-'}  "
+                f"status={followup_job.get('status') or '-'}"
+            )
+
 
 def command_schedule_run_due(args: argparse.Namespace) -> int:
     connection = connect(args.db)
@@ -6023,13 +6246,39 @@ def command_schedule_run_due(args: argparse.Namespace) -> int:
         runs_dir=Path(args.runs_dir).expanduser(),
         logs_dir=Path(args.scan_logs_dir).expanduser(),
         events_path=args.events,
-        max_runs=args.max_runs,
+        max_runs=args.max_runs,        trueaegis_execution_mode="synchronous",
+
     )
 
     print_schedule_run_results(results)
 
-    failed = any((item.get("job") or {}).get("status") == "FAILED" for item in results)
-    return 1 if failed else 0
+    scan_failed = any(
+        (item.get("job") or {}).get("status") == "FAILED"
+        for item in results
+    )
+    trueaegis_failed = any(
+        (
+            str(
+                (item.get("trueaegis_followup_execution") or {}).get("outcome")
+                or ""
+            ).lower()
+            in {
+                "failed",
+                "execution_failed",
+                "thread_start_failed",
+                "database_path_unavailable",
+            }
+            or (
+                (
+                    (item.get("trueaegis_followup_execution") or {}).get("job")
+                    or {}
+                ).get("status")
+                == "FAILED"
+            )
+        )
+        for item in results
+    )
+    return 1 if scan_failed or trueaegis_failed else 0
 
 
 def set_scan_schedule_enabled(
@@ -6117,7 +6366,7 @@ def print_scan_schedule_rows(rows: Iterable[sqlite3.Row]) -> None:
         if item.get("last_job_id"):
             print(f"  last_job={item['last_job_id']}  last_status={item.get('last_status') or '-'}")
 
-        print(f"  auto_ingest={'yes' if item['auto_ingest'] else 'no'}  skips={item['skip_count']}  failures={item['failure_count']}")
+        print(f"  auto_ingest={'yes' if item['auto_ingest'] else 'no'}  trueaegis_after_ingest={'yes' if item['run_trueaegis_after_ingest'] else 'no'}  skips={item['skip_count']}  failures={item['failure_count']}")
 
         if item.get("message"):
             print(f"  message={item['message']}")
@@ -6134,6 +6383,7 @@ def command_schedule_create(args: argparse.Namespace) -> int:
         cadence_minutes=args.cadence_minutes,
         enabled=not args.disabled,
         auto_ingest=args.auto_ingest,
+        run_trueaegis_after_ingest=args.run_trueaegis_after_ingest,
     )
     connection.commit()
 
@@ -6144,6 +6394,7 @@ def command_schedule_create(args: argparse.Namespace) -> int:
     print(f"Cadence: {schedule['cadence_minutes']} minutes")
     print(f"Enabled: {'yes' if schedule['enabled'] else 'no'}")
     print(f"Auto-ingest: {'yes' if schedule['auto_ingest'] else 'no'}")
+    print(f"TrueAegis after ingest: {'yes' if schedule['run_trueaegis_after_ingest'] else 'no'}")
     print(f"Next run: {schedule.get('next_run_at') or '-'}")
 
     return 0
@@ -11846,6 +12097,518 @@ def active_trueaegis_job_exists(connection: sqlite3.Connection) -> bool:
     ).fetchone()
 
     return row is not None
+
+
+def trueaegis_followup_plan_for_schedule(
+    connection: sqlite3.Connection,
+    schedule: dict[str, Any],
+    job: dict[str, Any],
+    trueaegis_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Return a read-only TrueAegis follow-up plan for a scheduled NetSniper job.
+
+    This planner is intentionally side-effect free. It does not create a
+    TrueAegis job, start a thread, import validation results, or modify risk.
+    """
+
+    schedule_id = str(schedule.get("schedule_id") or "").strip()
+    job_id = str(job.get("job_id") or "").strip()
+    status = str(job.get("status") or "").strip().upper()
+    network_scope = str(
+        job.get("network_scope")
+        or schedule.get("network_scope")
+        or schedule.get("target")
+        or ""
+    ).strip()
+    resolved_trueaegis_path = resolve_trueaegis_executable(trueaegis_path)
+
+    plan = {
+        "schema_version": "deltaaegis-trueaegis-followup-plan-v1",
+        "eligible": False,
+        "outcome": "",
+        "schedule_id": schedule_id,
+        "job_id": job_id,
+        "scan_id": job.get("scan_id") or "",
+        "network_scope": network_scope,
+        "manifest_path": None,
+        "manifest_exists": False,
+        "trueaegis_path": str(resolved_trueaegis_path),
+        "trueaegis_exists": resolved_trueaegis_path.is_file(),
+        "command_preview": [],
+        "command_preview_kind": "argv",
+        "execution_enabled": False,
+        "message": "",
+    }
+
+    def finish(outcome: str, message: str) -> dict[str, Any]:
+        plan["outcome"] = outcome
+        plan["message"] = message
+        return plan
+
+    if not bool(schedule.get("run_trueaegis_after_ingest")):
+        return finish(
+            "disabled_by_schedule",
+            "TrueAegis follow-up is disabled for this schedule.",
+        )
+
+    if not bool(schedule.get("auto_ingest")) or not bool(job.get("auto_ingest", True)):
+        return finish(
+            "auto_ingest_disabled",
+            "TrueAegis follow-up requires scheduled NetSniper auto-ingest.",
+        )
+
+    if status != "COMPLETED":
+        return finish(
+            "scan_not_completed",
+            f"TrueAegis follow-up requires a completed NetSniper job; status={status or 'UNKNOWN'}.",
+        )
+
+    status_json = job.get("status_json") or {}
+    if isinstance(status_json, str):
+        try:
+            status_json = json.loads(status_json or "{}")
+        except json.JSONDecodeError:
+            status_json = {}
+
+    auto_ingest_evidence = (
+        status_json.get("auto_ingest")
+        if isinstance(status_json, dict)
+        else None
+    )
+
+    if not isinstance(auto_ingest_evidence, dict):
+        return finish(
+            "ingest_not_recorded",
+            "TrueAegis follow-up requires structured auto-ingest evidence.",
+        )
+
+    ingest_performed = auto_ingest_evidence.get("performed") is True
+    ingest_accepted = auto_ingest_evidence.get("accepted") is True
+    ingest_quality_status = str(
+        auto_ingest_evidence.get("quality_status") or ""
+    ).strip().upper()
+    ingested_scan_id = str(
+        auto_ingest_evidence.get("scan_id")
+        or status_json.get("scan_id")
+        or ""
+    ).strip()
+
+    plan["ingest_evidence"] = auto_ingest_evidence
+    plan["scan_id"] = ingested_scan_id
+
+    if not ingest_performed or not ingested_scan_id:
+        return finish(
+            "ingest_not_recorded",
+            "TrueAegis follow-up requires proof that auto-ingest stored a snapshot.",
+        )
+
+    if not ingest_accepted or ingest_quality_status != "ACCEPTED":
+        return finish(
+            "ingest_not_accepted",
+            "TrueAegis follow-up requires an ACCEPTED DeltaAegis snapshot.",
+        )
+
+    manifest_candidates: list[Path] = []
+
+    for value in (
+        job.get("manifest_path"),
+        job.get("manifest"),
+        status_json.get("manifest_path") if isinstance(status_json, dict) else None,
+        status_json.get("manifest") if isinstance(status_json, dict) else None,
+    ):
+        raw = str(value or "").strip()
+        if raw:
+            manifest_candidates.append(Path(raw).expanduser())
+
+    bundle_value = str(job.get("bundle_path") or "").strip()
+    if bundle_value:
+        bundle_path = Path(bundle_value).expanduser()
+        if bundle_path.name == "manifest.json":
+            manifest_candidates.append(bundle_path)
+        else:
+            manifest_candidates.append(bundle_path / "manifest.json")
+
+    manifest_path: Path | None = None
+
+    for candidate in manifest_candidates:
+        if candidate.name == "manifest.json" and candidate.is_file():
+            manifest_path = candidate
+            break
+
+    if manifest_path is None:
+        return finish(
+            "missing_manifest",
+            "TrueAegis follow-up requires a NetSniper manifest.json from the completed scan.",
+        )
+
+    plan["manifest_path"] = str(manifest_path)
+    plan["manifest_exists"] = True
+
+    snapshot_row = connection.execute(
+        """
+        SELECT scan_id, quality_status, manifest_path
+        FROM snapshots
+        WHERE scan_id = ?
+        LIMIT 1
+        """,
+        (plan["scan_id"],),
+    ).fetchone()
+
+    if snapshot_row is None:
+        return finish(
+            "ingest_not_recorded",
+            "The auto-ingested snapshot could not be verified in DeltaAegis.",
+        )
+
+    snapshot_item = dict(snapshot_row)
+    persisted_quality_status = str(
+        snapshot_item.get("quality_status") or ""
+    ).strip().upper()
+    persisted_manifest_path = Path(
+        str(snapshot_item.get("manifest_path") or "")
+    ).expanduser()
+
+    if persisted_quality_status != "ACCEPTED":
+        return finish(
+            "ingest_not_accepted",
+            "The persisted DeltaAegis snapshot is not ACCEPTED.",
+        )
+
+    try:
+        manifest_matches_snapshot = (
+            persisted_manifest_path.resolve() == manifest_path.resolve()
+        )
+    except OSError:
+        manifest_matches_snapshot = str(persisted_manifest_path) == str(manifest_path)
+
+    if not manifest_matches_snapshot:
+        return finish(
+            "ingest_manifest_mismatch",
+            "The accepted snapshot does not reference this NetSniper manifest.",
+        )
+
+    if active_trueaegis_job_exists(connection):
+        return finish(
+            "active_trueaegis_job_exists",
+            "A TrueAegis validation job is already queued or running.",
+        )
+
+    try:
+        command_preview = build_trueaegis_validation_command(
+            trueaegis_path=resolved_trueaegis_path,
+            manifest_path=manifest_path,
+        )
+    except DeltaAegisError as exc:
+        return finish(
+            "trueaegis_not_ready",
+            str(exc),
+        )
+
+    plan["eligible"] = True
+    plan["command_preview"] = command_preview
+    return finish(
+        "eligible",
+        "TrueAegis follow-up is eligible for automated queueing and execution.",
+    )
+
+
+def trueaegis_queue_followup_for_schedule(
+    connection: sqlite3.Connection,
+    schedule: dict[str, Any],
+    job: dict[str, Any],
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    """Queue a TrueAegis follow-up job when the read-only planner is eligible.
+
+    This function creates a QUEUED TrueAegis job only. It intentionally does not
+    start a worker thread, execute TrueAegis, import validation output, or modify
+    risk scoring.
+    """
+
+    result = {
+        "schema_version": "deltaaegis-trueaegis-followup-queue-v1",
+        "queued": False,
+        "outcome": str(plan.get("outcome") or "unknown"),
+        "schedule_id": str(schedule.get("schedule_id") or ""),
+        "scan_job_id": str(job.get("job_id") or ""),
+        "trueaegis_job_id": None,
+        "job": None,
+        "message": "TrueAegis follow-up was not queued.",
+    }
+
+    if not bool(plan.get("eligible")) or str(plan.get("outcome") or "") != "eligible":
+        result["message"] = str(
+            plan.get("message")
+            or "TrueAegis follow-up planner did not mark this scan eligible."
+        )
+        return result
+
+    if active_trueaegis_job_exists(connection):
+        result["outcome"] = "active_trueaegis_job_exists"
+        result["message"] = "A TrueAegis validation job is already queued or running."
+        return result
+
+    manifest_value = str(plan.get("manifest_path") or "").strip()
+    trueaegis_value = str(plan.get("trueaegis_path") or "").strip()
+
+    if not manifest_value:
+        result["outcome"] = "missing_manifest"
+        result["message"] = "TrueAegis follow-up queueing requires a manifest path."
+        return result
+
+    if not trueaegis_value:
+        result["outcome"] = "trueaegis_not_ready"
+        result["message"] = "TrueAegis follow-up queueing requires a TrueAegis path."
+        return result
+
+    manifest_path = Path(manifest_value).expanduser()
+    trueaegis_path = Path(trueaegis_value).expanduser()
+
+    if not manifest_path.is_file():
+        result["outcome"] = "missing_manifest"
+        result["message"] = f"NetSniper manifest was not found: {manifest_path}"
+        return result
+
+    if not trueaegis_path.is_file():
+        result["outcome"] = "trueaegis_not_ready"
+        result["message"] = f"TrueAegis executable was not found: {trueaegis_path}"
+        return result
+
+    trueaegis_job = create_trueaegis_job(
+        connection,
+        scan_id=plan.get("scan_id") or job.get("scan_id") or job.get("job_id"),
+        network_scope=plan.get("network_scope") or job.get("network_scope") or schedule.get("network_scope"),
+        manifest_path=manifest_path,
+        trueaegis_path=trueaegis_path,
+        scan_job_id=job.get("job_id"),
+        schedule_id=schedule.get("schedule_id"),
+        trigger_source="scheduled_followup",
+    )
+    connection.commit()
+
+    result.update(
+        {
+            "queued": True,
+            "outcome": "queued",
+            "trueaegis_job_id": trueaegis_job.get("job_id"),
+            "job": trueaegis_job,
+            "message": "TrueAegis follow-up job queued for guarded automated execution.",
+        }
+    )
+
+    return result
+
+
+def sqlite_connection_database_path(
+    connection: sqlite3.Connection,
+    explicit_path: Path | str | None = None,
+) -> Path | None:
+    """Resolve the file backing an SQLite connection.
+
+    File-backed CLI and dashboard connections expose their path through
+    PRAGMA database_list. In-memory databases intentionally return None.
+    """
+
+    if explicit_path is not None:
+        return Path(explicit_path).expanduser()
+
+    try:
+        rows = connection.execute("PRAGMA database_list").fetchall()
+    except sqlite3.Error:
+        return None
+
+    for row in rows:
+        if isinstance(row, sqlite3.Row):
+            name = str(row["name"] or "")
+            filename = str(row["file"] or "").strip()
+        else:
+            try:
+                name = str(row[1] or "")
+                filename = str(row[2] or "").strip()
+            except (IndexError, TypeError):
+                continue
+
+        if name == "main" and filename:
+            return Path(filename).expanduser()
+
+    return None
+
+
+def trueaegis_start_queued_followup_for_schedule(
+    connection: sqlite3.Connection,
+    queue_result: dict[str, Any],
+    db_path: Path | str | None = None,
+    logs_dir: Path | str = DEFAULT_TRUEAEGIS_LOGS,
+    execution_mode: str = "asynchronous",
+) -> dict[str, Any]:
+    """Execute the exact TrueAegis job queued by the scheduled follow-up path.
+
+    Dashboard schedule workers use the asynchronous guarded worker. CLI
+    schedule execution uses synchronous mode so the process remains alive
+    until validation, import, and correlation refresh finish.
+    """
+
+    safe_execution_mode = str(execution_mode or "asynchronous").strip().lower()
+
+    if safe_execution_mode not in {"asynchronous", "synchronous"}:
+        raise DeltaAegisError(
+            f"invalid TrueAegis follow-up execution mode: {execution_mode}"
+        )
+
+    result = {
+        "schema_version": "deltaaegis-trueaegis-followup-execution-v2",
+        "execution_mode": safe_execution_mode,
+        "started": False,
+        "completed": False,
+        "outcome": str(queue_result.get("outcome") or "not_queued"),
+        "trueaegis_job_id": queue_result.get("trueaegis_job_id"),
+        "thread_name": None,
+        "job": queue_result.get("job"),
+        "message": "TrueAegis follow-up execution was not started.",
+    }
+
+    if not bool(queue_result.get("queued")):
+        result["message"] = str(
+            queue_result.get("message")
+            or "TrueAegis follow-up was not queued."
+        )
+        return result
+
+    trueaegis_job = queue_result.get("job") or {}
+    job_id = str(
+        queue_result.get("trueaegis_job_id")
+        or trueaegis_job.get("job_id")
+        or ""
+    ).strip()
+    manifest_value = str(trueaegis_job.get("manifest_path") or "").strip()
+    trueaegis_value = str(trueaegis_job.get("trueaegis_path") or "").strip()
+
+    if not job_id:
+        result["outcome"] = "missing_job_id"
+        result["message"] = "Queued TrueAegis follow-up did not include a job id."
+        return result
+
+    def persisted_job() -> dict[str, Any] | None:
+        row = connection.execute(
+            "SELECT * FROM trueaegis_jobs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+
+        return trueaegis_job_to_dict(row) if row is not None else None
+
+    def mark_start_failed(outcome: str, message: str) -> dict[str, Any]:
+        try:
+            update_trueaegis_job(
+                connection,
+                job_id,
+                status="FAILED",
+                completed_at=utc_now_text(),
+                message=message,
+            )
+            connection.commit()
+        except Exception:
+            pass
+
+        result["completed"] = True
+        result["outcome"] = outcome
+        result["job"] = persisted_job()
+        result["message"] = message
+        return result
+
+    if not manifest_value:
+        return mark_start_failed(
+            "missing_manifest",
+            "Queued TrueAegis follow-up did not include a manifest path.",
+        )
+
+    if not trueaegis_value:
+        return mark_start_failed(
+            "trueaegis_not_ready",
+            "Queued TrueAegis follow-up did not include a TrueAegis path.",
+        )
+
+    manifest_path = Path(manifest_value).expanduser()
+    trueaegis_path = Path(trueaegis_value).expanduser()
+    safe_logs_dir = Path(logs_dir).expanduser()
+
+    if safe_execution_mode == "synchronous":
+        result["started"] = True
+
+        try:
+            final_job = execute_trueaegis_job(
+                connection,
+                job_id=job_id,
+                manifest_path=manifest_path,
+                trueaegis_path=trueaegis_path,
+                logs_dir=safe_logs_dir,
+            )
+        except Exception as exc:
+            return mark_start_failed(
+                "execution_failed",
+                f"TrueAegis synchronous follow-up failed: {exc}",
+            )
+
+        final_status = str(final_job.get("status") or "").strip().upper()
+        completed = final_status in {"COMPLETED", "FAILED"}
+
+        result.update(
+            {
+                "completed": completed,
+                "outcome": (
+                    "completed"
+                    if final_status == "COMPLETED"
+                    else "failed"
+                    if final_status == "FAILED"
+                    else "finished_with_unknown_status"
+                ),
+                "job": final_job,
+                "message": (
+                    "TrueAegis synchronous follow-up completed."
+                    if final_status == "COMPLETED"
+                    else f"TrueAegis synchronous follow-up finished with status "
+                    f"{final_status or 'UNKNOWN'}."
+                ),
+            }
+        )
+
+        return result
+
+    resolved_db_path = sqlite_connection_database_path(
+        connection,
+        explicit_path=db_path,
+    )
+
+    if resolved_db_path is None:
+        return mark_start_failed(
+            "database_path_unavailable",
+            "TrueAegis follow-up worker could not resolve the DeltaAegis database path.",
+        )
+
+    try:
+        thread = dashboard_start_trueaegis_job_thread(
+            db_path=resolved_db_path,
+            job_id=job_id,
+            manifest_path=manifest_path,
+            trueaegis_path=trueaegis_path,
+            logs_dir=safe_logs_dir,
+        )
+    except Exception as exc:
+        return mark_start_failed(
+            "thread_start_failed",
+            f"TrueAegis follow-up worker failed to start: {exc}",
+        )
+
+    result.update(
+        {
+            "started": True,
+            "outcome": "started",
+            "thread_name": thread.name,
+            "job": persisted_job() or trueaegis_job,
+            "message": "TrueAegis asynchronous follow-up worker started.",
+        }
+    )
+
+    return result
 
 
 def latest_trueaegis_validation_results_path(
@@ -18811,7 +19574,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.37 Operator Evidence Review</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.38 TrueAegis Follow-Up Automation</span></div>
     </div>
   </header>
 
@@ -22468,7 +23231,7 @@ def dashboard_index_html() -> str:
 
     panel = """
       <h2>Latest Network Changes</h2>
-      <p class="muted">Read-only v0.37 evidence summary for what changed in the latest accepted NetSniper scan. This does not change event generation, alert state, or risk scoring.</p>
+      <p class="muted">Read-only evidence summary for what changed in the latest accepted NetSniper scan. This does not change event generation, alert state, or risk scoring.</p>
       <div id="latest-network-changes" class="detail-grid">
         <div class="detail-box"><div class="label">Latest scan</div><div id="latest-network-changes-scan">—</div></div>
         <div class="detail-box"><div class="label">Total changes</div><div id="latest-network-changes-total">0</div></div>
@@ -22627,7 +23390,7 @@ def dashboard_index_html() -> str:
 
     panel = """
       <h2>Scan Freshness</h2>
-      <p class="muted">Read-only v0.37 freshness warning based on the latest accepted NetSniper scan timestamp for the selected scope. States: <code>FRESH</code>, <code>AGING</code>, <code>STALE</code>, <code>NO_ACCEPTED_SCAN</code>.</p>
+      <p class="muted">Read-only freshness warning based on the latest accepted NetSniper scan timestamp for the selected scope. States: <code>FRESH</code>, <code>AGING</code>, <code>STALE</code>, <code>NO_ACCEPTED_SCAN</code>.</p>
       <div id="scan-freshness" class="detail-grid">
         <div class="detail-box"><div class="label">Freshness state</div><div id="scan-freshness-state">—</div></div>
         <div class="detail-box"><div class="label">Latest scan</div><div id="scan-freshness-scan">—</div></div>
@@ -24019,6 +24782,11 @@ def render_netsniper_page() -> str:
             <option value="true" selected>Enabled</option>
             <option value="false">Disabled</option>
           </select>
+          <label for="netsniper-schedule-trueaegis-after-ingest">TrueAegis after ingest</label>
+          <select id="netsniper-schedule-trueaegis-after-ingest" name="run_trueaegis_after_ingest">
+            <option value="false" selected>no</option>
+            <option value="true">yes - record follow-up intent</option>
+          </select>
         </label>
         <button type="submit" id="netsniper-schedule-create">Create schedule</button>
       </form>
@@ -24539,6 +25307,7 @@ def render_netsniper_page() -> str:
       const cadenceInput = document.getElementById("netsniper-schedule-cadence");
       const enabledInput = document.getElementById("netsniper-schedule-enabled");
       const autoIngestInput = document.getElementById("netsniper-schedule-auto-ingest");
+        const trueAegisAfterIngestInput = document.getElementById("netsniper-schedule-trueaegis-after-ingest");
 
       const name = nameInput ? nameInput.value.trim() : "";
       const target = targetInput ? targetInput.value.trim() : "";
@@ -24558,7 +25327,8 @@ def render_netsniper_page() -> str:
           scan_profile: profileInput ? profileInput.value : "balanced",
           cadence_minutes: cadenceInput ? Number.parseInt(cadenceInput.value, 10) : 60,
           enabled: enabledInput ? enabledInput.value === "true" : true,
-          auto_ingest: autoIngestInput ? autoIngestInput.value === "true" : true
+          auto_ingest: autoIngestInput ? autoIngestInput.value === "true" : true,
+          run_trueaegis_after_ingest: trueAegisAfterIngestInput ? trueAegisAfterIngestInput.value === "true" : false
         });
 
         if (!payload) { return; }
@@ -24807,7 +25577,8 @@ def dashboard_run_due_schedule_tick(
             runs_dir=runs_dir or dashboard_netsniper_runs_dir(),
             logs_dir=logs_dir or DEFAULT_SCAN_LOGS,
             events_path=events_path,
-            max_runs=max_runs,
+            max_runs=max_runs,            trueaegis_execution_mode="asynchronous",
+
         )
     finally:
         connection.close()
@@ -26625,7 +27396,7 @@ def command_validations(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.37.0 — Operator Evidence Review, schedule run history, telemetry reset audit visibility, latest network changes, scan freshness warnings, TrueAegis orchestration, validation correlation, v3 bundle ingest, RBAC, current-state SIEM dashboard, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.38.0 — TrueAegis Follow-Up Automation, guarded scheduled validation, strict accepted-ingest gating, provenance-linked jobs, validation correlation, reporting, RBAC, and the current-state SIEM dashboard")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
@@ -26688,6 +27459,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cadence-minutes", type=int, choices=sorted(ALLOWED_SCAN_SCHEDULE_CADENCE_MINUTES), default=60)
     p.add_argument("--disabled", action="store_true", help="Create the schedule disabled")
     p.add_argument("--no-auto-ingest", dest="auto_ingest", action="store_false", default=True, help="Do not auto-ingest completed scheduled scan bundles")
+    p.add_argument("--trueaegis-after-ingest", dest="run_trueaegis_after_ingest", action="store_true", default=False, help="Run TrueAegis automatically after a completed scheduled scan is accepted by DeltaAegis")
     p = sub.add_parser("schedule-list", help="List saved NetSniper scan schedules")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--enabled", choices=["all", "enabled", "disabled"], default="all")
