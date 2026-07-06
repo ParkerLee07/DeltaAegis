@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.38.0: TrueAegis Follow-Up Automation.
+"""DeltaAegis v0.39.0: Scan Job Lifecycle Observability.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -20567,7 +20567,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.38 TrueAegis Follow-Up Automation</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.39 Scan Job Lifecycle Observability</span></div>
     </div>
   </header>
 
@@ -26980,7 +26980,7 @@ def command_dashboard(args):
 
 
     class DeltaAegisDashboardHandler(BaseHTTPRequestHandler):
-        server_version = "DeltaAegisDashboard/0.5.0"
+        server_version = "DeltaAegisDashboard/0.39.0"
 
         def log_message(self, fmt, *handler_args):
             if not args.quiet:
@@ -28840,7 +28840,7 @@ def command_validations(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.38.0 — TrueAegis Follow-Up Automation, guarded scheduled validation, strict accepted-ingest gating, provenance-linked jobs, validation correlation, reporting, RBAC, and the current-state SIEM dashboard")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.39.0 — Scan Job Lifecycle Observability, live NetSniper execution evidence, authenticated cancellation, non-destructive schedule deletion, guarded TrueAegis follow-up automation, reporting, RBAC, and the current-state SIEM dashboard")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
