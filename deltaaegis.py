@@ -602,6 +602,38 @@ CREATE INDEX IF NOT EXISTS idx_scan_schedules_scope
 CREATE INDEX IF NOT EXISTS idx_scan_schedules_profile
     ON scan_schedules(scan_profile);
 
+CREATE TABLE IF NOT EXISTS scan_schedule_deletions (
+    schedule_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    target TEXT NOT NULL,
+    network_scope TEXT NOT NULL,
+    scan_profile TEXT NOT NULL DEFAULT 'balanced',
+    cadence_minutes INTEGER NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    auto_ingest INTEGER NOT NULL DEFAULT 1,
+    run_trueaegis_after_ingest INTEGER NOT NULL DEFAULT 0,
+    last_run_at TEXT,
+    next_run_at TEXT,
+    last_job_id TEXT,
+    last_status TEXT,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    skip_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    message TEXT NOT NULL DEFAULT '',
+    deleted_at TEXT NOT NULL,
+    linked_job_count INTEGER NOT NULL DEFAULT 0,
+    linked_active_job_count INTEGER NOT NULL DEFAULT 0,
+    linked_job_status_counts_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_schedule_deletions_deleted_at
+    ON scan_schedule_deletions(deleted_at);
+
+CREATE INDEX IF NOT EXISTS idx_scan_schedule_deletions_scope
+    ON scan_schedule_deletions(network_scope);
+
+
 """
 
 
@@ -5767,6 +5799,14 @@ def scan_schedule_history_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict
         "created_at": item.get("created_at"),
         "updated_at": item.get("updated_at"),
         "message": item.get("schedule_message") or "",
+        "deleted": bool(item.get("deleted")),
+        "deleted_at": item.get("deleted_at"),
+        "linked_job_count": int(item.get("linked_job_count") or 0),
+        "linked_active_job_count": int(item.get("linked_active_job_count") or 0),
+        "linked_job_status_counts": decode_json_field(
+            item.get("linked_job_status_counts_json"),
+            {},
+        ),
         "job": None,
     }
 
@@ -5814,6 +5854,66 @@ def query_scan_schedule_history(
 
     return connection.execute(
         f"""
+        WITH schedule_sources AS (
+            SELECT
+                schedule_id,
+                name,
+                target,
+                network_scope,
+                scan_profile,
+                cadence_minutes,
+                enabled,
+                auto_ingest,
+                run_trueaegis_after_ingest,
+                last_run_at,
+                next_run_at,
+                last_job_id,
+                last_status,
+                failure_count,
+                skip_count,
+                created_at,
+                updated_at,
+                message,
+                0 AS deleted,
+                NULL AS deleted_at,
+                0 AS linked_job_count,
+                0 AS linked_active_job_count,
+                '{{}}' AS linked_job_status_counts_json
+            FROM scan_schedules
+
+            UNION ALL
+
+            SELECT
+                d.schedule_id,
+                d.name,
+                d.target,
+                d.network_scope,
+                d.scan_profile,
+                d.cadence_minutes,
+                0 AS enabled,
+                d.auto_ingest,
+                d.run_trueaegis_after_ingest,
+                d.last_run_at,
+                NULL AS next_run_at,
+                d.last_job_id,
+                d.last_status,
+                d.failure_count,
+                d.skip_count,
+                d.created_at,
+                d.updated_at,
+                d.message,
+                1 AS deleted,
+                d.deleted_at,
+                d.linked_job_count,
+                d.linked_active_job_count,
+                d.linked_job_status_counts_json
+            FROM scan_schedule_deletions d
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM scan_schedules active
+                WHERE active.schedule_id = d.schedule_id
+            )
+        )
         SELECT
             s.schedule_id AS schedule_id,
             s.name AS name,
@@ -5833,6 +5933,11 @@ def query_scan_schedule_history(
             s.created_at AS created_at,
             s.updated_at AS updated_at,
             s.message AS schedule_message,
+            s.deleted AS deleted,
+            s.deleted_at AS deleted_at,
+            s.linked_job_count AS linked_job_count,
+            s.linked_active_job_count AS linked_active_job_count,
+            s.linked_job_status_counts_json AS linked_job_status_counts_json,
             j.job_id AS job_id,
             j.target AS job_target,
             j.network_scope AS job_network_scope,
@@ -5852,7 +5957,7 @@ def query_scan_schedule_history(
             j.stderr_log AS stderr_log,
             j.status_json AS status_json,
             j.message AS job_message
-        FROM scan_schedules s
+        FROM schedule_sources s
         LEFT JOIN scan_jobs j
             ON j.schedule_id = s.schedule_id
             OR j.job_id = s.last_job_id
@@ -5973,13 +6078,41 @@ def dashboard_netsniper_schedule_delete_payload(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     schedule_id = dashboard_schedule_id_from_payload(payload)
-    delete_scan_schedule(connection, schedule_id)
+    confirmation_required = scan_schedule_delete_confirmation(schedule_id)
+    confirmation = str(payload.get("confirmation") or "")
+
+    if confirmation != confirmation_required:
+        raise DashboardAdminUserActionError(
+            "schedule deletion confirmation must exactly match: "
+            f"{confirmation_required}",
+            status_code=400,
+        )
+
+    deletion = delete_scan_schedule(connection, schedule_id)
 
     return {
         "ok": True,
         "action": "schedule.delete",
         "schedule_id": schedule_id,
+        "confirmation_required": confirmation_required,
+        "deletion": deletion,
+        "linked_job_count": deletion["linked_job_count"],
+        "linked_active_job_count": deletion["linked_active_job_count"],
+        "linked_job_status_counts": deletion["linked_job_status_counts"],
+        "linked_jobs_preserved": True,
+        "active_jobs_cancelled": False,
+        "cancellation_required_for_active_jobs": bool(
+            deletion["linked_active_job_count"]
+        ),
+        "message": (
+            "schedule definition deleted; linked scan jobs and history "
+            "were preserved; active jobs were not cancelled"
+        ),
         "schedules": dashboard_scan_schedules_payload(connection),
+        "schedule_history": dashboard_netsniper_schedule_history_payload(
+            connection,
+            limit=50,
+        )["history"],
     }
 
 
@@ -6158,6 +6291,7 @@ def command_scan_jobs(args: argparse.Namespace) -> int:
 
 
 ALLOWED_SCAN_SCHEDULE_CADENCE_MINUTES = {60, 120, 360, 720, 1440}
+SCAN_SCHEDULE_DELETE_CONFIRMATION_PREFIX = "DELETE SCHEDULE "
 
 
 def validate_scan_schedule_cadence_minutes(value: int | str | None) -> int:
@@ -6664,7 +6798,7 @@ def update_scan_schedule_after_job(
     status = str(job.get("status") or "UNKNOWN").upper()
     failure_increment = 0 if status == "COMPLETED" else 1
 
-    connection.execute(
+    cursor = connection.execute(
         """
         UPDATE scan_schedules
         SET
@@ -6694,10 +6828,59 @@ def update_scan_schedule_after_job(
         (schedule_id,),
     ).fetchone()
 
-    if row is None:
-        raise DeltaAegisError(f"scan schedule disappeared unexpectedly: {schedule_id}")
+    if row is not None:
+        return scan_schedule_to_dict(row)
 
-    return scan_schedule_to_dict(row)
+    if cursor.rowcount == 0:
+        summary = scan_schedule_linked_job_summary(
+            connection,
+            schedule_id,
+        )
+        connection.execute(
+            """
+            UPDATE scan_schedule_deletions
+            SET
+                last_run_at = ?,
+                next_run_at = NULL,
+                last_job_id = ?,
+                last_status = ?,
+                failure_count = failure_count + ?,
+                updated_at = ?,
+                message = ?,
+                linked_job_count = ?,
+                linked_active_job_count = ?,
+                linked_job_status_counts_json = ?
+            WHERE schedule_id = ?
+            """,
+            (
+                now,
+                job.get("job_id"),
+                status,
+                failure_increment,
+                now,
+                job.get("message")
+                or f"deleted schedule job finished with status {status}",
+                summary["linked_job_count"],
+                summary["linked_active_job_count"],
+                json.dumps(
+                    summary["linked_job_status_counts"],
+                    sort_keys=True,
+                ),
+                schedule_id,
+            ),
+        )
+
+        deleted_row = connection.execute(
+            "SELECT * FROM scan_schedule_deletions WHERE schedule_id = ?",
+            (schedule_id,),
+        ).fetchone()
+
+        if deleted_row is not None:
+            return scan_schedule_deletion_to_dict(deleted_row)
+
+    raise DeltaAegisError(
+        f"scan schedule disappeared without deletion evidence: {schedule_id}"
+    )
 
 
 def run_due_scan_schedules(
@@ -6984,17 +7167,169 @@ def set_scan_schedule_enabled(
     return scan_schedule_to_dict(row)
 
 
+
+def scan_schedule_delete_confirmation(schedule_id: Any) -> str:
+    safe_schedule_id = str(schedule_id or "").strip()
+
+    if not safe_schedule_id:
+        raise DeltaAegisError("scan schedule id is required")
+
+    return f"{SCAN_SCHEDULE_DELETE_CONFIRMATION_PREFIX}{safe_schedule_id}"
+
+
+def scan_schedule_deletion_to_dict(
+    row: sqlite3.Row | dict[str, Any],
+) -> dict[str, Any]:
+    item = scan_schedule_to_dict(row)
+    item["deleted"] = True
+    item["deleted_at"] = item.get("deleted_at")
+    item["linked_job_count"] = int(item.get("linked_job_count") or 0)
+    item["linked_active_job_count"] = int(
+        item.get("linked_active_job_count") or 0
+    )
+    item["linked_job_status_counts"] = decode_json_field(
+        item.get("linked_job_status_counts_json"),
+        {},
+    )
+    item["linked_jobs_preserved"] = True
+    item["active_jobs_cancelled"] = False
+    item["cancellation_required_for_active_jobs"] = bool(
+        item["linked_active_job_count"]
+    )
+    return item
+
+
+def scan_schedule_linked_job_summary(
+    connection: sqlite3.Connection,
+    schedule_id: str,
+) -> dict[str, Any]:
+    rows = connection.execute(
+        "SELECT status, COUNT(*) AS count "
+        "FROM scan_jobs "
+        "WHERE schedule_id = ? "
+        "GROUP BY status "
+        "ORDER BY status",
+        (schedule_id,),
+    ).fetchall()
+
+    status_counts = {
+        str(row["status"] or "UNKNOWN").upper(): int(row["count"] or 0)
+        for row in rows
+    }
+    linked_job_count = sum(status_counts.values())
+    linked_active_job_count = sum(
+        status_counts.get(status, 0)
+        for status in ("QUEUED", "RUNNING")
+    )
+
+    return {
+        "linked_job_count": linked_job_count,
+        "linked_active_job_count": linked_active_job_count,
+        "linked_job_status_counts": status_counts,
+    }
+
+
 def delete_scan_schedule(
     connection: sqlite3.Connection,
     schedule_id: str,
-) -> None:
-    cursor = connection.execute(
-        "DELETE FROM scan_schedules WHERE schedule_id = ?",
-        (schedule_id,),
+) -> dict[str, Any]:
+    safe_schedule_id = str(schedule_id or "").strip()
+    row = connection.execute(
+        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
+        (safe_schedule_id,),
+    ).fetchone()
+
+    if row is None:
+        raise DeltaAegisError(
+            f"scan schedule not found: {safe_schedule_id}"
+        )
+
+    schedule = scan_schedule_to_dict(row)
+    summary = scan_schedule_linked_job_summary(
+        connection,
+        safe_schedule_id,
+    )
+    deleted_at = utc_now_text()
+
+    connection.execute(
+        """
+        INSERT OR REPLACE INTO scan_schedule_deletions (
+            schedule_id,
+            name,
+            target,
+            network_scope,
+            scan_profile,
+            cadence_minutes,
+            enabled,
+            auto_ingest,
+            run_trueaegis_after_ingest,
+            last_run_at,
+            next_run_at,
+            last_job_id,
+            last_status,
+            failure_count,
+            skip_count,
+            created_at,
+            updated_at,
+            message,
+            deleted_at,
+            linked_job_count,
+            linked_active_job_count,
+            linked_job_status_counts_json
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+        """,
+        (
+            safe_schedule_id,
+            schedule["name"],
+            schedule["target"],
+            schedule["network_scope"],
+            schedule["scan_profile"],
+            schedule["cadence_minutes"],
+            1 if schedule["enabled"] else 0,
+            1 if schedule["auto_ingest"] else 0,
+            1 if schedule.get("run_trueaegis_after_ingest") else 0,
+            schedule.get("last_run_at"),
+            schedule.get("next_run_at"),
+            schedule.get("last_job_id"),
+            schedule.get("last_status"),
+            int(schedule.get("failure_count") or 0),
+            int(schedule.get("skip_count") or 0),
+            schedule.get("created_at") or deleted_at,
+            schedule.get("updated_at") or deleted_at,
+            schedule.get("message") or "",
+            deleted_at,
+            summary["linked_job_count"],
+            summary["linked_active_job_count"],
+            json.dumps(
+                summary["linked_job_status_counts"],
+                sort_keys=True,
+            ),
+        ),
     )
 
-    if cursor.rowcount == 0:
-        raise DeltaAegisError(f"scan schedule not found: {schedule_id}")
+    cursor = connection.execute(
+        "DELETE FROM scan_schedules WHERE schedule_id = ?",
+        (safe_schedule_id,),
+    )
+
+    if cursor.rowcount != 1:
+        raise DeltaAegisError(
+            f"scan schedule deletion failed: {safe_schedule_id}"
+        )
+
+    deleted_row = connection.execute(
+        "SELECT * FROM scan_schedule_deletions WHERE schedule_id = ?",
+        (safe_schedule_id,),
+    ).fetchone()
+
+    if deleted_row is None:
+        raise DeltaAegisError(
+            f"scan schedule deletion evidence missing: {safe_schedule_id}"
+        )
+
+    return scan_schedule_deletion_to_dict(deleted_row)
 
 
 def print_scan_schedule_rows(rows: Iterable[sqlite3.Row]) -> None:
@@ -26099,7 +26434,9 @@ def render_netsniper_page() -> str:
 
       tbody.innerHTML = rows.map(function (item) {
         const job = item.job || {};
-        const scheduleStatus = item.last_status || (item.enabled ? "ENABLED" : "DISABLED");
+        const scheduleStatus = item.deleted
+          ? "DELETED"
+          : (item.last_status || (item.enabled ? "ENABLED" : "DISABLED"));
         const jobId = job.job_id || item.last_job_id || "-";
         const jobStatus = job.status || "-";
         const finishedAt = job.finished_at || "-";
@@ -26380,7 +26717,20 @@ def render_netsniper_page() -> str:
         return;
       }
 
-      if (action === "delete" && !window.confirm(`Delete scan schedule ${scheduleId}?`)) {
+      const deleteConfirmation = `DELETE SCHEDULE ${scheduleId}`;
+
+      if (
+        action === "delete"
+        && !window.confirm(
+          `Delete scan schedule ${scheduleId}?
+
+`
+          + "This removes only the saved schedule definition. "
+          + "Existing queued or running scan jobs are not cancelled, "
+          + "and completed job history is preserved. Use the dedicated "
+          + "Cancel active scan control to stop an active job."
+        )
+      ) {
         return;
       }
 
@@ -26388,15 +26738,29 @@ def render_netsniper_page() -> str:
       status.textContent = `Applying schedule action: ${action}`;
 
       try {
-        const payload = await postNetSniperSchedule(`/api/netsniper/schedule-${action}`, {
-          schedule_id: scheduleId
-        });
+        const requestPayload = {schedule_id: scheduleId};
+
+        if (action === "delete") {
+          requestPayload.confirmation = deleteConfirmation;
+        }
+
+        const payload = await postNetSniperSchedule(
+          `/api/netsniper/schedule-${action}`,
+          requestPayload
+        );
 
         if (!payload) { return; }
 
         output.textContent = JSON.stringify(payload, null, 2);
-        status.textContent = `Schedule action complete: ${action}`;
+        status.textContent = action === "delete"
+          ? `Schedule deleted; ${payload.linked_job_count || 0} linked job(s) preserved and no active jobs cancelled.`
+          : `Schedule action complete: ${action}`;
         renderNetSniperSchedules(payload);
+
+        if (action === "delete") {
+          await loadNetSniperScheduleHistory();
+          await loadNetSniperScanJobs();
+        }
       } catch (error) {
         status.textContent = `Schedule action failed: ${error.message || error}`;
         output.textContent = String(error.message || error);
