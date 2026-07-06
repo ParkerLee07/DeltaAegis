@@ -24934,7 +24934,14 @@ def render_netsniper_page() -> str:
     .scan-form label { color: #94a3b8; display: grid; gap: 6px; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
     .scan-form input { border: 1px solid rgba(148,163,184,.22); border-radius: 12px; background: rgba(2,6,23,.48); color: #e2e8f0; padding: 10px 12px; min-width: 240px; font-weight: 800; }
     .table-wrap { overflow-x: auto; border: 1px solid rgba(148,163,184,.18); border-radius: 18px; margin-top: 10px; }
-    table { width: 100%; border-collapse: collapse; min-width: 900px; }
+    .live-job-panel { margin-top: 18px; border: 1px solid rgba(34,211,238,.24); border-radius: 20px; background: rgba(2,6,23,.44); padding: 18px; }
+    .live-job-panel[hidden] { display: none; }
+    .live-job-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); gap: 10px; margin: 14px 0; }
+    .live-job-streams { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+    .live-job-stream h3 { margin: 0 0 8px; color: #e2e8f0; font-size: 14px; }
+    .live-job-stream pre { min-height: 160px; max-height: 360px; margin: 0; }
+    .live-job-meta { color: #94a3b8; font-size: 12px; margin: 0 0 8px; }
+    table { width: 100%; border-collapse: collapse; min-width: 980px; }
     th, td { border-bottom: 1px solid rgba(148,163,184,.14); padding: 10px 12px; text-align: left; vertical-align: top; }
     th { color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
     td { color: #e2e8f0; font-size: 13px; font-weight: 700; }
@@ -25116,19 +25123,51 @@ def render_netsniper_page() -> str:
               <th>Job</th>
               <th>Status</th>
               <th>Target</th>
-                            <th>Profile</th>
-<th>Created</th>
+              <th>Profile</th>
+              <th>Created</th>
               <th>Updated</th>
               <th>Exit</th>
               <th>Bundle</th>
               <th>Message</th>
+              <th>Details</th>
             </tr>
           </thead>
           <tbody id="netsniper-scan-jobs-body">
-            <tr><td colspan="9">Loading scan jobs…</td></tr>
+            <tr><td colspan="10">Loading scan jobs…</td></tr>
           </tbody>
         </table>
       </div>
+
+      <section id="netsniper-live-job-panel" class="live-job-panel" hidden>
+        <div class="actions">
+          <strong id="netsniper-live-job-heading">Live scan details</strong>
+          <a id="netsniper-live-job-raw" href="/api/netsniper/job-detail" target="_blank" rel="noopener">View raw job detail JSON</a>
+          <button type="button" id="netsniper-live-job-refresh">Refresh details</button>
+          <button type="button" id="netsniper-live-job-close">Close details</button>
+        </div>
+
+        <div class="status" id="netsniper-live-job-status">Select a scan job to view its lifecycle evidence and bounded log tails.</div>
+
+        <div class="live-job-grid">
+          <div class="card"><div class="card-label">Status</div><div class="card-value" id="netsniper-live-job-state">—</div></div>
+          <div class="card"><div class="card-label">Process PID</div><div class="card-value" id="netsniper-live-job-pid">—</div></div>
+          <div class="card"><div class="card-label">Heartbeat</div><div class="card-value" id="netsniper-live-job-heartbeat">—</div></div>
+          <div class="card"><div class="card-label">Updated</div><div class="card-value" id="netsniper-live-job-updated">—</div></div>
+        </div>
+
+        <div class="live-job-streams">
+          <div class="live-job-stream">
+            <h3>Stdout tail</h3>
+            <p class="live-job-meta" id="netsniper-live-job-stdout-meta">No stdout detail loaded.</p>
+            <pre id="netsniper-live-job-stdout">—</pre>
+          </div>
+          <div class="live-job-stream">
+            <h3>Stderr tail</h3>
+            <p class="live-job-meta" id="netsniper-live-job-stderr-meta">No stderr detail loaded.</p>
+            <pre id="netsniper-live-job-stderr">—</pre>
+          </div>
+        </div>
+      </section>
 
       <h2>Design boundary</h2>
       <p>This tab does not run arbitrary shell commands. Scan execution uses a guarded NetSniper wrapper with validated private-CIDR input, one active job at a time, and ADMIN-only launch controls.</p>
@@ -25254,6 +25293,114 @@ def render_netsniper_page() -> str:
       }
     }
 
+    let selectedNetSniperJobId = "";
+    let netSniperJobDetailTimer = null;
+
+    function stopNetSniperJobDetailPolling() {
+      if (netSniperJobDetailTimer !== null) {
+        window.clearTimeout(netSniperJobDetailTimer);
+        netSniperJobDetailTimer = null;
+      }
+    }
+
+    function netSniperJobIsActive(job) {
+      const status = String((job || {}).status || "").toUpperCase();
+      return status === "QUEUED" || status === "RUNNING";
+    }
+
+    function scanJobStreamMeta(stream) {
+      if (!stream || !stream.available) {
+        return `Unavailable: ${(stream || {}).reason || "log not available"}`;
+      }
+
+      const parts = [
+        `${stream.bytes_read || 0} byte(s) returned`,
+        `${stream.file_size || 0} byte file`
+      ];
+
+      if (stream.truncated) { parts.push("tail truncated"); }
+      if (stream.updated_at) { parts.push(`updated ${stream.updated_at}`); }
+      return parts.join(" · ");
+    }
+
+    function renderNetSniperJobDetail(payload) {
+      const panel = document.getElementById("netsniper-live-job-panel");
+      const job = payload.job || {};
+      const stdout = payload.stdout || {};
+      const stderr = payload.stderr || {};
+      const jobId = job.job_id || payload.job_id || selectedNetSniperJobId;
+
+      if (!panel) { return; }
+
+      panel.hidden = false;
+      setText("netsniper-live-job-heading", `Scan job ${jobId || "detail"}`);
+      setText("netsniper-live-job-status", `${job.status || "UNKNOWN"} · ${job.message || "No job message"}`);
+      setText("netsniper-live-job-state", job.status || "—");
+      setText("netsniper-live-job-pid", job.process_pid || "—");
+      setText("netsniper-live-job-heartbeat", job.heartbeat_at || "—");
+      setText("netsniper-live-job-updated", job.updated_at || "—");
+      setText("netsniper-live-job-stdout-meta", scanJobStreamMeta(stdout));
+      setText("netsniper-live-job-stderr-meta", scanJobStreamMeta(stderr));
+      setText("netsniper-live-job-stdout", stdout.available ? stdout.text : "—");
+      setText("netsniper-live-job-stderr", stderr.available ? stderr.text : "—");
+
+      const rawLink = document.getElementById("netsniper-live-job-raw");
+      if (rawLink && jobId) {
+        rawLink.href = `/api/netsniper/job-detail?job_id=${encodeURIComponent(jobId)}&tail_bytes=16384`;
+      }
+    }
+
+    async function loadNetSniperJobDetail(jobId) {
+      const requestedJobId = String(jobId || selectedNetSniperJobId || "").trim();
+      if (!requestedJobId) { return; }
+
+      selectedNetSniperJobId = requestedJobId;
+      stopNetSniperJobDetailPolling();
+
+      const panel = document.getElementById("netsniper-live-job-panel");
+      if (panel) { panel.hidden = false; }
+      setText("netsniper-live-job-status", `Loading scan job ${requestedJobId}…`);
+
+      try {
+        const response = await fetch(
+          `/api/netsniper/job-detail?job_id=${encodeURIComponent(requestedJobId)}&tail_bytes=16384`,
+          { credentials: "same-origin", cache: "no-store" }
+        );
+
+        if (response.status === 401 || response.status === 403) {
+          window.location.href = "/login";
+          return;
+        }
+
+        let payload = {};
+        try { payload = await response.json(); } catch (error) { payload = {}; }
+
+        if (selectedNetSniperJobId !== requestedJobId) { return; }
+        if (!response.ok || !payload.ok) {
+          throw new Error(payload.error || `Job detail request failed with HTTP ${response.status}`);
+        }
+
+        renderNetSniperJobDetail(payload);
+
+        if (netSniperJobIsActive(payload.job) && selectedNetSniperJobId === requestedJobId) {
+          netSniperJobDetailTimer = window.setTimeout(function () {
+            loadNetSniperJobDetail(requestedJobId);
+          }, 3000);
+        }
+      } catch (error) {
+        if (selectedNetSniperJobId === requestedJobId) {
+          setText("netsniper-live-job-status", `Job detail lookup failed: ${error.message || error}`);
+        }
+      }
+    }
+
+    function closeNetSniperJobDetail() {
+      stopNetSniperJobDetailPolling();
+      selectedNetSniperJobId = "";
+      const panel = document.getElementById("netsniper-live-job-panel");
+      if (panel) { panel.hidden = true; }
+    }
+
     function renderNetSniperScanJobs(payload) {
       const tbody = document.getElementById("netsniper-scan-jobs-body");
       if (!tbody) { return; }
@@ -25263,14 +25410,15 @@ def render_netsniper_page() -> str:
         : (payload.jobs || payload.scan_jobs || payload.items || []);
 
       if (!jobs.length) {
-        tbody.innerHTML = '<tr><td colspan="9">No scan jobs found.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10">No scan jobs found.</td></tr>';
         return;
       }
 
       tbody.innerHTML = jobs.slice(0, 10).map(function (job) {
+        const jobId = job.job_id || "";
         return `
           <tr>
-            <td><code>${escapeHtml(job.job_id || "-")}</code></td>
+            <td><code>${escapeHtml(jobId || "-")}</code></td>
             <td><span class="pill">${escapeHtml(job.status || "-")}</span></td>
             <td>${escapeHtml(job.target || job.network_scope || "-")}</td>
             <td>${escapeHtml(job.scan_profile || "balanced")}</td>
@@ -25279,6 +25427,7 @@ def render_netsniper_page() -> str:
             <td>${escapeHtml(job.exit_code === null || job.exit_code === undefined ? "-" : job.exit_code)}</td>
             <td>${escapeHtml(job.bundle_path || "-")}</td>
             <td>${escapeHtml(job.message || "-")}</td>
+            <td><button type="button" data-scan-job-detail="${escapeHtml(jobId)}">View details</button></td>
           </tr>
         `;
       }).join("");
@@ -25304,7 +25453,7 @@ def render_netsniper_page() -> str:
       } catch (error) {
         const tbody = document.getElementById("netsniper-scan-jobs-body");
         if (tbody) {
-          tbody.innerHTML = `<tr><td colspan="9">Scan job lookup failed: ${escapeHtml(error.message || error)}</td></tr>`;
+          tbody.innerHTML = `<tr><td colspan="10">Scan job lookup failed: ${escapeHtml(error.message || error)}</td></tr>`;
         }
       }
     }
@@ -25771,6 +25920,10 @@ def render_netsniper_page() -> str:
         output.textContent = JSON.stringify(payload, null, 2);
         status.textContent = `Scan job started: ${payload.job_id || "queued"}`;
         await loadNetSniperScanJobs();
+
+        if (payload.job_id) {
+          loadNetSniperJobDetail(payload.job_id);
+        }
       } catch (error) {
         status.textContent = `Scan start failed: ${error.message || error}`;
         output.textContent = String(error.message || error);
@@ -25798,6 +25951,16 @@ def render_netsniper_page() -> str:
     document.getElementById("netsniper-hourly-monitoring-enable").addEventListener("click", function () { setHourlyNetSniperMonitoring(true); });
     document.getElementById("netsniper-hourly-monitoring-disable").addEventListener("click", function () { setHourlyNetSniperMonitoring(false); });
     document.getElementById("netsniper-schedules-body").addEventListener("click", handleNetSniperScheduleAction);
+    document.getElementById("netsniper-scan-jobs-body").addEventListener("click", function (event) {
+      const button = event.target.closest("button[data-scan-job-detail]");
+      if (!button) { return; }
+      loadNetSniperJobDetail(button.dataset.scanJobDetail || "");
+    });
+    document.getElementById("netsniper-live-job-refresh").addEventListener("click", function () {
+      loadNetSniperJobDetail(selectedNetSniperJobId);
+    });
+    document.getElementById("netsniper-live-job-close").addEventListener("click", closeNetSniperJobDetail);
+    window.addEventListener("beforeunload", stopNetSniperJobDetailPolling);
     loadNetSniperStatus();
     loadNetSniperScanJobs();
     loadNetSniperSchedules();
