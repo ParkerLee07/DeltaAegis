@@ -25344,6 +25344,12 @@ def render_netsniper_page() -> str:
     .live-job-stream h3 { margin: 0 0 8px; color: #e2e8f0; font-size: 14px; }
     .live-job-stream pre { min-height: 160px; max-height: 360px; margin: 0; }
     .live-job-meta { color: #94a3b8; font-size: 12px; margin: 0 0 8px; }
+    .live-job-cancel-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 14px 0; }
+    .live-job-cancel-form[hidden] { display: none; }
+    .live-job-cancel-form label { color: #94a3b8; display: grid; gap: 6px; flex: 1 1 360px; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+    .live-job-cancel-form input { border: 1px solid rgba(248,113,113,.32); border-radius: 12px; background: rgba(2,6,23,.48); color: #e2e8f0; padding: 10px 12px; min-width: 280px; font-weight: 800; }
+    .danger { border-color: rgba(248,113,113,.42); background: rgba(185,28,28,.18); color: #fecaca; }
+    .danger:hover { background: rgba(185,28,28,.32); }
     table { width: 100%; border-collapse: collapse; min-width: 980px; }
     th, td { border-bottom: 1px solid rgba(148,163,184,.14); padding: 10px 12px; text-align: left; vertical-align: top; }
     th { color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
@@ -25551,12 +25557,26 @@ def render_netsniper_page() -> str:
 
         <div class="status" id="netsniper-live-job-status">Select a scan job to view its lifecycle evidence and bounded log tails.</div>
 
+        <form id="netsniper-live-job-cancel-form" class="live-job-cancel-form" hidden>
+          <label>Cancellation reason
+            <input id="netsniper-live-job-cancel-reason" name="reason" autocomplete="off" maxlength="500" placeholder="Reason for stopping this active scan" required>
+          </label>
+          <button type="submit" id="netsniper-live-job-cancel" class="danger">Cancel active scan</button>
+        </form>
+        <div class="status" id="netsniper-live-job-cancel-result" hidden>No cancellation request has been submitted.</div>
+
         <div class="live-job-grid">
           <div class="card"><div class="card-label">Status</div><div class="card-value" id="netsniper-live-job-state">—</div></div>
           <div class="card"><div class="card-label">Process PID</div><div class="card-value" id="netsniper-live-job-pid">—</div></div>
           <div class="card"><div class="card-label">Heartbeat</div><div class="card-value" id="netsniper-live-job-heartbeat">—</div></div>
           <div class="card"><div class="card-label">Updated</div><div class="card-value" id="netsniper-live-job-updated">—</div></div>
+          <div class="card"><div class="card-label">Cancel requested</div><div class="card-value" id="netsniper-live-job-cancel-requested-at">—</div></div>
+          <div class="card"><div class="card-label">Requested by</div><div class="card-value" id="netsniper-live-job-cancel-requested-by">—</div></div>
+          <div class="card"><div class="card-label">Cancelled</div><div class="card-value" id="netsniper-live-job-cancelled-at">—</div></div>
         </div>
+
+        <h3>Cancellation reason</h3>
+        <pre id="netsniper-live-job-cancel-reason-display">—</pre>
 
         <div class="live-job-streams">
           <div class="live-job-stream">
@@ -25573,7 +25593,7 @@ def render_netsniper_page() -> str:
       </section>
 
       <h2>Design boundary</h2>
-      <p>This tab does not run arbitrary shell commands. Scan execution uses a guarded NetSniper wrapper with validated private-CIDR input, one active job at a time, and ADMIN-only launch controls.</p>
+      <p>This tab does not run arbitrary shell commands. Scan execution and cancellation use guarded, ADMIN-only APIs with validated job identifiers; the browser never supplies or signals a process PID.</p>
     </section>
   </main>
 
@@ -25697,6 +25717,7 @@ def render_netsniper_page() -> str:
     }
 
     let selectedNetSniperJobId = "";
+    let selectedNetSniperJob = null;
     let netSniperJobDetailTimer = null;
 
     function stopNetSniperJobDetailPolling() {
@@ -25736,16 +25757,36 @@ def render_netsniper_page() -> str:
       if (!panel) { return; }
 
       panel.hidden = false;
+      selectedNetSniperJob = job;
       setText("netsniper-live-job-heading", `Scan job ${jobId || "detail"}`);
       setText("netsniper-live-job-status", `${job.status || "UNKNOWN"} · ${job.message || "No job message"}`);
       setText("netsniper-live-job-state", job.status || "—");
       setText("netsniper-live-job-pid", job.process_pid || "—");
       setText("netsniper-live-job-heartbeat", job.heartbeat_at || "—");
       setText("netsniper-live-job-updated", job.updated_at || "—");
+      setText("netsniper-live-job-cancel-requested-at", job.cancel_requested_at || "—");
+      setText("netsniper-live-job-cancel-requested-by", job.cancel_requested_by || "—");
+      setText("netsniper-live-job-cancelled-at", job.cancelled_at || "—");
+      setText("netsniper-live-job-cancel-reason-display", job.cancel_reason || "—");
       setText("netsniper-live-job-stdout-meta", scanJobStreamMeta(stdout));
       setText("netsniper-live-job-stderr-meta", scanJobStreamMeta(stderr));
       setText("netsniper-live-job-stdout", stdout.available ? stdout.text : "—");
       setText("netsniper-live-job-stderr", stderr.available ? stderr.text : "—");
+
+      const cancelForm = document.getElementById("netsniper-live-job-cancel-form");
+      const cancelButton = document.getElementById("netsniper-live-job-cancel");
+      const cancelResult = document.getElementById("netsniper-live-job-cancel-result");
+      const canCancel = netSniperJobIsActive(job) && !job.cancel_requested_at;
+
+      if (cancelForm) { cancelForm.hidden = !canCancel; }
+      if (cancelButton) { cancelButton.disabled = !canCancel; }
+
+      if (cancelResult && job.cancel_requested_at) {
+        cancelResult.hidden = false;
+        cancelResult.textContent = job.status === "CANCELLED"
+          ? `Scan cancelled at ${job.cancelled_at || job.finished_at || "unknown time"}.`
+          : `Cancellation requested by ${job.cancel_requested_by || "operator"} at ${job.cancel_requested_at}.`;
+      }
 
       const rawLink = document.getElementById("netsniper-live-job-raw");
       if (rawLink && jobId) {
@@ -25800,8 +25841,101 @@ def render_netsniper_page() -> str:
     function closeNetSniperJobDetail() {
       stopNetSniperJobDetailPolling();
       selectedNetSniperJobId = "";
+      selectedNetSniperJob = null;
       const panel = document.getElementById("netsniper-live-job-panel");
+      const cancelForm = document.getElementById("netsniper-live-job-cancel-form");
+      const cancelResult = document.getElementById("netsniper-live-job-cancel-result");
+      const cancelReason = document.getElementById("netsniper-live-job-cancel-reason");
+
       if (panel) { panel.hidden = true; }
+      if (cancelForm) { cancelForm.hidden = true; }
+      if (cancelResult) { cancelResult.hidden = true; }
+      if (cancelReason) { cancelReason.value = ""; }
+    }
+
+    async function cancelSelectedNetSniperJob(event) {
+      event.preventDefault();
+
+      const job = selectedNetSniperJob || {};
+      const jobId = String(job.job_id || selectedNetSniperJobId || "").trim();
+      const reasonInput = document.getElementById("netsniper-live-job-cancel-reason");
+      const button = document.getElementById("netsniper-live-job-cancel");
+      const result = document.getElementById("netsniper-live-job-cancel-result");
+      const reason = String((reasonInput || {}).value || "").trim();
+
+      if (!jobId || !netSniperJobIsActive(job)) {
+        if (result) {
+          result.hidden = false;
+          result.textContent = "Only an active queued or running scan can be cancelled.";
+        }
+        return;
+      }
+
+      if (!reason) {
+        if (result) {
+          result.hidden = false;
+          result.textContent = "A cancellation reason is required.";
+        }
+        if (reasonInput) { reasonInput.focus(); }
+        return;
+      }
+
+      if (!window.confirm(`Cancel active scan ${jobId}?\n\nReason: ${reason}`)) {
+        return;
+      }
+
+      if (button) { button.disabled = true; }
+      if (reasonInput) { reasonInput.disabled = true; }
+      if (result) {
+        result.hidden = false;
+        result.textContent = `Submitting cancellation request for ${jobId}…`;
+      }
+
+      try {
+        const response = await fetch("/api/netsniper/scan-cancel", {
+          method: "POST",
+          credentials: "same-origin",
+          cache: "no-store",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({job_id: jobId, reason: reason})
+        });
+
+        if (response.status === 401 || response.status === 403) {
+          window.location.href = "/login";
+          return;
+        }
+
+        let payload = {};
+        try { payload = await response.json(); } catch (error) { payload = {}; }
+
+        if (!response.ok || !payload.ok) {
+          throw new Error(
+            payload.error
+            || payload.message
+            || `Cancellation failed with HTTP ${response.status}`
+          );
+        }
+
+        if (result) {
+          result.hidden = false;
+          result.textContent = `${payload.cancellation_action || "requested"}: ${payload.message || "cancellation request accepted"}`;
+        }
+
+        await loadNetSniperScanJobs();
+        await loadNetSniperJobDetail(jobId);
+      } catch (error) {
+        if (result) {
+          result.hidden = false;
+          result.textContent = `Cancellation failed: ${error.message || error}`;
+        }
+      } finally {
+        if (reasonInput) { reasonInput.disabled = false; }
+        if (button && netSniperJobIsActive(selectedNetSniperJob || {})) {
+          button.disabled = Boolean(
+            (selectedNetSniperJob || {}).cancel_requested_at
+          );
+        }
+      }
     }
 
     function renderNetSniperScanJobs(payload) {
@@ -26363,6 +26497,7 @@ def render_netsniper_page() -> str:
       loadNetSniperJobDetail(selectedNetSniperJobId);
     });
     document.getElementById("netsniper-live-job-close").addEventListener("click", closeNetSniperJobDetail);
+    document.getElementById("netsniper-live-job-cancel-form").addEventListener("submit", cancelSelectedNetSniperJob);
     window.addEventListener("beforeunload", stopNetSniperJobDetailPolling);
     loadNetSniperStatus();
     loadNetSniperScanJobs();
