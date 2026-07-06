@@ -106,6 +106,34 @@ try:
         manifest = bundle / "manifest.json"
         manifest.write_text("{}", encoding="utf-8")
 
+        class PlannerSnapshotCursor:
+            def __init__(self, row):
+                self.row = row
+
+            def fetchone(self):
+                return self.row
+
+        class PlannerConnection:
+            def __init__(self, inner, manifest_path):
+                self.inner = inner
+                self.manifest_path = manifest_path
+
+            def execute(self, sql, params=()):
+                if "FROM snapshots" in sql:
+                    scan_id = str(params[0] if params else "scan-test")
+
+                    return PlannerSnapshotCursor(
+                        {
+                            "scan_id": scan_id,
+                            "quality_status": "ACCEPTED",
+                            "manifest_path": str(self.manifest_path),
+                        }
+                    )
+
+                return self.inner.execute(sql, params)
+
+        planner_conn = PlannerConnection(conn, manifest)
+
         trueaegis_dir = root / "TrueAegis"
         trueaegis_dir.mkdir()
         trueaegis_path = trueaegis_dir / "trueaegis.py"
@@ -125,11 +153,18 @@ try:
             "network_scope": "192.168.44.0/24",
             "auto_ingest": True,
             "bundle_path": str(bundle),
-            "status_json": {},
+            "status_json": {
+            "auto_ingest": {
+                "performed": True,
+                "accepted": True,
+                "quality_status": "ACCEPTED",
+                "scan_id": "scan-test",
+            }
+        },
         }
 
         plan = deltaaegis.trueaegis_followup_plan_for_schedule(
-            conn,
+            planner_conn,
             schedule,
             job,
             trueaegis_path=trueaegis_path,

@@ -91,7 +91,14 @@ with tempfile.TemporaryDirectory() as tmp:
         "status": "COMPLETED",
         "network_scope": "192.168.44.0/24",
         "auto_ingest": True,
-        "status_json": {},
+        "status_json": {
+            "auto_ingest": {
+                "performed": True,
+                "accepted": True,
+                "quality_status": "ACCEPTED",
+                "scan_id": "scan-test",
+            }
+        },
     }
 
     disabled = dict(schedule)
@@ -116,7 +123,14 @@ with tempfile.TemporaryDirectory() as tmp:
     )
 
     rejected_job = dict(job)
-    rejected_job["status_json"] = {"quality_status": "SKIPPED"}
+    rejected_job["status_json"] = {
+        "auto_ingest": {
+            "performed": True,
+            "accepted": False,
+            "quality_status": "SKIPPED",
+            "scan_id": "scan-test",
+        }
+    }
     require_outcome(
         deltaaegis.trueaegis_followup_plan_for_schedule(conn, schedule, rejected_job),
         "ingest_not_accepted",
@@ -132,12 +146,40 @@ with tempfile.TemporaryDirectory() as tmp:
     manifest = bundle / "manifest.json"
     manifest.write_text("{}", encoding="utf-8")
 
+    class PlannerSnapshotCursor:
+        def __init__(self, row):
+            self.row = row
+
+        def fetchone(self):
+            return self.row
+
+    class PlannerConnection:
+        def __init__(self, inner, manifest_path):
+            self.inner = inner
+            self.manifest_path = manifest_path
+
+        def execute(self, sql, params=()):
+            if "FROM snapshots" in sql:
+                scan_id = str(params[0] if params else "scan-test")
+
+                return PlannerSnapshotCursor(
+                    {
+                        "scan_id": scan_id,
+                        "quality_status": "ACCEPTED",
+                        "manifest_path": str(self.manifest_path),
+                    }
+                )
+
+            return self.inner.execute(sql, params)
+
+    planner_conn = PlannerConnection(conn, manifest)
+
     with_manifest = dict(job)
     with_manifest["bundle_path"] = str(bundle)
 
     require_outcome(
         deltaaegis.trueaegis_followup_plan_for_schedule(
-            conn,
+            planner_conn,
             schedule,
             with_manifest,
             trueaegis_path=root / "missing" / "trueaegis.py",
@@ -151,7 +193,7 @@ with tempfile.TemporaryDirectory() as tmp:
     trueaegis_path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
 
     eligible = deltaaegis.trueaegis_followup_plan_for_schedule(
-        conn,
+        planner_conn,
         schedule,
         with_manifest,
         trueaegis_path=trueaegis_path,
@@ -175,7 +217,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
     require_outcome(
         deltaaegis.trueaegis_followup_plan_for_schedule(
-            conn,
+            planner_conn,
             schedule,
             with_manifest,
             trueaegis_path=trueaegis_path,
@@ -234,6 +276,14 @@ try:
             "status": "COMPLETED",
             "network_scope": "192.168.44.0/24",
             "auto_ingest": True,
+            "status_json": {
+                "auto_ingest": {
+                    "performed": True,
+                    "accepted": True,
+                    "quality_status": "ACCEPTED",
+                    "scan_id": "scan-run-due",
+                }
+            },
             "message": "done",
         }
 

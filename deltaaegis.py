@@ -531,6 +531,9 @@ CREATE TABLE IF NOT EXISTS trueaegis_jobs (
     job_id TEXT PRIMARY KEY,
     status TEXT NOT NULL,
     scan_id TEXT,
+    scan_job_id TEXT NOT NULL DEFAULT '',
+    schedule_id TEXT NOT NULL DEFAULT '',
+    trigger_source TEXT NOT NULL DEFAULT 'manual_dashboard',
     network_scope TEXT NOT NULL DEFAULT '',
     manifest_path TEXT NOT NULL,
     trueaegis_path TEXT NOT NULL DEFAULT '',
@@ -1508,6 +1511,15 @@ def connect(db_path: Path) -> sqlite3.Connection:
     ensure_column(connection, "snapshots", "network_scope", "network_scope TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "asset_observations", "identity_class", "identity_class TEXT NOT NULL DEFAULT 'IP_ONLY'")
     ensure_column(connection, "scan_jobs", "scan_profile", "scan_profile TEXT NOT NULL DEFAULT 'balanced'")
+    ensure_column(connection, "trueaegis_jobs", "scan_job_id", "scan_job_id TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "trueaegis_jobs", "schedule_id", "schedule_id TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "trueaegis_jobs", "trigger_source", "trigger_source TEXT NOT NULL DEFAULT 'manual_dashboard'")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_trueaegis_jobs_scan_job_id ""ON trueaegis_jobs(scan_job_id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_trueaegis_jobs_schedule_id ""ON trueaegis_jobs(schedule_id)"
+    )
     ensure_column(connection, "scan_jobs", "schedule_id", "schedule_id TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "scan_schedules", "run_trueaegis_after_ingest", "run_trueaegis_after_ingest INTEGER NOT NULL DEFAULT 0")
     connection.execute(
@@ -4423,6 +4435,88 @@ def enrich_netsniper_status_from_manifest(
 
 
 
+def scan_job_auto_ingest_evidence(
+    connection: sqlite3.Connection,
+    manifest_path: Path | str,
+    ingest_result: Any,
+    status_json: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build durable evidence that a scan bundle was ingested and quality-gated."""
+
+    safe_manifest_path = Path(manifest_path).expanduser()
+    status_payload = status_json if isinstance(status_json, dict) else {}
+    scan_id = str(status_payload.get("scan_id") or "").strip()
+
+    if not scan_id and safe_manifest_path.is_file():
+        try:
+            manifest_payload = json.loads(
+                safe_manifest_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            manifest_payload = {}
+
+        if isinstance(manifest_payload, dict):
+            scan_id = str(manifest_payload.get("scan_id") or "").strip()
+
+    row = None
+
+    if scan_id:
+        row = connection.execute(
+            """
+            SELECT scan_id, quality_status, manifest_path, network_scope
+            FROM snapshots
+            WHERE scan_id = ?
+            LIMIT 1
+            """,
+            (scan_id,),
+        ).fetchone()
+
+    if row is None:
+        row = connection.execute(
+            """
+            SELECT scan_id, quality_status, manifest_path, network_scope
+            FROM snapshots
+            WHERE manifest_path = ?
+            ORDER BY imported_at DESC
+            LIMIT 1
+            """,
+            (str(safe_manifest_path),),
+        ).fetchone()
+
+    evidence = {
+        "schema_version": "deltaaegis-scan-auto-ingest-evidence-v1",
+        "requested": True,
+        "attempted": True,
+        "performed": True,
+        "accepted": False,
+        "quality_status": None,
+        "scan_id": scan_id,
+        "manifest_path": str(safe_manifest_path),
+        "network_scope": None,
+        "result": str(ingest_result),
+    }
+
+    if row is None:
+        return evidence
+
+    row_item = dict(row)
+    quality_status = str(row_item.get("quality_status") or "").strip().upper()
+
+    evidence.update(
+        {
+            "accepted": quality_status == "ACCEPTED",
+            "quality_status": quality_status or None,
+            "scan_id": str(row_item.get("scan_id") or scan_id),
+            "manifest_path": str(
+                row_item.get("manifest_path") or safe_manifest_path
+            ),
+            "network_scope": str(row_item.get("network_scope") or "") or None,
+        }
+    )
+
+    return evidence
+
+
 def execute_scan_job(
     connection: sqlite3.Connection,
     job_id: str,
@@ -4500,6 +4594,10 @@ def execute_scan_job(
     stderr_log.write_text(completed.stderr or "", encoding="utf-8")
 
     status_json = extract_netsniper_status_json(completed.stdout)
+
+    if not isinstance(status_json, dict):
+        status_json = {}
+
     bundle_path = extract_netsniper_bundle_path(status_json)
 
     if completed.returncode == 0 and not bundle_path:
@@ -4526,15 +4624,44 @@ def execute_scan_job(
     if bundle_path:
         message_parts.append(f"bundle={bundle_path}")
 
-    if final_status == "COMPLETED" and auto_ingest and bundle_path:
-        manifest = Path(bundle_path) / "manifest.json"
+    auto_ingest_evidence = {
+        "schema_version": "deltaaegis-scan-auto-ingest-evidence-v1",
+        "requested": bool(auto_ingest),
+        "attempted": False,
+        "performed": False,
+        "accepted": False,
+        "quality_status": None,
+        "scan_id": str(status_json.get("scan_id") or ""),
+        "manifest_path": None,
+        "network_scope": None,
+        "result": None,
+    }
 
-        if manifest.is_file():
-            ingest_result = ingest_manifest(connection, manifest, events_path)
-            message_parts.append(f"auto-ingest={ingest_result}")
-        else:
+    if final_status == "COMPLETED" and auto_ingest:
+        auto_ingest_evidence["attempted"] = True
+
+        if not bundle_path:
             final_status = "FAILED"
-            message_parts.append(f"auto-ingest failed: manifest not found at {manifest}")
+            message_parts.append("auto-ingest failed: completed scan did not provide a bundle path")
+        else:
+            manifest = Path(bundle_path) / "manifest.json"
+            auto_ingest_evidence["manifest_path"] = str(manifest)
+
+            if manifest.is_file():
+                ingest_result = ingest_manifest(connection, manifest, events_path)
+                auto_ingest_evidence = scan_job_auto_ingest_evidence(
+                    connection, manifest, ingest_result, status_json=status_json
+                )
+                message_parts.append(f"auto-ingest={ingest_result}")
+                message_parts.append(
+                    "auto-ingest-quality="
+                    f"{auto_ingest_evidence.get('quality_status') or 'UNKNOWN'}"
+                )
+            else:
+                final_status = "FAILED"
+                message_parts.append(f"auto-ingest failed: manifest not found at {manifest}")
+
+    status_json["auto_ingest"] = auto_ingest_evidence
 
     update_scan_job(
         connection,
@@ -4730,6 +4857,10 @@ def trueaegis_job_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         except (TypeError, ValueError):
             item["exit_code"] = None
 
+    item["scan_job_id"] = str(item.get("scan_job_id") or "")
+    item["schedule_id"] = str(item.get("schedule_id") or "")
+    item["trigger_source"] = str(item.get("trigger_source") or "manual_dashboard")
+
     return item
 
 
@@ -4739,9 +4870,19 @@ def create_trueaegis_job(
     network_scope: str | None,
     manifest_path: Path,
     trueaegis_path: Path,
+    scan_job_id: str | None = None,
+    schedule_id: str | None = None,
+    trigger_source: str = "manual_dashboard",
 ) -> dict[str, Any]:
     safe_manifest_path = Path(manifest_path).expanduser()
     safe_trueaegis_path = Path(trueaegis_path).expanduser()
+    safe_scan_job_id = str(scan_job_id or "").strip()
+    safe_schedule_id = str(schedule_id or "").strip()
+    safe_trigger_source = str(trigger_source or "manual_dashboard").strip().lower()
+
+    if safe_trigger_source not in {"manual_dashboard", "scheduled_followup"}:
+        raise DeltaAegisError(f"invalid TrueAegis trigger source: {trigger_source}")
+
     now = utc_now_text()
     job_id = f"trueaegis-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
 
@@ -4751,6 +4892,9 @@ def create_trueaegis_job(
             job_id,
             status,
             scan_id,
+            scan_job_id,
+            schedule_id,
+            trigger_source,
             network_scope,
             manifest_path,
             trueaegis_path,
@@ -4758,12 +4902,15 @@ def create_trueaegis_job(
             created_at,
             updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             job_id,
             "QUEUED",
             str(scan_id or ""),
+            safe_scan_job_id,
+            safe_schedule_id,
+            safe_trigger_source,
             str(network_scope or ""),
             str(safe_manifest_path),
             str(safe_trueaegis_path),
@@ -4877,6 +5024,9 @@ def query_trueaegis_jobs(
             job_id,
             status,
             scan_id,
+            scan_job_id,
+            schedule_id,
+            trigger_source,
             network_scope,
             manifest_path,
             trueaegis_path,
@@ -11980,23 +12130,42 @@ def trueaegis_followup_plan_for_schedule(
         except json.JSONDecodeError:
             status_json = {}
 
-    ingest_status_candidates = [
-        status_json.get("quality_status") if isinstance(status_json, dict) else None,
-        status_json.get("ingest_status") if isinstance(status_json, dict) else None,
-        status_json.get("auto_ingest_status") if isinstance(status_json, dict) else None,
-        status_json.get("quality") if isinstance(status_json, dict) else None,
-    ]
+    auto_ingest_evidence = (
+        status_json.get("auto_ingest")
+        if isinstance(status_json, dict)
+        else None
+    )
 
-    normalized_ingest_statuses = {
-        str(item or "").strip().upper()
-        for item in ingest_status_candidates
-        if str(item or "").strip()
-    }
+    if not isinstance(auto_ingest_evidence, dict):
+        return finish(
+            "ingest_not_recorded",
+            "TrueAegis follow-up requires structured auto-ingest evidence.",
+        )
 
-    if normalized_ingest_statuses and "ACCEPTED" not in normalized_ingest_statuses:
+    ingest_performed = auto_ingest_evidence.get("performed") is True
+    ingest_accepted = auto_ingest_evidence.get("accepted") is True
+    ingest_quality_status = str(
+        auto_ingest_evidence.get("quality_status") or ""
+    ).strip().upper()
+    ingested_scan_id = str(
+        auto_ingest_evidence.get("scan_id")
+        or status_json.get("scan_id")
+        or ""
+    ).strip()
+
+    plan["ingest_evidence"] = auto_ingest_evidence
+    plan["scan_id"] = ingested_scan_id
+
+    if not ingest_performed or not ingested_scan_id:
+        return finish(
+            "ingest_not_recorded",
+            "TrueAegis follow-up requires proof that auto-ingest stored a snapshot.",
+        )
+
+    if not ingest_accepted or ingest_quality_status != "ACCEPTED":
         return finish(
             "ingest_not_accepted",
-            "TrueAegis follow-up requires an accepted DeltaAegis ingest result.",
+            "TrueAegis follow-up requires an ACCEPTED DeltaAegis snapshot.",
         )
 
     manifest_candidates: list[Path] = []
@@ -12034,6 +12203,49 @@ def trueaegis_followup_plan_for_schedule(
 
     plan["manifest_path"] = str(manifest_path)
     plan["manifest_exists"] = True
+
+    snapshot_row = connection.execute(
+        """
+        SELECT scan_id, quality_status, manifest_path
+        FROM snapshots
+        WHERE scan_id = ?
+        LIMIT 1
+        """,
+        (plan["scan_id"],),
+    ).fetchone()
+
+    if snapshot_row is None:
+        return finish(
+            "ingest_not_recorded",
+            "The auto-ingested snapshot could not be verified in DeltaAegis.",
+        )
+
+    snapshot_item = dict(snapshot_row)
+    persisted_quality_status = str(
+        snapshot_item.get("quality_status") or ""
+    ).strip().upper()
+    persisted_manifest_path = Path(
+        str(snapshot_item.get("manifest_path") or "")
+    ).expanduser()
+
+    if persisted_quality_status != "ACCEPTED":
+        return finish(
+            "ingest_not_accepted",
+            "The persisted DeltaAegis snapshot is not ACCEPTED.",
+        )
+
+    try:
+        manifest_matches_snapshot = (
+            persisted_manifest_path.resolve() == manifest_path.resolve()
+        )
+    except OSError:
+        manifest_matches_snapshot = str(persisted_manifest_path) == str(manifest_path)
+
+    if not manifest_matches_snapshot:
+        return finish(
+            "ingest_manifest_mismatch",
+            "The accepted snapshot does not reference this NetSniper manifest.",
+        )
 
     if active_trueaegis_job_exists(connection):
         return finish(
@@ -12128,6 +12340,9 @@ def trueaegis_queue_followup_for_schedule(
         network_scope=plan.get("network_scope") or job.get("network_scope") or schedule.get("network_scope"),
         manifest_path=manifest_path,
         trueaegis_path=trueaegis_path,
+        scan_job_id=job.get("job_id"),
+        schedule_id=schedule.get("schedule_id"),
+        trigger_source="scheduled_followup",
     )
     connection.commit()
 
