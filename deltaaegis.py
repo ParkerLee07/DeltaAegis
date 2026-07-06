@@ -5991,6 +5991,10 @@ def run_due_scan_schedules(
                 final_job,
                 trueaegis_followup_plan,
             )
+            trueaegis_followup_execution = trueaegis_start_queued_followup_for_schedule(
+                connection,
+                trueaegis_followup_queue,
+            )
             results.append(
                 {
                     "schedule_id": schedule["schedule_id"],
@@ -6000,6 +6004,7 @@ def run_due_scan_schedules(
                     "schedule": updated,
                     "trueaegis_followup": trueaegis_followup_plan,
                     "trueaegis_followup_queue": trueaegis_followup_queue,
+                    "trueaegis_followup_execution": trueaegis_followup_execution,
                 }
             )
             continue
@@ -6023,6 +6028,10 @@ def run_due_scan_schedules(
             final_job,
             trueaegis_followup_plan,
         )
+        trueaegis_followup_execution = trueaegis_start_queued_followup_for_schedule(
+            connection,
+            trueaegis_followup_queue,
+        )
 
         results.append(
             {
@@ -6033,6 +6042,7 @@ def run_due_scan_schedules(
                 "schedule": updated,
                 "trueaegis_followup": trueaegis_followup_plan,
                 "trueaegis_followup_queue": trueaegis_followup_queue,
+                "trueaegis_followup_execution": trueaegis_followup_execution,
             }
         )
 
@@ -12131,6 +12141,150 @@ def trueaegis_queue_followup_for_schedule(
         }
     )
 
+    return result
+
+
+def sqlite_connection_database_path(
+    connection: sqlite3.Connection,
+    explicit_path: Path | str | None = None,
+) -> Path | None:
+    """Resolve the file backing an SQLite connection.
+
+    File-backed CLI and dashboard connections expose their path through
+    PRAGMA database_list. In-memory databases intentionally return None.
+    """
+
+    if explicit_path is not None:
+        return Path(explicit_path).expanduser()
+
+    try:
+        rows = connection.execute("PRAGMA database_list").fetchall()
+    except sqlite3.Error:
+        return None
+
+    for row in rows:
+        if isinstance(row, sqlite3.Row):
+            name = str(row["name"] or "")
+            filename = str(row["file"] or "").strip()
+        else:
+            try:
+                name = str(row[1] or "")
+                filename = str(row[2] or "").strip()
+            except (IndexError, TypeError):
+                continue
+
+        if name == "main" and filename:
+            return Path(filename).expanduser()
+
+    return None
+
+
+def trueaegis_start_queued_followup_for_schedule(
+    connection: sqlite3.Connection,
+    queue_result: dict[str, Any],
+    db_path: Path | str | None = None,
+    logs_dir: Path | str = DEFAULT_TRUEAEGIS_LOGS,
+) -> dict[str, Any]:
+    """Start the guarded worker for a TrueAegis job queued by checkpoint 3.
+
+    This helper never creates a second TrueAegis job. If thread startup fails,
+    the queued job is marked FAILED so it cannot remain stuck as an active job.
+    """
+
+    result = {
+        "schema_version": "deltaaegis-trueaegis-followup-execution-v1",
+        "started": False,
+        "outcome": str(queue_result.get("outcome") or "not_queued"),
+        "trueaegis_job_id": queue_result.get("trueaegis_job_id"),
+        "thread_name": None,
+        "message": "TrueAegis follow-up execution was not started.",
+    }
+
+    if not bool(queue_result.get("queued")):
+        result["message"] = str(
+            queue_result.get("message")
+            or "TrueAegis follow-up was not queued."
+        )
+        return result
+
+    trueaegis_job = queue_result.get("job") or {}
+    job_id = str(
+        queue_result.get("trueaegis_job_id")
+        or trueaegis_job.get("job_id")
+        or ""
+    ).strip()
+    manifest_value = str(trueaegis_job.get("manifest_path") or "").strip()
+    trueaegis_value = str(trueaegis_job.get("trueaegis_path") or "").strip()
+    resolved_db_path = sqlite_connection_database_path(
+        connection,
+        explicit_path=db_path,
+    )
+
+    if not job_id:
+        result["outcome"] = "missing_job_id"
+        result["message"] = "Queued TrueAegis follow-up did not include a job id."
+        return result
+
+    def mark_start_failed(outcome: str, message: str) -> dict[str, Any]:
+        try:
+            update_trueaegis_job(
+                connection,
+                job_id,
+                status="FAILED",
+                completed_at=utc_now_text(),
+                message=message,
+            )
+            connection.commit()
+        except Exception:
+            pass
+
+        result["outcome"] = outcome
+        result["message"] = message
+        return result
+
+    if resolved_db_path is None:
+        return mark_start_failed(
+            "database_path_unavailable",
+            "TrueAegis follow-up worker could not resolve the DeltaAegis database path.",
+        )
+
+    if not manifest_value:
+        return mark_start_failed(
+            "missing_manifest",
+            "Queued TrueAegis follow-up did not include a manifest path.",
+        )
+
+    if not trueaegis_value:
+        return mark_start_failed(
+            "trueaegis_not_ready",
+            "Queued TrueAegis follow-up did not include a TrueAegis path.",
+        )
+
+    manifest_path = Path(manifest_value).expanduser()
+    trueaegis_path = Path(trueaegis_value).expanduser()
+
+    try:
+        thread = dashboard_start_trueaegis_job_thread(
+            db_path=resolved_db_path,
+            job_id=job_id,
+            manifest_path=manifest_path,
+            trueaegis_path=trueaegis_path,
+            logs_dir=Path(logs_dir).expanduser(),
+        )
+    except Exception as exc:
+        return mark_start_failed(
+            "thread_start_failed",
+            f"TrueAegis follow-up worker failed to start: {exc}",
+        )
+
+    result.update(
+        {
+            "started": True,
+            "outcome": "started",
+            "thread_name": thread.name,
+            "message": "TrueAegis follow-up worker started.",
+        }
+    )
     return result
 
 

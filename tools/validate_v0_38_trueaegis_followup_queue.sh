@@ -55,9 +55,21 @@ for forbidden in [
         raise SystemExit(f"checkpoint 3 must not execute TrueAegis from schedules yet: {forbidden}")
 
 queue_start = text.find("def trueaegis_queue_followup_for_schedule(")
-queue_end = text.find("\ndef latest_trueaegis_validation_results_path(", queue_start)
-if queue_start < 0 or queue_end < 0:
+
+queue_end_candidates = [
+    text.find("\ndef sqlite_connection_database_path(", queue_start),
+    text.find("\ndef latest_trueaegis_validation_results_path(", queue_start),
+]
+queue_end_candidates = [
+    candidate
+    for candidate in queue_end_candidates
+    if candidate >= 0
+]
+
+if queue_start < 0 or not queue_end_candidates:
     raise SystemExit("could not isolate queue helper")
+
+queue_end = min(queue_end_candidates)
 queue_block = text[queue_start:queue_end]
 
 for forbidden in [
