@@ -12,7 +12,7 @@ DeltaAegis v0.38.0 adds guarded TrueAegis validation as an optional follow-up to
 
 Scheduled follow-ups preserve provenance through the originating NetSniper scan job and schedule. Dashboard workers execute asynchronously through the existing guarded worker, while CLI `schedule-run-due` execution is synchronous so the process remains alive through validation, result import, and correlation refresh. The implementation uses fixed argument-vector execution and does not expose arbitrary shell command execution.
 
-The v0.38 release was validated with an isolated real NetSniper scan and accepted ingest, followed by a controlled TrueAegis replay that completed successfully with 81 imported validation observations and 81 refreshed correlations.
+The v0.38 release was validated with an isolated real NetSniper scan and accepted ingest, followed by a controlled TrueAegis replay with 81 imported observations and 81 refreshed correlations. A later live dashboard-schedule acceptance test completed with 183 imported observations and 711 refreshed correlations.
 
 ## What DeltaAegis Does
 
@@ -139,7 +139,7 @@ Do not use unauthenticated mode on exposed networks.
 - Intelligence — NetSniper classification quality and device-intelligence context.
 - Events — delta events from accepted scans.
 - Alerts — analyst-facing alert review.
-- NetSniper — telemetry source status and latest completed run import.
+- NetSniper — telemetry status, guarded scan launch, schedules, job history, and completed-run import.
 - Admin/User Management — local users, roles, and access controls.
 
 ## NetSniper Integration
@@ -180,7 +180,7 @@ Dashboard NetSniper scan controls use guarded job records and fixed argument-vec
 
 The `/api/netsniper/import-latest` endpoint imports completed telemetry and is protected by the `workflow.write` permission. ANALYST and ADMIN users can perform workflow write actions.
 
-Automatic TrueAegis execution from scheduled NetSniper scans is not enabled by default. NetSniper schedules run NetSniper and optional auto-ingest only; TrueAegis validation remains a separate guarded workflow.
+Automatic TrueAegis execution from scheduled NetSniper scans is not enabled by default. Schedules with `run_trueaegis_after_ingest` enabled can launch one guarded TrueAegis validation job only after NetSniper completes, structured auto-ingest evidence is recorded, and the matching persisted snapshot is verified as `ACCEPTED`. Schedules without the flag continue to run NetSniper and optional auto-ingest without launching TrueAegis.
 
 ## Core CLI Commands
 
@@ -305,21 +305,15 @@ Preview uninstall actions without deleting anything:
 
 ## Validation
 
-Run the v0.28 release gate:
+Run the complete v0.38 release gate:
 
 ```bash
-./tools/validate_v0_28_release.sh /path/to/NetSniper/runs/latest-or-known-run
+./tools/validate_v0_38_release.sh
 ```
 
-Useful v0.28 validators:
-
-```bash
-./tools/validate_v0_28_netsniper_status_tab.sh
-./tools/validate_v0_28_netsniper_navigation.sh
-./tools/validate_v0_28_netsniper_import_latest.sh /path/to/NetSniper/runs/latest-or-known-run
-./tools/validate_v0_28_dashboard_db_defaults.sh
-./tools/validate_v0_28_release_metadata.sh
-```
+The release gate chains the v0.38 schedule-intent, planning, queueing,
+execution, ingest-provenance, execution-mode, and due-schedule regression
+validators.
 
 Basic syntax check:
 
@@ -340,7 +334,8 @@ DeltaAegis does not currently:
 - Perform machine-learning anomaly detection.
 - Automatically discover business owners for assets.
 - Execute raw shell commands from the dashboard.
-- Launch NetSniper scans from the dashboard through a guarded job runner.
+- Stream NetSniper stdout and stderr live while a scan is still running; the current log files are populated after completion.
+- Cancel an already-running scan automatically when its originating schedule is deleted.
 - Replace manual analyst review.
 
 Its conclusions are limited to NetSniper telemetry, stored historical snapshots, analyst annotations, investigation state, and local DeltaAegis database records.
@@ -351,11 +346,18 @@ Use DeltaAegis only on networks and systems for which you have explicit authoriz
 
 DeltaAegis is intended for defensive monitoring, lab validation, internship research, and authorized security assessment workflows.
 
-## Related Project
+## Related Projects
 
-DeltaAegis is designed to work with NetSniper.
+DeltaAegis works as the orchestration and historical-analysis layer of a
+three-project defensive workflow:
 
-NetSniper performs network discovery and scan-bundle generation. DeltaAegis ingests those bundles and tracks how the monitored network changes over time.
+- **NetSniper** discovers hosts, collects service evidence, classifies devices,
+  and produces versioned telemetry bundles.
+- **TrueAegis** performs safe validation, enrichment, and attack-surface
+  correlation against accepted NetSniper evidence.
+- **DeltaAegis** schedules and ingests NetSniper runs, tracks network changes,
+  launches guarded TrueAegis follow-ups, and supports investigation and
+  reporting workflows.
 
 ## License
 
