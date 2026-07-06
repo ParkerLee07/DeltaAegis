@@ -12899,6 +12899,127 @@ def dashboard_netsniper_latest_completed_manifest(runs_dir: Path) -> Path | None
     return None
 
 
+
+DASHBOARD_ACTION_RECEIPT_SCHEMA_VERSION = "deltaaegis-dashboard-action-receipt-v1"
+DASHBOARD_ACTION_RECEIPT_SEVERITIES = frozenset(
+    {
+        "success",
+        "info",
+        "warning",
+        "error",
+    }
+)
+DASHBOARD_ACTION_RECEIPT_ACTION_PATTERN = re.compile(
+    r"[a-z0-9][a-z0-9._:-]{0,127}"
+)
+DASHBOARD_ACTION_RECEIPT_MESSAGE_MAX_LENGTH = 2000
+
+
+def dashboard_action_receipt_json_object(
+    value: Any,
+    field_name: str,
+) -> dict[str, Any]:
+    if value is None:
+        return {}
+
+    if not isinstance(value, dict):
+        raise DeltaAegisError(
+            f"{field_name} must be a JSON object"
+        )
+
+    try:
+        normalized = json.loads(
+            json.dumps(
+                value,
+                sort_keys=True,
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        raise DeltaAegisError(
+            f"{field_name} must contain only JSON-serializable values"
+        ) from exc
+
+    if not isinstance(normalized, dict):
+        raise DeltaAegisError(
+            f"{field_name} must be a JSON object"
+        )
+
+    return normalized
+
+
+def dashboard_action_receipt(
+    action: str,
+    message: str,
+    *,
+    ok: bool = True,
+    severity: str | None = None,
+    summary: dict[str, Any] | None = None,
+    identifiers: dict[str, Any] | None = None,
+    diagnostic_detail: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    clean_action = str(action or "").strip().lower()
+    clean_message = str(message or "").strip()
+
+    if DASHBOARD_ACTION_RECEIPT_ACTION_PATTERN.fullmatch(clean_action) is None:
+        raise DeltaAegisError(
+            "action receipt action must be a stable lowercase identifier"
+        )
+
+    if not clean_message:
+        raise DeltaAegisError(
+            "action receipt message is required"
+        )
+
+    if len(clean_message) > DASHBOARD_ACTION_RECEIPT_MESSAGE_MAX_LENGTH:
+        raise DeltaAegisError(
+            "action receipt message exceeds "
+            f"{DASHBOARD_ACTION_RECEIPT_MESSAGE_MAX_LENGTH} characters"
+        )
+
+    clean_severity = str(
+        severity if severity is not None else ("success" if ok else "error")
+    ).strip().lower()
+
+    if clean_severity not in DASHBOARD_ACTION_RECEIPT_SEVERITIES:
+        raise DeltaAegisError(
+            "action receipt severity must be one of: "
+            + ", ".join(sorted(DASHBOARD_ACTION_RECEIPT_SEVERITIES))
+        )
+
+    safe_summary = dashboard_action_receipt_json_object(
+        summary,
+        "action receipt summary",
+    )
+    safe_identifiers = dashboard_action_receipt_json_object(
+        identifiers,
+        "action receipt identifiers",
+    )
+    safe_diagnostic_detail = dashboard_action_receipt_json_object(
+        diagnostic_detail,
+        "action receipt diagnostic_detail",
+    )
+
+    if "available" not in safe_diagnostic_detail:
+        safe_diagnostic_detail["available"] = bool(
+            safe_diagnostic_detail
+        )
+    else:
+        safe_diagnostic_detail["available"] = bool(
+            safe_diagnostic_detail["available"]
+        )
+
+    return {
+        "schema_version": DASHBOARD_ACTION_RECEIPT_SCHEMA_VERSION,
+        "ok": bool(ok),
+        "action": clean_action,
+        "severity": clean_severity,
+        "message": clean_message,
+        "summary": safe_summary,
+        "identifiers": safe_identifiers,
+        "diagnostic_detail": safe_diagnostic_detail,
+    }
+
+
 def dashboard_netsniper_import_latest_payload(
     connection: sqlite3.Connection,
     export_path: Path,
