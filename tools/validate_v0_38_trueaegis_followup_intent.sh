@@ -21,7 +21,7 @@ required = [
     'payload.get("run_trueaegis_after_ingest")',
     "--trueaegis-after-ingest",
     "trueaegis_after_ingest=",
-    "v0.38.0-dev",
+    "v0.38.0: TrueAegis Follow-Up Automation",
 ]
 
 for needle in required:

@@ -1,3 +1,19 @@
+## DeltaAegis v0.38.0 — TrueAegis Follow-Up Automation
+
+- Added opt-in `run_trueaegis_after_ingest` intent to scheduled NetSniper scans, disabled by default.
+- Added a read-only follow-up planner with explicit eligibility and blocker outcomes.
+- Added guarded TrueAegis queueing that never creates duplicate active validation jobs.
+- Added asynchronous dashboard execution through the existing guarded TrueAegis worker.
+- Added synchronous CLI execution so `schedule-run-due` waits for validation, result import, and correlation refresh.
+- Added structured auto-ingest evidence to NetSniper scan-job status payloads.
+- Added a strict gate requiring a persisted `ACCEPTED` snapshot linked to the same NetSniper manifest.
+- Added TrueAegis job provenance fields for the originating scan job, schedule, and trigger source.
+- Added startup and synchronous-execution failure recovery so jobs do not remain stuck as active.
+- Added TrueAegis execution outcomes and final status to scheduled-run CLI output and exit-status handling.
+- Fixed due-schedule loading so `run_trueaegis_after_ingest` survives the explicit schedule query.
+- Added checkpoint validators and `validate_v0_38_release.sh` as the complete v0.38 release gate.
+- Validated the real follow-up path with 81 imported TrueAegis observations and 81 refreshed correlations.
+
 ## DeltaAegis v0.37.0 — Operator Evidence Review
 
 - Added `validate_v0_37_release.sh` as the full v0.37 release gate for metadata, dashboard copy, release safety checks, and the v0.37 checkpoint validator suite.

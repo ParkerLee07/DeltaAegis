@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.38.0-dev: TrueAegis follow-up automation planning on top of v0.37 operator evidence review.
+"""DeltaAegis v0.38.0: TrueAegis Follow-Up Automation.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -12308,7 +12308,7 @@ def trueaegis_followup_plan_for_schedule(
     plan["command_preview"] = command_preview
     return finish(
         "eligible",
-        "TrueAegis follow-up is eligible to be queued by a later v0.38 checkpoint.",
+        "TrueAegis follow-up is eligible for automated queueing and execution.",
     )
 
 
@@ -12392,7 +12392,7 @@ def trueaegis_queue_followup_for_schedule(
             "outcome": "queued",
             "trueaegis_job_id": trueaegis_job.get("job_id"),
             "job": trueaegis_job,
-            "message": "TrueAegis follow-up job queued; execution is deferred to a later v0.38 checkpoint.",
+            "message": "TrueAegis follow-up job queued for guarded automated execution.",
         }
     )
 
@@ -23231,7 +23231,7 @@ def dashboard_index_html() -> str:
 
     panel = """
       <h2>Latest Network Changes</h2>
-      <p class="muted">Read-only v0.37 evidence summary for what changed in the latest accepted NetSniper scan. This does not change event generation, alert state, or risk scoring.</p>
+      <p class="muted">Read-only evidence summary for what changed in the latest accepted NetSniper scan. This does not change event generation, alert state, or risk scoring.</p>
       <div id="latest-network-changes" class="detail-grid">
         <div class="detail-box"><div class="label">Latest scan</div><div id="latest-network-changes-scan">—</div></div>
         <div class="detail-box"><div class="label">Total changes</div><div id="latest-network-changes-total">0</div></div>
@@ -23390,7 +23390,7 @@ def dashboard_index_html() -> str:
 
     panel = """
       <h2>Scan Freshness</h2>
-      <p class="muted">Read-only v0.37 freshness warning based on the latest accepted NetSniper scan timestamp for the selected scope. States: <code>FRESH</code>, <code>AGING</code>, <code>STALE</code>, <code>NO_ACCEPTED_SCAN</code>.</p>
+      <p class="muted">Read-only freshness warning based on the latest accepted NetSniper scan timestamp for the selected scope. States: <code>FRESH</code>, <code>AGING</code>, <code>STALE</code>, <code>NO_ACCEPTED_SCAN</code>.</p>
       <div id="scan-freshness" class="detail-grid">
         <div class="detail-box"><div class="label">Freshness state</div><div id="scan-freshness-state">—</div></div>
         <div class="detail-box"><div class="label">Latest scan</div><div id="scan-freshness-scan">—</div></div>
@@ -27396,7 +27396,7 @@ def command_validations(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.37.0 — Operator Evidence Review, schedule run history, telemetry reset audit visibility, latest network changes, scan freshness warnings, TrueAegis orchestration, validation correlation, v3 bundle ingest, RBAC, current-state SIEM dashboard, calibrated risk policy, reporting, and dashboard console")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.38.0 — TrueAegis Follow-Up Automation, guarded scheduled validation, strict accepted-ingest gating, provenance-linked jobs, validation correlation, reporting, RBAC, and the current-state SIEM dashboard")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
@@ -27459,7 +27459,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cadence-minutes", type=int, choices=sorted(ALLOWED_SCAN_SCHEDULE_CADENCE_MINUTES), default=60)
     p.add_argument("--disabled", action="store_true", help="Create the schedule disabled")
     p.add_argument("--no-auto-ingest", dest="auto_ingest", action="store_false", default=True, help="Do not auto-ingest completed scheduled scan bundles")
-    p.add_argument("--trueaegis-after-ingest", dest="run_trueaegis_after_ingest", action="store_true", default=False, help="Record intent to run TrueAegis after a completed scheduled scan is auto-ingested; execution is added in a later v0.38 checkpoint")
+    p.add_argument("--trueaegis-after-ingest", dest="run_trueaegis_after_ingest", action="store_true", default=False, help="Run TrueAegis automatically after a completed scheduled scan is accepted by DeltaAegis")
     p = sub.add_parser("schedule-list", help="List saved NetSniper scan schedules")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--enabled", choices=["all", "enabled", "disabled"], default="all")

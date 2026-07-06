@@ -21,7 +21,7 @@ required = [
     '"queued": False',
     '"outcome": "queued"',
     "create_trueaegis_job(",
-    "TrueAegis follow-up job queued; execution is deferred",
+    "TrueAegis follow-up job queued for guarded automated execution.",
     "trueaegis_followup_queue = trueaegis_queue_followup_for_schedule(",
     '"trueaegis_followup_queue": trueaegis_followup_queue',
 ]
