@@ -18,7 +18,7 @@ import urllib.request
 
 
 EXPECTED_BRANCH = "feature/v0.39-job-lifecycle-observability"
-EXPECTED_HEAD = "88726cf"
+REQUIRED_OBSERVABILITY_COMMIT = "88726cf"
 REPO = Path.home() / "DeltaAegis"
 SOURCE = REPO / "deltaaegis.py"
 
@@ -164,35 +164,29 @@ if branch != EXPECTED_BRANCH:
         f"ERROR: expected branch {EXPECTED_BRANCH!r}, found {branch!r}"
     )
 
-head = git_output("rev-parse", "--short", "HEAD")
-if head != EXPECTED_HEAD:
+ancestor_check = subprocess.run(
+    [
+        "git",
+        "merge-base",
+        "--is-ancestor",
+        REQUIRED_OBSERVABILITY_COMMIT,
+        "HEAD",
+    ],
+    cwd=REPO,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+
+if ancestor_check.returncode != 0:
     raise SystemExit(
-        f"ERROR: expected HEAD {EXPECTED_HEAD}, found {head}"
+        "ERROR: required observability baseline commit "
+        f"{REQUIRED_OBSERVABILITY_COMMIT} is not an ancestor of HEAD"
     )
 
-status_lines = [
-    line
-    for line in git_output("status", "--short").splitlines()
-    if line.strip()
-]
-
-allowed_status_lines = {
-    "?? tools/validate_v0_39_dashboard_http_smoke.py",
-    "?? tools/validate_v0_39_dashboard_http_smoke.sh",
-}
-
-unexpected_status_lines = [
-    line
-    for line in status_lines
-    if line not in allowed_status_lines
-]
-
-if unexpected_status_lines:
-    raise SystemExit(
-        "ERROR: unrelated working-tree changes are present before the "
-        "HTTP smoke test:\n"
-        + "\n".join(unexpected_status_lines)
-    )
+# This validator intentionally tests the current working-tree source. That is
+# required for guarded pre-commit validation of later v0.39 checkpoints.
+# Runtime isolation is provided by temporary database, events, NetSniper,
+# runs, and log paths rather than by requiring a clean Git tree.
 
 
 with tempfile.TemporaryDirectory(

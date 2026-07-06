@@ -47,7 +47,7 @@ IDENTITY_COVERAGE_THRESHOLD = 0.50
 IDENTITY_DROP_REVIEW_THRESHOLD = 0.25
 REMOVAL_THRESHOLD = 3
 MAC_RE = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
-SCAN_JOB_STATUSES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED"}
+SCAN_JOB_STATUSES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"}
 NETSNIPER_SUPPORTED_SCHEMAS = {"netsniper-run-v1", "netsniper-run-v2", "netsniper-run-v3"}
 NETSNIPER_PROFILE_AWARE_SCHEMAS = {"netsniper-run-v2", "netsniper-run-v3"}
 TRUEAEGIS_VALIDATION_STATUSES = {"CONFIRMED", "REACHABLE", "PROTECTED", "PROTOCOL_MISMATCH", "NOT_REACHABLE", "TIMEOUT", "INCONCLUSIVE", "PARTIALLY_CONFIRMED", "DEPENDENCY_MISSING", "UNKNOWN"}
@@ -509,6 +509,10 @@ CREATE TABLE IF NOT EXISTS scan_jobs (
     updated_at TEXT NOT NULL,
     started_at TEXT,
     heartbeat_at TEXT,
+    cancel_requested_at TEXT,
+    cancel_requested_by TEXT NOT NULL DEFAULT '',
+    cancel_reason TEXT NOT NULL DEFAULT '',
+    cancelled_at TEXT,
     finished_at TEXT,
     process_pid INTEGER,
     netsniper_path TEXT NOT NULL DEFAULT '',
@@ -1517,6 +1521,10 @@ def connect(db_path: Path) -> sqlite3.Connection:
     ensure_column(connection, "scan_jobs", "scan_profile", "scan_profile TEXT NOT NULL DEFAULT 'balanced'")
     ensure_column(connection, "scan_jobs", "process_pid", "process_pid INTEGER")
     ensure_column(connection, "scan_jobs", "heartbeat_at", "heartbeat_at TEXT")
+    ensure_column(connection, "scan_jobs", "cancel_requested_at", "cancel_requested_at TEXT")
+    ensure_column(connection, "scan_jobs", "cancel_requested_by", "cancel_requested_by TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "scan_jobs", "cancel_reason", "cancel_reason TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "scan_jobs", "cancelled_at", "cancelled_at TEXT")
     ensure_column(connection, "trueaegis_jobs", "scan_job_id", "scan_job_id TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "trueaegis_jobs", "schedule_id", "schedule_id TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "trueaegis_jobs", "trigger_source", "trigger_source TEXT NOT NULL DEFAULT 'manual_dashboard'")
@@ -4214,6 +4222,10 @@ def create_scan_job(
         "created_at": now,
         "updated_at": now,
         "heartbeat_at": None,
+        "cancel_requested_at": None,
+        "cancel_requested_by": "",
+        "cancel_reason": "",
+        "cancelled_at": None,
         "process_pid": None,
         "netsniper_path": str(netsniper_path),
         "runs_dir": str(runs_dir),
@@ -4232,6 +4244,10 @@ def update_scan_job(
         "status",
         "started_at",
         "heartbeat_at",
+        "cancel_requested_at",
+        "cancel_requested_by",
+        "cancel_reason",
+        "cancelled_at",
         "finished_at",
         "process_pid",
         "bundle_path",
@@ -4527,6 +4543,171 @@ def scan_job_auto_ingest_evidence(
     return evidence
 
 
+
+SCAN_JOB_CANCEL_ACTOR_MAX_LENGTH = 96
+SCAN_JOB_CANCEL_REASON_MAX_LENGTH = 500
+SCAN_JOB_CANCEL_GRACE_SECONDS = 5.0
+
+
+def normalize_scan_job_cancel_actor(value: Any = None) -> str:
+    actor = str(value or "operator").strip() or "operator"
+    if len(actor) > SCAN_JOB_CANCEL_ACTOR_MAX_LENGTH:
+        raise DeltaAegisError(
+            f"scan cancellation requester exceeds "
+            f"{SCAN_JOB_CANCEL_ACTOR_MAX_LENGTH} characters"
+        )
+    return actor
+
+
+def normalize_scan_job_cancel_reason(value: Any = None) -> str:
+    reason = (
+        str(value or "operator requested cancellation").strip()
+        or "operator requested cancellation"
+    )
+    if len(reason) > SCAN_JOB_CANCEL_REASON_MAX_LENGTH:
+        raise DeltaAegisError(
+            f"scan cancellation reason exceeds "
+            f"{SCAN_JOB_CANCEL_REASON_MAX_LENGTH} characters"
+        )
+    return reason
+
+
+def scan_job_row(
+    connection: sqlite3.Connection,
+    job_id: str,
+) -> sqlite3.Row | None:
+    return connection.execute(
+        "SELECT * FROM scan_jobs WHERE job_id = ?",
+        (str(job_id or "").strip(),),
+    ).fetchone()
+
+
+def scan_job_cancellation_request(
+    connection: sqlite3.Connection,
+    job_id: str,
+) -> dict[str, Any]:
+    row = scan_job_row(connection, job_id)
+    if row is None:
+        return {"found": False, "requested": False, "job": None}
+
+    job = scan_job_to_dict(row)
+    return {
+        "found": True,
+        "requested": bool(job.get("cancel_requested_at")),
+        "requested_at": job.get("cancel_requested_at"),
+        "requested_by": job.get("cancel_requested_by") or "",
+        "reason": job.get("cancel_reason") or "",
+        "job": job,
+    }
+
+
+def terminate_scan_process_group(
+    process: subprocess.Popen,
+    grace_seconds: float = SCAN_JOB_CANCEL_GRACE_SECONDS,
+) -> int | None:
+    if process.poll() is not None:
+        return process.returncode
+
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return process.poll()
+
+    try:
+        process.wait(timeout=max(0.1, float(grace_seconds)))
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+    return process.returncode
+
+
+def request_scan_job_cancellation(
+    connection: sqlite3.Connection,
+    job_id: Any,
+    requested_by: Any = None,
+    reason: Any = None,
+) -> dict[str, Any]:
+    safe_job_id = str(job_id or "").strip()
+
+    if (
+        not safe_job_id
+        or len(safe_job_id) > 160
+        or re.fullmatch(r"[A-Za-z0-9._:-]+", safe_job_id) is None
+    ):
+        raise DeltaAegisError("invalid scan job id")
+
+    actor = normalize_scan_job_cancel_actor(requested_by)
+    cancel_reason = normalize_scan_job_cancel_reason(reason)
+    row = scan_job_row(connection, safe_job_id)
+
+    if row is None:
+        raise DeltaAegisError(f"scan job not found: {safe_job_id}")
+
+    job = scan_job_to_dict(row)
+    status = str(job.get("status") or "").upper()
+
+    if status == "CANCELLED":
+        job["cancellation_action"] = "already_cancelled"
+        return job
+
+    if status in {"COMPLETED", "FAILED"}:
+        raise DeltaAegisError(
+            f"cannot cancel terminal scan job {safe_job_id} with status {status}"
+        )
+
+    if job.get("cancel_requested_at"):
+        job["cancellation_action"] = "already_requested"
+        return job
+
+    now = utc_now_text()
+    status_json = dict(job.get("status_json") or {})
+    status_json["cancellation"] = {
+        "requested_at": now,
+        "requested_by": actor,
+        "reason": cancel_reason,
+        "state": "CANCELLED_BEFORE_START" if status == "QUEUED" else "REQUESTED",
+    }
+
+    fields: dict[str, Any] = {
+        "cancel_requested_at": now,
+        "cancel_requested_by": actor,
+        "cancel_reason": cancel_reason,
+        "status_json": status_json,
+        "message": f"scan cancellation requested by {actor}: {cancel_reason}",
+    }
+
+    if status == "QUEUED":
+        fields.update(
+            {
+                "status": "CANCELLED",
+                "cancelled_at": now,
+                "finished_at": now,
+                "heartbeat_at": now,
+                "exit_code": 130,
+                "message": (
+                    f"scan cancelled before process launch by "
+                    f"{actor}: {cancel_reason}"
+                ),
+            }
+        )
+
+    update_scan_job(connection, safe_job_id, **fields)
+    updated_row = scan_job_row(connection, safe_job_id)
+
+    if updated_row is None:
+        raise DeltaAegisError(f"scan job disappeared unexpectedly: {safe_job_id}")
+
+    result = scan_job_to_dict(updated_row)
+    result["cancellation_action"] = (
+        "cancelled_before_start" if status == "QUEUED" else "requested"
+    )
+    return result
+
+
 def execute_scan_job(
     connection: sqlite3.Connection,
     job_id: str,
@@ -4557,6 +4738,21 @@ def execute_scan_job(
 
     started_at = utc_now_text()
     process = None
+    cancellation_observed = False
+
+    initial_cancellation = scan_job_cancellation_request(
+        connection,
+        job_id,
+    )
+
+    if (
+        initial_cancellation.get("requested")
+        or str(
+            (initial_cancellation.get("job") or {}).get("status")
+            or ""
+        ).upper() == "CANCELLED"
+    ):
+        return initial_cancellation["job"]
 
     try:
         with (
@@ -4574,24 +4770,72 @@ def execute_scan_job(
 
             heartbeat_at = utc_now_text()
 
-            update_scan_job(
-                connection,
-                job_id,
-                status="RUNNING",
-                started_at=started_at,
-                heartbeat_at=heartbeat_at,
-                process_pid=process.pid,
-                stdout_log=str(stdout_log),
-                stderr_log=str(stderr_log),
-                message=f"NetSniper scan running profile={safe_profile}",
+            start_cursor = connection.execute(
+                "UPDATE scan_jobs "
+                "SET status = ?, started_at = ?, heartbeat_at = ?, "
+                "process_pid = ?, stdout_log = ?, stderr_log = ?, "
+                "message = ?, updated_at = ? "
+                "WHERE job_id = ? "
+                "AND status = 'QUEUED' "
+                "AND cancel_requested_at IS NULL",
+                (
+                    "RUNNING",
+                    started_at,
+                    heartbeat_at,
+                    process.pid,
+                    str(stdout_log),
+                    str(stderr_log),
+                    f"NetSniper scan running profile={safe_profile}",
+                    heartbeat_at,
+                    job_id,
+                ),
             )
             connection.commit()
+
+            if start_cursor.rowcount != 1:
+                terminate_scan_process_group(process)
+                blocked_row = scan_job_row(connection, job_id)
+
+                if blocked_row is not None:
+                    blocked_job = scan_job_to_dict(blocked_row)
+                    if (
+                        blocked_job.get("cancel_requested_at")
+                        or blocked_job.get("status") == "CANCELLED"
+                    ):
+                        return blocked_job
+
+                raise DeltaAegisError(
+                    f"scan job could not transition from QUEUED "
+                    f"to RUNNING: {job_id}"
+                )
 
             while True:
                 try:
                     return_code = process.wait(timeout=5.0)
+                    final_request = scan_job_cancellation_request(
+                        connection,
+                        job_id,
+                    )
+                    cancellation_observed = bool(
+                        final_request.get("requested")
+                    )
                     break
                 except subprocess.TimeoutExpired:
+                    cancellation = scan_job_cancellation_request(
+                        connection,
+                        job_id,
+                    )
+
+                    if cancellation.get("requested"):
+                        cancellation_observed = True
+                        terminate_scan_process_group(process)
+                        return_code = (
+                            process.returncode
+                            if process.returncode is not None
+                            else 130
+                        )
+                        break
+
                     update_scan_job(
                         connection,
                         job_id,
@@ -4618,14 +4862,26 @@ def execute_scan_job(
         update_scan_job(
             connection,
             job_id,
-            status="FAILED",
+            status="CANCELLED",
             heartbeat_at=finished_at,
+            cancel_requested_at=finished_at,
+            cancel_requested_by="cli",
+            cancel_reason="keyboard interrupt",
+            cancelled_at=finished_at,
             finished_at=finished_at,
             process_pid=process.pid if process is not None else None,
             stdout_log=str(stdout_log),
             stderr_log=str(stderr_log),
             exit_code=130,
-            message=f"NetSniper scan interrupted by operator profile={safe_profile}",
+            status_json={
+                "cancellation": {
+                    "requested_at": finished_at,
+                    "requested_by": "cli",
+                    "reason": "keyboard interrupt",
+                    "state": "CANCELLED",
+                }
+            },
+            message=f"NetSniper scan cancelled by CLI operator profile={safe_profile}",
         )
         connection.commit()
 
@@ -4667,6 +4923,63 @@ def execute_scan_job(
         raise DeltaAegisError(
             f"failed to launch NetSniper: {exc}"
         ) from exc
+
+    cancellation = scan_job_cancellation_request(
+        connection,
+        job_id,
+    )
+
+    if cancellation_observed or cancellation.get("requested"):
+        finished_at = utc_now_text()
+        cancel_job = cancellation.get("job") or {}
+        requested_at = cancel_job.get("cancel_requested_at") or finished_at
+        requested_by = cancel_job.get("cancel_requested_by") or "operator"
+        cancel_reason = (
+            cancel_job.get("cancel_reason")
+            or "operator requested cancellation"
+        )
+        status_json = dict(cancel_job.get("status_json") or {})
+        cancellation_evidence = dict(status_json.get("cancellation") or {})
+        cancellation_evidence.update(
+            {
+                "requested_at": requested_at,
+                "requested_by": requested_by,
+                "reason": cancel_reason,
+                "cancelled_at": finished_at,
+                "state": "CANCELLED",
+                "process_return_code": return_code,
+            }
+        )
+        status_json["cancellation"] = cancellation_evidence
+
+        update_scan_job(
+            connection,
+            job_id,
+            status="CANCELLED",
+            heartbeat_at=finished_at,
+            cancel_requested_at=requested_at,
+            cancel_requested_by=requested_by,
+            cancel_reason=cancel_reason,
+            cancelled_at=finished_at,
+            finished_at=finished_at,
+            process_pid=process.pid if process is not None else None,
+            stdout_log=str(stdout_log),
+            stderr_log=str(stderr_log),
+            exit_code=130,
+            status_json=status_json,
+            message=(
+                f"NetSniper scan cancelled by {requested_by}: "
+                f"{cancel_reason}; process_return_code={return_code}"
+            ),
+        )
+        connection.commit()
+
+        cancelled_row = scan_job_row(connection, job_id)
+        if cancelled_row is None:
+            raise DeltaAegisError(
+                f"scan job disappeared unexpectedly: {job_id}"
+            )
+        return scan_job_to_dict(cancelled_row)
 
     stdout_text = stdout_log.read_text(
         encoding="utf-8",
@@ -4854,6 +5167,10 @@ def scan_job_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
             item["process_pid"] = None
 
     item["heartbeat_at"] = item.get("heartbeat_at") or None
+    item["cancel_requested_at"] = item.get("cancel_requested_at") or None
+    item["cancel_requested_by"] = item.get("cancel_requested_by") or ""
+    item["cancel_reason"] = item.get("cancel_reason") or ""
+    item["cancelled_at"] = item.get("cancelled_at") or None
     item["status_json"] = decode_json_field(item.get("status_json"), {})
 
     return item
@@ -4897,6 +5214,10 @@ def query_scan_jobs(
             updated_at,
             started_at,
             heartbeat_at,
+            cancel_requested_at,
+            cancel_requested_by,
+            cancel_reason,
+            cancelled_at,
             finished_at,
             process_pid,
             netsniper_path,
