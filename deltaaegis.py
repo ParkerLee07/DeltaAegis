@@ -99,6 +99,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("POST", "/api/investigate-asset", "workflow.write"),
     ("POST", "/api/netsniper/import-latest", "workflow.write"),
     ("POST", "/api/netsniper/scan-start", "scan.start"),
+    ("POST", "/api/netsniper/scan-cancel", "scan.start"),
     ("POST", "/api/trueaegis/run", "scan.start"),
     ("GET", "/api/netsniper/schedules", "dashboard.read"),
     ("GET", "/api/netsniper/schedule-history", "dashboard.read"),
@@ -5354,6 +5355,87 @@ def scan_job_log_tail_payload(
 
     return payload
 
+
+
+def dashboard_netsniper_scan_cancel_payload(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+    actor: dict[str, Any] | None = None,
+    source_ip: str | None = None,
+    user_agent: str | None = None,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise DashboardAdminUserActionError(
+            "scan cancellation payload must be a JSON object",
+            status_code=400,
+        )
+
+    job_id = str(payload.get("job_id") or "").strip()
+    reason = payload.get("reason")
+
+    if (
+        not job_id
+        or len(job_id) > 160
+        or re.fullmatch(r"[A-Za-z0-9._:-]+", job_id) is None
+    ):
+        raise DashboardAdminUserActionError(
+            "invalid scan job id",
+            status_code=400,
+        )
+
+    existing_row = scan_job_row(connection, job_id)
+
+    if existing_row is None:
+        raise DashboardAdminUserActionError(
+            f"scan job not found: {job_id}",
+            status_code=404,
+        )
+
+    actor_summary = dashboard_actor_summary(actor)
+    requested_by = actor_summary.get("username") or "dashboard.admin"
+
+    job = request_scan_job_cancellation(
+        connection,
+        job_id,
+        requested_by=requested_by,
+        reason=reason,
+    )
+
+    cancellation_action = str(
+        job.get("cancellation_action") or "requested"
+    )
+
+    record_access_audit_event(
+        connection,
+        action="NETSNIPER_SCAN_CANCEL_REQUEST",
+        actor=actor or actor_summary,
+        target_type="scan_job",
+        target_key=job_id,
+        source_ip=source_ip,
+        user_agent=user_agent,
+        details={
+            "job_id": job_id,
+            "status": job.get("status"),
+            "cancellation_action": cancellation_action,
+            "requested_by": job.get("cancel_requested_by"),
+            "reason": job.get("cancel_reason"),
+            "cancel_requested_at": job.get("cancel_requested_at"),
+            "cancelled_at": job.get("cancelled_at"),
+        },
+    )
+
+    return {
+        "ok": True,
+        "action": "netsniper.scan.cancel",
+        "job_id": job_id,
+        "cancellation_action": cancellation_action,
+        "job": job,
+        "message": (
+            "scan cancellation request accepted"
+            if cancellation_action == "requested"
+            else "scan cancellation state recorded"
+        ),
+    }
 
 def dashboard_scan_job_detail_payload(
     connection: sqlite3.Connection,
@@ -27431,6 +27513,96 @@ def command_dashboard(args):
                         return
 
                     dashboard_json_response(self, result, status=202)
+                    return
+                finally:
+                    connection.close()
+
+            if route == "/api/netsniper/scan-cancel":
+                if not self.require_permission("scan.start"):
+                    return
+
+                try:
+                    content_length = int(
+                        self.headers.get("Content-Length", "0")
+                    )
+                except ValueError:
+                    content_length = 0
+
+                if content_length <= 0:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "missing_body",
+                            "message": "POST body must be JSON.",
+                        },
+                        status=400,
+                    )
+                    return
+
+                if content_length > 65536:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "body_too_large",
+                            "message": "POST body is too large.",
+                        },
+                        status=413,
+                    )
+                    return
+
+                try:
+                    payload = dashboard_read_request_payload(self)
+                except DashboardAdminUserActionError as exc:
+                    dashboard_admin_json_error_response(
+                        self,
+                        str(exc),
+                        status_code=exc.status_code,
+                    )
+                    return
+
+                connection = self.open_connection()
+
+                try:
+                    try:
+                        result = dashboard_netsniper_scan_cancel_payload(
+                            connection,
+                            payload,
+                            actor=getattr(
+                                self,
+                                "current_actor",
+                                None,
+                            ),
+                            source_ip=(
+                                self.client_address[0]
+                                if self.client_address
+                                else None
+                            ),
+                            user_agent=self.headers.get(
+                                "User-Agent",
+                                "",
+                            ),
+                        )
+                        connection.commit()
+                    except DashboardAdminUserActionError as exc:
+                        connection.rollback()
+                        dashboard_admin_json_error_response(
+                            self,
+                            str(exc),
+                            status_code=exc.status_code,
+                        )
+                        return
+                    except DeltaAegisError as exc:
+                        connection.rollback()
+                        dashboard_admin_json_error_response(
+                            self,
+                            str(exc),
+                            status_code=400,
+                        )
+                        return
+
+                    dashboard_json_response(self, result)
                     return
                 finally:
                     connection.close()
