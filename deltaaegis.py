@@ -80,6 +80,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("GET", "/operator/reset", "admin.telemetry.cleanup"),
     ("GET", "/netsniper", "dashboard.read"),
     ("GET", "/api/netsniper/status", "dashboard.read"),
+    ("GET", "/api/netsniper/job-detail", "dashboard.read"),
     ("GET", "/api/validation-summary", "dashboard.read"),
     ("GET", "/api/validation-correlations", "dashboard.read"),
     ("GET", "/api/validations", "dashboard.read"),
@@ -4933,6 +4934,165 @@ def dashboard_scan_jobs_payload(
         )
     ]
 
+
+
+
+SCAN_JOB_LOG_TAIL_DEFAULT_BYTES = 16 * 1024
+SCAN_JOB_LOG_TAIL_MINIMUM_BYTES = 1024
+SCAN_JOB_LOG_TAIL_MAXIMUM_BYTES = 64 * 1024
+
+
+def normalize_scan_job_log_tail_bytes(value: Any = None) -> int:
+    try:
+        requested = int(value or SCAN_JOB_LOG_TAIL_DEFAULT_BYTES)
+    except (TypeError, ValueError):
+        requested = SCAN_JOB_LOG_TAIL_DEFAULT_BYTES
+
+    return max(
+        SCAN_JOB_LOG_TAIL_MINIMUM_BYTES,
+        min(SCAN_JOB_LOG_TAIL_MAXIMUM_BYTES, requested),
+    )
+
+
+def scan_job_log_tail_payload(
+    path_value: Any,
+    job_id: str,
+    stream: str,
+    logs_root: Path,
+    max_bytes: Any = None,
+) -> dict[str, Any]:
+    safe_stream = str(stream or "").strip().lower()
+
+    if safe_stream not in {"stdout", "stderr"}:
+        raise DeltaAegisError(
+            f"unsupported scan job log stream: {stream!r}"
+        )
+
+    limit = normalize_scan_job_log_tail_bytes(max_bytes)
+    payload = {
+        "stream": safe_stream,
+        "available": False,
+        "text": "",
+        "truncated": False,
+        "file_size": 0,
+        "bytes_read": 0,
+        "tail_bytes_limit": limit,
+        "updated_at": None,
+        "reason": None,
+    }
+
+    if not path_value:
+        payload["reason"] = "log_path_not_recorded"
+        return payload
+
+    root = Path(logs_root).expanduser().resolve()
+    candidate = Path(str(path_value)).expanduser().resolve()
+    expected_name = f"{job_id}.{safe_stream}.log"
+
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        payload["reason"] = "log_path_outside_allowed_root"
+        return payload
+
+    if candidate.name != expected_name:
+        payload["reason"] = "unexpected_log_filename"
+        return payload
+
+    if not candidate.is_file():
+        payload["reason"] = "log_file_not_found"
+        return payload
+
+    try:
+        stat = candidate.stat()
+        file_size = int(stat.st_size)
+        start = max(0, file_size - limit)
+
+        with candidate.open("rb") as handle:
+            handle.seek(start)
+            content = handle.read(limit)
+
+        payload.update(
+            {
+                "available": True,
+                "text": content.decode(
+                    "utf-8",
+                    errors="replace",
+                ),
+                "truncated": start > 0,
+                "file_size": file_size,
+                "bytes_read": len(content),
+                "updated_at": datetime.fromtimestamp(
+                    stat.st_mtime,
+                    timezone.utc,
+                ).isoformat(timespec="seconds"),
+            }
+        )
+    except OSError as exc:
+        payload["reason"] = f"log_read_failed:{exc.__class__.__name__}"
+
+    return payload
+
+
+def dashboard_scan_job_detail_payload(
+    connection: sqlite3.Connection,
+    job_id: Any,
+    tail_bytes: Any = None,
+    logs_root: Path | None = None,
+) -> dict[str, Any]:
+    safe_job_id = str(job_id or "").strip()
+
+    if (
+        not safe_job_id
+        or len(safe_job_id) > 160
+        or re.fullmatch(r"[A-Za-z0-9._:-]+", safe_job_id) is None
+    ):
+        return {
+            "ok": False,
+            "found": False,
+            "job_id": safe_job_id,
+            "error": "invalid scan job id",
+        }
+
+    row = connection.execute(
+        "SELECT * FROM scan_jobs WHERE job_id = ?",
+        (safe_job_id,),
+    ).fetchone()
+
+    if row is None:
+        return {
+            "ok": False,
+            "found": False,
+            "job_id": safe_job_id,
+            "error": "scan job not found",
+        }
+
+    job = scan_job_to_dict(row)
+    safe_logs_root = Path(
+        logs_root if logs_root is not None else DEFAULT_SCAN_LOGS
+    ).expanduser()
+
+    return {
+        "ok": True,
+        "found": True,
+        "job_id": safe_job_id,
+        "tail_bytes": normalize_scan_job_log_tail_bytes(tail_bytes),
+        "job": job,
+        "stdout": scan_job_log_tail_payload(
+            job.get("stdout_log"),
+            safe_job_id,
+            "stdout",
+            safe_logs_root,
+            tail_bytes,
+        ),
+        "stderr": scan_job_log_tail_payload(
+            job.get("stderr_log"),
+            safe_job_id,
+            "stderr",
+            safe_logs_root,
+            tail_bytes,
+        ),
+    }
 
 
 def trueaegis_job_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -26064,6 +26224,40 @@ def command_dashboard(args):
                             limit=limit,
                             scope=scope,
                         ),
+                    )
+                finally:
+                    connection.close()
+
+                return
+
+            if route == "/api/netsniper/job-detail":
+                query = urllib.parse.parse_qs(parsed.query or "")
+                job_id = query.get("job_id", [""])[0]
+                tail_bytes = query.get(
+                    "tail_bytes",
+                    [str(SCAN_JOB_LOG_TAIL_DEFAULT_BYTES)],
+                )[0]
+                connection = self.open_connection()
+
+                try:
+                    payload = dashboard_scan_job_detail_payload(
+                        connection,
+                        job_id=job_id,
+                        tail_bytes=tail_bytes,
+                        logs_root=DEFAULT_SCAN_LOGS,
+                    )
+
+                    if payload.get("ok"):
+                        response_status = 200
+                    elif payload.get("error") == "scan job not found":
+                        response_status = 404
+                    else:
+                        response_status = 400
+
+                    dashboard_json_response(
+                        self,
+                        payload,
+                        status=response_status,
                     )
                 finally:
                     connection.close()
