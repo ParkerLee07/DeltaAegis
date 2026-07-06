@@ -506,7 +506,9 @@ CREATE TABLE IF NOT EXISTS scan_jobs (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     started_at TEXT,
+    heartbeat_at TEXT,
     finished_at TEXT,
+    process_pid INTEGER,
     netsniper_path TEXT NOT NULL DEFAULT '',
     runs_dir TEXT NOT NULL DEFAULT '',
     bundle_path TEXT,
@@ -1511,6 +1513,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
     ensure_column(connection, "snapshots", "network_scope", "network_scope TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "asset_observations", "identity_class", "identity_class TEXT NOT NULL DEFAULT 'IP_ONLY'")
     ensure_column(connection, "scan_jobs", "scan_profile", "scan_profile TEXT NOT NULL DEFAULT 'balanced'")
+    ensure_column(connection, "scan_jobs", "process_pid", "process_pid INTEGER")
+    ensure_column(connection, "scan_jobs", "heartbeat_at", "heartbeat_at TEXT")
     ensure_column(connection, "trueaegis_jobs", "scan_job_id", "scan_job_id TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "trueaegis_jobs", "schedule_id", "schedule_id TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "trueaegis_jobs", "trigger_source", "trigger_source TEXT NOT NULL DEFAULT 'manual_dashboard'")
@@ -4207,6 +4211,8 @@ def create_scan_job(
         "status": "QUEUED",
         "created_at": now,
         "updated_at": now,
+        "heartbeat_at": None,
+        "process_pid": None,
         "netsniper_path": str(netsniper_path),
         "runs_dir": str(runs_dir),
         "scan_profile": safe_profile,
@@ -4223,7 +4229,9 @@ def update_scan_job(
     allowed = {
         "status",
         "started_at",
+        "heartbeat_at",
         "finished_at",
+        "process_pid",
         "bundle_path",
         "exit_code",
         "stdout_log",
@@ -4760,6 +4768,17 @@ def scan_job_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     item["auto_ingest"] = bool(item.get("auto_ingest"))
     item["scan_profile"] = item.get("scan_profile") or "balanced"
     item["schedule_id"] = item.get("schedule_id") or ""
+
+    process_pid = item.get("process_pid")
+    if process_pid in ("", None):
+        item["process_pid"] = None
+    else:
+        try:
+            item["process_pid"] = int(process_pid)
+        except (TypeError, ValueError):
+            item["process_pid"] = None
+
+    item["heartbeat_at"] = item.get("heartbeat_at") or None
     item["status_json"] = decode_json_field(item.get("status_json"), {})
 
     return item
@@ -4802,7 +4821,9 @@ def query_scan_jobs(
             created_at,
             updated_at,
             started_at,
+            heartbeat_at,
             finished_at,
+            process_pid,
             netsniper_path,
             runs_dir,
             scan_profile,
