@@ -70,10 +70,10 @@ if missing:
 raw_dump_count = source.count(
     "output.textContent = JSON.stringify(payload, null, 2);"
 )
-if raw_dump_count != 7:
+if raw_dump_count > 7:
     raise SystemExit(
-        "checkpoint 1 must not migrate action UI yet; "
-        f"expected 7 legacy raw payload render sites, found {raw_dump_count}"
+        "action receipt migrations must not increase legacy raw payload render sites; "
+        f"expected at most 7, found {raw_dump_count}"
     )
 
 legacy_functions = (
@@ -259,7 +259,7 @@ unexpected_paths="$(
   {
     git diff --name-only
     git ls-files --others --exclude-standard
-  } | sort -u | grep -Ev '^$|^deltaaegis\.py$|^tools/validate_v0_40_action_receipt_contract\.sh$' || true
+  } | sort -u | grep -Ev '^$|^deltaaegis\.py$|^tools/validate_v0_40_action_receipt_contract\.sh$|^tools/validate_v0_40_netsniper_action_receipts\.sh$' || true
 )"
 
 if [[ -n "$unexpected_paths" ]]; then

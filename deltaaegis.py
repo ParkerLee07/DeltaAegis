@@ -13036,14 +13036,30 @@ def dashboard_netsniper_import_latest_payload(
 
     result = ingest_manifest(connection, manifest_path, export_path)
     status_payload = dashboard_netsniper_status_payload()
+    run_id = manifest_path.parent.name
+    receipt = dashboard_action_receipt(
+        "netsniper.import_latest",
+        f"Imported NetSniper run {run_id}.",
+        summary={
+            "import_result": result,
+        },
+        identifiers={
+            "run_id": run_id,
+        },
+        diagnostic_detail={
+            "available": True,
+            "manifest_path": str(manifest_path),
+        },
+    )
 
     return {
         "ok": True,
         "action": "netsniper.import_latest",
         "manifest_path": str(manifest_path),
-        "run_id": manifest_path.parent.name,
+        "run_id": run_id,
         "result": result,
         "status": status_payload,
+        "receipt": receipt,
     }
 
 
@@ -13112,6 +13128,26 @@ def dashboard_netsniper_scan_start_payload(
         auto_ingest=True,
     )
 
+    receipt = dashboard_action_receipt(
+        "netsniper.scan_start",
+        "NetSniper scan queued successfully.",
+        summary={
+            "target": safe_target,
+            "scan_profile": safe_profile,
+            "status": job["status"],
+            "auto_ingest": True,
+        },
+        identifiers={
+            "job_id": job["job_id"],
+        },
+        diagnostic_detail={
+            "available": True,
+            "netsniper_path": str(netsniper_path),
+            "runs_dir": str(runs_dir),
+            "logs_dir": str(logs_dir),
+        },
+    )
+
     return {
         "ok": True,
         "job": job,
@@ -13124,6 +13160,7 @@ def dashboard_netsniper_scan_start_payload(
         "logs_dir": str(logs_dir),
         "auto_ingest": True,
         "message": "scan job queued and started in a guarded dashboard background worker with auto-ingest enabled",
+        "receipt": receipt,
     }
 
 
@@ -26128,6 +26165,88 @@ def render_netsniper_page() -> str:
       }
     }
 
+    function dashboardActionReceiptLabel(value) {
+      return String(value || "")
+        .replaceAll("_", " ")
+        .replace(/\\b\\w/g, function (character) {
+          return character.toUpperCase();
+        });
+    }
+
+    function dashboardActionReceiptValue(value) {
+      if (value === true) {
+        return "Yes";
+      }
+
+      if (value === false) {
+        return "No";
+      }
+
+      if (value === null || value === undefined || value === "") {
+        return "—";
+      }
+
+      if (Array.isArray(value)) {
+        return value.length ? value.join(", ") : "None";
+      }
+
+      if (typeof value === "object") {
+        return Object.entries(value)
+          .map(function (entry) {
+            return `${dashboardActionReceiptLabel(entry[0])}: ${dashboardActionReceiptValue(entry[1])}`;
+          })
+          .join("; ");
+      }
+
+      return String(value);
+    }
+
+    function renderDashboardActionReceipt(target, receipt, fallbackPayload) {
+      if (!target) {
+        return;
+      }
+
+      const safeReceipt = receipt && typeof receipt === "object"
+        ? receipt
+        : {};
+      const safePayload = fallbackPayload && typeof fallbackPayload === "object"
+        ? fallbackPayload
+        : {};
+      const message = String(
+        safeReceipt.message
+        || safePayload.message
+        || safePayload.error
+        || "Action completed."
+      ).trim();
+      const severity = String(
+        safeReceipt.severity
+        || (safePayload.ok === false ? "error" : "info")
+      ).toLowerCase();
+      const summary = safeReceipt.summary && typeof safeReceipt.summary === "object"
+        ? safeReceipt.summary
+        : {};
+      const identifiers = safeReceipt.identifiers && typeof safeReceipt.identifiers === "object"
+        ? safeReceipt.identifiers
+        : {};
+      const lines = [message];
+
+      Object.entries(summary).forEach(function (entry) {
+        lines.push(
+          `${dashboardActionReceiptLabel(entry[0])}: ${dashboardActionReceiptValue(entry[1])}`
+        );
+      });
+
+      Object.entries(identifiers).forEach(function (entry) {
+        lines.push(
+          `${dashboardActionReceiptLabel(entry[0])}: ${dashboardActionReceiptValue(entry[1])}`
+        );
+      });
+
+      target.textContent = lines.join("\n");
+      target.dataset.receiptSeverity = severity;
+      target.dataset.receiptAction = String(safeReceipt.action || "");
+    }
+
     async function importLatestNetSniperRun() {
       const status = document.getElementById("netsniper-status");
       const output = document.getElementById("netsniper-import-result");
@@ -26161,8 +26280,9 @@ def render_netsniper_page() -> str:
           throw new Error(payload.message || payload.error || `Import failed with HTTP ${response.status}`);
         }
 
-        output.textContent = JSON.stringify(payload, null, 2);
-        status.textContent = `Import complete: ${payload.result || payload.run_id || "latest run"}`;
+        renderDashboardActionReceipt(output, payload.receipt, payload);
+        status.textContent = (payload.receipt || {}).message
+          || `Import complete: ${payload.run_id || "latest run"}`;
         await loadNetSniperStatus();
       } catch (error) {
         status.textContent = `Import failed: ${error.message || error}`;
@@ -26374,7 +26494,21 @@ def render_netsniper_page() -> str:
 
         if (result) {
           result.hidden = false;
-          result.textContent = `${payload.cancellation_action || "requested"}: ${payload.message || "cancellation request accepted"}`;
+          renderDashboardActionReceipt(
+          result,
+          payload.receipt || {
+            action: "netsniper.scan_cancel",
+            severity: "info",
+            message: payload.message || "Scan cancellation request accepted.",
+            summary: {
+              cancellation_action: payload.cancellation_action || "requested"
+            },
+            identifiers: {
+              job_id: payload.job_id || ""
+            }
+          },
+          payload
+        );
         }
 
         await loadNetSniperScanJobs();
@@ -26939,8 +27073,9 @@ def render_netsniper_page() -> str:
           throw new Error(payload.message || payload.error || `Scan start failed with HTTP ${response.status}`);
         }
 
-        output.textContent = JSON.stringify(payload, null, 2);
-        status.textContent = `Scan job started: ${payload.job_id || "queued"}`;
+        renderDashboardActionReceipt(output, payload.receipt, payload);
+        status.textContent = (payload.receipt || {}).message
+          || `Scan job started: ${payload.job_id || "queued"}`;
         await loadNetSniperScanJobs();
 
         if (payload.job_id) {
