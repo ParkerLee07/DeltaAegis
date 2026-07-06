@@ -5938,6 +5938,7 @@ def query_due_scan_schedules(
             cadence_minutes,
             enabled,
             auto_ingest,
+            run_trueaegis_after_ingest,
             last_run_at,
             next_run_at,
             last_job_id,
