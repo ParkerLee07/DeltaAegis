@@ -30,8 +30,11 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 import html
+import datetime as _datetime
+import tempfile
 
 DEFAULT_DB = Path.home() / "DeltaAegis" / "data" / "deltaaegis.db"
+DEFAULT_BACKUPS = Path.home() / "DeltaAegis" / "backups"
 DEFAULT_RUNS = Path.home() / "NetSniper" / "runs"
 DEFAULT_NETSNIPER = Path.home() / "NetSniper" / "netsniper.sh"
 DEFAULT_SCAN_LOGS = Path.home() / "DeltaAegis" / "scan-logs"
@@ -29813,6 +29816,306 @@ def command_validations(args) -> int:
     return 0
 
 
+
+# v0.41 checkpoint 1: SQLite-consistent backup foundation
+def _normalize_new_backup_path(path: Path) -> Path:
+    """Resolve parent directories without following the final path."""
+
+    expanded = Path(path).expanduser()
+    absolute = Path(os.path.abspath(os.fspath(expanded)))
+    resolved_parent = absolute.parent.resolve(strict=False)
+    return resolved_parent / absolute.name
+
+
+def resolve_database_backup_destination(
+    source_path: Path,
+    *,
+    destination: Path | None = None,
+    backups_dir: Path | None = None,
+) -> Path:
+    """Resolve a new backup destination without opening the source."""
+
+    if destination is not None and backups_dir is not None:
+        raise DeltaAegisError(
+            "--destination and --backups-dir are mutually exclusive"
+        )
+
+    resolved_source = Path(source_path).expanduser().resolve(
+        strict=False
+    )
+
+    if destination is not None:
+        resolved_destination = _normalize_new_backup_path(
+            Path(destination)
+        )
+        destination_parent = resolved_destination.parent
+
+        if not destination_parent.exists():
+            raise DeltaAegisError(
+                "backup destination parent directory does not exist: "
+                f"{destination_parent}"
+            )
+
+        if not destination_parent.is_dir():
+            raise DeltaAegisError(
+                "backup destination parent is not a directory: "
+                f"{destination_parent}"
+            )
+    else:
+        backup_root = Path(
+            backups_dir if backups_dir is not None else DEFAULT_BACKUPS
+        ).expanduser().resolve(strict=False)
+
+        if os.path.lexists(backup_root) and not backup_root.is_dir():
+            raise DeltaAegisError(
+                f"backup directory is not a directory: {backup_root}"
+            )
+
+        try:
+            backup_root.mkdir(
+                parents=True,
+                exist_ok=True,
+                mode=0o700,
+            )
+        except OSError as exc:
+            raise DeltaAegisError(
+                f"could not create backup directory {backup_root}: {exc}"
+            ) from exc
+
+        timestamp = _datetime.datetime.now(
+            _datetime.timezone.utc
+        ).strftime("%Y%m%dT%H%M%SZ")
+
+        suffix = secrets.token_hex(4)
+
+        resolved_destination = (
+            backup_root
+            / f"deltaaegis-backup-{timestamp}-{suffix}.db"
+        )
+
+    if resolved_destination == resolved_source:
+        raise DeltaAegisError(
+            "backup source and destination must be different paths"
+        )
+
+    if os.path.lexists(resolved_destination):
+        raise DeltaAegisError(
+            f"backup destination already exists: {resolved_destination}"
+        )
+
+    return resolved_destination
+
+
+def create_sqlite_database_backup(
+    source_path: Path,
+    destination_path: Path,
+) -> dict[str, Any]:
+    """Create and verify a consistent SQLite backup."""
+
+    resolved_source = Path(source_path).expanduser().resolve(
+        strict=False
+    )
+    resolved_destination = _normalize_new_backup_path(
+        Path(destination_path)
+    )
+
+    if resolved_source == resolved_destination:
+        raise DeltaAegisError(
+            "backup source and destination must be different paths"
+        )
+
+    if not os.path.lexists(resolved_source):
+        raise DeltaAegisError(
+            f"source database does not exist: {resolved_source}"
+        )
+
+    if not resolved_source.is_file():
+        raise DeltaAegisError(
+            f"source database is not a regular file: {resolved_source}"
+        )
+
+    try:
+        source_size = resolved_source.stat().st_size
+    except OSError as exc:
+        raise DeltaAegisError(
+            f"could not inspect source database {resolved_source}: {exc}"
+        ) from exc
+
+    if source_size <= 0:
+        raise DeltaAegisError(
+            f"source database is empty: {resolved_source}"
+        )
+
+    destination_parent = resolved_destination.parent
+
+    if not destination_parent.exists():
+        raise DeltaAegisError(
+            "backup destination parent directory does not exist: "
+            f"{destination_parent}"
+        )
+
+    if not destination_parent.is_dir():
+        raise DeltaAegisError(
+            "backup destination parent is not a directory: "
+            f"{destination_parent}"
+        )
+
+    if os.path.lexists(resolved_destination):
+        raise DeltaAegisError(
+            f"backup destination already exists: "
+            f"{resolved_destination}"
+        )
+
+    temporary_path: Path | None = None
+    destination_published = False
+
+    try:
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{resolved_destination.name}.",
+            suffix=".tmp",
+            dir=str(destination_parent),
+        )
+        os.close(file_descriptor)
+        temporary_path = Path(temporary_name)
+
+        source_connection: sqlite3.Connection | None = None
+        backup_connection: sqlite3.Connection | None = None
+
+        try:
+            source_uri = resolved_source.as_uri() + "?mode=ro"
+
+            source_connection = sqlite3.connect(
+                source_uri,
+                uri=True,
+                timeout=30.0,
+            )
+
+            backup_connection = sqlite3.connect(
+                temporary_path,
+                timeout=30.0,
+            )
+
+            source_connection.backup(
+                backup_connection,
+                pages=256,
+                sleep=0.05,
+            )
+        finally:
+            if backup_connection is not None:
+                backup_connection.close()
+
+            if source_connection is not None:
+                source_connection.close()
+
+        verification_uri = (
+            temporary_path.resolve().as_uri() + "?mode=ro"
+        )
+        verification_connection: sqlite3.Connection | None = None
+
+        try:
+            verification_connection = sqlite3.connect(
+                verification_uri,
+                uri=True,
+                timeout=30.0,
+            )
+
+            quick_check_rows = [
+                str(row[0]).strip().lower()
+                for row in verification_connection.execute(
+                    "PRAGMA quick_check"
+                ).fetchall()
+            ]
+        finally:
+            if verification_connection is not None:
+                verification_connection.close()
+
+        if quick_check_rows != ["ok"]:
+            detail = "; ".join(quick_check_rows) or "no result"
+            raise DeltaAegisError(
+                f"backup integrity verification failed: {detail}"
+            )
+
+        try:
+            os.link(
+                temporary_path,
+                resolved_destination,
+            )
+            destination_published = True
+        except FileExistsError as exc:
+            raise DeltaAegisError(
+                f"backup destination already exists: "
+                f"{resolved_destination}"
+            ) from exc
+
+        temporary_path.unlink()
+        temporary_path = None
+
+        if not resolved_destination.is_file():
+            raise DeltaAegisError(
+                "backup publication did not create a regular file: "
+                f"{resolved_destination}"
+            )
+
+        final_size = resolved_destination.stat().st_size
+
+        if final_size <= 0:
+            raise DeltaAegisError(
+                f"completed backup is empty: {resolved_destination}"
+            )
+
+        return {
+            "source_path": str(resolved_source),
+            "backup_path": str(resolved_destination),
+            "size_bytes": final_size,
+            "integrity_status": "ok",
+        }
+
+    except DeltaAegisError:
+        if destination_published:
+            try:
+                resolved_destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        if destination_published:
+            try:
+                resolved_destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        raise DeltaAegisError(
+            f"database backup failed: {exc}"
+        ) from exc
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def command_backup(args) -> int:
+    destination_path = resolve_database_backup_destination(
+        args.db,
+        destination=args.destination,
+        backups_dir=args.backups_dir,
+    )
+
+    result = create_sqlite_database_backup(
+        args.db,
+        destination_path,
+    )
+
+    print("DeltaAegis database backup completed.")
+    print(f"Source: {result['source_path']}")
+    print(f"Backup: {result['backup_path']}")
+    print(f"Size: {result['size_bytes']} bytes")
+    print(f"Integrity: {result['integrity_status']}")
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DeltaAegis v0.40.0 — Human-Readable Operator Actions, stable dashboard action receipts, progressive technical disclosure, compact mutation payloads, guarded NetSniper and TrueAegis orchestration, reporting, RBAC, and the current-state SIEM dashboard")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -29821,6 +30124,31 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reports-dir", type=Path, default=DEFAULT_REPORTS)
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("menu")
+
+    p = sub.add_parser(
+        "backup",
+        help=(
+            "Create a consistent backup of the "
+            "DeltaAegis SQLite database"
+        ),
+    )
+    backup_destination_group = p.add_mutually_exclusive_group()
+    backup_destination_group.add_argument(
+        "--destination",
+        type=Path,
+        help=(
+            "Exact new backup file path; its parent "
+            "directory must already exist"
+        ),
+    )
+    backup_destination_group.add_argument(
+        "--backups-dir",
+        type=Path,
+        help=(
+            "Directory for a generated timestamped "
+            "backup filename"
+        ),
+    )
     p = sub.add_parser("user-create", help="Create a local DeltaAegis access user")
     p.add_argument("username")
     p.add_argument("--role", choices=list(ACCESS_ROLES), default="VIEWER")
@@ -30056,6 +30384,7 @@ def main() -> int:
     args = build_parser().parse_args()
     try:
         if args.command in {None, "menu"}: return run_interactive_menu(args)
+        if args.command == "backup": return command_backup(args)
         if args.command == "user-create": return command_user_create(args)
         if args.command == "users": return command_users(args)
         if args.command == "user-password": return command_user_password(args)
