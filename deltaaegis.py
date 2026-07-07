@@ -35,6 +35,8 @@ import tempfile
 
 DEFAULT_DB = Path.home() / "DeltaAegis" / "data" / "deltaaegis.db"
 DEFAULT_BACKUPS = Path.home() / "DeltaAegis" / "backups"
+DELTAAEGIS_VERSION = "0.41.0-dev"
+DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION = "deltaaegis-backup-manifest-v1"
 DEFAULT_RUNS = Path.home() / "NetSniper" / "runs"
 DEFAULT_NETSNIPER = Path.home() / "NetSniper" / "netsniper.sh"
 DEFAULT_SCAN_LOGS = Path.home() / "DeltaAegis" / "scan-logs"
@@ -30095,6 +30097,355 @@ def create_sqlite_database_backup(
                 pass
 
 
+
+# v0.41 checkpoint 2: backup metadata manifest and checksum
+def database_backup_manifest_path(backup_path: Path) -> Path:
+    normalized_backup = _normalize_new_backup_path(
+        Path(backup_path)
+    )
+    return _normalize_new_backup_path(
+        normalized_backup.with_name(
+            normalized_backup.name + ".manifest.json"
+        )
+    )
+
+
+def _database_backup_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+
+    try:
+        with Path(path).open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError as exc:
+        raise DeltaAegisError(
+            f"could not calculate backup checksum for {path}: {exc}"
+        ) from exc
+
+    return digest.hexdigest()
+
+
+def _sqlite_backup_metadata(
+    backup_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    resolved_backup = Path(backup_path).expanduser().resolve(
+        strict=True
+    )
+    connection: sqlite3.Connection | None = None
+
+    try:
+        connection = sqlite3.connect(
+            resolved_backup.as_uri() + "?mode=ro",
+            uri=True,
+            timeout=30.0,
+        )
+
+        pragma_names = (
+            "user_version",
+            "schema_version",
+            "application_id",
+            "page_size",
+            "page_count",
+            "journal_mode",
+        )
+        pragma_values: dict[str, Any] = {}
+
+        for pragma_name in pragma_names:
+            row = connection.execute(
+                f"PRAGMA {pragma_name}"
+            ).fetchone()
+
+            if row is None:
+                raise DeltaAegisError(
+                    f"backup metadata query returned no value for "
+                    f"PRAGMA {pragma_name}"
+                )
+
+            pragma_values[pragma_name] = row[0]
+
+        schema_rows = connection.execute(
+            "SELECT type, name, tbl_name, sql "
+            "FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' "
+            "AND sql IS NOT NULL "
+            "ORDER BY type, name, tbl_name"
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise DeltaAegisError(
+            f"could not inspect completed backup metadata: {exc}"
+        ) from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+    schema_objects = [
+        {
+            "type": str(row[0]),
+            "name": str(row[1]),
+            "table_name": str(row[2]),
+            "sql": str(row[3]),
+        }
+        for row in schema_rows
+    ]
+
+    canonical_schema = json.dumps(
+        schema_objects,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+    schema_fingerprint = hashlib.sha256(
+        canonical_schema
+    ).hexdigest()
+
+    sqlite_metadata = {
+        "library_version": sqlite3.sqlite_version,
+        "user_version": int(pragma_values["user_version"]),
+        "schema_version": int(pragma_values["schema_version"]),
+        "application_id": int(pragma_values["application_id"]),
+        "page_size": int(pragma_values["page_size"]),
+        "page_count": int(pragma_values["page_count"]),
+        "journal_mode": str(
+            pragma_values["journal_mode"]
+        ).lower(),
+    }
+
+    schema_metadata = {
+        "fingerprint_algorithm": "sha256",
+        "fingerprint": schema_fingerprint,
+        "object_count": len(schema_objects),
+    }
+
+    return sqlite_metadata, schema_metadata
+
+
+def _publish_database_backup_manifest(
+    manifest_path: Path,
+    payload: dict[str, Any],
+) -> None:
+    resolved_manifest = _normalize_new_backup_path(
+        Path(manifest_path)
+    )
+    manifest_parent = resolved_manifest.parent
+
+    if not manifest_parent.exists():
+        raise DeltaAegisError(
+            "backup manifest parent directory does not exist: "
+            f"{manifest_parent}"
+        )
+
+    if not manifest_parent.is_dir():
+        raise DeltaAegisError(
+            "backup manifest parent is not a directory: "
+            f"{manifest_parent}"
+        )
+
+    if os.path.lexists(resolved_manifest):
+        raise DeltaAegisError(
+            f"backup manifest already exists: {resolved_manifest}"
+        )
+
+    temporary_path: Path | None = None
+    manifest_published = False
+
+    try:
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{resolved_manifest.name}.",
+            suffix=".tmp",
+            dir=str(manifest_parent),
+        )
+        temporary_path = Path(temporary_name)
+
+        with os.fdopen(
+            file_descriptor,
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(
+                payload,
+                handle,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        try:
+            os.link(
+                temporary_path,
+                resolved_manifest,
+            )
+            manifest_published = True
+        except FileExistsError as exc:
+            raise DeltaAegisError(
+                f"backup manifest already exists: "
+                f"{resolved_manifest}"
+            ) from exc
+
+        temporary_path.unlink()
+        temporary_path = None
+    except DeltaAegisError:
+        if manifest_published:
+            try:
+                resolved_manifest.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    except (OSError, TypeError, ValueError) as exc:
+        if manifest_published:
+            try:
+                resolved_manifest.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        raise DeltaAegisError(
+            f"could not publish backup manifest "
+            f"{resolved_manifest}: {exc}"
+        ) from exc
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def create_sqlite_database_backup_bundle(
+    source_path: Path,
+    destination_path: Path,
+) -> dict[str, Any]:
+    resolved_source = Path(source_path).expanduser().resolve(
+        strict=False
+    )
+    resolved_destination = _normalize_new_backup_path(
+        Path(destination_path)
+    )
+    manifest_path = database_backup_manifest_path(
+        resolved_destination
+    )
+
+    if os.path.lexists(manifest_path):
+        raise DeltaAegisError(
+            f"backup manifest already exists: {manifest_path}"
+        )
+
+    try:
+        source_size = resolved_source.stat().st_size
+    except OSError as exc:
+        raise DeltaAegisError(
+            f"could not inspect source database "
+            f"{resolved_source}: {exc}"
+        ) from exc
+
+    backup_created = False
+    manifest_created = False
+
+    try:
+        backup_result = create_sqlite_database_backup(
+            resolved_source,
+            resolved_destination,
+        )
+        backup_created = True
+
+        backup_path = Path(backup_result["backup_path"])
+        backup_sha256 = _database_backup_sha256(
+            backup_path
+        )
+        sqlite_metadata, schema_metadata = (
+            _sqlite_backup_metadata(backup_path)
+        )
+
+        created_at = (
+            datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+
+        manifest_payload = {
+            "schema_version": (
+                DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION
+            ),
+            "application": {
+                "name": "DeltaAegis",
+                "version": DELTAAEGIS_VERSION,
+            },
+            "created_at": created_at,
+            "source": {
+                "path": str(resolved_source),
+                "size_bytes": int(source_size),
+            },
+            "backup": {
+                "filename": backup_path.name,
+                "path": str(backup_path),
+                "size_bytes": int(
+                    backup_result["size_bytes"]
+                ),
+                "sha256": backup_sha256,
+                "integrity_status": str(
+                    backup_result["integrity_status"]
+                ),
+            },
+            "sqlite": sqlite_metadata,
+            "schema": schema_metadata,
+        }
+
+        _publish_database_backup_manifest(
+            manifest_path,
+            manifest_payload,
+        )
+        manifest_created = True
+
+        result = dict(backup_result)
+        result.update(
+            {
+                "manifest_path": str(manifest_path),
+                "backup_sha256": backup_sha256,
+                "schema_fingerprint": (
+                    schema_metadata["fingerprint"]
+                ),
+            }
+        )
+        return result
+    except DeltaAegisError:
+        if manifest_created:
+            try:
+                manifest_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        if backup_created:
+            try:
+                resolved_destination.unlink(missing_ok=True)
+            except OSError as cleanup_exc:
+                raise DeltaAegisError(
+                    "backup metadata creation failed and the "
+                    "incomplete backup could not be removed: "
+                    f"{resolved_destination}: {cleanup_exc}"
+                ) from cleanup_exc
+
+        raise
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        if manifest_created:
+            try:
+                manifest_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        if backup_created:
+            try:
+                resolved_destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        raise DeltaAegisError(
+            f"database backup metadata creation failed: {exc}"
+        ) from exc
+
+
 def command_backup(args) -> int:
     destination_path = resolve_database_backup_destination(
         args.db,
@@ -30102,7 +30453,7 @@ def command_backup(args) -> int:
         backups_dir=args.backups_dir,
     )
 
-    result = create_sqlite_database_backup(
+    result = create_sqlite_database_backup_bundle(
         args.db,
         destination_path,
     )
@@ -30110,8 +30461,14 @@ def command_backup(args) -> int:
     print("DeltaAegis database backup completed.")
     print(f"Source: {result['source_path']}")
     print(f"Backup: {result['backup_path']}")
+    print(f"Manifest: {result['manifest_path']}")
     print(f"Size: {result['size_bytes']} bytes")
     print(f"Integrity: {result['integrity_status']}")
+    print(f"SHA-256: {result['backup_sha256']}")
+    print(
+        f"Schema fingerprint: "
+        f"{result['schema_fingerprint']}"
+    )
 
     return 0
 
