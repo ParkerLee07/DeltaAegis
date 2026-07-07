@@ -277,11 +277,14 @@ PY
 echo "PASS: functional backend receipts"
 
 echo "[v0.40 checkpoint 4] staged compatibility"
-tools/validate_v0_40_action_receipt_contract.sh
-tools/validate_v0_40_netsniper_action_receipts.sh
-tools/validate_v0_40_schedule_action_receipts.sh
+if [[ "${DELTAAEGIS_V040_SKIP_COMPAT:-0}" == "1" ]]; then
+  echo "SKIP: compatibility checks delegated to flat validation"
+else
+  DELTAAEGIS_V040_SKIP_COMPAT=1 "tools/validate_v0_40_action_receipt_contract.sh"
+  DELTAAEGIS_V040_SKIP_COMPAT=1 "tools/validate_v0_40_netsniper_action_receipts.sh"
+  DELTAAEGIS_V040_SKIP_COMPAT=1 "tools/validate_v0_40_schedule_action_receipts.sh"
+fi
 echo "PASS: staged compatibility"
-
 echo "[v0.40 checkpoint 4] repository hygiene"
 git diff --check
 
@@ -289,7 +292,7 @@ unexpected_paths="$(
   {
     git diff --name-only
     git ls-files --others --exclude-standard
-  } | sort -u | grep -Ev '^$|^deltaaegis\.py$|^tools/validate_v0_40_action_receipt_contract\.sh$|^tools/validate_v0_40_netsniper_action_receipts\.sh$|^tools/validate_v0_40_schedule_action_receipts\.sh$|^tools/validate_v0_40_trueaegis_action_receipts\.sh$|^tools/validate_v0_40_admin_workflow_action_receipts\.sh$|^tools/validate_v0_40_progressive_technical_disclosure\.sh$' || true
+  } | sort -u | grep -Ev '^$|^deltaaegis\.py$|^tools/validate_v0_40_action_receipt_contract\.sh$|^tools/validate_v0_40_netsniper_action_receipts\.sh$|^tools/validate_v0_40_schedule_action_receipts\.sh$|^tools/validate_v0_40_trueaegis_action_receipts\.sh$|^tools/validate_v0_40_admin_workflow_action_receipts\.sh$|^tools/validate_v0_40_progressive_technical_disclosure\.sh$|^tools/validate_v0_40_all\.sh$' || true
 )"
 
 if [[ -n "$unexpected_paths" ]]; then
