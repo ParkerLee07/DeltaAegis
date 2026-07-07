@@ -52,3 +52,13 @@ scan-logs/
 
 # DeltaAegis TrueAegis runtime logs
 trueaegis-logs/
+
+# Generic DeltaAegis runtime log artifacts
+logs/
+*.log
+*.log.*
+*.out
+*.err
+*.trace
+stdout
+stderr
