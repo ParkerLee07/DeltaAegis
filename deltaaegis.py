@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.39.0: Scan Job Lifecycle Observability.
+"""DeltaAegis v0.40.0: Human-Readable Operator Actions.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -5456,17 +5456,49 @@ def dashboard_netsniper_scan_cancel_payload(
         },
     )
 
+    message = (
+        "Scan cancellation request accepted."
+        if cancellation_action == "requested"
+        else "Scan cancellation state recorded."
+    )
+    receipt = dashboard_action_receipt(
+        "netsniper.scan_cancel",
+        message,
+        severity="warning",
+        summary={
+            "status": job.get("status") or "",
+            "cancellation_action": cancellation_action,
+            "requested_by": (
+                job.get("cancel_requested_by")
+                or requested_by
+            ),
+        },
+        identifiers={
+            "job_id": job_id,
+        },
+        diagnostic_detail={
+            "available": bool(
+                job.get("cancel_reason")
+                or job.get("cancel_requested_at")
+                or job.get("cancelled_at")
+            ),
+            "reason": job.get("cancel_reason") or "",
+            "cancel_requested_at": (
+                job.get("cancel_requested_at")
+                or ""
+            ),
+            "cancelled_at": job.get("cancelled_at") or "",
+        },
+    )
+
     return {
         "ok": True,
         "action": "netsniper.scan.cancel",
         "job_id": job_id,
         "cancellation_action": cancellation_action,
         "job": job,
-        "message": (
-            "scan cancellation request accepted"
-            if cancellation_action == "requested"
-            else "scan cancellation state recorded"
-        ),
+        "message": message,
+        "receipt": receipt,
     }
 
 def dashboard_scan_job_detail_payload(
@@ -6048,12 +6080,30 @@ def dashboard_netsniper_schedule_create_payload(
         auto_ingest=dashboard_bool_from_payload(payload.get("auto_ingest"), True),
         run_trueaegis_after_ingest=dashboard_bool_from_payload(payload.get("run_trueaegis_after_ingest"), False),
     )
+    receipt = dashboard_action_receipt(
+        "schedule.create",
+        f"Created scan schedule {schedule['name']}.",
+        summary={
+            "target": schedule["target"],
+            "scan_profile": schedule["scan_profile"],
+            "cadence_minutes": schedule["cadence_minutes"],
+            "enabled": schedule["enabled"],
+            "auto_ingest": schedule["auto_ingest"],
+            "trueaegis_after_ingest": schedule.get(
+                "run_trueaegis_after_ingest",
+                False,
+            ),
+        },
+        identifiers={
+            "schedule_id": schedule["schedule_id"],
+        },
+    )
 
     return {
         "ok": True,
         "action": "schedule.create",
         "schedule": schedule,
-        "schedules": dashboard_scan_schedules_payload(connection),
+        "receipt": receipt,
     }
 
 
@@ -6064,12 +6114,28 @@ def dashboard_netsniper_schedule_enabled_payload(
 ) -> dict[str, Any]:
     schedule_id = dashboard_schedule_id_from_payload(payload)
     schedule = set_scan_schedule_enabled(connection, schedule_id, enabled)
+    action = "schedule.enable" if enabled else "schedule.disable"
+    receipt = dashboard_action_receipt(
+        action,
+        (
+            f"Enabled scan schedule {schedule['name']}."
+            if enabled
+            else f"Disabled scan schedule {schedule['name']}."
+        ),
+        summary={
+            "enabled": enabled,
+            "next_run_at": schedule.get("next_run_at"),
+        },
+        identifiers={
+            "schedule_id": schedule_id,
+        },
+    )
 
     return {
         "ok": True,
-        "action": "schedule.enable" if enabled else "schedule.disable",
+        "action": action,
         "schedule": schedule,
-        "schedules": dashboard_scan_schedules_payload(connection),
+        "receipt": receipt,
     }
 
 
@@ -6089,6 +6155,30 @@ def dashboard_netsniper_schedule_delete_payload(
         )
 
     deletion = delete_scan_schedule(connection, schedule_id)
+    linked_active_job_count = deletion["linked_active_job_count"]
+    receipt = dashboard_action_receipt(
+        "schedule.delete",
+        (
+            "Schedule deleted. Linked scan jobs and history were preserved; "
+            "active jobs were not cancelled."
+        ),
+        severity="warning" if linked_active_job_count else "success",
+        summary={
+            "linked_job_count": deletion["linked_job_count"],
+            "linked_active_job_count": linked_active_job_count,
+            "linked_jobs_preserved": True,
+            "active_jobs_cancelled": False,
+        },
+        identifiers={
+            "schedule_id": schedule_id,
+        },
+        diagnostic_detail={
+            "available": True,
+            "linked_job_status_counts": deletion[
+                "linked_job_status_counts"
+            ],
+        },
+    )
 
     return {
         "ok": True,
@@ -6097,23 +6187,85 @@ def dashboard_netsniper_schedule_delete_payload(
         "confirmation_required": confirmation_required,
         "deletion": deletion,
         "linked_job_count": deletion["linked_job_count"],
-        "linked_active_job_count": deletion["linked_active_job_count"],
+        "linked_active_job_count": linked_active_job_count,
         "linked_job_status_counts": deletion["linked_job_status_counts"],
         "linked_jobs_preserved": True,
         "active_jobs_cancelled": False,
         "cancellation_required_for_active_jobs": bool(
-            deletion["linked_active_job_count"]
+            linked_active_job_count
         ),
         "message": (
             "schedule definition deleted; linked scan jobs and history "
             "were preserved; active jobs were not cancelled"
         ),
-        "schedules": dashboard_scan_schedules_payload(connection),
-        "schedule_history": dashboard_netsniper_schedule_history_payload(
-            connection,
-            limit=50,
-        )["history"],
+        "receipt": receipt,
     }
+
+
+def dashboard_netsniper_schedule_run_due_receipt(
+    results: list[dict[str, Any]],
+    max_runs: int,
+) -> dict[str, Any]:
+    started_count = 0
+    blocked_count = 0
+    failed_count = 0
+    completed_count = 0
+
+    for result in results:
+        action = str(result.get("action") or "").strip().lower()
+        job = result.get("job") or {}
+        status = str(job.get("status") or "").strip().upper()
+
+        if action == "blocked":
+            blocked_count += 1
+            continue
+
+        if action in {"failed", "error"} or status == "FAILED":
+            failed_count += 1
+            continue
+
+        if job:
+            started_count += 1
+
+        if status == "COMPLETED":
+            completed_count += 1
+
+    if not results:
+        message = "No scheduled scans were due."
+        severity = "info"
+    elif failed_count:
+        message = (
+            "Scheduled scan runner completed with "
+            f"{failed_count} failed scan job(s)."
+        )
+        severity = "warning"
+    elif blocked_count and not started_count:
+        message = (
+            "A scheduled scan was due but could not start because "
+            "another scan job is active."
+        )
+        severity = "warning"
+    else:
+        message = "Scheduled scan runner completed."
+        severity = "success"
+
+    return dashboard_action_receipt(
+        "schedule.run_due",
+        message,
+        severity=severity,
+        summary={
+            "max_runs_requested": max_runs,
+            "due_results": len(results),
+            "started": started_count,
+            "blocked": blocked_count,
+            "failed": failed_count,
+            "completed": completed_count,
+        },
+        diagnostic_detail={
+            "available": bool(results),
+            "result_count": len(results),
+        },
+    )
 
 
 def dashboard_netsniper_schedule_run_due_payload(
@@ -6132,14 +6284,16 @@ def dashboard_netsniper_schedule_run_due_payload(
         max_runs=max_runs,        trueaegis_execution_mode="asynchronous",
 
     )
+    receipt = dashboard_netsniper_schedule_run_due_receipt(
+        results,
+        max_runs,
+    )
 
     return {
         "ok": True,
         "action": "schedule.run_due",
         "results": results,
-        "schedules": dashboard_scan_schedules_payload(connection),
-        "scan_jobs": dashboard_scan_jobs_payload(connection, limit=20),
-        "schedule_history": dashboard_netsniper_schedule_history_payload(connection, limit=25)["history"],
+        "receipt": receipt,
     }
 
 
@@ -6170,6 +6324,7 @@ def dashboard_netsniper_hourly_monitoring_payload(
 
     if not enabled:
         updated_schedule = None
+        updated_count = 0
 
         for row in existing_rows:
             updated_schedule = set_scan_schedule_enabled(
@@ -6177,12 +6332,34 @@ def dashboard_netsniper_hourly_monitoring_payload(
                 row["schedule_id"],
                 False,
             )
+            updated_count += 1
+
+        receipt = dashboard_action_receipt(
+            "hourly_monitoring.disable",
+            (
+                "Hourly balanced monitoring disabled."
+                if updated_count
+                else "Hourly balanced monitoring was already disabled."
+            ),
+            severity="success" if updated_count else "info",
+            summary={
+                "enabled": False,
+                "schedules_updated": updated_count,
+            },
+            identifiers={
+                "schedule_id": (
+                    updated_schedule.get("schedule_id")
+                    if updated_schedule
+                    else ""
+                ),
+            },
+        )
 
         return {
             "ok": True,
             "action": "hourly_monitoring.disable",
             "schedule": updated_schedule,
-            "schedules": dashboard_scan_schedules_payload(connection),
+            "receipt": receipt,
         }
 
     target = str(payload.get("target") or "").strip()
@@ -6193,8 +6370,11 @@ def dashboard_netsniper_hourly_monitoring_payload(
             status_code=400,
         )
 
+    replaced_count = 0
+
     for row in existing_rows:
         delete_scan_schedule(connection, row["schedule_id"])
+        replaced_count += 1
 
     schedule = create_scan_schedule(
         connection,
@@ -6205,12 +6385,26 @@ def dashboard_netsniper_hourly_monitoring_payload(
         enabled=True,
         auto_ingest=True,
     )
+    receipt = dashboard_action_receipt(
+        "hourly_monitoring.enable",
+        "Hourly balanced monitoring enabled.",
+        summary={
+            "target": schedule["target"],
+            "scan_profile": schedule["scan_profile"],
+            "cadence_minutes": schedule["cadence_minutes"],
+            "auto_ingest": schedule["auto_ingest"],
+            "replaced_schedule_count": replaced_count,
+        },
+        identifiers={
+            "schedule_id": schedule["schedule_id"],
+        },
+    )
 
     return {
         "ok": True,
         "action": "hourly_monitoring.enable",
         "schedule": schedule,
-        "schedules": dashboard_scan_schedules_payload(connection),
+        "receipt": receipt,
     }
 
 
@@ -6697,6 +6891,35 @@ def dashboard_netsniper_stale_scan_recovery_payload(
         stale_minutes=stale_minutes,
         limit=100,
     )
+    recovered_count = len(recovered)
+    receipt = dashboard_action_receipt(
+        "netsniper.stale_scan_fail",
+        (
+            f"Marked {recovered_count} stale active scan job(s) failed."
+            if recovered_count
+            else "No stale active scan jobs were found."
+        ),
+        severity="warning" if recovered_count else "info",
+        summary={
+            "stale_threshold_minutes": stale_minutes,
+            "stale_before": len(before),
+            "recovered": recovered_count,
+            "stale_remaining": len(after),
+        },
+        diagnostic_detail={
+            "available": bool(recovered or after),
+            "recovered_job_ids": [
+                str(job.get("job_id") or "")
+                for job in recovered
+                if job.get("job_id")
+            ],
+            "remaining_stale_job_ids": [
+                str(job.get("job_id") or "")
+                for job in after
+                if job.get("job_id")
+            ],
+        },
+    )
 
     return {
         "ok": True,
@@ -6704,11 +6927,9 @@ def dashboard_netsniper_stale_scan_recovery_payload(
         "confirmation_required": STALE_SCAN_JOB_RECOVERY_CONFIRMATION,
         "stale_threshold_minutes": stale_minutes,
         "stale_before_count": len(before),
-        "recovered_count": len(recovered),
+        "recovered_count": recovered_count,
         "stale_after_count": len(after),
-        "recovered_jobs": recovered,
-        "remaining_stale_jobs": after,
-        "scan_jobs": dashboard_scan_jobs_payload(connection, limit=20),
+        "receipt": receipt,
     }
 
 
@@ -11919,7 +12140,10 @@ def dashboard_json_response(handler, payload, status=200):
     handler.send_header("Cache-Control", "no-store")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
-    handler.wfile.write(body)
+    try:
+        handler.wfile.write(body)
+    except (BrokenPipeError, ConnectionResetError):
+        return
 
 
 
@@ -12708,6 +12932,9 @@ def dashboard_telemetry_cleanup_clear_all_payload(
             },
         )
 
+    result["receipt"] = dashboard_telemetry_cleanup_action_receipt(
+        result
+    )
     return result
 
 
@@ -12899,6 +13126,127 @@ def dashboard_netsniper_latest_completed_manifest(runs_dir: Path) -> Path | None
     return None
 
 
+
+DASHBOARD_ACTION_RECEIPT_SCHEMA_VERSION = "deltaaegis-dashboard-action-receipt-v1"
+DASHBOARD_ACTION_RECEIPT_SEVERITIES = frozenset(
+    {
+        "success",
+        "info",
+        "warning",
+        "error",
+    }
+)
+DASHBOARD_ACTION_RECEIPT_ACTION_PATTERN = re.compile(
+    r"[a-z0-9][a-z0-9._:-]{0,127}"
+)
+DASHBOARD_ACTION_RECEIPT_MESSAGE_MAX_LENGTH = 2000
+
+
+def dashboard_action_receipt_json_object(
+    value: Any,
+    field_name: str,
+) -> dict[str, Any]:
+    if value is None:
+        return {}
+
+    if not isinstance(value, dict):
+        raise DeltaAegisError(
+            f"{field_name} must be a JSON object"
+        )
+
+    try:
+        normalized = json.loads(
+            json.dumps(
+                value,
+                sort_keys=True,
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        raise DeltaAegisError(
+            f"{field_name} must contain only JSON-serializable values"
+        ) from exc
+
+    if not isinstance(normalized, dict):
+        raise DeltaAegisError(
+            f"{field_name} must be a JSON object"
+        )
+
+    return normalized
+
+
+def dashboard_action_receipt(
+    action: str,
+    message: str,
+    *,
+    ok: bool = True,
+    severity: str | None = None,
+    summary: dict[str, Any] | None = None,
+    identifiers: dict[str, Any] | None = None,
+    diagnostic_detail: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    clean_action = str(action or "").strip().lower()
+    clean_message = str(message or "").strip()
+
+    if DASHBOARD_ACTION_RECEIPT_ACTION_PATTERN.fullmatch(clean_action) is None:
+        raise DeltaAegisError(
+            "action receipt action must be a stable lowercase identifier"
+        )
+
+    if not clean_message:
+        raise DeltaAegisError(
+            "action receipt message is required"
+        )
+
+    if len(clean_message) > DASHBOARD_ACTION_RECEIPT_MESSAGE_MAX_LENGTH:
+        raise DeltaAegisError(
+            "action receipt message exceeds "
+            f"{DASHBOARD_ACTION_RECEIPT_MESSAGE_MAX_LENGTH} characters"
+        )
+
+    clean_severity = str(
+        severity if severity is not None else ("success" if ok else "error")
+    ).strip().lower()
+
+    if clean_severity not in DASHBOARD_ACTION_RECEIPT_SEVERITIES:
+        raise DeltaAegisError(
+            "action receipt severity must be one of: "
+            + ", ".join(sorted(DASHBOARD_ACTION_RECEIPT_SEVERITIES))
+        )
+
+    safe_summary = dashboard_action_receipt_json_object(
+        summary,
+        "action receipt summary",
+    )
+    safe_identifiers = dashboard_action_receipt_json_object(
+        identifiers,
+        "action receipt identifiers",
+    )
+    safe_diagnostic_detail = dashboard_action_receipt_json_object(
+        diagnostic_detail,
+        "action receipt diagnostic_detail",
+    )
+
+    if "available" not in safe_diagnostic_detail:
+        safe_diagnostic_detail["available"] = bool(
+            safe_diagnostic_detail
+        )
+    else:
+        safe_diagnostic_detail["available"] = bool(
+            safe_diagnostic_detail["available"]
+        )
+
+    return {
+        "schema_version": DASHBOARD_ACTION_RECEIPT_SCHEMA_VERSION,
+        "ok": bool(ok),
+        "action": clean_action,
+        "severity": clean_severity,
+        "message": clean_message,
+        "summary": safe_summary,
+        "identifiers": safe_identifiers,
+        "diagnostic_detail": safe_diagnostic_detail,
+    }
+
+
 def dashboard_netsniper_import_latest_payload(
     connection: sqlite3.Connection,
     export_path: Path,
@@ -12915,14 +13263,30 @@ def dashboard_netsniper_import_latest_payload(
 
     result = ingest_manifest(connection, manifest_path, export_path)
     status_payload = dashboard_netsniper_status_payload()
+    run_id = manifest_path.parent.name
+    receipt = dashboard_action_receipt(
+        "netsniper.import_latest",
+        f"Imported NetSniper run {run_id}.",
+        summary={
+            "import_result": result,
+        },
+        identifiers={
+            "run_id": run_id,
+        },
+        diagnostic_detail={
+            "available": True,
+            "manifest_path": str(manifest_path),
+        },
+    )
 
     return {
         "ok": True,
         "action": "netsniper.import_latest",
         "manifest_path": str(manifest_path),
-        "run_id": manifest_path.parent.name,
+        "run_id": run_id,
         "result": result,
         "status": status_payload,
+        "receipt": receipt,
     }
 
 
@@ -12991,6 +13355,26 @@ def dashboard_netsniper_scan_start_payload(
         auto_ingest=True,
     )
 
+    receipt = dashboard_action_receipt(
+        "netsniper.scan_start",
+        "NetSniper scan queued successfully.",
+        summary={
+            "target": safe_target,
+            "scan_profile": safe_profile,
+            "status": job["status"],
+            "auto_ingest": True,
+        },
+        identifiers={
+            "job_id": job["job_id"],
+        },
+        diagnostic_detail={
+            "available": True,
+            "netsniper_path": str(netsniper_path),
+            "runs_dir": str(runs_dir),
+            "logs_dir": str(logs_dir),
+        },
+    )
+
     return {
         "ok": True,
         "job": job,
@@ -13003,6 +13387,7 @@ def dashboard_netsniper_scan_start_payload(
         "logs_dir": str(logs_dir),
         "auto_ingest": True,
         "message": "scan job queued and started in a guarded dashboard background worker with auto-ingest enabled",
+        "receipt": receipt,
     }
 
 
@@ -13915,6 +14300,24 @@ def dashboard_trueaegis_validation_start_payload(
         trueaegis_path=trueaegis_path,
         logs_dir=DEFAULT_TRUEAEGIS_LOGS,
     )
+    receipt = dashboard_action_receipt(
+        "trueaegis.validation_start",
+        "TrueAegis validation queued successfully.",
+        summary={
+            "status": job["status"],
+            "scan_id": latest_scan.get("scan_id"),
+            "network_scope": latest_scan.get("network_scope"),
+        },
+        identifiers={
+            "job_id": job["job_id"],
+        },
+        diagnostic_detail={
+            "available": True,
+            "manifest_path": str(manifest_path),
+            "trueaegis_path": str(trueaegis_path),
+            "logs_dir": str(DEFAULT_TRUEAEGIS_LOGS),
+        },
+    )
 
     return {
         "ok": True,
@@ -13927,6 +14330,7 @@ def dashboard_trueaegis_validation_start_payload(
         "trueaegis_path": str(trueaegis_path),
         "logs_dir": str(DEFAULT_TRUEAEGIS_LOGS),
         "message": "TrueAegis validation job queued and started in a guarded dashboard background worker",
+        "receipt": receipt,
     }
 
 
@@ -20506,10 +20910,45 @@ def dashboard_index_html_base_v025_operator_link():
       padding: 11px 13px;
     }
 
-    #trueaegis-validation-import-status.error {
+    #trueaegis-validation-import-status,
+    #trueaegis-run-receipt {
+      white-space: pre-line;
+    }
+
+    #trueaegis-validation-import-status.error,
+    #trueaegis-validation-import-status[data-receipt-severity="error"],
+    #trueaegis-run-receipt[data-receipt-severity="error"] {
       background: rgba(127, 29, 29, 0.22);
       border-color: rgba(248, 113, 113, 0.34);
       color: #fecaca;
+    }
+
+    #trueaegis-validation-import-status[data-receipt-severity="success"],
+    #trueaegis-run-receipt[data-receipt-severity="success"] {
+      background: rgba(6, 78, 59, 0.22);
+      border: 1px solid rgba(52, 211, 153, 0.32);
+      border-radius: 12px;
+      color: #a7f3d0;
+      margin-top: 12px;
+      padding: 10px 12px;
+    }
+
+    #trueaegis-validation-import-status[data-receipt-severity="warning"],
+    #trueaegis-run-receipt[data-receipt-severity="warning"] {
+      background: rgba(120, 53, 15, 0.22);
+      border: 1px solid rgba(251, 191, 36, 0.32);
+      border-radius: 12px;
+      color: #fde68a;
+      margin-top: 12px;
+      padding: 10px 12px;
+    }
+
+    #trueaegis-run-receipt[data-receipt-severity="info"] {
+      background: rgba(15, 23, 42, 0.62);
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 12px;
+      margin-top: 12px;
+      padding: 10px 12px;
     }
 
     #trueaegis-validation-status-counts {
@@ -20567,7 +21006,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.39 Scan Job Lifecycle Observability</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.40 Human-Readable Operator Actions</span></div>
     </div>
   </header>
 
@@ -22067,7 +22506,11 @@ def dashboard_index_html_base_v025_operator_link():
           const nextMessage = document.getElementById("investigation-status-message");
 
           if (nextMessage) {
-            nextMessage.textContent = `Saved investigation status: ${status}`;
+            renderDashboardActionReceipt(
+              nextMessage,
+              payload.receipt,
+              payload
+            );
           }
         } catch (error) {
           if (message) {
@@ -22842,6 +23285,41 @@ def dashboard_index_html_base_v025_operator_link():
       `;
     }
 
+    function ensureWorkflowActionReceipt() {
+      let box = document.getElementById("workflow-action-receipt");
+
+      if (box) {
+        return box;
+      }
+
+      const summary = document.getElementById("investigation-center-summary");
+      box = document.createElement("div");
+      box.id = "workflow-action-receipt";
+      box.className = "callout";
+      box.hidden = true;
+
+      if (summary && summary.parentNode) {
+        summary.parentNode.insertBefore(box, summary.nextSibling);
+      }
+
+      return box;
+    }
+
+    function renderWorkflowActionReceipt(receipt, fallbackPayload) {
+      const box = ensureWorkflowActionReceipt();
+
+      if (!box) {
+        return;
+      }
+
+      box.hidden = false;
+      renderDashboardActionReceipt(
+        box,
+        receipt,
+        fallbackPayload || {}
+      );
+    }
+
     async function updateTicketWorkflow(button) {
       const subject = button.dataset.ticketSubject || "";
       const status = button.dataset.ticketStatus || "";
@@ -22871,8 +23349,17 @@ def dashboard_index_html_base_v025_operator_link():
         }
 
         await refreshInvestigationCenter();
+        renderWorkflowActionReceipt(payload.receipt, payload);
       } catch (error) {
-        alert(error && error.message ? error.message : String(error));
+        const message = error && error.message ? error.message : String(error);
+        renderWorkflowActionReceipt(
+          {
+            action: "workflow.ticket_status",
+            severity: "error",
+            message: `Ticket workflow update failed: ${message}`
+          },
+          {}
+        );
       } finally {
         button.disabled = false;
       }
@@ -23573,6 +24060,95 @@ def dashboard_index_html_base_v025_operator_link():
         .replaceAll("'", "&#039;");
     }
 
+    function trueAegisActionReceiptLabel(value) {
+      return String(value || "")
+        .replaceAll("_", " ")
+        .replaceAll("-", " ")
+        .split(" ")
+        .filter(function (part) { return Boolean(part); })
+        .map(function (part) {
+          return part.charAt(0).toUpperCase() + part.slice(1);
+        })
+        .join(" ");
+    }
+
+    function trueAegisActionReceiptValue(value) {
+      if (value === true) { return "Yes"; }
+      if (value === false) { return "No"; }
+      if (value === null || value === undefined || value === "") { return "—"; }
+
+      if (Array.isArray(value)) {
+        return value.length
+          ? value.map(trueAegisActionReceiptValue).join(", ")
+          : "None";
+      }
+
+      if (typeof value === "object") {
+        return Object.entries(value)
+          .map(function (entry) {
+            return `${trueAegisActionReceiptLabel(entry[0])}: ${trueAegisActionReceiptValue(entry[1])}`;
+          })
+          .join("; ");
+      }
+
+      return String(value);
+    }
+
+    function trueAegisActionReceiptText(receipt, fallbackMessage) {
+      const safeReceipt = receipt && typeof receipt === "object"
+        ? receipt
+        : {};
+      const lines = [
+        String(safeReceipt.message || fallbackMessage || "Action completed.")
+      ];
+      const summary = safeReceipt.summary && typeof safeReceipt.summary === "object"
+        ? safeReceipt.summary
+        : {};
+      const identifiers = safeReceipt.identifiers && typeof safeReceipt.identifiers === "object"
+        ? safeReceipt.identifiers
+        : {};
+
+      Object.entries(summary).forEach(function (entry) {
+        lines.push(
+          `${trueAegisActionReceiptLabel(entry[0])}: ${trueAegisActionReceiptValue(entry[1])}`
+        );
+      });
+
+      Object.entries(identifiers).forEach(function (entry) {
+        if (entry[1] === null || entry[1] === undefined || entry[1] === "") {
+          return;
+        }
+
+        lines.push(
+          `${trueAegisActionReceiptLabel(entry[0])}: ${trueAegisActionReceiptValue(entry[1])}`
+        );
+      });
+
+      return lines.join("\\n");
+    }
+
+    function trueAegisRenderActionReceipt(element, receipt, fallbackMessage) {
+      if (!element) {
+        return;
+      }
+
+      const safeReceipt = receipt && typeof receipt === "object"
+        ? receipt
+        : {};
+      element.textContent = trueAegisActionReceiptText(
+        safeReceipt,
+        fallbackMessage
+      );
+      element.dataset.receiptSeverity = String(
+        safeReceipt.severity || "info"
+      ).toLowerCase();
+      element.dataset.receiptAction = String(
+        safeReceipt.action || ""
+      );
+    }
+
+    let deltaAegisTrueAegisLastRunReceipt = null;
+
     function deltaAegisTrueAegisOrchestrationEnsurePanel() {
       let panel = document.getElementById("trueaegis-orchestration-panel");
 
@@ -23690,9 +24266,12 @@ def dashboard_index_html_base_v025_operator_link():
         <div class="grid two-col">
           <div>
             <h3>Readiness</h3>
-            <p><strong>Manifest:</strong> <code>${deltaAegisTrueAegisOrchestrationEsc((context && context.manifest_path) || "-")}</code></p>
-            <p><strong>TrueAegis:</strong> <code>${deltaAegisTrueAegisOrchestrationEsc((context && context.trueaegis_path) || "-")}</code></p>
-            <p><strong>Validation results:</strong> <code>${deltaAegisTrueAegisOrchestrationEsc((context && context.validation_results_dir) || "-")}</code></p>
+            <details class="technical-details">
+              <summary>Technical paths</summary>
+              <p><strong>Manifest:</strong> <code>${deltaAegisTrueAegisOrchestrationEsc((context && context.manifest_path) || "-")}</code></p>
+              <p><strong>TrueAegis:</strong> <code>${deltaAegisTrueAegisOrchestrationEsc((context && context.trueaegis_path) || "-")}</code></p>
+              <p><strong>Validation results:</strong> <code>${deltaAegisTrueAegisOrchestrationEsc((context && context.validation_results_dir) || "-")}</code></p>
+            </details>
             <h4>Blockers</h4>
             ${blockerHtml}
           </div>
@@ -23711,8 +24290,15 @@ def dashboard_index_html_base_v025_operator_link():
               type="button"
               id="trueaegis-refresh-button"
             >Refresh</button>
-            <h4>Command preview</h4>
-            <pre><code>${deltaAegisTrueAegisOrchestrationEsc(commandPreview.join(" "))}</code></pre>
+            <div
+              id="trueaegis-run-receipt"
+              class="muted"
+              data-receipt-severity="info"
+            >No TrueAegis validation has been started from this dashboard session.</div>
+            <details class="technical-details">
+              <summary>Technical command preview</summary>
+              <pre><code>${deltaAegisTrueAegisOrchestrationEsc(commandPreview.join(" "))}</code></pre>
+            </details>
           </div>
         </div>
 
@@ -23734,6 +24320,12 @@ def dashboard_index_html_base_v025_operator_link():
           <tbody>${deltaAegisTrueAegisJobRows(jobs)}</tbody>
         </table>
       `;
+
+      trueAegisRenderActionReceipt(
+        document.getElementById("trueaegis-run-receipt"),
+        deltaAegisTrueAegisLastRunReceipt,
+        "No TrueAegis validation has been started from this dashboard session."
+      );
 
       const refreshButton = document.getElementById("trueaegis-refresh-button");
       if (refreshButton) {
@@ -23766,16 +24358,34 @@ def dashboard_index_html_base_v025_operator_link():
       }
 
       try {
-        await deltaAegisTrueAegisOrchestrationFetchJson("/api/trueaegis/run", {
+        const result = await deltaAegisTrueAegisOrchestrationFetchJson("/api/trueaegis/run", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: "{}"
         });
+        deltaAegisTrueAegisLastRunReceipt = result.receipt || {
+          action: "trueaegis.validation_start",
+          severity: "success",
+          message: result.message || "TrueAegis validation queued successfully.",
+          summary: {
+            status: result.status || "QUEUED",
+            scan_id: result.scan_id || "",
+            network_scope: result.network_scope || ""
+          },
+          identifiers: {
+            job_id: result.job_id || ""
+          }
+        };
         await deltaAegisTrueAegisOrchestrationRefresh();
       } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        deltaAegisTrueAegisLastRunReceipt = {
+          action: "trueaegis.validation_start",
+          severity: "error",
+          message: `TrueAegis validation could not be started: ${message}`
+        };
         await deltaAegisTrueAegisOrchestrationRefresh();
         const panel = deltaAegisTrueAegisOrchestrationEnsurePanel();
-        const message = error && error.message ? error.message : String(error);
         panel.insertAdjacentHTML(
           "afterbegin",
           `<div class="alert error">${deltaAegisTrueAegisOrchestrationEsc(message)}</div>`
@@ -23931,11 +24541,14 @@ def dashboard_index_html_base_v025_operator_link():
     }
 
 
-    function trueAegisValidationSetImportStatus(message, isError) {
+    function trueAegisValidationSetImportStatus(message, isError, severity = "") {
       const status = document.getElementById("trueaegis-validation-import-status");
       if (!status) { return; }
       status.textContent = message || "";
       status.classList.toggle("error", !!isError);
+      status.dataset.receiptSeverity = String(
+        severity || (isError ? "error" : "info")
+      ).toLowerCase();
     }
 
     async function importTrueAegisValidation(mode) {
@@ -23980,9 +24593,14 @@ def dashboard_index_html_base_v025_operator_link():
 
         const imported = result.import_result || {};
         const count = imported.observation_count || imported.imported_observation_count || 0;
+        const fallbackMessage = (
+          `Imported ${count} TrueAegis validation observation(s) from `
+          + `${result.source_path || "selected file"}.`
+        );
         trueAegisValidationSetImportStatus(
-          `Imported ${count} TrueAegis validation observation(s) from ${result.source_path || "selected file"}.`,
-          false
+          trueAegisActionReceiptText(result.receipt, fallbackMessage),
+          false,
+          (result.receipt || {}).severity || "success"
         );
 
         await renderTrueAegisValidationPanel();
@@ -24491,10 +25109,10 @@ def dashboard_index_html() -> str:
 
 
 def dashboard_operator_users_shell_html() -> str:
-    return "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n  <title>DeltaAegis User Management</title>\n  <style>\n    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; background: #020617; color: #e2e8f0; }\n    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, rgba(34,211,238,.13), transparent 34rem), #020617; }\n    main { width: min(1180px, calc(100vw - 32px)); margin: 0 auto; padding: 44px 0; }\n    .panel { border: 1px solid rgba(148,163,184,.22); border-radius: 24px; background: rgba(15,23,42,.92); box-shadow: 0 24px 80px rgba(0,0,0,.34); padding: 28px; }\n    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: .16em; text-transform: uppercase; }\n    h1 { margin: 8px 0 8px; font-size: 32px; letter-spacing: -.04em; }\n    h2 { margin: 26px 0 12px; font-size: 18px; }\n    p { margin: 0 0 20px; color: #94a3b8; line-height: 1.55; }\n    .actions, .form-grid, .row-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }\n    a, button { border: 1px solid rgba(34,211,238,.28); border-radius: 999px; background: rgba(8,145,178,.14); color: #67e8f9; cursor: pointer; padding: 9px 13px; text-decoration: none; font-size: 13px; font-weight: 900; }\n    button:hover, a:hover { background: rgba(8,145,178,.26); }\n    button.danger { border-color: rgba(248,113,113,.35); background: rgba(220,38,38,.12); color: #fecaca; }\n    button.safe { border-color: rgba(34,197,94,.35); background: rgba(22,163,74,.12); color: #bbf7d0; }\n    input, select { border: 1px solid rgba(148,163,184,.22); border-radius: 12px; background: rgba(2,6,23,.48); color: #e2e8f0; padding: 10px 12px; font-weight: 800; }\n    input::placeholder { color: #64748b; }\n    label { color: #94a3b8; display: grid; gap: 6px; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }\n    .status { border: 1px solid rgba(148,163,184,.18); border-radius: 16px; background: rgba(2,6,23,.38); color: #cbd5e1; margin: 18px 0; padding: 12px 14px; font-weight: 700; white-space: pre-wrap; }\n    .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 18px 0 22px; }\n    .card { border: 1px solid rgba(148,163,184,.18); border-radius: 18px; background: rgba(2,6,23,.34); padding: 14px; }\n    .card-label { color: #94a3b8; font-size: 11px; font-weight: 900; letter-spacing: .11em; text-transform: uppercase; }\n    .card-value { color: #f8fafc; font-size: 24px; font-weight: 950; margin-top: 4px; }\n    .table-wrap { overflow-x: auto; border: 1px solid rgba(148,163,184,.18); border-radius: 18px; }\n    table { width: 100%; border-collapse: collapse; min-width: 1020px; }\n    th, td { border-bottom: 1px solid rgba(148,163,184,.14); padding: 12px 14px; text-align: left; vertical-align: top; }\n    th { color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }\n    td { color: #e2e8f0; font-size: 13px; font-weight: 700; }\n    .pill { display: inline-flex; border: 1px solid rgba(148,163,184,.22); border-radius: 999px; padding: 4px 8px; font-size: 11px; font-weight: 950; text-transform: uppercase; letter-spacing: .06em; }\n    .enabled { color: #bbf7d0; border-color: rgba(34,197,94,.35); background: rgba(22,163,74,.12); }\n    .disabled { color: #fecaca; border-color: rgba(248,113,113,.35); background: rgba(220,38,38,.12); }\n    .muted { color: #94a3b8; font-weight: 600; }\n  </style>\n</head>\n<body>\n  <main>\n    <section class=\"panel\">\n      <div class=\"eyebrow\">DeltaAegis Admin</div>\n      <h1>User Management</h1>\n      <p>ADMIN-only v0.26 control surface for local dashboard users. State-changing user actions require ADMIN access and are sent to audited backend APIs. Passwords are never displayed after submission.</p>\n\n      <div class=\"actions\">\n        <a href=\"/operator\">Back to operator session</a>\n        <a href=\"/\">Back to dashboard</a>\n        <a href=\"/api/admin/users\">View raw /api/admin/users JSON</a>\n        <button type=\"button\" id=\"operator-users-refresh\">Refresh users</button>\n      </div>\n\n      <h2>Create user</h2>\n      <form id=\"operator-create-user-form\" class=\"form-grid\">\n        <label>Username\n          <input id=\"operator-create-username\" name=\"username\" autocomplete=\"off\" required placeholder=\"analyst.one\">\n        </label>\n        <label>Display name\n          <input id=\"operator-create-display-name\" name=\"display_name\" autocomplete=\"off\" placeholder=\"Analyst One\">\n        </label>\n        <label>Role\n          <select id=\"operator-create-role\" name=\"role\">\n            <option value=\"VIEWER\">VIEWER</option>\n            <option value=\"ANALYST\">ANALYST</option>\n            <option value=\"ADMIN\">ADMIN</option>\n          </select>\n        </label>\n        <label>Temporary password\n          <input id=\"operator-create-password\" name=\"password\" type=\"password\" autocomplete=\"new-password\" required placeholder=\"Minimum 8 characters\">\n        </label>\n        <button type=\"submit\" class=\"safe\">Create user</button>\n      </form>\n\n      <div class=\"status\" id=\"operator-users-status\">Loading users\u2026</div>\n\n      <div class=\"summary\" id=\"operator-users-summary\" hidden>\n        <div class=\"card\"><div class=\"card-label\">Users</div><div class=\"card-value\" id=\"operator-users-count\">0</div></div>\n        <div class=\"card\"><div class=\"card-label\">Enabled</div><div class=\"card-value\" id=\"operator-users-enabled-count\">0</div></div>\n        <div class=\"card\"><div class=\"card-label\">Admins</div><div class=\"card-value\" id=\"operator-users-admin-count\">0</div></div>\n        <div class=\"card\"><div class=\"card-label\">Analysts</div><div class=\"card-value\" id=\"operator-users-analyst-count\">0</div></div>\n        <div class=\"card\"><div class=\"card-label\">Viewers</div><div class=\"card-value\" id=\"operator-users-viewer-count\">0</div></div>\n      </div>\n\n      <div class=\"table-wrap\" id=\"operator-users-table-wrap\" hidden>\n        <table>\n          <thead>\n            <tr>\n              <th>Username</th><th>Display name</th><th>Role</th><th>Status</th>\n              <th>Password</th><th>Active tokens</th><th>Last token used</th><th>Updated</th><th>Actions</th>\n            </tr>\n          </thead>\n          <tbody id=\"operator-users-body\"></tbody>\n        </table>\n      </div>\n\n      <h2>Recent user-management audit events</h2>\n      <p class=\"muted\">Shows recent audited dashboard user-management actions. Secrets, password hashes, token hashes, raw tokens, and submitted password values are not displayed.</p>\n      <div class=\"actions\">\n        <button type=\"button\" id=\"operator-users-audit-refresh\">Refresh audit trail</button>\n        <a href=\"/api/access-audit?limit=50\">View raw /api/access-audit JSON</a>\n      </div>\n      <div class=\"status\" id=\"operator-users-audit-status\">Loading user-management audit events\u2026</div>\n      <div class=\"table-wrap\" id=\"operator-users-audit-table-wrap\" hidden>\n        <table>\n          <thead>\n            <tr>\n              <th>Timestamp</th><th>Action</th><th>Target</th><th>Actor</th><th>Details</th>\n            </tr>\n          </thead>\n          <tbody id=\"operator-users-audit-body\"></tbody>\n        </table>\n      </div>\n\n    </section>\n  </main>\n\n  <script>\n    function text(value) {\n      if (value === null || value === undefined || value === \"\") { return \"\u2014\"; }\n      return String(value);\n    }\n\n    function setText(id, value) {\n      const element = document.getElementById(id);\n      if (element) { element.textContent = text(value); }\n    }\n\n    function escapeHtml(value) {\n      return text(value)\n        .replaceAll(\"&\", \"&amp;\")\n        .replaceAll(\"<\", \"&lt;\")\n        .replaceAll(\">\", \"&gt;\")\n        .replaceAll('\"', \"&quot;\")\n        .replaceAll(\"'\", \"&#039;\");\n    }\n\n    function roleOptions(currentRole) {\n      return [\"ADMIN\", \"ANALYST\", \"VIEWER\"].map(function (role) {\n        const selected = role === currentRole ? \" selected\" : \"\";\n        return `<option value=\"${role}\"${selected}>${role}</option>`;\n      }).join(\"\");\n    }\n\n    async function adminPost(path, payload) {\n      const response = await fetch(path, {\n        method: \"POST\",\n        credentials: \"same-origin\",\n        cache: \"no-store\",\n        headers: { \"Content-Type\": \"application/json\" },\n        body: JSON.stringify(payload || {})\n      });\n\n      let data = {};\n      try { data = await response.json(); } catch (error) { data = {}; }\n\n      if (response.status === 401) {\n        window.location.href = \"/login\";\n        return null;\n      }\n\n      if (!response.ok) {\n        throw new Error(data.error || data.message || `Request failed with HTTP ${response.status}`);\n      }\n\n      return data;\n    }\n\n    async function loadOperatorUsers() {\n      const status = document.getElementById(\"operator-users-status\");\n      const summary = document.getElementById(\"operator-users-summary\");\n      const tableWrap = document.getElementById(\"operator-users-table-wrap\");\n      const body = document.getElementById(\"operator-users-body\");\n\n      try {\n        const response = await fetch(\"/api/admin/users\", {\n          credentials: \"same-origin\",\n          cache: \"no-store\"\n        });\n\n        if (response.status === 401) {\n          window.location.href = \"/login\";\n          return;\n        }\n\n        if (response.status === 403) {\n          status.textContent = \"Admin role required.\";\n          return;\n        }\n\n        if (!response.ok) {\n          status.textContent = \"User lookup failed.\";\n          return;\n        }\n\n        const payload = await response.json();\n        const roleCounts = payload.role_counts || {};\n        const users = payload.users || [];\n\n        setText(\"operator-users-count\", payload.count || users.length || 0);\n        setText(\"operator-users-enabled-count\", payload.enabled_count || 0);\n        setText(\"operator-users-admin-count\", roleCounts.ADMIN || 0);\n        setText(\"operator-users-analyst-count\", roleCounts.ANALYST || 0);\n        setText(\"operator-users-viewer-count\", roleCounts.VIEWER || 0);\n\n        body.innerHTML = users.length\n          ? users.map(function (user) {\n              const enabledClass = user.enabled ? \"enabled\" : \"disabled\";\n              const enabledText = user.enabled ? \"Enabled\" : \"Disabled\";\n              const toggleAction = user.enabled ? \"disable\" : \"enable\";\n              const toggleLabel = user.enabled ? \"Disable\" : \"Enable\";\n              const toggleClass = user.enabled ? \"danger\" : \"safe\";\n\n              return `\n                <tr data-username=\"${escapeHtml(user.username)}\">\n                  <td>${escapeHtml(user.username)}</td>\n                  <td>${escapeHtml(user.display_name)}</td>\n                  <td>\n                    <select data-role-select=\"${escapeHtml(user.username)}\">\n                      ${roleOptions(user.role)}\n                    </select>\n                  </td>\n                  <td><span class=\"pill ${enabledClass}\">${enabledText}</span></td>\n                  <td>${user.password_configured ? \"Configured\" : '<span class=\"muted\">Not set</span>'}</td>\n                  <td>${escapeHtml(user.active_token_count)}</td>\n                  <td>${escapeHtml(user.last_token_used_at)}</td>\n                  <td>${escapeHtml(user.updated_at)}</td>\n                  <td>\n                    <div class=\"row-actions\">\n                      <button type=\"button\" data-action=\"role\" data-username=\"${escapeHtml(user.username)}\">Change role</button>\n                      <button type=\"button\" data-action=\"password\" data-username=\"${escapeHtml(user.username)}\">Rotate password</button>\n                      <button type=\"button\" class=\"${toggleClass}\" data-action=\"${toggleAction}\" data-username=\"${escapeHtml(user.username)}\">${toggleLabel}</button>\n                    </div>\n                  </td>\n                </tr>\n              `;\n            }).join(\"\")\n          : '<tr><td colspan=\"9\" class=\"muted\">No users found.</td></tr>';\n\n        status.textContent = \"Users loaded.\";\n        summary.hidden = false;\n        tableWrap.hidden = false;\n      } catch (error) {\n        status.textContent = `User lookup failed: ${error.message || error}`;\n      }\n    }\n\n    document.getElementById(\"operator-users-refresh\").addEventListener(\"click\", loadOperatorUsers);\n\n    document.getElementById(\"operator-create-user-form\").addEventListener(\"submit\", async function (event) {\n      event.preventDefault();\n      const status = document.getElementById(\"operator-users-status\");\n      const form = event.currentTarget;\n\n      const payload = {\n        username: document.getElementById(\"operator-create-username\").value,\n        display_name: document.getElementById(\"operator-create-display-name\").value,\n        role: document.getElementById(\"operator-create-role\").value,\n        password: document.getElementById(\"operator-create-password\").value\n      };\n\n      try {\n        await adminPost(\"/api/admin/users\", payload);\n        form.reset();\n        status.textContent = `Created user ${payload.username}.`;\n        await loadOperatorUsers();\n      } catch (error) {\n        status.textContent = `Create user failed: ${error.message || error}`;\n      }\n    });\n\n    document.getElementById(\"operator-users-body\").addEventListener(\"click\", async function (event) {\n      const button = event.target.closest(\"button[data-action]\");\n      if (!button) { return; }\n\n      const username = button.dataset.username;\n      const action = button.dataset.action;\n      const status = document.getElementById(\"operator-users-status\");\n\n      try {\n        if (action === \"role\") {\n          const roleSelect = document.querySelector(`[data-role-select=\"${CSS.escape(username)}\"]`);\n          await adminPost(`/api/admin/users/${encodeURIComponent(username)}/role`, {\n            role: roleSelect ? roleSelect.value : \"VIEWER\"\n          });\n          status.textContent = `Changed role for ${username}.`;\n        } else if (action === \"password\") {\n          const password = window.prompt(`Enter a new temporary password for ${username}. It will not be displayed after submission.`);\n          if (!password) {\n            status.textContent = \"Password rotation cancelled.\";\n            return;\n          }\n          await adminPost(`/api/admin/users/${encodeURIComponent(username)}/password`, {\n            password: password\n          });\n          status.textContent = `Rotated password for ${username}.`;\n        } else if (action === \"disable\" || action === \"enable\") {\n          await adminPost(`/api/admin/users/${encodeURIComponent(username)}/${action}`, {});\n          status.textContent = `${action === \"disable\" ? \"Disabled\" : \"Enabled\"} ${username}.`;\n        }\n\n        await loadOperatorUsers();\n      } catch (error) {\n        status.textContent = `Action failed: ${error.message || error}`;\n      }\n    });\n\n\n    function auditEventsFromPayload(payload) {\n      if (!payload) { return []; }\n      if (Array.isArray(payload.events)) { return payload.events; }\n      if (Array.isArray(payload.audit_events)) { return payload.audit_events; }\n      if (Array.isArray(payload.rows)) { return payload.rows; }\n      if (Array.isArray(payload.items)) { return payload.items; }\n      return [];\n    }\n\n    function actorText(event) {\n      const details = event.details || {};\n      const actor = details.actor || {};\n      return text(\n        event.actor_username ||\n        event.username ||\n        actor.username ||\n        actor.token_name ||\n        actor.user_id ||\n        \"\u2014\"\n      );\n    }\n\n    function targetText(event) {\n      return text(\n        event.target_key ||\n        event.target_username ||\n        event.target ||\n        event.resource ||\n        \"\u2014\"\n      );\n    }\n\n    function safeAuditDetails(event) {\n      const details = Object.assign({}, event.details || {});\n      if (details.actor) {\n        details.actor = {\n          username: details.actor.username || details.actor.token_name || \"\u2014\",\n          role: details.actor.role || \"\u2014\",\n          auth_type: details.actor.auth_type || \"\u2014\"\n        };\n      }\n\n      for (const key of Object.keys(details)) {\n        const lower = key.toLowerCase();\n        if (\n          lower.includes(\"password\") ||\n          lower.includes(\"token\") ||\n          lower.includes(\"secret\") ||\n          lower.includes(\"hash\")\n        ) {\n          details[key] = \"[redacted]\";\n        }\n      }\n\n      return JSON.stringify(details, null, 2);\n    }\n\n    async function loadOperatorUserAuditEvents() {\n      const status = document.getElementById(\"operator-users-audit-status\");\n      const tableWrap = document.getElementById(\"operator-users-audit-table-wrap\");\n      const body = document.getElementById(\"operator-users-audit-body\");\n\n      try {\n        const response = await fetch(\"/api/access-audit?limit=50\", {\n          credentials: \"same-origin\",\n          cache: \"no-store\"\n        });\n\n        if (response.status === 401) {\n          window.location.href = \"/login\";\n          return;\n        }\n\n        if (response.status === 403) {\n          status.textContent = \"Admin role required for audit visibility.\";\n          return;\n        }\n\n        if (!response.ok) {\n          status.textContent = \"Audit lookup failed.\";\n          return;\n        }\n\n        const payload = await response.json();\n        const events = auditEventsFromPayload(payload)\n          .filter(function (event) {\n            return String(event.action || \"\").startsWith(\"ACCESS_USER_DASHBOARD_\");\n          })\n          .slice(0, 20);\n\n        body.innerHTML = events.length\n          ? events.map(function (event) {\n              return `\n                <tr>\n                  <td>${escapeHtml(event.created_at || event.timestamp || event.event_time)}</td>\n                  <td><span class=\"pill\">${escapeHtml(event.action)}</span></td>\n                  <td>${escapeHtml(targetText(event))}</td>\n                  <td>${escapeHtml(actorText(event))}</td>\n                  <td><pre class=\"muted\">${escapeHtml(safeAuditDetails(event))}</pre></td>\n                </tr>\n              `;\n            }).join(\"\")\n          : '<tr><td colspan=\"5\" class=\"muted\">No user-management audit events found.</td></tr>';\n\n        status.textContent = `Loaded ${events.length} user-management audit event(s).`;\n        tableWrap.hidden = false;\n      } catch (error) {\n        status.textContent = `Audit lookup failed: ${error.message || error}`;\n      }\n    }\n\n    document.getElementById(\"operator-users-audit-refresh\").addEventListener(\"click\", loadOperatorUserAuditEvents);\n\n    loadOperatorUsers();\n    loadOperatorUserAuditEvents();\n  </script>\n</body>\n</html>"
+    return '<!doctype html>\n<html lang="en">\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-width,initial-scale=1">\n  <title>DeltaAegis User Management</title>\n  <style>\n    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #020617; color: #e2e8f0; }\n    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, rgba(34,211,238,.13), transparent 34rem), #020617; }\n    main { width: min(1180px, calc(100vw - 32px)); margin: 0 auto; padding: 44px 0; }\n    .panel { border: 1px solid rgba(148,163,184,.22); border-radius: 24px; background: rgba(15,23,42,.92); box-shadow: 0 24px 80px rgba(0,0,0,.34); padding: 28px; }\n    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: .16em; text-transform: uppercase; }\n    h1 { margin: 8px 0 8px; font-size: 32px; letter-spacing: -.04em; }\n    h2 { margin: 26px 0 12px; font-size: 18px; }\n    p { margin: 0 0 20px; color: #94a3b8; line-height: 1.55; }\n    .actions, .form-grid, .row-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }\n    a, button { border: 1px solid rgba(34,211,238,.28); border-radius: 999px; background: rgba(8,145,178,.14); color: #67e8f9; cursor: pointer; padding: 9px 13px; text-decoration: none; font-size: 13px; font-weight: 900; }\n    button:hover, a:hover { background: rgba(8,145,178,.26); }\n    button.danger { border-color: rgba(248,113,113,.35); background: rgba(220,38,38,.12); color: #fecaca; }\n    button.safe { border-color: rgba(34,197,94,.35); background: rgba(22,163,74,.12); color: #bbf7d0; }\n    input, select { border: 1px solid rgba(148,163,184,.22); border-radius: 12px; background: rgba(2,6,23,.48); color: #e2e8f0; padding: 10px 12px; font-weight: 800; }\n    input::placeholder { color: #64748b; }\n    label { color: #94a3b8; display: grid; gap: 6px; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }\n    .status { border: 1px solid rgba(148,163,184,.18); border-radius: 16px; background: rgba(2,6,23,.38); color: #cbd5e1; margin: 18px 0; padding: 12px 14px; font-weight: 700; white-space: pre-wrap; }\n    .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 18px 0 22px; }\n    .card { border: 1px solid rgba(148,163,184,.18); border-radius: 18px; background: rgba(2,6,23,.34); padding: 14px; }\n    .card-label { color: #94a3b8; font-size: 11px; font-weight: 900; letter-spacing: .11em; text-transform: uppercase; }\n    .card-value { color: #f8fafc; font-size: 24px; font-weight: 950; margin-top: 4px; }\n    .table-wrap { overflow-x: auto; border: 1px solid rgba(148,163,184,.18); border-radius: 18px; }\n    table { width: 100%; border-collapse: collapse; min-width: 1020px; }\n    th, td { border-bottom: 1px solid rgba(148,163,184,.14); padding: 12px 14px; text-align: left; vertical-align: top; }\n    th { color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }\n    td { color: #e2e8f0; font-size: 13px; font-weight: 700; }\n    .pill { display: inline-flex; border: 1px solid rgba(148,163,184,.22); border-radius: 999px; padding: 4px 8px; font-size: 11px; font-weight: 950; text-transform: uppercase; letter-spacing: .06em; }\n    .enabled { color: #bbf7d0; border-color: rgba(34,197,94,.35); background: rgba(22,163,74,.12); }\n    .disabled { color: #fecaca; border-color: rgba(248,113,113,.35); background: rgba(220,38,38,.12); }\n    .muted { color: #94a3b8; font-weight: 600; }\n  </style>\n</head>\n<body>\n  <main>\n    <section class="panel">\n      <div class="eyebrow">DeltaAegis Admin</div>\n      <h1>User Management</h1>\n      <p>ADMIN-only v0.26 control surface for local dashboard users. State-changing user actions require ADMIN access and are sent to audited backend APIs. Passwords are never displayed after submission.</p>\n\n      <div class="actions">\n        <a href="/operator">Back to operator session</a>\n        <a href="/">Back to dashboard</a>\n        <a href="/api/admin/users">View raw /api/admin/users JSON</a>\n        <button type="button" id="operator-users-refresh">Refresh users</button>\n      </div>\n\n      <h2>Create user</h2>\n      <form id="operator-create-user-form" class="form-grid">\n        <label>Username\n          <input id="operator-create-username" name="username" autocomplete="off" required placeholder="analyst.one">\n        </label>\n        <label>Display name\n          <input id="operator-create-display-name" name="display_name" autocomplete="off" placeholder="Analyst One">\n        </label>\n        <label>Role\n          <select id="operator-create-role" name="role">\n            <option value="VIEWER">VIEWER</option>\n            <option value="ANALYST">ANALYST</option>\n            <option value="ADMIN">ADMIN</option>\n          </select>\n        </label>\n        <label>Temporary password\n          <input id="operator-create-password" name="password" type="password" autocomplete="new-password" required placeholder="Minimum 8 characters">\n        </label>\n        <button type="submit" class="safe">Create user</button>\n      </form>\n\n      <div class="status" id="operator-users-status">Loading users…</div>\n\n      <div class="summary" id="operator-users-summary" hidden>\n        <div class="card"><div class="card-label">Users</div><div class="card-value" id="operator-users-count">0</div></div>\n        <div class="card"><div class="card-label">Enabled</div><div class="card-value" id="operator-users-enabled-count">0</div></div>\n        <div class="card"><div class="card-label">Admins</div><div class="card-value" id="operator-users-admin-count">0</div></div>\n        <div class="card"><div class="card-label">Analysts</div><div class="card-value" id="operator-users-analyst-count">0</div></div>\n        <div class="card"><div class="card-label">Viewers</div><div class="card-value" id="operator-users-viewer-count">0</div></div>\n      </div>\n\n      <div class="table-wrap" id="operator-users-table-wrap" hidden>\n        <table>\n          <thead>\n            <tr>\n              <th>Username</th><th>Display name</th><th>Role</th><th>Status</th>\n              <th>Password</th><th>Active tokens</th><th>Last token used</th><th>Updated</th><th>Actions</th>\n            </tr>\n          </thead>\n          <tbody id="operator-users-body"></tbody>\n        </table>\n      </div>\n\n      <h2>Recent user-management audit events</h2>\n      <p class="muted">Shows recent audited dashboard user-management actions. Secrets, password hashes, token hashes, raw tokens, and submitted password values are not displayed.</p>\n      <div class="actions">\n        <button type="button" id="operator-users-audit-refresh">Refresh audit trail</button>\n        <a href="/api/access-audit?limit=50">View raw /api/access-audit JSON</a>\n      </div>\n      <div class="status" id="operator-users-audit-status">Loading user-management audit events…</div>\n      <div class="table-wrap" id="operator-users-audit-table-wrap" hidden>\n        <table>\n          <thead>\n            <tr>\n              <th>Timestamp</th><th>Action</th><th>Target</th><th>Actor</th><th>Details</th>\n            </tr>\n          </thead>\n          <tbody id="operator-users-audit-body"></tbody>\n        </table>\n      </div>\n\n    </section>\n  </main>\n\n  <script>\n    function text(value) {\n      if (value === null || value === undefined || value === "") { return "—"; }\n      return String(value);\n    }\n\n    function setText(id, value) {\n      const element = document.getElementById(id);\n      if (element) { element.textContent = text(value); }\n    }\n\n    function adminReceiptLabel(value) {\n      return String(value || "")\n        .replaceAll("_", " ")\n        .replaceAll("-", " ")\n        .split(" ")\n        .filter(function (part) { return Boolean(part); })\n        .map(function (part) {\n          return part.charAt(0).toUpperCase() + part.slice(1);\n        })\n        .join(" ");\n    }\n\n    function adminReceiptValue(value) {\n      if (value === true) { return "Yes"; }\n      if (value === false) { return "No"; }\n      if (value === null || value === undefined || value === "") { return "—"; }\n      return String(value);\n    }\n\n    function adminActionReceiptText(receipt, fallbackMessage) {\n      const safeReceipt = receipt && typeof receipt === "object"\n        ? receipt\n        : {};\n      const lines = [\n        String(safeReceipt.message || fallbackMessage || "Action completed.")\n      ];\n      const summary = safeReceipt.summary && typeof safeReceipt.summary === "object"\n        ? safeReceipt.summary\n        : {};\n      const identifiers = safeReceipt.identifiers && typeof safeReceipt.identifiers === "object"\n        ? safeReceipt.identifiers\n        : {};\n\n      Object.entries(summary).forEach(function (entry) {\n        if (entry[1] === null || entry[1] === undefined || entry[1] === "") {\n          return;\n        }\n        lines.push(\n          `${adminReceiptLabel(entry[0])}: ${adminReceiptValue(entry[1])}`\n        );\n      });\n\n      Object.entries(identifiers).forEach(function (entry) {\n        if (entry[1] === null || entry[1] === undefined || entry[1] === "") {\n          return;\n        }\n        lines.push(\n          `${adminReceiptLabel(entry[0])}: ${adminReceiptValue(entry[1])}`\n        );\n      });\n\n      return lines.join("\\n");\n    }\n\n    function renderAdminActionReceipt(status, receipt, fallbackMessage) {\n      if (!status) { return; }\n      status.textContent = adminActionReceiptText(\n        receipt,\n        fallbackMessage\n      );\n      status.dataset.receiptSeverity = String(\n        (receipt || {}).severity || "info"\n      ).toLowerCase();\n      status.dataset.receiptAction = String(\n        (receipt || {}).action || ""\n      );\n    }\n\n    function escapeHtml(value) {\n      return text(value)\n        .replaceAll("&", "&amp;")\n        .replaceAll("<", "&lt;")\n        .replaceAll(">", "&gt;")\n        .replaceAll(\'"\', "&quot;")\n        .replaceAll("\'", "&#039;");\n    }\n\n    function roleOptions(currentRole) {\n      return ["ADMIN", "ANALYST", "VIEWER"].map(function (role) {\n        const selected = role === currentRole ? " selected" : "";\n        return `<option value="${role}"${selected}>${role}</option>`;\n      }).join("");\n    }\n\n    async function adminPost(path, payload) {\n      const response = await fetch(path, {\n        method: "POST",\n        credentials: "same-origin",\n        cache: "no-store",\n        headers: { "Content-Type": "application/json" },\n        body: JSON.stringify(payload || {})\n      });\n\n      let data = {};\n      try { data = await response.json(); } catch (error) { data = {}; }\n\n      if (response.status === 401) {\n        window.location.href = "/login";\n        return null;\n      }\n\n      if (!response.ok) {\n        throw new Error(data.error || data.message || `Request failed with HTTP ${response.status}`);\n      }\n\n      return data;\n    }\n\n    async function loadOperatorUsers() {\n      const status = document.getElementById("operator-users-status");\n      const summary = document.getElementById("operator-users-summary");\n      const tableWrap = document.getElementById("operator-users-table-wrap");\n      const body = document.getElementById("operator-users-body");\n\n      try {\n        const response = await fetch("/api/admin/users", {\n          credentials: "same-origin",\n          cache: "no-store"\n        });\n\n        if (response.status === 401) {\n          window.location.href = "/login";\n          return;\n        }\n\n        if (response.status === 403) {\n          status.textContent = "Admin role required.";\n          return;\n        }\n\n        if (!response.ok) {\n          status.textContent = "User lookup failed.";\n          return;\n        }\n\n        const payload = await response.json();\n        const roleCounts = payload.role_counts || {};\n        const users = payload.users || [];\n\n        setText("operator-users-count", payload.count || users.length || 0);\n        setText("operator-users-enabled-count", payload.enabled_count || 0);\n        setText("operator-users-admin-count", roleCounts.ADMIN || 0);\n        setText("operator-users-analyst-count", roleCounts.ANALYST || 0);\n        setText("operator-users-viewer-count", roleCounts.VIEWER || 0);\n\n        body.innerHTML = users.length\n          ? users.map(function (user) {\n              const enabledClass = user.enabled ? "enabled" : "disabled";\n              const enabledText = user.enabled ? "Enabled" : "Disabled";\n              const toggleAction = user.enabled ? "disable" : "enable";\n              const toggleLabel = user.enabled ? "Disable" : "Enable";\n              const toggleClass = user.enabled ? "danger" : "safe";\n\n              return `\n                <tr data-username="${escapeHtml(user.username)}">\n                  <td>${escapeHtml(user.username)}</td>\n                  <td>${escapeHtml(user.display_name)}</td>\n                  <td>\n                    <select data-role-select="${escapeHtml(user.username)}">\n                      ${roleOptions(user.role)}\n                    </select>\n                  </td>\n                  <td><span class="pill ${enabledClass}">${enabledText}</span></td>\n                  <td>${user.password_configured ? "Configured" : \'<span class="muted">Not set</span>\'}</td>\n                  <td>${escapeHtml(user.active_token_count)}</td>\n                  <td>${escapeHtml(user.last_token_used_at)}</td>\n                  <td>${escapeHtml(user.updated_at)}</td>\n                  <td>\n                    <div class="row-actions">\n                      <button type="button" data-action="role" data-username="${escapeHtml(user.username)}">Change role</button>\n                      <button type="button" data-action="password" data-username="${escapeHtml(user.username)}">Rotate password</button>\n                      <button type="button" class="${toggleClass}" data-action="${toggleAction}" data-username="${escapeHtml(user.username)}">${toggleLabel}</button>\n                    </div>\n                  </td>\n                </tr>\n              `;\n            }).join("")\n          : \'<tr><td colspan="9" class="muted">No users found.</td></tr>\';\n\n        status.textContent = "Users loaded.";\n        summary.hidden = false;\n        tableWrap.hidden = false;\n      } catch (error) {\n        status.textContent = `User lookup failed: ${error.message || error}`;\n      }\n    }\n\n    document.getElementById("operator-users-refresh").addEventListener("click", loadOperatorUsers);\n\n    document.getElementById("operator-create-user-form").addEventListener("submit", async function (event) {\n      event.preventDefault();\n      const status = document.getElementById("operator-users-status");\n      const form = event.currentTarget;\n\n      const payload = {\n        username: document.getElementById("operator-create-username").value,\n        display_name: document.getElementById("operator-create-display-name").value,\n        role: document.getElementById("operator-create-role").value,\n        password: document.getElementById("operator-create-password").value\n      };\n\n      try {\n        const result = await adminPost("/api/admin/users", payload);\n        form.reset();\n        await loadOperatorUsers();\n        renderAdminActionReceipt(\n          status,\n          result && result.receipt,\n          `Created user ${payload.username}.`\n        );\n      } catch (error) {\n        status.textContent = `Create user failed: ${error.message || error}`;\n      }\n    });\n\n    document.getElementById("operator-users-body").addEventListener("click", async function (event) {\n      const button = event.target.closest("button[data-action]");\n      if (!button) { return; }\n\n      const username = button.dataset.username;\n      const action = button.dataset.action;\n      const status = document.getElementById("operator-users-status");\n\n      try {\n        let result = null;\n        let fallbackMessage = `Updated user ${username}.`;\n\n        if (action === "role") {\n          const roleSelect = document.querySelector(`[data-role-select="${CSS.escape(username)}"]`);\n          result = await adminPost(`/api/admin/users/${encodeURIComponent(username)}/role`, {\n            role: roleSelect ? roleSelect.value : "VIEWER"\n          });\n          fallbackMessage = `Changed role for ${username}.`;\n        } else if (action === "password") {\n          const password = window.prompt(`Enter a new temporary password for ${username}. It will not be displayed after submission.`);\n          if (!password) {\n            status.textContent = "Password rotation cancelled.";\n            return;\n          }\n          result = await adminPost(`/api/admin/users/${encodeURIComponent(username)}/password`, {\n            password: password\n          });\n          fallbackMessage = `Rotated password for ${username}.`;\n        } else if (action === "disable" || action === "enable") {\n          result = await adminPost(`/api/admin/users/${encodeURIComponent(username)}/${action}`, {});\n          fallbackMessage = `${action === "disable" ? "Disabled" : "Enabled"} ${username}.`;\n        }\n\n        await loadOperatorUsers();\n        renderAdminActionReceipt(\n          status,\n          result && result.receipt,\n          fallbackMessage\n        );\n      } catch (error) {\n        status.textContent = `Action failed: ${error.message || error}`;\n      }\n    });\n\n\n    function auditEventsFromPayload(payload) {\n      if (!payload) { return []; }\n      if (Array.isArray(payload.events)) { return payload.events; }\n      if (Array.isArray(payload.audit_events)) { return payload.audit_events; }\n      if (Array.isArray(payload.rows)) { return payload.rows; }\n      if (Array.isArray(payload.items)) { return payload.items; }\n      return [];\n    }\n\n    function actorText(event) {\n      const details = event.details || {};\n      const actor = details.actor || {};\n      return text(\n        event.actor_username ||\n        event.username ||\n        actor.username ||\n        actor.token_name ||\n        actor.user_id ||\n        "—"\n      );\n    }\n\n    function targetText(event) {\n      return text(\n        event.target_key ||\n        event.target_username ||\n        event.target ||\n        event.resource ||\n        "—"\n      );\n    }\n\n    function safeAuditDetails(event) {\n      const details = Object.assign({}, event.details || {});\n      if (details.actor) {\n        details.actor = {\n          username: details.actor.username || details.actor.token_name || "—",\n          role: details.actor.role || "—",\n          auth_type: details.actor.auth_type || "—"\n        };\n      }\n\n      for (const key of Object.keys(details)) {\n        const lower = key.toLowerCase();\n        if (\n          lower.includes("password") ||\n          lower.includes("token") ||\n          lower.includes("secret") ||\n          lower.includes("hash")\n        ) {\n          details[key] = "[redacted]";\n        }\n      }\n\n      return JSON.stringify(details, null, 2);\n    }\n\n    async function loadOperatorUserAuditEvents() {\n      const status = document.getElementById("operator-users-audit-status");\n      const tableWrap = document.getElementById("operator-users-audit-table-wrap");\n      const body = document.getElementById("operator-users-audit-body");\n\n      try {\n        const response = await fetch("/api/access-audit?limit=50", {\n          credentials: "same-origin",\n          cache: "no-store"\n        });\n\n        if (response.status === 401) {\n          window.location.href = "/login";\n          return;\n        }\n\n        if (response.status === 403) {\n          status.textContent = "Admin role required for audit visibility.";\n          return;\n        }\n\n        if (!response.ok) {\n          status.textContent = "Audit lookup failed.";\n          return;\n        }\n\n        const payload = await response.json();\n        const events = auditEventsFromPayload(payload)\n          .filter(function (event) {\n            return String(event.action || "").startsWith("ACCESS_USER_DASHBOARD_");\n          })\n          .slice(0, 20);\n\n        body.innerHTML = events.length\n          ? events.map(function (event) {\n              return `\n                <tr>\n                  <td>${escapeHtml(event.created_at || event.timestamp || event.event_time)}</td>\n                  <td><span class="pill">${escapeHtml(event.action)}</span></td>\n                  <td>${escapeHtml(targetText(event))}</td>\n                  <td>${escapeHtml(actorText(event))}</td>\n                  <td><details><summary>View details</summary><pre class="muted">${escapeHtml(safeAuditDetails(event))}</pre></details></td>\n                </tr>\n              `;\n            }).join("")\n          : \'<tr><td colspan="5" class="muted">No user-management audit events found.</td></tr>\';\n\n        status.textContent = `Loaded ${events.length} user-management audit event(s).`;\n        tableWrap.hidden = false;\n      } catch (error) {\n        status.textContent = `Audit lookup failed: ${error.message || error}`;\n      }\n    }\n\n    document.getElementById("operator-users-audit-refresh").addEventListener("click", loadOperatorUserAuditEvents);\n\n    loadOperatorUsers();\n    loadOperatorUserAuditEvents();\n  </script>\n</body>\n</html>'
 
 def dashboard_operator_session_shell_html() -> str:
-    return "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n  <title>DeltaAegis Operator Session</title>\n  <style>\n    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; background: #020617; color: #e2e8f0; }\n    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, rgba(34, 211, 238, 0.13), transparent 34rem), #020617; }\n    main { width: min(900px, calc(100vw - 32px)); margin: 0 auto; padding: 44px 0; }\n    .panel { border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 24px; background: rgba(15, 23, 42, 0.92); box-shadow: 0 24px 80px rgba(0, 0, 0, 0.34); padding: 28px; }\n    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: 0.16em; text-transform: uppercase; }\n    h1 { margin: 8px 0 8px; font-size: 32px; letter-spacing: -0.04em; }\n    p { margin: 0 0 24px; color: #94a3b8; line-height: 1.55; }\n    table { width: 100%; border-collapse: collapse; margin: 22px 0; overflow: hidden; border-radius: 16px; }\n    th, td { border-bottom: 1px solid rgba(148, 163, 184, 0.14); padding: 13px 14px; text-align: left; }\n    th { width: 180px; color: #94a3b8; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }\n    td { color: #f8fafc; font-weight: 700; }\n    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }\n    a { border: 1px solid rgba(34, 211, 238, 0.28); border-radius: 999px; color: #67e8f9; padding: 9px 13px; text-decoration: none; font-size: 13px; font-weight: 900; }\n    a.logout { border-color: rgba(248, 113, 113, 0.34); color: #fecaca; }\n    .status { border: 1px solid rgba(148, 163, 184, 0.18); border-radius: 16px; background: rgba(2, 6, 23, 0.38); color: #cbd5e1; margin-top: 18px; padding: 12px 14px; font-weight: 700; }\n  </style>\n\n  <style id=\"deltaaegis-operator-audit-layout-fix\">\n    main {\n      width: min(1180px, calc(100vw - 32px)) !important;\n    }\n\n    h2 {\n      margin-top: 28px;\n      margin-bottom: 12px;\n      font-size: 22px;\n      letter-spacing: -0.02em;\n    }\n\n    .muted {\n      color: #94a3b8;\n      overflow-wrap: anywhere;\n    }\n\n    #operator-access-audit-table-wrap {\n      max-width: 100%;\n      overflow-x: auto;\n      border-radius: 18px;\n    }\n\n    #operator-access-audit-table-wrap table {\n      width: 100%;\n      min-width: 0;\n      table-layout: fixed;\n    }\n\n    #operator-access-audit-table-wrap th,\n    #operator-access-audit-table-wrap td {\n      overflow-wrap: anywhere;\n      word-break: break-word;\n      vertical-align: top;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(1),\n    #operator-access-audit-table-wrap td:nth-child(1) {\n      width: 21%;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(2),\n    #operator-access-audit-table-wrap td:nth-child(2) {\n      width: 20%;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(3),\n    #operator-access-audit-table-wrap td:nth-child(3) {\n      width: 20%;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(4),\n    #operator-access-audit-table-wrap td:nth-child(4) {\n      width: 14%;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(5),\n    #operator-access-audit-table-wrap td:nth-child(5) {\n      width: 25%;\n    }\n\n    #operator-access-audit-table-wrap pre {\n      margin: 0;\n      max-width: 100%;\n      white-space: pre-wrap;\n      overflow-wrap: anywhere;\n      word-break: break-word;\n      font-size: 11px;\n      line-height: 1.45;\n    }\n\n    #operator-access-audit-table-wrap .pill {\n      white-space: normal;\n      overflow-wrap: anywhere;\n    }\n  </style>\n\n</head>\n<body>\n  <main>\n    <section class=\"panel\">\n      <div class=\"eyebrow\">DeltaAegis</div>\n      <h1>Operator Session</h1>\n      <p>This page loads the current operator identity from the protected <code>/api/session</code> endpoint.</p>\n      <div class=\"status\" id=\"operator-session-status\">Loading session\u2026</div>\n      <table id=\"operator-session-table\" hidden>\n        <tbody>\n          <tr><th>Username</th><td id=\"operator-session-username\">\u2014</td></tr>\n          <tr><th>Display name</th><td id=\"operator-session-display-name\">\u2014</td></tr>\n          <tr><th>Role</th><td id=\"operator-session-role\">\u2014</td></tr>\n          <tr><th>Auth type</th><td id=\"operator-session-auth-type\">\u2014</td></tr>\n          <tr><th>Session ID</th><td id=\"operator-session-id\">\u2014</td></tr>\n          <tr><th>Expires at</th><td id=\"operator-session-expires-at\">\u2014</td></tr>\n        </tbody>\n      </table>\n      <div class=\"actions\">\n        <a id=\"deltaaegis-admin-control-panel-link\" href=\"/operator/users\">Admin control panel</a>\n        <a href=\"/\">Back to dashboard</a>\n        <a href=\"/api/session\">View raw /api/session JSON</a>\n        <a class=\"logout\" href=\"/logout\">Logout</a>\n      </div>\n\n      <h2>Access Audit Trail</h2>\n      <p class=\"muted\">Operator-centered view of recent dashboard access and account-management audit events. Secrets, password hashes, token hashes, raw tokens, and submitted password values are not displayed.</p>\n      <div class=\"actions\">\n        <button type=\"button\" id=\"operator-access-audit-refresh\">Refresh access audit</button>\n        <a href=\"/api/access-audit?limit=50\">View raw /api/access-audit JSON</a>\n      </div>\n      <div class=\"status\" id=\"operator-access-audit-status\">Loading access audit trail\u2026</div>\n      <div class=\"table-wrap\" id=\"operator-access-audit-table-wrap\" hidden>\n        <table>\n          <thead>\n            <tr>\n              <th>Timestamp</th><th>Action</th><th>Target</th><th>Actor</th><th>Details</th>\n            </tr>\n          </thead>\n          <tbody id=\"operator-access-audit-body\"></tbody>\n        </table>\n      </div>\n\n    </section>\n  </main>\n  <script>\n    function setText(id, value) {\n      const element = document.getElementById(id);\n      if (element) { element.textContent = value || \"\u2014\"; }\n    }\n    async function loadOperatorSession() {\n      const status = document.getElementById(\"operator-session-status\");\n      const table = document.getElementById(\"operator-session-table\");\n      try {\n        const response = await fetch(\"/api/session\", { credentials: \"same-origin\", cache: \"no-store\" });\n        if (response.status === 401 || response.status === 403) { window.location.href = \"/login\"; return; }\n        if (!response.ok) { status.textContent = \"Session lookup failed.\"; return; }\n        const session = await response.json();\n        const user = session.user || {};\n        setText(\"operator-session-username\", user.username);\n        setText(\"operator-session-display-name\", user.display_name);\n        setText(\"operator-session-role\", user.role || session.role);\n        setText(\"operator-session-auth-type\", session.auth_type);\n        setText(\"operator-session-id\", session.session_id);\n        setText(\"operator-session-expires-at\", session.expires_at);\n        status.textContent = \"Session loaded.\";\n        table.hidden = false;\n      } catch (error) {\n        status.textContent = \"Session lookup failed.\";\n      }\n    }\n    loadOperatorSession();\n  </script>\n<style id=\"deltaaegis-operator-actions-style\">\n  .operator-action-button {\n    border: 1px solid rgba(34, 211, 238, 0.28);\n    border-radius: 999px;\n    background: rgba(8, 145, 178, 0.14);\n    color: #67e8f9;\n    cursor: pointer;\n    padding: 9px 13px;\n    font-size: 13px;\n    font-weight: 900;\n  }\n  .operator-action-button:hover {\n    background: rgba(8, 145, 178, 0.26);\n  }\n  .operator-action-output {\n    border: 1px solid rgba(148, 163, 184, 0.18);\n    border-radius: 16px;\n    background: rgba(2, 6, 23, 0.55);\n    color: #cbd5e1;\n    margin-top: 18px;\n    max-height: 260px;\n    overflow: auto;\n    padding: 14px;\n    white-space: pre-wrap;\n    word-break: break-word;\n    font-size: 12px;\n  }\n</style>\n<script id=\"deltaaegis-operator-actions-script\">\n(function () {\n  function ensureActionControls() {\n    const actions = document.querySelector(\".actions\");\n\n    if (!actions || document.getElementById(\"operator-refresh-session\")) {\n      return;\n    }\n\n    const refreshButton = document.createElement(\"button\");\n    refreshButton.id = \"operator-refresh-session\";\n    refreshButton.className = \"operator-action-button\";\n    refreshButton.type = \"button\";\n    refreshButton.textContent = \"Refresh session\";\n\n    const copyButton = document.createElement(\"button\");\n    copyButton.id = \"operator-copy-session-json\";\n    copyButton.className = \"operator-action-button\";\n    copyButton.type = \"button\";\n    copyButton.textContent = \"Copy /api/session JSON\";\n\n    actions.insertBefore(copyButton, actions.firstChild);\n    actions.insertBefore(refreshButton, actions.firstChild);\n\n    const output = document.createElement(\"pre\");\n    output.id = \"operator-session-json-output\";\n    output.className = \"operator-action-output\";\n    output.hidden = true;\n    actions.parentNode.insertBefore(output, actions.nextSibling);\n\n    refreshButton.addEventListener(\"click\", function () {\n      if (typeof loadOperatorSession === \"function\") {\n        loadOperatorSession();\n      }\n    });\n\n    copyButton.addEventListener(\"click\", async function () {\n      const response = await fetch(\"/api/session\", {\n        credentials: \"same-origin\",\n        cache: \"no-store\"\n      });\n\n      if (response.status === 401 || response.status === 403) {\n        window.location.href = \"/login\";\n        return;\n      }\n\n      const session = await response.json();\n      const jsonText = JSON.stringify(session, null, 2);\n      output.textContent = jsonText;\n      output.hidden = false;\n\n      try {\n        await navigator.clipboard.writeText(jsonText);\n        copyButton.textContent = \"Copied /api/session JSON\";\n        window.setTimeout(function () {\n          copyButton.textContent = \"Copy /api/session JSON\";\n        }, 1600);\n      } catch (error) {\n        copyButton.textContent = \"Copy unavailable\";\n        window.setTimeout(function () {\n          copyButton.textContent = \"Copy /api/session JSON\";\n        }, 1600);\n      }\n    });\n  }\n\n  if (document.readyState === \"loading\") {\n    document.addEventListener(\"DOMContentLoaded\", ensureActionControls);\n  } else {\n    ensureActionControls();\n  }\n})();\n</script>\n\n  <script id=\"deltaaegis-operator-access-audit-script\">\n    function operatorAuditText(value) {\n      if (value === null || value === undefined || value === \"\") { return \"\u2014\"; }\n      return String(value);\n    }\n\n    function operatorAuditEscape(value) {\n      return operatorAuditText(value)\n        .replaceAll(\"&\", \"&amp;\")\n        .replaceAll(\"<\", \"&lt;\")\n        .replaceAll(\">\", \"&gt;\")\n        .replaceAll('\"', \"&quot;\")\n        .replaceAll(\"'\", \"&#039;\");\n    }\n\n    function operatorAuditEventsFromPayload(payload) {\n      if (!payload) { return []; }\n      if (Array.isArray(payload.events)) { return payload.events; }\n      if (Array.isArray(payload.audit_events)) { return payload.audit_events; }\n      if (Array.isArray(payload.rows)) { return payload.rows; }\n      if (Array.isArray(payload.items)) { return payload.items; }\n      return [];\n    }\n\n    function operatorAuditSafeDetails(event) {\n      const details = Object.assign({}, event.details || {});\n      if (details.actor) {\n        details.actor = {\n          username: details.actor.username || details.actor.token_name || \"\u2014\",\n          role: details.actor.role || \"\u2014\",\n          auth_type: details.actor.auth_type || \"\u2014\"\n        };\n      }\n\n      for (const key of Object.keys(details)) {\n        const lower = key.toLowerCase();\n        if (lower.includes(\"password\") || lower.includes(\"token\") || lower.includes(\"secret\") || lower.includes(\"hash\")) {\n          details[key] = \"[redacted]\";\n        }\n      }\n\n      return JSON.stringify(details, null, 2);\n    }\n\n    async function loadOperatorAccessAuditTrail() {\n      const status = document.getElementById(\"operator-access-audit-status\");\n      const tableWrap = document.getElementById(\"operator-access-audit-table-wrap\");\n      const body = document.getElementById(\"operator-access-audit-body\");\n\n      try {\n        const response = await fetch(\"/api/access-audit?limit=50\", {\n          credentials: \"same-origin\",\n          cache: \"no-store\"\n        });\n\n        if (response.status === 401) {\n          window.location.href = \"/login\";\n          return;\n        }\n\n        if (response.status === 403) {\n          status.textContent = \"Admin role required for access audit visibility.\";\n          return;\n        }\n\n        if (!response.ok) {\n          status.textContent = \"Access audit lookup failed.\";\n          return;\n        }\n\n        const payload = await response.json();\n        const events = operatorAuditEventsFromPayload(payload).slice(0, 50);\n\n        body.innerHTML = events.length\n          ? events.map(function (event) {\n              const details = event.details || {};\n              const actor = details.actor || {};\n              const actorText = event.actor_username || event.username || actor.username || actor.token_name || actor.user_id || \"\u2014\";\n              const targetText = event.target_key || event.target_username || event.target || event.resource || \"\u2014\";\n\n              return `\n                <tr>\n                  <td>${operatorAuditEscape(event.created_at || event.timestamp || event.event_time)}</td>\n                  <td><span class=\"pill\">${operatorAuditEscape(event.action)}</span></td>\n                  <td>${operatorAuditEscape(targetText)}</td>\n                  <td>${operatorAuditEscape(actorText)}</td>\n                  <td><pre class=\"muted\">${operatorAuditEscape(operatorAuditSafeDetails(event))}</pre></td>\n                </tr>\n              `;\n            }).join(\"\")\n          : '<tr><td colspan=\"5\" class=\"muted\">No access audit events found.</td></tr>';\n\n        status.textContent = `Loaded ${events.length} access audit event(s).`;\n        tableWrap.hidden = false;\n      } catch (error) {\n        status.textContent = `Access audit lookup failed: ${error.message || error}`;\n      }\n    }\n\n    document.getElementById(\"operator-access-audit-refresh\").addEventListener(\"click\", loadOperatorAccessAuditTrail);\n    loadOperatorAccessAuditTrail();\n  </script>\n\n</body>\n</html>"
+    return '<!doctype html>\n<html lang="en">\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-width,initial-scale=1">\n  <title>DeltaAegis Operator Session</title>\n  <style>\n    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #020617; color: #e2e8f0; }\n    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, rgba(34, 211, 238, 0.13), transparent 34rem), #020617; }\n    main { width: min(900px, calc(100vw - 32px)); margin: 0 auto; padding: 44px 0; }\n    .panel { border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 24px; background: rgba(15, 23, 42, 0.92); box-shadow: 0 24px 80px rgba(0, 0, 0, 0.34); padding: 28px; }\n    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: 0.16em; text-transform: uppercase; }\n    h1 { margin: 8px 0 8px; font-size: 32px; letter-spacing: -0.04em; }\n    p { margin: 0 0 24px; color: #94a3b8; line-height: 1.55; }\n    table { width: 100%; border-collapse: collapse; margin: 22px 0; overflow: hidden; border-radius: 16px; }\n    th, td { border-bottom: 1px solid rgba(148, 163, 184, 0.14); padding: 13px 14px; text-align: left; }\n    th { width: 180px; color: #94a3b8; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }\n    td { color: #f8fafc; font-weight: 700; }\n    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }\n    a { border: 1px solid rgba(34, 211, 238, 0.28); border-radius: 999px; color: #67e8f9; padding: 9px 13px; text-decoration: none; font-size: 13px; font-weight: 900; }\n    a.logout { border-color: rgba(248, 113, 113, 0.34); color: #fecaca; }\n    .status { border: 1px solid rgba(148, 163, 184, 0.18); border-radius: 16px; background: rgba(2, 6, 23, 0.38); color: #cbd5e1; margin-top: 18px; padding: 12px 14px; font-weight: 700; }\n  </style>\n\n  <style id="deltaaegis-operator-audit-layout-fix">\n    main {\n      width: min(1180px, calc(100vw - 32px)) !important;\n    }\n\n    h2 {\n      margin-top: 28px;\n      margin-bottom: 12px;\n      font-size: 22px;\n      letter-spacing: -0.02em;\n    }\n\n    .muted {\n      color: #94a3b8;\n      overflow-wrap: anywhere;\n    }\n\n    #operator-access-audit-table-wrap {\n      max-width: 100%;\n      overflow-x: auto;\n      border-radius: 18px;\n    }\n\n    #operator-access-audit-table-wrap table {\n      width: 100%;\n      min-width: 0;\n      table-layout: fixed;\n    }\n\n    #operator-access-audit-table-wrap th,\n    #operator-access-audit-table-wrap td {\n      overflow-wrap: anywhere;\n      word-break: break-word;\n      vertical-align: top;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(1),\n    #operator-access-audit-table-wrap td:nth-child(1) {\n      width: 21%;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(2),\n    #operator-access-audit-table-wrap td:nth-child(2) {\n      width: 20%;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(3),\n    #operator-access-audit-table-wrap td:nth-child(3) {\n      width: 20%;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(4),\n    #operator-access-audit-table-wrap td:nth-child(4) {\n      width: 14%;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(5),\n    #operator-access-audit-table-wrap td:nth-child(5) {\n      width: 25%;\n    }\n\n    #operator-access-audit-table-wrap pre {\n      margin: 0;\n      max-width: 100%;\n      white-space: pre-wrap;\n      overflow-wrap: anywhere;\n      word-break: break-word;\n      font-size: 11px;\n      line-height: 1.45;\n    }\n\n    #operator-access-audit-table-wrap .pill {\n      white-space: normal;\n      overflow-wrap: anywhere;\n    }\n  </style>\n\n</head>\n<body>\n  <main>\n    <section class="panel">\n      <div class="eyebrow">DeltaAegis</div>\n      <h1>Operator Session</h1>\n      <p>This page loads the current operator identity from the protected <code>/api/session</code> endpoint.</p>\n      <div class="status" id="operator-session-status">Loading session…</div>\n      <table id="operator-session-table" hidden>\n        <tbody>\n          <tr><th>Username</th><td id="operator-session-username">—</td></tr>\n          <tr><th>Display name</th><td id="operator-session-display-name">—</td></tr>\n          <tr><th>Role</th><td id="operator-session-role">—</td></tr>\n          <tr><th>Auth type</th><td id="operator-session-auth-type">—</td></tr>\n          <tr><th>Session ID</th><td id="operator-session-id">—</td></tr>\n          <tr><th>Expires at</th><td id="operator-session-expires-at">—</td></tr>\n        </tbody>\n      </table>\n      <div class="actions">\n        <a id="deltaaegis-admin-control-panel-link" href="/operator/users">Admin control panel</a>\n        <a href="/">Back to dashboard</a>\n        <a href="/api/session">View raw /api/session JSON</a>\n        <a class="logout" href="/logout">Logout</a>\n      </div>\n\n      <h2>Access Audit Trail</h2>\n      <p class="muted">Operator-centered view of recent dashboard access and account-management audit events. Secrets, password hashes, token hashes, raw tokens, and submitted password values are not displayed.</p>\n      <div class="actions">\n        <button type="button" id="operator-access-audit-refresh">Refresh access audit</button>\n        <a href="/api/access-audit?limit=50">View raw /api/access-audit JSON</a>\n      </div>\n      <div class="status" id="operator-access-audit-status">Loading access audit trail…</div>\n      <div class="table-wrap" id="operator-access-audit-table-wrap" hidden>\n        <table>\n          <thead>\n            <tr>\n              <th>Timestamp</th><th>Action</th><th>Target</th><th>Actor</th><th>Details</th>\n            </tr>\n          </thead>\n          <tbody id="operator-access-audit-body"></tbody>\n        </table>\n      </div>\n\n    </section>\n  </main>\n  <script>\n    function setText(id, value) {\n      const element = document.getElementById(id);\n      if (element) { element.textContent = value || "—"; }\n    }\n    async function loadOperatorSession() {\n      const status = document.getElementById("operator-session-status");\n      const table = document.getElementById("operator-session-table");\n      try {\n        const response = await fetch("/api/session", { credentials: "same-origin", cache: "no-store" });\n        if (response.status === 401 || response.status === 403) { window.location.href = "/login"; return; }\n        if (!response.ok) { status.textContent = "Session lookup failed."; return; }\n        const session = await response.json();\n        const user = session.user || {};\n        setText("operator-session-username", user.username);\n        setText("operator-session-display-name", user.display_name);\n        setText("operator-session-role", user.role || session.role);\n        setText("operator-session-auth-type", session.auth_type);\n        setText("operator-session-id", session.session_id);\n        setText("operator-session-expires-at", session.expires_at);\n        status.textContent = "Session loaded.";\n        table.hidden = false;\n      } catch (error) {\n        status.textContent = "Session lookup failed.";\n      }\n    }\n    loadOperatorSession();\n  </script>\n<style id="deltaaegis-operator-actions-style">\n  .operator-action-button {\n    border: 1px solid rgba(34, 211, 238, 0.28);\n    border-radius: 999px;\n    background: rgba(8, 145, 178, 0.14);\n    color: #67e8f9;\n    cursor: pointer;\n    padding: 9px 13px;\n    font-size: 13px;\n    font-weight: 900;\n  }\n  .operator-action-button:hover {\n    background: rgba(8, 145, 178, 0.26);\n  }\n  .operator-action-output {\n    border: 1px solid rgba(148, 163, 184, 0.18);\n    border-radius: 16px;\n    background: rgba(2, 6, 23, 0.55);\n    color: #cbd5e1;\n    margin-top: 18px;\n    max-height: 260px;\n    overflow: auto;\n    padding: 14px;\n    white-space: pre-wrap;\n    word-break: break-word;\n    font-size: 12px;\n  }\n</style>\n<script id="deltaaegis-operator-actions-script">\n(function () {\n  function ensureActionControls() {\n    const actions = document.querySelector(".actions");\n\n    if (!actions || document.getElementById("operator-refresh-session")) {\n      return;\n    }\n\n    const refreshButton = document.createElement("button");\n    refreshButton.id = "operator-refresh-session";\n    refreshButton.className = "operator-action-button";\n    refreshButton.type = "button";\n    refreshButton.textContent = "Refresh session";\n\n    const copyButton = document.createElement("button");\n    copyButton.id = "operator-copy-session-json";\n    copyButton.className = "operator-action-button";\n    copyButton.type = "button";\n    copyButton.textContent = "Copy /api/session JSON";\n\n    actions.insertBefore(copyButton, actions.firstChild);\n    actions.insertBefore(refreshButton, actions.firstChild);\n\n    const output = document.createElement("pre");\n    output.id = "operator-session-json-output";\n    output.className = "operator-action-output";\n    output.hidden = true;\n    actions.parentNode.insertBefore(output, actions.nextSibling);\n\n    refreshButton.addEventListener("click", function () {\n      if (typeof loadOperatorSession === "function") {\n        loadOperatorSession();\n      }\n    });\n\n    copyButton.addEventListener("click", async function () {\n      const response = await fetch("/api/session", {\n        credentials: "same-origin",\n        cache: "no-store"\n      });\n\n      if (response.status === 401 || response.status === 403) {\n        window.location.href = "/login";\n        return;\n      }\n\n      const session = await response.json();\n      const jsonText = JSON.stringify(session, null, 2);\n      output.textContent = jsonText;\n      output.hidden = false;\n\n      try {\n        await navigator.clipboard.writeText(jsonText);\n        copyButton.textContent = "Copied /api/session JSON";\n        window.setTimeout(function () {\n          copyButton.textContent = "Copy /api/session JSON";\n        }, 1600);\n      } catch (error) {\n        copyButton.textContent = "Copy unavailable";\n        window.setTimeout(function () {\n          copyButton.textContent = "Copy /api/session JSON";\n        }, 1600);\n      }\n    });\n  }\n\n  if (document.readyState === "loading") {\n    document.addEventListener("DOMContentLoaded", ensureActionControls);\n  } else {\n    ensureActionControls();\n  }\n})();\n</script>\n\n  <script id="deltaaegis-operator-access-audit-script">\n    function operatorAuditText(value) {\n      if (value === null || value === undefined || value === "") { return "—"; }\n      return String(value);\n    }\n\n    function operatorAuditEscape(value) {\n      return operatorAuditText(value)\n        .replaceAll("&", "&amp;")\n        .replaceAll("<", "&lt;")\n        .replaceAll(">", "&gt;")\n        .replaceAll(\'"\', "&quot;")\n        .replaceAll("\'", "&#039;");\n    }\n\n    function operatorAuditEventsFromPayload(payload) {\n      if (!payload) { return []; }\n      if (Array.isArray(payload.events)) { return payload.events; }\n      if (Array.isArray(payload.audit_events)) { return payload.audit_events; }\n      if (Array.isArray(payload.rows)) { return payload.rows; }\n      if (Array.isArray(payload.items)) { return payload.items; }\n      return [];\n    }\n\n    function operatorAuditSafeDetails(event) {\n      const details = Object.assign({}, event.details || {});\n      if (details.actor) {\n        details.actor = {\n          username: details.actor.username || details.actor.token_name || "—",\n          role: details.actor.role || "—",\n          auth_type: details.actor.auth_type || "—"\n        };\n      }\n\n      for (const key of Object.keys(details)) {\n        const lower = key.toLowerCase();\n        if (lower.includes("password") || lower.includes("token") || lower.includes("secret") || lower.includes("hash")) {\n          details[key] = "[redacted]";\n        }\n      }\n\n      return JSON.stringify(details, null, 2);\n    }\n\n    async function loadOperatorAccessAuditTrail() {\n      const status = document.getElementById("operator-access-audit-status");\n      const tableWrap = document.getElementById("operator-access-audit-table-wrap");\n      const body = document.getElementById("operator-access-audit-body");\n\n      try {\n        const response = await fetch("/api/access-audit?limit=50", {\n          credentials: "same-origin",\n          cache: "no-store"\n        });\n\n        if (response.status === 401) {\n          window.location.href = "/login";\n          return;\n        }\n\n        if (response.status === 403) {\n          status.textContent = "Admin role required for access audit visibility.";\n          return;\n        }\n\n        if (!response.ok) {\n          status.textContent = "Access audit lookup failed.";\n          return;\n        }\n\n        const payload = await response.json();\n        const events = operatorAuditEventsFromPayload(payload).slice(0, 50);\n\n        body.innerHTML = events.length\n          ? events.map(function (event) {\n              const details = event.details || {};\n              const actor = details.actor || {};\n              const actorText = event.actor_username || event.username || actor.username || actor.token_name || actor.user_id || "—";\n              const targetText = event.target_key || event.target_username || event.target || event.resource || "—";\n\n              return `\n                <tr>\n                  <td>${operatorAuditEscape(event.created_at || event.timestamp || event.event_time)}</td>\n                  <td><span class="pill">${operatorAuditEscape(event.action)}</span></td>\n                  <td>${operatorAuditEscape(targetText)}</td>\n                  <td>${operatorAuditEscape(actorText)}</td>\n                  <td><details><summary>View details</summary><pre class="muted">${operatorAuditEscape(operatorAuditSafeDetails(event))}</pre></details></td>\n                </tr>\n              `;\n            }).join("")\n          : \'<tr><td colspan="5" class="muted">No access audit events found.</td></tr>\';\n\n        status.textContent = `Loaded ${events.length} access audit event(s).`;\n        tableWrap.hidden = false;\n      } catch (error) {\n        status.textContent = `Access audit lookup failed: ${error.message || error}`;\n      }\n    }\n\n    document.getElementById("operator-access-audit-refresh").addEventListener("click", loadOperatorAccessAuditTrail);\n    loadOperatorAccessAuditTrail();\n  </script>\n\n</body>\n</html>'
 
 
 
@@ -24881,6 +25499,43 @@ def dashboard_operator_reset_shell_html() -> str:
     function cleanupEscape(value) {
       return cleanupText(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
     }
+    function cleanupReceiptLabel(value) {
+      return String(value || "")
+        .replaceAll("_", " ")
+        .replaceAll("-", " ")
+        .split(" ")
+        .filter(function (part) { return Boolean(part); })
+        .map(function (part) {
+          return part.charAt(0).toUpperCase() + part.slice(1);
+        })
+        .join(" ");
+    }
+    function cleanupReceiptValue(value) {
+      if (value === true) { return "Yes"; }
+      if (value === false) { return "No"; }
+      if (value === null || value === undefined || value === "") { return "—"; }
+      return String(value);
+    }
+    function cleanupReceiptText(receipt, fallbackMessage) {
+      const safeReceipt = receipt && typeof receipt === "object"
+        ? receipt
+        : {};
+      const lines = [
+        String(safeReceipt.message || fallbackMessage || "Action completed.")
+      ];
+      const summary = safeReceipt.summary && typeof safeReceipt.summary === "object"
+        ? safeReceipt.summary
+        : {};
+
+      Object.entries(summary).forEach(function (entry) {
+        lines.push(
+          cleanupReceiptLabel(entry[0]) + ": "
+          + cleanupReceiptValue(entry[1])
+        );
+      });
+
+      return lines.join("\\n");
+    }
     function cleanupRowsFromObject(rows, behavior) {
       return Object.entries(rows || {}).sort(function (a, b) { return a[0].localeCompare(b[0]); }).map(function (entry) {
         return "<tr><td><code>" + cleanupEscape(entry[0]) + "</code></td><td>" + cleanupEscape(entry[1]) + "</td><td>" + cleanupEscape(behavior) + "</td></tr>";
@@ -24894,12 +25549,25 @@ def dashboard_operator_reset_shell_html() -> str:
       const protectedTables = payload.protected_tables || payload.protected_tables_after || {};
       const protectedRows = payload.protected_total_rows ?? Object.values(protectedTables).reduce(function (sum, value) { return sum + Number(value || 0); }, 0);
       const totalRows = payload.total_rows ?? payload.total_deleted_rows ?? 0;
-      panel.textContent = [
-        payload.message || "Telemetry cleanup preview loaded.",
-        "Cleanup rows: " + totalRows,
-        "Protected rows: " + protectedRows,
-        "Confirmation phrase: " + (payload.confirmation_required || "DELETE TELEMETRY")
-      ].join("\\n");
+      if (payload.receipt) {
+        panel.textContent = cleanupReceiptText(
+          payload.receipt,
+          payload.message
+        );
+        panel.dataset.receiptSeverity = String(
+          payload.receipt.severity || "info"
+        ).toLowerCase();
+        panel.dataset.receiptAction = String(
+          payload.receipt.action || ""
+        );
+      } else {
+        panel.textContent = [
+          payload.message || "Telemetry cleanup preview loaded.",
+          "Cleanup rows: " + totalRows,
+          "Protected rows: " + protectedRows,
+          "Confirmation phrase: " + (payload.confirmation_required || "DELETE TELEMETRY")
+        ].join("\\n");
+      }
       const cleanupTables = payload.tables || payload.tables_after || payload.deleted_rows || {};
       body.innerHTML = cleanupRowsFromObject(cleanupTables, payload.dry_run === false ? "deleted/now empty" : "will be deleted") + cleanupRowsFromObject(protectedTables, "preserved");
       wrap.hidden = false;
@@ -24964,7 +25632,7 @@ def dashboard_operator_reset_shell_html() -> str:
                 <td><span class="pill">${cleanupEscape(event.action)}</span></td>
                 <td>${cleanupEscape(cleanupAuditTargetText(event))}</td>
                 <td>${cleanupEscape(cleanupAuditActorText(event))}</td>
-                <td><pre class="muted">${cleanupEscape(cleanupAuditSafeDetails(event))}</pre></td>
+                <td><details><summary>View details</summary><pre class="muted">${cleanupEscape(cleanupAuditSafeDetails(event))}</pre></details></td>
               </tr>
             `;
           }).join("")
@@ -25038,6 +25706,7 @@ def dashboard_operator_reset_shell_html() -> str:
         if (!response.ok) { throw new Error(payload.message || payload.error || "Cleanup failed."); }
         confirmation.value = "";
         renderTelemetryCleanup(payload);
+        loadTelemetryResetAuditEvents();
       } catch (error) {
         if (panel) { panel.textContent = "Telemetry cleanup failed: " + (error.message || error); }
       }
@@ -25224,16 +25893,190 @@ def dashboard_record_admin_user_action(
     )
 
 
+def dashboard_ticket_status_action_receipt(
+    state: dict[str, Any],
+    subject_key: str,
+    scope: str | None,
+) -> dict[str, Any]:
+    ticket_key = str(state.get("ticket_key") or subject_key or "").strip()
+    ticket_status = str(
+        state.get("ticket_status")
+        or state.get("status")
+        or ""
+    ).strip().upper()
+    analyst = str(state.get("analyst") or "").strip()
+
+    return dashboard_action_receipt(
+        "workflow.ticket_status",
+        (
+            f"Ticket workflow status updated to {ticket_status}."
+            if ticket_status
+            else "Ticket workflow status updated."
+        ),
+        summary={
+            "status": ticket_status,
+            "scope": str(scope or "").strip() or "all scopes",
+            "analyst": analyst or "dashboard",
+            "note_recorded": bool(state.get("note")),
+        },
+        identifiers={
+            "ticket_key": ticket_key,
+        },
+    )
+
+
+def dashboard_asset_investigation_action_receipt(
+    record: dict[str, Any],
+    asset_key: str,
+    scope: str,
+    ticket_state: dict[str, Any] | None,
+) -> dict[str, Any]:
+    investigation_status = str(
+        record.get("status")
+        or ""
+    ).strip().upper()
+    ticket_status = str(
+        (ticket_state or {}).get("ticket_status")
+        or (ticket_state or {}).get("status")
+        or ""
+    ).strip().upper()
+
+    return dashboard_action_receipt(
+        "workflow.asset_investigation",
+        (
+            f"Asset investigation status saved as {investigation_status}."
+            if investigation_status
+            else "Asset investigation status saved."
+        ),
+        summary={
+            "status": investigation_status,
+            "scope": scope,
+            "reason_recorded": bool(record.get("reason")),
+            "ticket_status": ticket_status,
+        },
+        identifiers={
+            "asset_key": asset_key,
+        },
+    )
+
+
+def dashboard_admin_user_action_receipt(
+    action: str,
+    target_username: str,
+    user: dict[str, Any] | None,
+) -> dict[str, Any]:
+    clean_action = str(action or "").strip().lower()
+    messages = {
+        "create": f"Created user {target_username}.",
+        "enable": f"Enabled user {target_username}.",
+        "disable": f"Disabled user {target_username}.",
+        "role": f"Updated the role for {target_username}.",
+        "password": f"Rotated the password for {target_username}.",
+    }
+    receipt_actions = {
+        "create": "admin.user_create",
+        "enable": "admin.user_enable",
+        "disable": "admin.user_disable",
+        "role": "admin.user_role",
+        "password": "admin.user_password",
+    }
+    safe_user = dict(user or {})
+
+    return dashboard_action_receipt(
+        receipt_actions.get(clean_action, "admin.user_update"),
+        messages.get(
+            clean_action,
+            f"Updated user {target_username}.",
+        ),
+        summary={
+            "role": safe_user.get("role"),
+            "enabled": safe_user.get("enabled"),
+            "password_configured": safe_user.get(
+                "password_configured"
+            ),
+            "active_token_count": safe_user.get(
+                "active_token_count",
+                0,
+            ),
+        },
+        identifiers={
+            "username": target_username,
+        },
+    )
+
+
+def dashboard_telemetry_cleanup_action_receipt(
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    dry_run = bool(result.get("dry_run"))
+    total_deleted_rows = int(
+        result.get("total_deleted_rows")
+        or result.get("total_rows")
+        or 0
+    )
+
+    if dry_run:
+        message = "Telemetry cleanup preview generated."
+        severity = "info"
+        action = "admin.telemetry_cleanup_preview"
+    else:
+        message = (
+            f"Telemetry cleanup completed; "
+            f"{total_deleted_rows} imported row(s) deleted."
+        )
+        severity = "warning"
+        action = "admin.telemetry_cleanup"
+
+    return dashboard_action_receipt(
+        action,
+        message,
+        severity=severity,
+        summary={
+            "dry_run": dry_run,
+            "deleted_rows": total_deleted_rows,
+            "protected_tables_preserved": result.get(
+                "protected_tables_preserved",
+                True,
+            ),
+        },
+        diagnostic_detail={
+            "available": True,
+            "deleted_rows_by_table": result.get(
+                "deleted_rows",
+                {},
+            ),
+            "protected_tables_after": result.get(
+                "protected_tables_after",
+                result.get("protected_tables", {}),
+            ),
+        },
+    )
+
 def dashboard_admin_user_action_response(
     connection: sqlite3.Connection,
     action: str,
     target_username: str,
 ) -> dict[str, Any]:
+    access = dashboard_admin_users_payload(connection)
+    target_user = next(
+        (
+            user
+            for user in access.get("users", [])
+            if str(user.get("username") or "") == target_username
+        ),
+        None,
+    )
+    receipt = dashboard_admin_user_action_receipt(
+        action,
+        target_username,
+        target_user,
+    )
+
     return {
         "ok": True,
         "action": action,
         "target_username": target_username,
-        "access": dashboard_admin_users_payload(connection),
+        "receipt": receipt,
     }
 
 
@@ -25716,14 +26559,18 @@ def render_netsniper_page() -> str:
         <div class="card"><div class="card-label">Import ready</div><div class="card-value" id="netsniper-import-ready">—</div></div>
       </div>
 
-      <h2>Detected paths</h2>
-      <pre id="netsniper-paths">Loading…</pre>
+      <details class="technical-details">
+        <summary>Detected NetSniper paths</summary>
+        <pre id="netsniper-paths">Loading…</pre>
+      </details>
 
-      <h2>Latest run metadata</h2>
-      <pre id="netsniper-latest-json">Loading…</pre>
+      <details class="technical-details">
+        <summary>Latest run metadata</summary>
+        <pre id="netsniper-latest-json">Loading…</pre>
+      </details>
 
       <h2>Import result</h2>
-      <pre id="netsniper-import-result">No import has been run from this page yet.</pre>
+      <div class="status" id="netsniper-import-result">No import has been run from this page yet.</div>
 
       <h2>Guarded scan launch</h2>
       <p>ADMIN-only launch control for a single private IPv4 CIDR target. DeltaAegis uses a fixed NetSniper headless command shape and does not expose arbitrary shell input.</p>
@@ -25740,7 +26587,7 @@ def render_netsniper_page() -> str:
           </label>
         <button type="submit" id="netsniper-scan-start">Start guarded scan</button>
       </form>
-      <pre id="netsniper-scan-start-result">No scan has been started from this page yet.</pre>
+      <div class="status" id="netsniper-scan-start-result">No scan has been started from this page yet.</div>
 
       <h2>Scheduled scans</h2>
       <p>Saved profile-aware NetSniper scan schedules. These use the same guarded scan-job path as manual dashboard launches.</p>
@@ -25806,7 +26653,7 @@ def render_netsniper_page() -> str:
 
       <p class="muted"><strong>TrueAegis note:</strong> Scheduled scans run NetSniper and optional auto-ingest only. TrueAegis validation is configured and launched separately from the TrueAegis controls; NetSniper schedules do not automatically run TrueAegis.</p>
       <p class="muted"><strong>Stale scan recovery:</strong> If an old <code>QUEUED</code> or <code>RUNNING</code> scan job blocks schedules and no NetSniper process is active, an ADMIN can mark stale active scan jobs failed after confirmation.</p>
-      <pre id="netsniper-schedule-result">No scheduled scan action has run from this page yet.</pre>
+      <div class="status" id="netsniper-schedule-result">No scheduled scan action has run from this page yet.</div>
 
       <div class="table-wrap">
         <table>
@@ -25910,20 +26757,22 @@ def render_netsniper_page() -> str:
           <div class="card"><div class="card-label">Cancelled</div><div class="card-value" id="netsniper-live-job-cancelled-at">—</div></div>
         </div>
 
-        <h3>Cancellation reason</h3>
-        <pre id="netsniper-live-job-cancel-reason-display">—</pre>
+        <details class="technical-details">
+          <summary>Cancellation evidence</summary>
+          <pre id="netsniper-live-job-cancel-reason-display">—</pre>
+        </details>
 
         <div class="live-job-streams">
-          <div class="live-job-stream">
-            <h3>Stdout tail</h3>
+          <details class="live-job-stream technical-details">
+            <summary>Stdout tail</summary>
             <p class="live-job-meta" id="netsniper-live-job-stdout-meta">No stdout detail loaded.</p>
             <pre id="netsniper-live-job-stdout">—</pre>
-          </div>
-          <div class="live-job-stream">
-            <h3>Stderr tail</h3>
+          </details>
+          <details class="live-job-stream technical-details">
+            <summary>Stderr tail</summary>
             <p class="live-job-meta" id="netsniper-live-job-stderr-meta">No stderr detail loaded.</p>
             <pre id="netsniper-live-job-stderr">—</pre>
-          </div>
+          </details>
         </div>
       </section>
 
@@ -26007,6 +26856,88 @@ def render_netsniper_page() -> str:
       }
     }
 
+    function dashboardActionReceiptLabel(value) {
+      return String(value || "")
+        .replaceAll("_", " ")
+        .replace(/\\b\\w/g, function (character) {
+          return character.toUpperCase();
+        });
+    }
+
+    function dashboardActionReceiptValue(value) {
+      if (value === true) {
+        return "Yes";
+      }
+
+      if (value === false) {
+        return "No";
+      }
+
+      if (value === null || value === undefined || value === "") {
+        return "—";
+      }
+
+      if (Array.isArray(value)) {
+        return value.length ? value.join(", ") : "None";
+      }
+
+      if (typeof value === "object") {
+        return Object.entries(value)
+          .map(function (entry) {
+            return `${dashboardActionReceiptLabel(entry[0])}: ${dashboardActionReceiptValue(entry[1])}`;
+          })
+          .join("; ");
+      }
+
+      return String(value);
+    }
+
+    function renderDashboardActionReceipt(target, receipt, fallbackPayload) {
+      if (!target) {
+        return;
+      }
+
+      const safeReceipt = receipt && typeof receipt === "object"
+        ? receipt
+        : {};
+      const safePayload = fallbackPayload && typeof fallbackPayload === "object"
+        ? fallbackPayload
+        : {};
+      const message = String(
+        safeReceipt.message
+        || safePayload.message
+        || safePayload.error
+        || "Action completed."
+      ).trim();
+      const severity = String(
+        safeReceipt.severity
+        || (safePayload.ok === false ? "error" : "info")
+      ).toLowerCase();
+      const summary = safeReceipt.summary && typeof safeReceipt.summary === "object"
+        ? safeReceipt.summary
+        : {};
+      const identifiers = safeReceipt.identifiers && typeof safeReceipt.identifiers === "object"
+        ? safeReceipt.identifiers
+        : {};
+      const lines = [message];
+
+      Object.entries(summary).forEach(function (entry) {
+        lines.push(
+          `${dashboardActionReceiptLabel(entry[0])}: ${dashboardActionReceiptValue(entry[1])}`
+        );
+      });
+
+      Object.entries(identifiers).forEach(function (entry) {
+        lines.push(
+          `${dashboardActionReceiptLabel(entry[0])}: ${dashboardActionReceiptValue(entry[1])}`
+        );
+      });
+
+      target.textContent = lines.join("\\n");
+      target.dataset.receiptSeverity = severity;
+      target.dataset.receiptAction = String(safeReceipt.action || "");
+    }
+
     async function importLatestNetSniperRun() {
       const status = document.getElementById("netsniper-status");
       const output = document.getElementById("netsniper-import-result");
@@ -26040,8 +26971,9 @@ def render_netsniper_page() -> str:
           throw new Error(payload.message || payload.error || `Import failed with HTTP ${response.status}`);
         }
 
-        output.textContent = JSON.stringify(payload, null, 2);
-        status.textContent = `Import complete: ${payload.result || payload.run_id || "latest run"}`;
+        renderDashboardActionReceipt(output, payload.receipt, payload);
+        status.textContent = (payload.receipt || {}).message
+          || `Import complete: ${payload.run_id || "latest run"}`;
         await loadNetSniperStatus();
       } catch (error) {
         status.textContent = `Import failed: ${error.message || error}`;
@@ -26253,7 +27185,21 @@ def render_netsniper_page() -> str:
 
         if (result) {
           result.hidden = false;
-          result.textContent = `${payload.cancellation_action || "requested"}: ${payload.message || "cancellation request accepted"}`;
+          renderDashboardActionReceipt(
+          result,
+          payload.receipt || {
+            action: "netsniper.scan_cancel",
+            severity: "info",
+            message: payload.message || "Scan cancellation request accepted.",
+            summary: {
+              cancellation_action: payload.cancellation_action || "requested"
+            },
+            identifiers: {
+              job_id: payload.job_id || ""
+            }
+          },
+          payload
+        );
         }
 
         await loadNetSniperScanJobs();
@@ -26555,12 +27501,14 @@ def render_netsniper_page() -> str:
 
         if (!payload) { return; }
 
-        output.textContent = JSON.stringify(payload, null, 2);
-        status.textContent = enabled
-          ? "Hourly balanced monitoring enabled."
-          : "Hourly balanced monitoring disabled.";
+        renderDashboardActionReceipt(output, payload.receipt, payload);
+        status.textContent = (payload.receipt || {}).message
+          || (
+            enabled
+              ? "Hourly balanced monitoring enabled."
+              : "Hourly balanced monitoring disabled."
+          );
 
-        renderNetSniperSchedules(payload);
         await loadNetSniperSchedules();
       } catch (error) {
         status.textContent = `Hourly monitoring action failed: ${error.message || error}`;
@@ -26611,9 +27559,9 @@ def render_netsniper_page() -> str:
 
         if (!payload) { return; }
 
-        output.textContent = JSON.stringify(payload, null, 2);
-        status.textContent = `Created scan schedule: ${(payload.schedule || {}).schedule_id || name}`;
-        renderNetSniperSchedules(payload);
+        renderDashboardActionReceipt(output, payload.receipt, payload);
+        status.textContent = (payload.receipt || {}).message
+          || `Created scan schedule: ${(payload.schedule || {}).schedule_id || name}`;
         await loadNetSniperSchedules();
       } catch (error) {
         status.textContent = `Schedule create failed: ${error.message || error}`;
@@ -26636,17 +27584,9 @@ def render_netsniper_page() -> str:
 
         if (!payload) { return; }
 
-        output.textContent = JSON.stringify(payload, null, 2);
-        status.textContent = `Schedule runner complete: ${(payload.results || []).length} result(s)`;
-        renderNetSniperSchedules(payload);
-
-        if (payload.scan_jobs) {
-          renderNetSniperScanJobs(payload.scan_jobs);
-        }
-
-        if (payload.schedule_history) {
-          renderNetSniperScheduleHistory({history: payload.schedule_history});
-        }
+        renderDashboardActionReceipt(output, payload.receipt, payload);
+        status.textContent = (payload.receipt || {}).message
+          || `Schedule runner complete: ${(payload.results || []).length} result(s)`;
 
         await loadNetSniperSchedules();
         await loadNetSniperScanJobs();
@@ -26684,12 +27624,9 @@ def render_netsniper_page() -> str:
 
         if (!payload) { return; }
 
-        output.textContent = JSON.stringify(payload, null, 2);
-        status.textContent = `Stale scan recovery complete: ${payload.recovered_count || 0} job(s) marked failed`;
-
-        if (payload.scan_jobs) {
-          renderNetSniperScanJobs(payload.scan_jobs);
-        }
+        renderDashboardActionReceipt(output, payload.receipt, payload);
+        status.textContent = (payload.receipt || {}).message
+          || `Stale scan recovery complete: ${payload.recovered_count || 0} job(s) marked failed`;
 
         await loadNetSniperSchedules();
         await loadNetSniperScanJobs();
@@ -26751,11 +27688,15 @@ def render_netsniper_page() -> str:
 
         if (!payload) { return; }
 
-        output.textContent = JSON.stringify(payload, null, 2);
-        status.textContent = action === "delete"
-          ? `Schedule deleted; ${payload.linked_job_count || 0} linked job(s) preserved and no active jobs cancelled.`
-          : `Schedule action complete: ${action}`;
-        renderNetSniperSchedules(payload);
+        renderDashboardActionReceipt(output, payload.receipt, payload);
+        status.textContent = (payload.receipt || {}).message
+          || (
+            action === "delete"
+              ? `Schedule deleted; ${payload.linked_job_count || 0} linked job(s) preserved and no active jobs cancelled.`
+              : `Schedule action complete: ${action}`
+          );
+
+        await loadNetSniperSchedules();
 
         if (action === "delete") {
           await loadNetSniperScheduleHistory();
@@ -26818,8 +27759,9 @@ def render_netsniper_page() -> str:
           throw new Error(payload.message || payload.error || `Scan start failed with HTTP ${response.status}`);
         }
 
-        output.textContent = JSON.stringify(payload, null, 2);
-        status.textContent = `Scan job started: ${payload.job_id || "queued"}`;
+        renderDashboardActionReceipt(output, payload.receipt, payload);
+        status.textContent = (payload.receipt || {}).message
+          || `Scan job started: ${payload.job_id || "queued"}`;
         await loadNetSniperScanJobs();
 
         if (payload.job_id) {
@@ -26980,7 +27922,7 @@ def command_dashboard(args):
 
 
     class DeltaAegisDashboardHandler(BaseHTTPRequestHandler):
-        server_version = "DeltaAegisDashboard/0.39.0"
+        server_version = "DeltaAegisDashboard/0.40.0"
 
         def log_message(self, fmt, *handler_args):
             if not args.quiet:
@@ -28343,6 +29285,11 @@ def command_dashboard(args):
                                 "ok": True,
                                 "ticket_state": state,
                                 "investigation_center": investigation_center,
+                                "receipt": dashboard_ticket_status_action_receipt(
+                                    state,
+                                    subject_key,
+                                    raw_scope,
+                                ),
                             },
                         )
                     finally:
@@ -28436,6 +29383,12 @@ def command_dashboard(args):
                             "investigation": record,
                             "ticket_state": ticket_state,
                             "asset_detail": detail,
+                                "receipt": dashboard_asset_investigation_action_receipt(
+                                    record,
+                                    asset_key,
+                                    resolved_scope,
+                                    ticket_state,
+                                ),
                         },
                     )
                 finally:
@@ -28751,17 +29704,38 @@ def dashboard_trueaegis_validation_ingest_payload(
     connection.commit()
 
     summary = dashboard_validation_summary_payload(connection)
-    observations = dashboard_validations_payload(connection, limit=25)
+    validation_run_id = result.get("validation_run_id")
+    observation_count = (
+        result.get("observation_count")
+        or result.get("imported_observation_count")
+        or 0
+    )
+    receipt = dashboard_action_receipt(
+        "trueaegis.validation_ingest",
+        f"Imported {observation_count} TrueAegis validation observation(s).",
+        summary={
+            "mode": mode or "path",
+            "observations_imported": observation_count,
+            "total_validation_runs": summary.get("validation_run_count", 0),
+            "total_observations": summary.get("observation_count", 0),
+        },
+        identifiers={
+            "validation_run_id": validation_run_id or "",
+        },
+        diagnostic_detail={
+            "available": True,
+            "source_path": str(validation_path),
+        },
+    )
 
     return {
         "ok": True,
         "schema_version": "deltaaegis-trueaegis-validation-ingest-v1",
         "mode": mode or "path",
         "source_path": str(validation_path),
-        "validation_run_id": result.get("validation_run_id"),
+        "validation_run_id": validation_run_id,
         "import_result": result,
-        "summary": summary,
-        "observations": observations,
+        "receipt": receipt,
     }
 
 def command_validation_ingest(args) -> int:
@@ -28840,7 +29814,7 @@ def command_validations(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.39.0 — Scan Job Lifecycle Observability, live NetSniper execution evidence, authenticated cancellation, non-destructive schedule deletion, guarded TrueAegis follow-up automation, reporting, RBAC, and the current-state SIEM dashboard")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.40.0 — Human-Readable Operator Actions, stable dashboard action receipts, progressive technical disclosure, compact mutation payloads, guarded NetSniper and TrueAegis orchestration, reporting, RBAC, and the current-state SIEM dashboard")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)

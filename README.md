@@ -4,15 +4,17 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.39.0
+## Current Release — v0.40.0
 
-**DeltaAegis v0.39.0 — Scan Job Lifecycle Observability**
+**DeltaAegis v0.40.0 — Human-Readable Operator Actions**
 
-DeltaAegis v0.39.0 adds persistent NetSniper scan-job lifecycle state from `QUEUED` through `RUNNING` to `COMPLETED`, `FAILED`, or `CANCELLED`. The worker records process IDs, heartbeats, bounded live stdout and stderr, terminal exit data, and cancellation evidence while retaining the existing fixed argument-vector execution boundary.
+DeltaAegis v0.40.0 replaces default raw JSON mutation output with the shared `deltaaegis-dashboard-action-receipt-v1` contract. Successful operator actions now provide a stable action identifier, severity, human-readable message, concise summary, identifiers, and optional diagnostic detail.
 
-The dashboard adds read-only live job detail, active-job polling, and an authenticated cancellation workflow with a required reason and explicit confirmation. The browser never supplies a process ID or sends operating-system signals; the worker owns process-group termination and escalation.
+Receipt coverage spans NetSniper import, scan start and cancellation, scheduled monitoring, TrueAegis launch and ingestion, investigation workflow actions, administrative user controls, and telemetry cleanup. Errors remain visible and actionable.
 
-Schedule deletion preserves every linked job and its original `schedule_id`. A deletion tombstone keeps the removed definition, linked-job status counts, and schedule history visible. Deleting a schedule does not cancel a queued or running job; cancellation remains a separate explicit action.
+Progressive technical disclosure keeps command previews, paths, run metadata, cancellation evidence, log tails, and audit JSON closed by default. Explicit raw API links and Copy JSON remain available for deliberate technical inspection.
+
+Mutation and read-model separation removes refreshed collections from POST responses when the dashboard already reloads them through GET endpoints. Action-specific objects remain available, while asset investigation detail and telemetry cleanup models remain intentional immediate-response exceptions.
 
 ## What DeltaAegis Does
 
@@ -174,7 +176,7 @@ deltaaegis ingest --runs-dir ~/NetSniper/runs
 
 ## Security Boundary
 
-DeltaAegis v0.39.0 does not expose arbitrary shell command execution from the dashboard.
+DeltaAegis v0.40.0 does not expose arbitrary shell command execution from the dashboard.
 
 Dashboard NetSniper execution uses guarded job records, validated private IPv4 CIDRs, and fixed argument-vector process creation. Live job-detail reads are bounded and confined to the configured scan-log root.
 
@@ -309,24 +311,30 @@ Preview uninstall actions without deleting anything:
 
 ## Validation
 
-Run the complete v0.39 release gate from a clean checkout:
+Run the complete v0.40 automated release gate from a clean checkout:
 
 ```bash
-./tools/validate_v0_39_release_gate.sh
+./tools/validate_v0_40_release_gate.sh
 ```
 
-The release gate validates lifecycle storage, live execution, read-only job detail, dashboard polling, HTTP execution, cancellation backend and API behavior, dashboard cancellation UX, non-destructive schedule deletion, release metadata, the branch-diff path audit, and v0.38 TrueAegis follow-up compatibility.
+The release gate validates rendered dashboard JavaScript syntax, client-disconnect response handling, release metadata, scan-cancellation receipt completion, all seven v0.40 readability checkpoints, repository path accuracy, and the complete v0.39 lifecycle, HTTP, cancellation, and schedule-deletion functional suite in an isolated compatibility clone.
+
+Complete the manual dashboard checklist before merge, tag, or publication:
+
+```text
+MANUAL_VERIFICATION_v0.40.0.md
+```
 
 For the pre-commit release-hardening checkpoint only:
 
 ```bash
-./tools/validate_v0_39_release_gate.sh --allow-dirty
+./tools/validate_v0_40_release_gate.sh --allow-dirty
 ```
 
 Basic syntax check:
 
 ```bash
-python3 -m py_compile deltaaegis.py
+python3 -W error::SyntaxWarning -m py_compile deltaaegis.py
 ```
 
 ## Scope and Limitations
