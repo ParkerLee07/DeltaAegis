@@ -1,3 +1,18 @@
+## DeltaAegis v0.40.0 — Human-Readable Operator Actions
+
+- Added a shared action-receipt contract for successful dashboard mutations with stable action identifiers, severity, messages, summaries, identifiers, and optional diagnostic detail.
+- Added human-readable receipt coverage for NetSniper, schedule, TrueAegis, investigation, administrative-user, and telemetry-cleanup actions.
+- Added the missing backend receipt for authenticated NetSniper scan cancellation while preserving legacy cancellation fields and v0.39 behavior.
+- Replaced automatic raw mutation-payload rendering with readable operator outcomes.
+- Added progressive technical disclosure for command previews, filesystem paths, latest-run metadata, cancellation evidence, bounded log tails, and audit JSON.
+- Separated mutation responses from refreshed schedule, scan-job, validation-observation, and administrative-user read models.
+- Preserved immediate asset-detail and telemetry-cleanup models where the interface still consumes them directly.
+- Added a flat seven-checkpoint validator suite with compatibility delegation.
+- Added rendered dashboard JavaScript syntax validation to prevent Python string escaping from producing invalid browser scripts.
+- Suppressed expected `BrokenPipeError` and `ConnectionResetError` failures when a browser refreshes, closes, or abandons an in-flight JSON response, while preserving normal response behavior and unrelated exceptions.
+- Added `validate_v0_40_release_gate.sh`, v0.39 functional compatibility coverage, release metadata validation, release notes, and a mandatory manual-verification hold.
+- Preserved fixed argument-vector execution, RBAC, confirmation gates, audit logging, non-destructive schedule deletion, and existing risk/event policy.
+
 ## DeltaAegis v0.39.0 — Scan Job Lifecycle Observability
 
 - Added persistent scan-job lifecycle storage for `QUEUED`, `RUNNING`, `COMPLETED`, `FAILED`, and `CANCELLED` states.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.39.0: Scan Job Lifecycle Observability.
+"""DeltaAegis v0.40.0: Human-Readable Operator Actions.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -5456,17 +5456,49 @@ def dashboard_netsniper_scan_cancel_payload(
         },
     )
 
+    message = (
+        "Scan cancellation request accepted."
+        if cancellation_action == "requested"
+        else "Scan cancellation state recorded."
+    )
+    receipt = dashboard_action_receipt(
+        "netsniper.scan_cancel",
+        message,
+        severity="warning",
+        summary={
+            "status": job.get("status") or "",
+            "cancellation_action": cancellation_action,
+            "requested_by": (
+                job.get("cancel_requested_by")
+                or requested_by
+            ),
+        },
+        identifiers={
+            "job_id": job_id,
+        },
+        diagnostic_detail={
+            "available": bool(
+                job.get("cancel_reason")
+                or job.get("cancel_requested_at")
+                or job.get("cancelled_at")
+            ),
+            "reason": job.get("cancel_reason") or "",
+            "cancel_requested_at": (
+                job.get("cancel_requested_at")
+                or ""
+            ),
+            "cancelled_at": job.get("cancelled_at") or "",
+        },
+    )
+
     return {
         "ok": True,
         "action": "netsniper.scan.cancel",
         "job_id": job_id,
         "cancellation_action": cancellation_action,
         "job": job,
-        "message": (
-            "scan cancellation request accepted"
-            if cancellation_action == "requested"
-            else "scan cancellation state recorded"
-        ),
+        "message": message,
+        "receipt": receipt,
     }
 
 def dashboard_scan_job_detail_payload(
@@ -12108,7 +12140,10 @@ def dashboard_json_response(handler, payload, status=200):
     handler.send_header("Cache-Control", "no-store")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
-    handler.wfile.write(body)
+    try:
+        handler.wfile.write(body)
+    except (BrokenPipeError, ConnectionResetError):
+        return
 
 
 
@@ -20971,7 +21006,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.39 Scan Job Lifecycle Observability</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.40 Human-Readable Operator Actions</span></div>
     </div>
   </header>
 
@@ -24089,7 +24124,7 @@ def dashboard_index_html_base_v025_operator_link():
         );
       });
 
-      return lines.join("\n");
+      return lines.join("\\n");
     }
 
     function trueAegisRenderActionReceipt(element, receipt, fallbackMessage) {
@@ -25499,8 +25534,7 @@ def dashboard_operator_reset_shell_html() -> str:
         );
       });
 
-      return lines.join("
-");
+      return lines.join("\\n");
     }
     function cleanupRowsFromObject(rows, behavior) {
       return Object.entries(rows || {}).sort(function (a, b) { return a[0].localeCompare(b[0]); }).map(function (entry) {
@@ -25532,8 +25566,7 @@ def dashboard_operator_reset_shell_html() -> str:
           "Cleanup rows: " + totalRows,
           "Protected rows: " + protectedRows,
           "Confirmation phrase: " + (payload.confirmation_required || "DELETE TELEMETRY")
-        ].join("
-");
+        ].join("\\n");
       }
       const cleanupTables = payload.tables || payload.tables_after || payload.deleted_rows || {};
       body.innerHTML = cleanupRowsFromObject(cleanupTables, payload.dry_run === false ? "deleted/now empty" : "will be deleted") + cleanupRowsFromObject(protectedTables, "preserved");
@@ -26900,7 +26933,7 @@ def render_netsniper_page() -> str:
         );
       });
 
-      target.textContent = lines.join("\n");
+      target.textContent = lines.join("\\n");
       target.dataset.receiptSeverity = severity;
       target.dataset.receiptAction = String(safeReceipt.action || "");
     }
@@ -27889,7 +27922,7 @@ def command_dashboard(args):
 
 
     class DeltaAegisDashboardHandler(BaseHTTPRequestHandler):
-        server_version = "DeltaAegisDashboard/0.39.0"
+        server_version = "DeltaAegisDashboard/0.40.0"
 
         def log_message(self, fmt, *handler_args):
             if not args.quiet:
@@ -29781,7 +29814,7 @@ def command_validations(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.39.0 — Scan Job Lifecycle Observability, live NetSniper execution evidence, authenticated cancellation, non-destructive schedule deletion, guarded TrueAegis follow-up automation, reporting, RBAC, and the current-state SIEM dashboard")
+    parser = argparse.ArgumentParser(description="DeltaAegis v0.40.0 — Human-Readable Operator Actions, stable dashboard action receipts, progressive technical disclosure, compact mutation payloads, guarded NetSniper and TrueAegis orchestration, reporting, RBAC, and the current-state SIEM dashboard")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)

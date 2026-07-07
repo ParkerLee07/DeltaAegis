@@ -288,7 +288,7 @@ unexpected_paths="$(
   {
     git diff --name-only
     git ls-files --others --exclude-standard
-  } | sort -u | grep -Ev '^$|^deltaaegis\.py$|^tools/validate_v0_40_action_receipt_contract\.sh$|^tools/validate_v0_40_netsniper_action_receipts\.sh$|^tools/validate_v0_40_schedule_action_receipts\.sh$|^tools/validate_v0_40_trueaegis_action_receipts\.sh$|^tools/validate_v0_40_admin_workflow_action_receipts\.sh$|^tools/validate_v0_40_progressive_technical_disclosure\.sh$|^tools/validate_v0_40_payload_separation\.sh$|^tools/validate_v0_40_all\.sh$' || true
+  } | sort -u | grep -Ev '^$|^deltaaegis\.py$|^tools/validate_v0_40_action_receipt_contract\.sh$|^tools/validate_v0_40_netsniper_action_receipts\.sh$|^tools/validate_v0_40_schedule_action_receipts\.sh$|^tools/validate_v0_40_trueaegis_action_receipts\.sh$|^tools/validate_v0_40_admin_workflow_action_receipts\.sh$|^tools/validate_v0_40_progressive_technical_disclosure\.sh$|^tools/validate_v0_40_payload_separation\.sh$|^README\.md$|^CHANGELOG\.md$|^RELEASE_NOTES_v0\.40\.0\.md$|^MANUAL_VERIFICATION_v0\.40\.0\.md$|^tools/validate_v0_40_release_metadata\.sh$|^tools/validate_v0_40_v0_39_compatibility\.sh$|^tools/validate_v0_40_dashboard_javascript_syntax\.sh$|^tools/validate_v0_40_broken_pipe_response\.sh$|^tools/validate_v0_40_release_gate\.sh$|^tools/validate_v0_40_all\.sh$' || true
 )"
 
 if [[ -n "$unexpected_paths" ]]; then
