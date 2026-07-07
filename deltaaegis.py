@@ -6048,12 +6048,31 @@ def dashboard_netsniper_schedule_create_payload(
         auto_ingest=dashboard_bool_from_payload(payload.get("auto_ingest"), True),
         run_trueaegis_after_ingest=dashboard_bool_from_payload(payload.get("run_trueaegis_after_ingest"), False),
     )
+    receipt = dashboard_action_receipt(
+        "schedule.create",
+        f"Created scan schedule {schedule['name']}.",
+        summary={
+            "target": schedule["target"],
+            "scan_profile": schedule["scan_profile"],
+            "cadence_minutes": schedule["cadence_minutes"],
+            "enabled": schedule["enabled"],
+            "auto_ingest": schedule["auto_ingest"],
+            "trueaegis_after_ingest": schedule.get(
+                "run_trueaegis_after_ingest",
+                False,
+            ),
+        },
+        identifiers={
+            "schedule_id": schedule["schedule_id"],
+        },
+    )
 
     return {
         "ok": True,
         "action": "schedule.create",
         "schedule": schedule,
         "schedules": dashboard_scan_schedules_payload(connection),
+        "receipt": receipt,
     }
 
 
@@ -6064,12 +6083,29 @@ def dashboard_netsniper_schedule_enabled_payload(
 ) -> dict[str, Any]:
     schedule_id = dashboard_schedule_id_from_payload(payload)
     schedule = set_scan_schedule_enabled(connection, schedule_id, enabled)
+    action = "schedule.enable" if enabled else "schedule.disable"
+    receipt = dashboard_action_receipt(
+        action,
+        (
+            f"Enabled scan schedule {schedule['name']}."
+            if enabled
+            else f"Disabled scan schedule {schedule['name']}."
+        ),
+        summary={
+            "enabled": enabled,
+            "next_run_at": schedule.get("next_run_at"),
+        },
+        identifiers={
+            "schedule_id": schedule_id,
+        },
+    )
 
     return {
         "ok": True,
-        "action": "schedule.enable" if enabled else "schedule.disable",
+        "action": action,
         "schedule": schedule,
         "schedules": dashboard_scan_schedules_payload(connection),
+        "receipt": receipt,
     }
 
 
@@ -6089,6 +6125,30 @@ def dashboard_netsniper_schedule_delete_payload(
         )
 
     deletion = delete_scan_schedule(connection, schedule_id)
+    linked_active_job_count = deletion["linked_active_job_count"]
+    receipt = dashboard_action_receipt(
+        "schedule.delete",
+        (
+            "Schedule deleted. Linked scan jobs and history were preserved; "
+            "active jobs were not cancelled."
+        ),
+        severity="warning" if linked_active_job_count else "success",
+        summary={
+            "linked_job_count": deletion["linked_job_count"],
+            "linked_active_job_count": linked_active_job_count,
+            "linked_jobs_preserved": True,
+            "active_jobs_cancelled": False,
+        },
+        identifiers={
+            "schedule_id": schedule_id,
+        },
+        diagnostic_detail={
+            "available": True,
+            "linked_job_status_counts": deletion[
+                "linked_job_status_counts"
+            ],
+        },
+    )
 
     return {
         "ok": True,
@@ -6097,12 +6157,12 @@ def dashboard_netsniper_schedule_delete_payload(
         "confirmation_required": confirmation_required,
         "deletion": deletion,
         "linked_job_count": deletion["linked_job_count"],
-        "linked_active_job_count": deletion["linked_active_job_count"],
+        "linked_active_job_count": linked_active_job_count,
         "linked_job_status_counts": deletion["linked_job_status_counts"],
         "linked_jobs_preserved": True,
         "active_jobs_cancelled": False,
         "cancellation_required_for_active_jobs": bool(
-            deletion["linked_active_job_count"]
+            linked_active_job_count
         ),
         "message": (
             "schedule definition deleted; linked scan jobs and history "
@@ -6113,7 +6173,74 @@ def dashboard_netsniper_schedule_delete_payload(
             connection,
             limit=50,
         )["history"],
+        "receipt": receipt,
     }
+
+
+def dashboard_netsniper_schedule_run_due_receipt(
+    results: list[dict[str, Any]],
+    max_runs: int,
+) -> dict[str, Any]:
+    started_count = 0
+    blocked_count = 0
+    failed_count = 0
+    completed_count = 0
+
+    for result in results:
+        action = str(result.get("action") or "").strip().lower()
+        job = result.get("job") or {}
+        status = str(job.get("status") or "").strip().upper()
+
+        if action == "blocked":
+            blocked_count += 1
+            continue
+
+        if action in {"failed", "error"} or status == "FAILED":
+            failed_count += 1
+            continue
+
+        if job:
+            started_count += 1
+
+        if status == "COMPLETED":
+            completed_count += 1
+
+    if not results:
+        message = "No scheduled scans were due."
+        severity = "info"
+    elif failed_count:
+        message = (
+            "Scheduled scan runner completed with "
+            f"{failed_count} failed scan job(s)."
+        )
+        severity = "warning"
+    elif blocked_count and not started_count:
+        message = (
+            "A scheduled scan was due but could not start because "
+            "another scan job is active."
+        )
+        severity = "warning"
+    else:
+        message = "Scheduled scan runner completed."
+        severity = "success"
+
+    return dashboard_action_receipt(
+        "schedule.run_due",
+        message,
+        severity=severity,
+        summary={
+            "max_runs_requested": max_runs,
+            "due_results": len(results),
+            "started": started_count,
+            "blocked": blocked_count,
+            "failed": failed_count,
+            "completed": completed_count,
+        },
+        diagnostic_detail={
+            "available": bool(results),
+            "result_count": len(results),
+        },
+    )
 
 
 def dashboard_netsniper_schedule_run_due_payload(
@@ -6132,6 +6259,10 @@ def dashboard_netsniper_schedule_run_due_payload(
         max_runs=max_runs,        trueaegis_execution_mode="asynchronous",
 
     )
+    receipt = dashboard_netsniper_schedule_run_due_receipt(
+        results,
+        max_runs,
+    )
 
     return {
         "ok": True,
@@ -6140,6 +6271,7 @@ def dashboard_netsniper_schedule_run_due_payload(
         "schedules": dashboard_scan_schedules_payload(connection),
         "scan_jobs": dashboard_scan_jobs_payload(connection, limit=20),
         "schedule_history": dashboard_netsniper_schedule_history_payload(connection, limit=25)["history"],
+        "receipt": receipt,
     }
 
 
@@ -6170,6 +6302,7 @@ def dashboard_netsniper_hourly_monitoring_payload(
 
     if not enabled:
         updated_schedule = None
+        updated_count = 0
 
         for row in existing_rows:
             updated_schedule = set_scan_schedule_enabled(
@@ -6177,12 +6310,35 @@ def dashboard_netsniper_hourly_monitoring_payload(
                 row["schedule_id"],
                 False,
             )
+            updated_count += 1
+
+        receipt = dashboard_action_receipt(
+            "hourly_monitoring.disable",
+            (
+                "Hourly balanced monitoring disabled."
+                if updated_count
+                else "Hourly balanced monitoring was already disabled."
+            ),
+            severity="success" if updated_count else "info",
+            summary={
+                "enabled": False,
+                "schedules_updated": updated_count,
+            },
+            identifiers={
+                "schedule_id": (
+                    updated_schedule.get("schedule_id")
+                    if updated_schedule
+                    else ""
+                ),
+            },
+        )
 
         return {
             "ok": True,
             "action": "hourly_monitoring.disable",
             "schedule": updated_schedule,
             "schedules": dashboard_scan_schedules_payload(connection),
+            "receipt": receipt,
         }
 
     target = str(payload.get("target") or "").strip()
@@ -6193,8 +6349,11 @@ def dashboard_netsniper_hourly_monitoring_payload(
             status_code=400,
         )
 
+    replaced_count = 0
+
     for row in existing_rows:
         delete_scan_schedule(connection, row["schedule_id"])
+        replaced_count += 1
 
     schedule = create_scan_schedule(
         connection,
@@ -6205,12 +6364,27 @@ def dashboard_netsniper_hourly_monitoring_payload(
         enabled=True,
         auto_ingest=True,
     )
+    receipt = dashboard_action_receipt(
+        "hourly_monitoring.enable",
+        "Hourly balanced monitoring enabled.",
+        summary={
+            "target": schedule["target"],
+            "scan_profile": schedule["scan_profile"],
+            "cadence_minutes": schedule["cadence_minutes"],
+            "auto_ingest": schedule["auto_ingest"],
+            "replaced_schedule_count": replaced_count,
+        },
+        identifiers={
+            "schedule_id": schedule["schedule_id"],
+        },
+    )
 
     return {
         "ok": True,
         "action": "hourly_monitoring.enable",
         "schedule": schedule,
         "schedules": dashboard_scan_schedules_payload(connection),
+        "receipt": receipt,
     }
 
 
@@ -6697,6 +6871,35 @@ def dashboard_netsniper_stale_scan_recovery_payload(
         stale_minutes=stale_minutes,
         limit=100,
     )
+    recovered_count = len(recovered)
+    receipt = dashboard_action_receipt(
+        "netsniper.stale_scan_fail",
+        (
+            f"Marked {recovered_count} stale active scan job(s) failed."
+            if recovered_count
+            else "No stale active scan jobs were found."
+        ),
+        severity="warning" if recovered_count else "info",
+        summary={
+            "stale_threshold_minutes": stale_minutes,
+            "stale_before": len(before),
+            "recovered": recovered_count,
+            "stale_remaining": len(after),
+        },
+        diagnostic_detail={
+            "available": bool(recovered or after),
+            "recovered_job_ids": [
+                str(job.get("job_id") or "")
+                for job in recovered
+                if job.get("job_id")
+            ],
+            "remaining_stale_job_ids": [
+                str(job.get("job_id") or "")
+                for job in after
+                if job.get("job_id")
+            ],
+        },
+    )
 
     return {
         "ok": True,
@@ -6704,11 +6907,12 @@ def dashboard_netsniper_stale_scan_recovery_payload(
         "confirmation_required": STALE_SCAN_JOB_RECOVERY_CONFIRMATION,
         "stale_threshold_minutes": stale_minutes,
         "stale_before_count": len(before),
-        "recovered_count": len(recovered),
+        "recovered_count": recovered_count,
         "stale_after_count": len(after),
         "recovered_jobs": recovered,
         "remaining_stale_jobs": after,
         "scan_jobs": dashboard_scan_jobs_payload(connection, limit=20),
+        "receipt": receipt,
     }
 
 
@@ -26810,12 +27014,14 @@ def render_netsniper_page() -> str:
 
         if (!payload) { return; }
 
-        output.textContent = JSON.stringify(payload, null, 2);
-        status.textContent = enabled
-          ? "Hourly balanced monitoring enabled."
-          : "Hourly balanced monitoring disabled.";
+        renderDashboardActionReceipt(output, payload.receipt, payload);
+        status.textContent = (payload.receipt || {}).message
+          || (
+            enabled
+              ? "Hourly balanced monitoring enabled."
+              : "Hourly balanced monitoring disabled."
+          );
 
-        renderNetSniperSchedules(payload);
         await loadNetSniperSchedules();
       } catch (error) {
         status.textContent = `Hourly monitoring action failed: ${error.message || error}`;
@@ -26866,9 +27072,9 @@ def render_netsniper_page() -> str:
 
         if (!payload) { return; }
 
-        output.textContent = JSON.stringify(payload, null, 2);
-        status.textContent = `Created scan schedule: ${(payload.schedule || {}).schedule_id || name}`;
-        renderNetSniperSchedules(payload);
+        renderDashboardActionReceipt(output, payload.receipt, payload);
+        status.textContent = (payload.receipt || {}).message
+          || `Created scan schedule: ${(payload.schedule || {}).schedule_id || name}`;
         await loadNetSniperSchedules();
       } catch (error) {
         status.textContent = `Schedule create failed: ${error.message || error}`;
@@ -26891,17 +27097,9 @@ def render_netsniper_page() -> str:
 
         if (!payload) { return; }
 
-        output.textContent = JSON.stringify(payload, null, 2);
-        status.textContent = `Schedule runner complete: ${(payload.results || []).length} result(s)`;
-        renderNetSniperSchedules(payload);
-
-        if (payload.scan_jobs) {
-          renderNetSniperScanJobs(payload.scan_jobs);
-        }
-
-        if (payload.schedule_history) {
-          renderNetSniperScheduleHistory({history: payload.schedule_history});
-        }
+        renderDashboardActionReceipt(output, payload.receipt, payload);
+        status.textContent = (payload.receipt || {}).message
+          || `Schedule runner complete: ${(payload.results || []).length} result(s)`;
 
         await loadNetSniperSchedules();
         await loadNetSniperScanJobs();
@@ -26939,12 +27137,9 @@ def render_netsniper_page() -> str:
 
         if (!payload) { return; }
 
-        output.textContent = JSON.stringify(payload, null, 2);
-        status.textContent = `Stale scan recovery complete: ${payload.recovered_count || 0} job(s) marked failed`;
-
-        if (payload.scan_jobs) {
-          renderNetSniperScanJobs(payload.scan_jobs);
-        }
+        renderDashboardActionReceipt(output, payload.receipt, payload);
+        status.textContent = (payload.receipt || {}).message
+          || `Stale scan recovery complete: ${payload.recovered_count || 0} job(s) marked failed`;
 
         await loadNetSniperSchedules();
         await loadNetSniperScanJobs();
@@ -27006,11 +27201,15 @@ def render_netsniper_page() -> str:
 
         if (!payload) { return; }
 
-        output.textContent = JSON.stringify(payload, null, 2);
-        status.textContent = action === "delete"
-          ? `Schedule deleted; ${payload.linked_job_count || 0} linked job(s) preserved and no active jobs cancelled.`
-          : `Schedule action complete: ${action}`;
-        renderNetSniperSchedules(payload);
+        renderDashboardActionReceipt(output, payload.receipt, payload);
+        status.textContent = (payload.receipt || {}).message
+          || (
+            action === "delete"
+              ? `Schedule deleted; ${payload.linked_job_count || 0} linked job(s) preserved and no active jobs cancelled.`
+              : `Schedule action complete: ${action}`
+          );
+
+        await loadNetSniperSchedules();
 
         if (action === "delete") {
           await loadNetSniperScheduleHistory();

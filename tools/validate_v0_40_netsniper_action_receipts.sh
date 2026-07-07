@@ -84,9 +84,9 @@ for fragment in required_ui_fragments:
 raw_dump = "output.textContent = JSON.stringify(payload, null, 2);"
 raw_dump_count = source.count(raw_dump)
 
-if raw_dump_count != 5:
+if raw_dump_count != 0:
     raise SystemExit(
-        f"expected 5 remaining legacy raw action dumps, found {raw_dump_count}"
+        f"expected no remaining legacy raw action dumps, found {raw_dump_count}"
     )
 
 legacy_cancel = (
@@ -96,9 +96,9 @@ legacy_cancel = (
 if legacy_cancel in source:
     raise SystemExit("legacy cancellation result assignment remains")
 
-if source.count("renderDashboardActionReceipt(output, payload.receipt, payload);") != 2:
+if source.count("renderDashboardActionReceipt(output, payload.receipt, payload);") < 2:
     raise SystemExit(
-        "expected exactly two backend-receipt UI migrations"
+        "NetSniper import and scan-start receipt migrations are missing"
     )
 
 print("static backend and UI checks passed")
@@ -247,7 +247,7 @@ unexpected_paths="$(
   {
     git diff --name-only
     git ls-files --others --exclude-standard
-  } | sort -u | grep -Ev '^$|^deltaaegis\.py$|^tools/validate_v0_40_action_receipt_contract\.sh$|^tools/validate_v0_40_netsniper_action_receipts\.sh$' || true
+  } | sort -u | grep -Ev '^$|^deltaaegis\.py$|^tools/validate_v0_40_action_receipt_contract\.sh$|^tools/validate_v0_40_netsniper_action_receipts\.sh$|^tools/validate_v0_40_schedule_action_receipts\.sh$' || true
 )"
 
 if [[ -n "$unexpected_paths" ]]; then
