@@ -12912,6 +12912,9 @@ def dashboard_telemetry_cleanup_clear_all_payload(
             },
         )
 
+    result["receipt"] = dashboard_telemetry_cleanup_action_receipt(
+        result
+    )
     return result
 
 
@@ -22483,7 +22486,11 @@ def dashboard_index_html_base_v025_operator_link():
           const nextMessage = document.getElementById("investigation-status-message");
 
           if (nextMessage) {
-            nextMessage.textContent = `Saved investigation status: ${status}`;
+            renderDashboardActionReceipt(
+              nextMessage,
+              payload.receipt,
+              payload
+            );
           }
         } catch (error) {
           if (message) {
@@ -23258,6 +23265,41 @@ def dashboard_index_html_base_v025_operator_link():
       `;
     }
 
+    function ensureWorkflowActionReceipt() {
+      let box = document.getElementById("workflow-action-receipt");
+
+      if (box) {
+        return box;
+      }
+
+      const summary = document.getElementById("investigation-center-summary");
+      box = document.createElement("div");
+      box.id = "workflow-action-receipt";
+      box.className = "callout";
+      box.hidden = true;
+
+      if (summary && summary.parentNode) {
+        summary.parentNode.insertBefore(box, summary.nextSibling);
+      }
+
+      return box;
+    }
+
+    function renderWorkflowActionReceipt(receipt, fallbackPayload) {
+      const box = ensureWorkflowActionReceipt();
+
+      if (!box) {
+        return;
+      }
+
+      box.hidden = false;
+      renderDashboardActionReceipt(
+        box,
+        receipt,
+        fallbackPayload || {}
+      );
+    }
+
     async function updateTicketWorkflow(button) {
       const subject = button.dataset.ticketSubject || "";
       const status = button.dataset.ticketStatus || "";
@@ -23287,8 +23329,17 @@ def dashboard_index_html_base_v025_operator_link():
         }
 
         await refreshInvestigationCenter();
+        renderWorkflowActionReceipt(payload.receipt, payload);
       } catch (error) {
-        alert(error && error.message ? error.message : String(error));
+        const message = error && error.message ? error.message : String(error);
+        renderWorkflowActionReceipt(
+          {
+            action: "workflow.ticket_status",
+            severity: "error",
+            message: `Ticket workflow update failed: ${message}`
+          },
+          {}
+        );
       } finally {
         button.disabled = false;
       }
@@ -25033,7 +25084,7 @@ def dashboard_index_html() -> str:
 
 
 def dashboard_operator_users_shell_html() -> str:
-    return "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n  <title>DeltaAegis User Management</title>\n  <style>\n    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; background: #020617; color: #e2e8f0; }\n    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, rgba(34,211,238,.13), transparent 34rem), #020617; }\n    main { width: min(1180px, calc(100vw - 32px)); margin: 0 auto; padding: 44px 0; }\n    .panel { border: 1px solid rgba(148,163,184,.22); border-radius: 24px; background: rgba(15,23,42,.92); box-shadow: 0 24px 80px rgba(0,0,0,.34); padding: 28px; }\n    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: .16em; text-transform: uppercase; }\n    h1 { margin: 8px 0 8px; font-size: 32px; letter-spacing: -.04em; }\n    h2 { margin: 26px 0 12px; font-size: 18px; }\n    p { margin: 0 0 20px; color: #94a3b8; line-height: 1.55; }\n    .actions, .form-grid, .row-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }\n    a, button { border: 1px solid rgba(34,211,238,.28); border-radius: 999px; background: rgba(8,145,178,.14); color: #67e8f9; cursor: pointer; padding: 9px 13px; text-decoration: none; font-size: 13px; font-weight: 900; }\n    button:hover, a:hover { background: rgba(8,145,178,.26); }\n    button.danger { border-color: rgba(248,113,113,.35); background: rgba(220,38,38,.12); color: #fecaca; }\n    button.safe { border-color: rgba(34,197,94,.35); background: rgba(22,163,74,.12); color: #bbf7d0; }\n    input, select { border: 1px solid rgba(148,163,184,.22); border-radius: 12px; background: rgba(2,6,23,.48); color: #e2e8f0; padding: 10px 12px; font-weight: 800; }\n    input::placeholder { color: #64748b; }\n    label { color: #94a3b8; display: grid; gap: 6px; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }\n    .status { border: 1px solid rgba(148,163,184,.18); border-radius: 16px; background: rgba(2,6,23,.38); color: #cbd5e1; margin: 18px 0; padding: 12px 14px; font-weight: 700; white-space: pre-wrap; }\n    .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 18px 0 22px; }\n    .card { border: 1px solid rgba(148,163,184,.18); border-radius: 18px; background: rgba(2,6,23,.34); padding: 14px; }\n    .card-label { color: #94a3b8; font-size: 11px; font-weight: 900; letter-spacing: .11em; text-transform: uppercase; }\n    .card-value { color: #f8fafc; font-size: 24px; font-weight: 950; margin-top: 4px; }\n    .table-wrap { overflow-x: auto; border: 1px solid rgba(148,163,184,.18); border-radius: 18px; }\n    table { width: 100%; border-collapse: collapse; min-width: 1020px; }\n    th, td { border-bottom: 1px solid rgba(148,163,184,.14); padding: 12px 14px; text-align: left; vertical-align: top; }\n    th { color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }\n    td { color: #e2e8f0; font-size: 13px; font-weight: 700; }\n    .pill { display: inline-flex; border: 1px solid rgba(148,163,184,.22); border-radius: 999px; padding: 4px 8px; font-size: 11px; font-weight: 950; text-transform: uppercase; letter-spacing: .06em; }\n    .enabled { color: #bbf7d0; border-color: rgba(34,197,94,.35); background: rgba(22,163,74,.12); }\n    .disabled { color: #fecaca; border-color: rgba(248,113,113,.35); background: rgba(220,38,38,.12); }\n    .muted { color: #94a3b8; font-weight: 600; }\n  </style>\n</head>\n<body>\n  <main>\n    <section class=\"panel\">\n      <div class=\"eyebrow\">DeltaAegis Admin</div>\n      <h1>User Management</h1>\n      <p>ADMIN-only v0.26 control surface for local dashboard users. State-changing user actions require ADMIN access and are sent to audited backend APIs. Passwords are never displayed after submission.</p>\n\n      <div class=\"actions\">\n        <a href=\"/operator\">Back to operator session</a>\n        <a href=\"/\">Back to dashboard</a>\n        <a href=\"/api/admin/users\">View raw /api/admin/users JSON</a>\n        <button type=\"button\" id=\"operator-users-refresh\">Refresh users</button>\n      </div>\n\n      <h2>Create user</h2>\n      <form id=\"operator-create-user-form\" class=\"form-grid\">\n        <label>Username\n          <input id=\"operator-create-username\" name=\"username\" autocomplete=\"off\" required placeholder=\"analyst.one\">\n        </label>\n        <label>Display name\n          <input id=\"operator-create-display-name\" name=\"display_name\" autocomplete=\"off\" placeholder=\"Analyst One\">\n        </label>\n        <label>Role\n          <select id=\"operator-create-role\" name=\"role\">\n            <option value=\"VIEWER\">VIEWER</option>\n            <option value=\"ANALYST\">ANALYST</option>\n            <option value=\"ADMIN\">ADMIN</option>\n          </select>\n        </label>\n        <label>Temporary password\n          <input id=\"operator-create-password\" name=\"password\" type=\"password\" autocomplete=\"new-password\" required placeholder=\"Minimum 8 characters\">\n        </label>\n        <button type=\"submit\" class=\"safe\">Create user</button>\n      </form>\n\n      <div class=\"status\" id=\"operator-users-status\">Loading users\u2026</div>\n\n      <div class=\"summary\" id=\"operator-users-summary\" hidden>\n        <div class=\"card\"><div class=\"card-label\">Users</div><div class=\"card-value\" id=\"operator-users-count\">0</div></div>\n        <div class=\"card\"><div class=\"card-label\">Enabled</div><div class=\"card-value\" id=\"operator-users-enabled-count\">0</div></div>\n        <div class=\"card\"><div class=\"card-label\">Admins</div><div class=\"card-value\" id=\"operator-users-admin-count\">0</div></div>\n        <div class=\"card\"><div class=\"card-label\">Analysts</div><div class=\"card-value\" id=\"operator-users-analyst-count\">0</div></div>\n        <div class=\"card\"><div class=\"card-label\">Viewers</div><div class=\"card-value\" id=\"operator-users-viewer-count\">0</div></div>\n      </div>\n\n      <div class=\"table-wrap\" id=\"operator-users-table-wrap\" hidden>\n        <table>\n          <thead>\n            <tr>\n              <th>Username</th><th>Display name</th><th>Role</th><th>Status</th>\n              <th>Password</th><th>Active tokens</th><th>Last token used</th><th>Updated</th><th>Actions</th>\n            </tr>\n          </thead>\n          <tbody id=\"operator-users-body\"></tbody>\n        </table>\n      </div>\n\n      <h2>Recent user-management audit events</h2>\n      <p class=\"muted\">Shows recent audited dashboard user-management actions. Secrets, password hashes, token hashes, raw tokens, and submitted password values are not displayed.</p>\n      <div class=\"actions\">\n        <button type=\"button\" id=\"operator-users-audit-refresh\">Refresh audit trail</button>\n        <a href=\"/api/access-audit?limit=50\">View raw /api/access-audit JSON</a>\n      </div>\n      <div class=\"status\" id=\"operator-users-audit-status\">Loading user-management audit events\u2026</div>\n      <div class=\"table-wrap\" id=\"operator-users-audit-table-wrap\" hidden>\n        <table>\n          <thead>\n            <tr>\n              <th>Timestamp</th><th>Action</th><th>Target</th><th>Actor</th><th>Details</th>\n            </tr>\n          </thead>\n          <tbody id=\"operator-users-audit-body\"></tbody>\n        </table>\n      </div>\n\n    </section>\n  </main>\n\n  <script>\n    function text(value) {\n      if (value === null || value === undefined || value === \"\") { return \"\u2014\"; }\n      return String(value);\n    }\n\n    function setText(id, value) {\n      const element = document.getElementById(id);\n      if (element) { element.textContent = text(value); }\n    }\n\n    function escapeHtml(value) {\n      return text(value)\n        .replaceAll(\"&\", \"&amp;\")\n        .replaceAll(\"<\", \"&lt;\")\n        .replaceAll(\">\", \"&gt;\")\n        .replaceAll('\"', \"&quot;\")\n        .replaceAll(\"'\", \"&#039;\");\n    }\n\n    function roleOptions(currentRole) {\n      return [\"ADMIN\", \"ANALYST\", \"VIEWER\"].map(function (role) {\n        const selected = role === currentRole ? \" selected\" : \"\";\n        return `<option value=\"${role}\"${selected}>${role}</option>`;\n      }).join(\"\");\n    }\n\n    async function adminPost(path, payload) {\n      const response = await fetch(path, {\n        method: \"POST\",\n        credentials: \"same-origin\",\n        cache: \"no-store\",\n        headers: { \"Content-Type\": \"application/json\" },\n        body: JSON.stringify(payload || {})\n      });\n\n      let data = {};\n      try { data = await response.json(); } catch (error) { data = {}; }\n\n      if (response.status === 401) {\n        window.location.href = \"/login\";\n        return null;\n      }\n\n      if (!response.ok) {\n        throw new Error(data.error || data.message || `Request failed with HTTP ${response.status}`);\n      }\n\n      return data;\n    }\n\n    async function loadOperatorUsers() {\n      const status = document.getElementById(\"operator-users-status\");\n      const summary = document.getElementById(\"operator-users-summary\");\n      const tableWrap = document.getElementById(\"operator-users-table-wrap\");\n      const body = document.getElementById(\"operator-users-body\");\n\n      try {\n        const response = await fetch(\"/api/admin/users\", {\n          credentials: \"same-origin\",\n          cache: \"no-store\"\n        });\n\n        if (response.status === 401) {\n          window.location.href = \"/login\";\n          return;\n        }\n\n        if (response.status === 403) {\n          status.textContent = \"Admin role required.\";\n          return;\n        }\n\n        if (!response.ok) {\n          status.textContent = \"User lookup failed.\";\n          return;\n        }\n\n        const payload = await response.json();\n        const roleCounts = payload.role_counts || {};\n        const users = payload.users || [];\n\n        setText(\"operator-users-count\", payload.count || users.length || 0);\n        setText(\"operator-users-enabled-count\", payload.enabled_count || 0);\n        setText(\"operator-users-admin-count\", roleCounts.ADMIN || 0);\n        setText(\"operator-users-analyst-count\", roleCounts.ANALYST || 0);\n        setText(\"operator-users-viewer-count\", roleCounts.VIEWER || 0);\n\n        body.innerHTML = users.length\n          ? users.map(function (user) {\n              const enabledClass = user.enabled ? \"enabled\" : \"disabled\";\n              const enabledText = user.enabled ? \"Enabled\" : \"Disabled\";\n              const toggleAction = user.enabled ? \"disable\" : \"enable\";\n              const toggleLabel = user.enabled ? \"Disable\" : \"Enable\";\n              const toggleClass = user.enabled ? \"danger\" : \"safe\";\n\n              return `\n                <tr data-username=\"${escapeHtml(user.username)}\">\n                  <td>${escapeHtml(user.username)}</td>\n                  <td>${escapeHtml(user.display_name)}</td>\n                  <td>\n                    <select data-role-select=\"${escapeHtml(user.username)}\">\n                      ${roleOptions(user.role)}\n                    </select>\n                  </td>\n                  <td><span class=\"pill ${enabledClass}\">${enabledText}</span></td>\n                  <td>${user.password_configured ? \"Configured\" : '<span class=\"muted\">Not set</span>'}</td>\n                  <td>${escapeHtml(user.active_token_count)}</td>\n                  <td>${escapeHtml(user.last_token_used_at)}</td>\n                  <td>${escapeHtml(user.updated_at)}</td>\n                  <td>\n                    <div class=\"row-actions\">\n                      <button type=\"button\" data-action=\"role\" data-username=\"${escapeHtml(user.username)}\">Change role</button>\n                      <button type=\"button\" data-action=\"password\" data-username=\"${escapeHtml(user.username)}\">Rotate password</button>\n                      <button type=\"button\" class=\"${toggleClass}\" data-action=\"${toggleAction}\" data-username=\"${escapeHtml(user.username)}\">${toggleLabel}</button>\n                    </div>\n                  </td>\n                </tr>\n              `;\n            }).join(\"\")\n          : '<tr><td colspan=\"9\" class=\"muted\">No users found.</td></tr>';\n\n        status.textContent = \"Users loaded.\";\n        summary.hidden = false;\n        tableWrap.hidden = false;\n      } catch (error) {\n        status.textContent = `User lookup failed: ${error.message || error}`;\n      }\n    }\n\n    document.getElementById(\"operator-users-refresh\").addEventListener(\"click\", loadOperatorUsers);\n\n    document.getElementById(\"operator-create-user-form\").addEventListener(\"submit\", async function (event) {\n      event.preventDefault();\n      const status = document.getElementById(\"operator-users-status\");\n      const form = event.currentTarget;\n\n      const payload = {\n        username: document.getElementById(\"operator-create-username\").value,\n        display_name: document.getElementById(\"operator-create-display-name\").value,\n        role: document.getElementById(\"operator-create-role\").value,\n        password: document.getElementById(\"operator-create-password\").value\n      };\n\n      try {\n        await adminPost(\"/api/admin/users\", payload);\n        form.reset();\n        status.textContent = `Created user ${payload.username}.`;\n        await loadOperatorUsers();\n      } catch (error) {\n        status.textContent = `Create user failed: ${error.message || error}`;\n      }\n    });\n\n    document.getElementById(\"operator-users-body\").addEventListener(\"click\", async function (event) {\n      const button = event.target.closest(\"button[data-action]\");\n      if (!button) { return; }\n\n      const username = button.dataset.username;\n      const action = button.dataset.action;\n      const status = document.getElementById(\"operator-users-status\");\n\n      try {\n        if (action === \"role\") {\n          const roleSelect = document.querySelector(`[data-role-select=\"${CSS.escape(username)}\"]`);\n          await adminPost(`/api/admin/users/${encodeURIComponent(username)}/role`, {\n            role: roleSelect ? roleSelect.value : \"VIEWER\"\n          });\n          status.textContent = `Changed role for ${username}.`;\n        } else if (action === \"password\") {\n          const password = window.prompt(`Enter a new temporary password for ${username}. It will not be displayed after submission.`);\n          if (!password) {\n            status.textContent = \"Password rotation cancelled.\";\n            return;\n          }\n          await adminPost(`/api/admin/users/${encodeURIComponent(username)}/password`, {\n            password: password\n          });\n          status.textContent = `Rotated password for ${username}.`;\n        } else if (action === \"disable\" || action === \"enable\") {\n          await adminPost(`/api/admin/users/${encodeURIComponent(username)}/${action}`, {});\n          status.textContent = `${action === \"disable\" ? \"Disabled\" : \"Enabled\"} ${username}.`;\n        }\n\n        await loadOperatorUsers();\n      } catch (error) {\n        status.textContent = `Action failed: ${error.message || error}`;\n      }\n    });\n\n\n    function auditEventsFromPayload(payload) {\n      if (!payload) { return []; }\n      if (Array.isArray(payload.events)) { return payload.events; }\n      if (Array.isArray(payload.audit_events)) { return payload.audit_events; }\n      if (Array.isArray(payload.rows)) { return payload.rows; }\n      if (Array.isArray(payload.items)) { return payload.items; }\n      return [];\n    }\n\n    function actorText(event) {\n      const details = event.details || {};\n      const actor = details.actor || {};\n      return text(\n        event.actor_username ||\n        event.username ||\n        actor.username ||\n        actor.token_name ||\n        actor.user_id ||\n        \"\u2014\"\n      );\n    }\n\n    function targetText(event) {\n      return text(\n        event.target_key ||\n        event.target_username ||\n        event.target ||\n        event.resource ||\n        \"\u2014\"\n      );\n    }\n\n    function safeAuditDetails(event) {\n      const details = Object.assign({}, event.details || {});\n      if (details.actor) {\n        details.actor = {\n          username: details.actor.username || details.actor.token_name || \"\u2014\",\n          role: details.actor.role || \"\u2014\",\n          auth_type: details.actor.auth_type || \"\u2014\"\n        };\n      }\n\n      for (const key of Object.keys(details)) {\n        const lower = key.toLowerCase();\n        if (\n          lower.includes(\"password\") ||\n          lower.includes(\"token\") ||\n          lower.includes(\"secret\") ||\n          lower.includes(\"hash\")\n        ) {\n          details[key] = \"[redacted]\";\n        }\n      }\n\n      return JSON.stringify(details, null, 2);\n    }\n\n    async function loadOperatorUserAuditEvents() {\n      const status = document.getElementById(\"operator-users-audit-status\");\n      const tableWrap = document.getElementById(\"operator-users-audit-table-wrap\");\n      const body = document.getElementById(\"operator-users-audit-body\");\n\n      try {\n        const response = await fetch(\"/api/access-audit?limit=50\", {\n          credentials: \"same-origin\",\n          cache: \"no-store\"\n        });\n\n        if (response.status === 401) {\n          window.location.href = \"/login\";\n          return;\n        }\n\n        if (response.status === 403) {\n          status.textContent = \"Admin role required for audit visibility.\";\n          return;\n        }\n\n        if (!response.ok) {\n          status.textContent = \"Audit lookup failed.\";\n          return;\n        }\n\n        const payload = await response.json();\n        const events = auditEventsFromPayload(payload)\n          .filter(function (event) {\n            return String(event.action || \"\").startsWith(\"ACCESS_USER_DASHBOARD_\");\n          })\n          .slice(0, 20);\n\n        body.innerHTML = events.length\n          ? events.map(function (event) {\n              return `\n                <tr>\n                  <td>${escapeHtml(event.created_at || event.timestamp || event.event_time)}</td>\n                  <td><span class=\"pill\">${escapeHtml(event.action)}</span></td>\n                  <td>${escapeHtml(targetText(event))}</td>\n                  <td>${escapeHtml(actorText(event))}</td>\n                  <td><pre class=\"muted\">${escapeHtml(safeAuditDetails(event))}</pre></td>\n                </tr>\n              `;\n            }).join(\"\")\n          : '<tr><td colspan=\"5\" class=\"muted\">No user-management audit events found.</td></tr>';\n\n        status.textContent = `Loaded ${events.length} user-management audit event(s).`;\n        tableWrap.hidden = false;\n      } catch (error) {\n        status.textContent = `Audit lookup failed: ${error.message || error}`;\n      }\n    }\n\n    document.getElementById(\"operator-users-audit-refresh\").addEventListener(\"click\", loadOperatorUserAuditEvents);\n\n    loadOperatorUsers();\n    loadOperatorUserAuditEvents();\n  </script>\n</body>\n</html>"
+    return '<!doctype html>\n<html lang="en">\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-width,initial-scale=1">\n  <title>DeltaAegis User Management</title>\n  <style>\n    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #020617; color: #e2e8f0; }\n    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, rgba(34,211,238,.13), transparent 34rem), #020617; }\n    main { width: min(1180px, calc(100vw - 32px)); margin: 0 auto; padding: 44px 0; }\n    .panel { border: 1px solid rgba(148,163,184,.22); border-radius: 24px; background: rgba(15,23,42,.92); box-shadow: 0 24px 80px rgba(0,0,0,.34); padding: 28px; }\n    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: .16em; text-transform: uppercase; }\n    h1 { margin: 8px 0 8px; font-size: 32px; letter-spacing: -.04em; }\n    h2 { margin: 26px 0 12px; font-size: 18px; }\n    p { margin: 0 0 20px; color: #94a3b8; line-height: 1.55; }\n    .actions, .form-grid, .row-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }\n    a, button { border: 1px solid rgba(34,211,238,.28); border-radius: 999px; background: rgba(8,145,178,.14); color: #67e8f9; cursor: pointer; padding: 9px 13px; text-decoration: none; font-size: 13px; font-weight: 900; }\n    button:hover, a:hover { background: rgba(8,145,178,.26); }\n    button.danger { border-color: rgba(248,113,113,.35); background: rgba(220,38,38,.12); color: #fecaca; }\n    button.safe { border-color: rgba(34,197,94,.35); background: rgba(22,163,74,.12); color: #bbf7d0; }\n    input, select { border: 1px solid rgba(148,163,184,.22); border-radius: 12px; background: rgba(2,6,23,.48); color: #e2e8f0; padding: 10px 12px; font-weight: 800; }\n    input::placeholder { color: #64748b; }\n    label { color: #94a3b8; display: grid; gap: 6px; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }\n    .status { border: 1px solid rgba(148,163,184,.18); border-radius: 16px; background: rgba(2,6,23,.38); color: #cbd5e1; margin: 18px 0; padding: 12px 14px; font-weight: 700; white-space: pre-wrap; }\n    .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 18px 0 22px; }\n    .card { border: 1px solid rgba(148,163,184,.18); border-radius: 18px; background: rgba(2,6,23,.34); padding: 14px; }\n    .card-label { color: #94a3b8; font-size: 11px; font-weight: 900; letter-spacing: .11em; text-transform: uppercase; }\n    .card-value { color: #f8fafc; font-size: 24px; font-weight: 950; margin-top: 4px; }\n    .table-wrap { overflow-x: auto; border: 1px solid rgba(148,163,184,.18); border-radius: 18px; }\n    table { width: 100%; border-collapse: collapse; min-width: 1020px; }\n    th, td { border-bottom: 1px solid rgba(148,163,184,.14); padding: 12px 14px; text-align: left; vertical-align: top; }\n    th { color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }\n    td { color: #e2e8f0; font-size: 13px; font-weight: 700; }\n    .pill { display: inline-flex; border: 1px solid rgba(148,163,184,.22); border-radius: 999px; padding: 4px 8px; font-size: 11px; font-weight: 950; text-transform: uppercase; letter-spacing: .06em; }\n    .enabled { color: #bbf7d0; border-color: rgba(34,197,94,.35); background: rgba(22,163,74,.12); }\n    .disabled { color: #fecaca; border-color: rgba(248,113,113,.35); background: rgba(220,38,38,.12); }\n    .muted { color: #94a3b8; font-weight: 600; }\n  </style>\n</head>\n<body>\n  <main>\n    <section class="panel">\n      <div class="eyebrow">DeltaAegis Admin</div>\n      <h1>User Management</h1>\n      <p>ADMIN-only v0.26 control surface for local dashboard users. State-changing user actions require ADMIN access and are sent to audited backend APIs. Passwords are never displayed after submission.</p>\n\n      <div class="actions">\n        <a href="/operator">Back to operator session</a>\n        <a href="/">Back to dashboard</a>\n        <a href="/api/admin/users">View raw /api/admin/users JSON</a>\n        <button type="button" id="operator-users-refresh">Refresh users</button>\n      </div>\n\n      <h2>Create user</h2>\n      <form id="operator-create-user-form" class="form-grid">\n        <label>Username\n          <input id="operator-create-username" name="username" autocomplete="off" required placeholder="analyst.one">\n        </label>\n        <label>Display name\n          <input id="operator-create-display-name" name="display_name" autocomplete="off" placeholder="Analyst One">\n        </label>\n        <label>Role\n          <select id="operator-create-role" name="role">\n            <option value="VIEWER">VIEWER</option>\n            <option value="ANALYST">ANALYST</option>\n            <option value="ADMIN">ADMIN</option>\n          </select>\n        </label>\n        <label>Temporary password\n          <input id="operator-create-password" name="password" type="password" autocomplete="new-password" required placeholder="Minimum 8 characters">\n        </label>\n        <button type="submit" class="safe">Create user</button>\n      </form>\n\n      <div class="status" id="operator-users-status">Loading users…</div>\n\n      <div class="summary" id="operator-users-summary" hidden>\n        <div class="card"><div class="card-label">Users</div><div class="card-value" id="operator-users-count">0</div></div>\n        <div class="card"><div class="card-label">Enabled</div><div class="card-value" id="operator-users-enabled-count">0</div></div>\n        <div class="card"><div class="card-label">Admins</div><div class="card-value" id="operator-users-admin-count">0</div></div>\n        <div class="card"><div class="card-label">Analysts</div><div class="card-value" id="operator-users-analyst-count">0</div></div>\n        <div class="card"><div class="card-label">Viewers</div><div class="card-value" id="operator-users-viewer-count">0</div></div>\n      </div>\n\n      <div class="table-wrap" id="operator-users-table-wrap" hidden>\n        <table>\n          <thead>\n            <tr>\n              <th>Username</th><th>Display name</th><th>Role</th><th>Status</th>\n              <th>Password</th><th>Active tokens</th><th>Last token used</th><th>Updated</th><th>Actions</th>\n            </tr>\n          </thead>\n          <tbody id="operator-users-body"></tbody>\n        </table>\n      </div>\n\n      <h2>Recent user-management audit events</h2>\n      <p class="muted">Shows recent audited dashboard user-management actions. Secrets, password hashes, token hashes, raw tokens, and submitted password values are not displayed.</p>\n      <div class="actions">\n        <button type="button" id="operator-users-audit-refresh">Refresh audit trail</button>\n        <a href="/api/access-audit?limit=50">View raw /api/access-audit JSON</a>\n      </div>\n      <div class="status" id="operator-users-audit-status">Loading user-management audit events…</div>\n      <div class="table-wrap" id="operator-users-audit-table-wrap" hidden>\n        <table>\n          <thead>\n            <tr>\n              <th>Timestamp</th><th>Action</th><th>Target</th><th>Actor</th><th>Details</th>\n            </tr>\n          </thead>\n          <tbody id="operator-users-audit-body"></tbody>\n        </table>\n      </div>\n\n    </section>\n  </main>\n\n  <script>\n    function text(value) {\n      if (value === null || value === undefined || value === "") { return "—"; }\n      return String(value);\n    }\n\n    function setText(id, value) {\n      const element = document.getElementById(id);\n      if (element) { element.textContent = text(value); }\n    }\n\n    function adminReceiptLabel(value) {\n      return String(value || "")\n        .replaceAll("_", " ")\n        .replaceAll("-", " ")\n        .split(" ")\n        .filter(function (part) { return Boolean(part); })\n        .map(function (part) {\n          return part.charAt(0).toUpperCase() + part.slice(1);\n        })\n        .join(" ");\n    }\n\n    function adminReceiptValue(value) {\n      if (value === true) { return "Yes"; }\n      if (value === false) { return "No"; }\n      if (value === null || value === undefined || value === "") { return "—"; }\n      return String(value);\n    }\n\n    function adminActionReceiptText(receipt, fallbackMessage) {\n      const safeReceipt = receipt && typeof receipt === "object"\n        ? receipt\n        : {};\n      const lines = [\n        String(safeReceipt.message || fallbackMessage || "Action completed.")\n      ];\n      const summary = safeReceipt.summary && typeof safeReceipt.summary === "object"\n        ? safeReceipt.summary\n        : {};\n      const identifiers = safeReceipt.identifiers && typeof safeReceipt.identifiers === "object"\n        ? safeReceipt.identifiers\n        : {};\n\n      Object.entries(summary).forEach(function (entry) {\n        if (entry[1] === null || entry[1] === undefined || entry[1] === "") {\n          return;\n        }\n        lines.push(\n          `${adminReceiptLabel(entry[0])}: ${adminReceiptValue(entry[1])}`\n        );\n      });\n\n      Object.entries(identifiers).forEach(function (entry) {\n        if (entry[1] === null || entry[1] === undefined || entry[1] === "") {\n          return;\n        }\n        lines.push(\n          `${adminReceiptLabel(entry[0])}: ${adminReceiptValue(entry[1])}`\n        );\n      });\n\n      return lines.join("\\n");\n    }\n\n    function renderAdminActionReceipt(status, receipt, fallbackMessage) {\n      if (!status) { return; }\n      status.textContent = adminActionReceiptText(\n        receipt,\n        fallbackMessage\n      );\n      status.dataset.receiptSeverity = String(\n        (receipt || {}).severity || "info"\n      ).toLowerCase();\n      status.dataset.receiptAction = String(\n        (receipt || {}).action || ""\n      );\n    }\n\n    function escapeHtml(value) {\n      return text(value)\n        .replaceAll("&", "&amp;")\n        .replaceAll("<", "&lt;")\n        .replaceAll(">", "&gt;")\n        .replaceAll(\'"\', "&quot;")\n        .replaceAll("\'", "&#039;");\n    }\n\n    function roleOptions(currentRole) {\n      return ["ADMIN", "ANALYST", "VIEWER"].map(function (role) {\n        const selected = role === currentRole ? " selected" : "";\n        return `<option value="${role}"${selected}>${role}</option>`;\n      }).join("");\n    }\n\n    async function adminPost(path, payload) {\n      const response = await fetch(path, {\n        method: "POST",\n        credentials: "same-origin",\n        cache: "no-store",\n        headers: { "Content-Type": "application/json" },\n        body: JSON.stringify(payload || {})\n      });\n\n      let data = {};\n      try { data = await response.json(); } catch (error) { data = {}; }\n\n      if (response.status === 401) {\n        window.location.href = "/login";\n        return null;\n      }\n\n      if (!response.ok) {\n        throw new Error(data.error || data.message || `Request failed with HTTP ${response.status}`);\n      }\n\n      return data;\n    }\n\n    async function loadOperatorUsers() {\n      const status = document.getElementById("operator-users-status");\n      const summary = document.getElementById("operator-users-summary");\n      const tableWrap = document.getElementById("operator-users-table-wrap");\n      const body = document.getElementById("operator-users-body");\n\n      try {\n        const response = await fetch("/api/admin/users", {\n          credentials: "same-origin",\n          cache: "no-store"\n        });\n\n        if (response.status === 401) {\n          window.location.href = "/login";\n          return;\n        }\n\n        if (response.status === 403) {\n          status.textContent = "Admin role required.";\n          return;\n        }\n\n        if (!response.ok) {\n          status.textContent = "User lookup failed.";\n          return;\n        }\n\n        const payload = await response.json();\n        const roleCounts = payload.role_counts || {};\n        const users = payload.users || [];\n\n        setText("operator-users-count", payload.count || users.length || 0);\n        setText("operator-users-enabled-count", payload.enabled_count || 0);\n        setText("operator-users-admin-count", roleCounts.ADMIN || 0);\n        setText("operator-users-analyst-count", roleCounts.ANALYST || 0);\n        setText("operator-users-viewer-count", roleCounts.VIEWER || 0);\n\n        body.innerHTML = users.length\n          ? users.map(function (user) {\n              const enabledClass = user.enabled ? "enabled" : "disabled";\n              const enabledText = user.enabled ? "Enabled" : "Disabled";\n              const toggleAction = user.enabled ? "disable" : "enable";\n              const toggleLabel = user.enabled ? "Disable" : "Enable";\n              const toggleClass = user.enabled ? "danger" : "safe";\n\n              return `\n                <tr data-username="${escapeHtml(user.username)}">\n                  <td>${escapeHtml(user.username)}</td>\n                  <td>${escapeHtml(user.display_name)}</td>\n                  <td>\n                    <select data-role-select="${escapeHtml(user.username)}">\n                      ${roleOptions(user.role)}\n                    </select>\n                  </td>\n                  <td><span class="pill ${enabledClass}">${enabledText}</span></td>\n                  <td>${user.password_configured ? "Configured" : \'<span class="muted">Not set</span>\'}</td>\n                  <td>${escapeHtml(user.active_token_count)}</td>\n                  <td>${escapeHtml(user.last_token_used_at)}</td>\n                  <td>${escapeHtml(user.updated_at)}</td>\n                  <td>\n                    <div class="row-actions">\n                      <button type="button" data-action="role" data-username="${escapeHtml(user.username)}">Change role</button>\n                      <button type="button" data-action="password" data-username="${escapeHtml(user.username)}">Rotate password</button>\n                      <button type="button" class="${toggleClass}" data-action="${toggleAction}" data-username="${escapeHtml(user.username)}">${toggleLabel}</button>\n                    </div>\n                  </td>\n                </tr>\n              `;\n            }).join("")\n          : \'<tr><td colspan="9" class="muted">No users found.</td></tr>\';\n\n        status.textContent = "Users loaded.";\n        summary.hidden = false;\n        tableWrap.hidden = false;\n      } catch (error) {\n        status.textContent = `User lookup failed: ${error.message || error}`;\n      }\n    }\n\n    document.getElementById("operator-users-refresh").addEventListener("click", loadOperatorUsers);\n\n    document.getElementById("operator-create-user-form").addEventListener("submit", async function (event) {\n      event.preventDefault();\n      const status = document.getElementById("operator-users-status");\n      const form = event.currentTarget;\n\n      const payload = {\n        username: document.getElementById("operator-create-username").value,\n        display_name: document.getElementById("operator-create-display-name").value,\n        role: document.getElementById("operator-create-role").value,\n        password: document.getElementById("operator-create-password").value\n      };\n\n      try {\n        const result = await adminPost("/api/admin/users", payload);\n        form.reset();\n        await loadOperatorUsers();\n        renderAdminActionReceipt(\n          status,\n          result && result.receipt,\n          `Created user ${payload.username}.`\n        );\n      } catch (error) {\n        status.textContent = `Create user failed: ${error.message || error}`;\n      }\n    });\n\n    document.getElementById("operator-users-body").addEventListener("click", async function (event) {\n      const button = event.target.closest("button[data-action]");\n      if (!button) { return; }\n\n      const username = button.dataset.username;\n      const action = button.dataset.action;\n      const status = document.getElementById("operator-users-status");\n\n      try {\n        let result = null;\n        let fallbackMessage = `Updated user ${username}.`;\n\n        if (action === "role") {\n          const roleSelect = document.querySelector(`[data-role-select="${CSS.escape(username)}"]`);\n          result = await adminPost(`/api/admin/users/${encodeURIComponent(username)}/role`, {\n            role: roleSelect ? roleSelect.value : "VIEWER"\n          });\n          fallbackMessage = `Changed role for ${username}.`;\n        } else if (action === "password") {\n          const password = window.prompt(`Enter a new temporary password for ${username}. It will not be displayed after submission.`);\n          if (!password) {\n            status.textContent = "Password rotation cancelled.";\n            return;\n          }\n          result = await adminPost(`/api/admin/users/${encodeURIComponent(username)}/password`, {\n            password: password\n          });\n          fallbackMessage = `Rotated password for ${username}.`;\n        } else if (action === "disable" || action === "enable") {\n          result = await adminPost(`/api/admin/users/${encodeURIComponent(username)}/${action}`, {});\n          fallbackMessage = `${action === "disable" ? "Disabled" : "Enabled"} ${username}.`;\n        }\n\n        await loadOperatorUsers();\n        renderAdminActionReceipt(\n          status,\n          result && result.receipt,\n          fallbackMessage\n        );\n      } catch (error) {\n        status.textContent = `Action failed: ${error.message || error}`;\n      }\n    });\n\n\n    function auditEventsFromPayload(payload) {\n      if (!payload) { return []; }\n      if (Array.isArray(payload.events)) { return payload.events; }\n      if (Array.isArray(payload.audit_events)) { return payload.audit_events; }\n      if (Array.isArray(payload.rows)) { return payload.rows; }\n      if (Array.isArray(payload.items)) { return payload.items; }\n      return [];\n    }\n\n    function actorText(event) {\n      const details = event.details || {};\n      const actor = details.actor || {};\n      return text(\n        event.actor_username ||\n        event.username ||\n        actor.username ||\n        actor.token_name ||\n        actor.user_id ||\n        "—"\n      );\n    }\n\n    function targetText(event) {\n      return text(\n        event.target_key ||\n        event.target_username ||\n        event.target ||\n        event.resource ||\n        "—"\n      );\n    }\n\n    function safeAuditDetails(event) {\n      const details = Object.assign({}, event.details || {});\n      if (details.actor) {\n        details.actor = {\n          username: details.actor.username || details.actor.token_name || "—",\n          role: details.actor.role || "—",\n          auth_type: details.actor.auth_type || "—"\n        };\n      }\n\n      for (const key of Object.keys(details)) {\n        const lower = key.toLowerCase();\n        if (\n          lower.includes("password") ||\n          lower.includes("token") ||\n          lower.includes("secret") ||\n          lower.includes("hash")\n        ) {\n          details[key] = "[redacted]";\n        }\n      }\n\n      return JSON.stringify(details, null, 2);\n    }\n\n    async function loadOperatorUserAuditEvents() {\n      const status = document.getElementById("operator-users-audit-status");\n      const tableWrap = document.getElementById("operator-users-audit-table-wrap");\n      const body = document.getElementById("operator-users-audit-body");\n\n      try {\n        const response = await fetch("/api/access-audit?limit=50", {\n          credentials: "same-origin",\n          cache: "no-store"\n        });\n\n        if (response.status === 401) {\n          window.location.href = "/login";\n          return;\n        }\n\n        if (response.status === 403) {\n          status.textContent = "Admin role required for audit visibility.";\n          return;\n        }\n\n        if (!response.ok) {\n          status.textContent = "Audit lookup failed.";\n          return;\n        }\n\n        const payload = await response.json();\n        const events = auditEventsFromPayload(payload)\n          .filter(function (event) {\n            return String(event.action || "").startsWith("ACCESS_USER_DASHBOARD_");\n          })\n          .slice(0, 20);\n\n        body.innerHTML = events.length\n          ? events.map(function (event) {\n              return `\n                <tr>\n                  <td>${escapeHtml(event.created_at || event.timestamp || event.event_time)}</td>\n                  <td><span class="pill">${escapeHtml(event.action)}</span></td>\n                  <td>${escapeHtml(targetText(event))}</td>\n                  <td>${escapeHtml(actorText(event))}</td>\n                  <td><pre class="muted">${escapeHtml(safeAuditDetails(event))}</pre></td>\n                </tr>\n              `;\n            }).join("")\n          : \'<tr><td colspan="5" class="muted">No user-management audit events found.</td></tr>\';\n\n        status.textContent = `Loaded ${events.length} user-management audit event(s).`;\n        tableWrap.hidden = false;\n      } catch (error) {\n        status.textContent = `Audit lookup failed: ${error.message || error}`;\n      }\n    }\n\n    document.getElementById("operator-users-audit-refresh").addEventListener("click", loadOperatorUserAuditEvents);\n\n    loadOperatorUsers();\n    loadOperatorUserAuditEvents();\n  </script>\n</body>\n</html>'
 
 def dashboard_operator_session_shell_html() -> str:
     return "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n  <title>DeltaAegis Operator Session</title>\n  <style>\n    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; background: #020617; color: #e2e8f0; }\n    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, rgba(34, 211, 238, 0.13), transparent 34rem), #020617; }\n    main { width: min(900px, calc(100vw - 32px)); margin: 0 auto; padding: 44px 0; }\n    .panel { border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 24px; background: rgba(15, 23, 42, 0.92); box-shadow: 0 24px 80px rgba(0, 0, 0, 0.34); padding: 28px; }\n    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: 0.16em; text-transform: uppercase; }\n    h1 { margin: 8px 0 8px; font-size: 32px; letter-spacing: -0.04em; }\n    p { margin: 0 0 24px; color: #94a3b8; line-height: 1.55; }\n    table { width: 100%; border-collapse: collapse; margin: 22px 0; overflow: hidden; border-radius: 16px; }\n    th, td { border-bottom: 1px solid rgba(148, 163, 184, 0.14); padding: 13px 14px; text-align: left; }\n    th { width: 180px; color: #94a3b8; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }\n    td { color: #f8fafc; font-weight: 700; }\n    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }\n    a { border: 1px solid rgba(34, 211, 238, 0.28); border-radius: 999px; color: #67e8f9; padding: 9px 13px; text-decoration: none; font-size: 13px; font-weight: 900; }\n    a.logout { border-color: rgba(248, 113, 113, 0.34); color: #fecaca; }\n    .status { border: 1px solid rgba(148, 163, 184, 0.18); border-radius: 16px; background: rgba(2, 6, 23, 0.38); color: #cbd5e1; margin-top: 18px; padding: 12px 14px; font-weight: 700; }\n  </style>\n\n  <style id=\"deltaaegis-operator-audit-layout-fix\">\n    main {\n      width: min(1180px, calc(100vw - 32px)) !important;\n    }\n\n    h2 {\n      margin-top: 28px;\n      margin-bottom: 12px;\n      font-size: 22px;\n      letter-spacing: -0.02em;\n    }\n\n    .muted {\n      color: #94a3b8;\n      overflow-wrap: anywhere;\n    }\n\n    #operator-access-audit-table-wrap {\n      max-width: 100%;\n      overflow-x: auto;\n      border-radius: 18px;\n    }\n\n    #operator-access-audit-table-wrap table {\n      width: 100%;\n      min-width: 0;\n      table-layout: fixed;\n    }\n\n    #operator-access-audit-table-wrap th,\n    #operator-access-audit-table-wrap td {\n      overflow-wrap: anywhere;\n      word-break: break-word;\n      vertical-align: top;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(1),\n    #operator-access-audit-table-wrap td:nth-child(1) {\n      width: 21%;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(2),\n    #operator-access-audit-table-wrap td:nth-child(2) {\n      width: 20%;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(3),\n    #operator-access-audit-table-wrap td:nth-child(3) {\n      width: 20%;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(4),\n    #operator-access-audit-table-wrap td:nth-child(4) {\n      width: 14%;\n    }\n\n    #operator-access-audit-table-wrap th:nth-child(5),\n    #operator-access-audit-table-wrap td:nth-child(5) {\n      width: 25%;\n    }\n\n    #operator-access-audit-table-wrap pre {\n      margin: 0;\n      max-width: 100%;\n      white-space: pre-wrap;\n      overflow-wrap: anywhere;\n      word-break: break-word;\n      font-size: 11px;\n      line-height: 1.45;\n    }\n\n    #operator-access-audit-table-wrap .pill {\n      white-space: normal;\n      overflow-wrap: anywhere;\n    }\n  </style>\n\n</head>\n<body>\n  <main>\n    <section class=\"panel\">\n      <div class=\"eyebrow\">DeltaAegis</div>\n      <h1>Operator Session</h1>\n      <p>This page loads the current operator identity from the protected <code>/api/session</code> endpoint.</p>\n      <div class=\"status\" id=\"operator-session-status\">Loading session\u2026</div>\n      <table id=\"operator-session-table\" hidden>\n        <tbody>\n          <tr><th>Username</th><td id=\"operator-session-username\">\u2014</td></tr>\n          <tr><th>Display name</th><td id=\"operator-session-display-name\">\u2014</td></tr>\n          <tr><th>Role</th><td id=\"operator-session-role\">\u2014</td></tr>\n          <tr><th>Auth type</th><td id=\"operator-session-auth-type\">\u2014</td></tr>\n          <tr><th>Session ID</th><td id=\"operator-session-id\">\u2014</td></tr>\n          <tr><th>Expires at</th><td id=\"operator-session-expires-at\">\u2014</td></tr>\n        </tbody>\n      </table>\n      <div class=\"actions\">\n        <a id=\"deltaaegis-admin-control-panel-link\" href=\"/operator/users\">Admin control panel</a>\n        <a href=\"/\">Back to dashboard</a>\n        <a href=\"/api/session\">View raw /api/session JSON</a>\n        <a class=\"logout\" href=\"/logout\">Logout</a>\n      </div>\n\n      <h2>Access Audit Trail</h2>\n      <p class=\"muted\">Operator-centered view of recent dashboard access and account-management audit events. Secrets, password hashes, token hashes, raw tokens, and submitted password values are not displayed.</p>\n      <div class=\"actions\">\n        <button type=\"button\" id=\"operator-access-audit-refresh\">Refresh access audit</button>\n        <a href=\"/api/access-audit?limit=50\">View raw /api/access-audit JSON</a>\n      </div>\n      <div class=\"status\" id=\"operator-access-audit-status\">Loading access audit trail\u2026</div>\n      <div class=\"table-wrap\" id=\"operator-access-audit-table-wrap\" hidden>\n        <table>\n          <thead>\n            <tr>\n              <th>Timestamp</th><th>Action</th><th>Target</th><th>Actor</th><th>Details</th>\n            </tr>\n          </thead>\n          <tbody id=\"operator-access-audit-body\"></tbody>\n        </table>\n      </div>\n\n    </section>\n  </main>\n  <script>\n    function setText(id, value) {\n      const element = document.getElementById(id);\n      if (element) { element.textContent = value || \"\u2014\"; }\n    }\n    async function loadOperatorSession() {\n      const status = document.getElementById(\"operator-session-status\");\n      const table = document.getElementById(\"operator-session-table\");\n      try {\n        const response = await fetch(\"/api/session\", { credentials: \"same-origin\", cache: \"no-store\" });\n        if (response.status === 401 || response.status === 403) { window.location.href = \"/login\"; return; }\n        if (!response.ok) { status.textContent = \"Session lookup failed.\"; return; }\n        const session = await response.json();\n        const user = session.user || {};\n        setText(\"operator-session-username\", user.username);\n        setText(\"operator-session-display-name\", user.display_name);\n        setText(\"operator-session-role\", user.role || session.role);\n        setText(\"operator-session-auth-type\", session.auth_type);\n        setText(\"operator-session-id\", session.session_id);\n        setText(\"operator-session-expires-at\", session.expires_at);\n        status.textContent = \"Session loaded.\";\n        table.hidden = false;\n      } catch (error) {\n        status.textContent = \"Session lookup failed.\";\n      }\n    }\n    loadOperatorSession();\n  </script>\n<style id=\"deltaaegis-operator-actions-style\">\n  .operator-action-button {\n    border: 1px solid rgba(34, 211, 238, 0.28);\n    border-radius: 999px;\n    background: rgba(8, 145, 178, 0.14);\n    color: #67e8f9;\n    cursor: pointer;\n    padding: 9px 13px;\n    font-size: 13px;\n    font-weight: 900;\n  }\n  .operator-action-button:hover {\n    background: rgba(8, 145, 178, 0.26);\n  }\n  .operator-action-output {\n    border: 1px solid rgba(148, 163, 184, 0.18);\n    border-radius: 16px;\n    background: rgba(2, 6, 23, 0.55);\n    color: #cbd5e1;\n    margin-top: 18px;\n    max-height: 260px;\n    overflow: auto;\n    padding: 14px;\n    white-space: pre-wrap;\n    word-break: break-word;\n    font-size: 12px;\n  }\n</style>\n<script id=\"deltaaegis-operator-actions-script\">\n(function () {\n  function ensureActionControls() {\n    const actions = document.querySelector(\".actions\");\n\n    if (!actions || document.getElementById(\"operator-refresh-session\")) {\n      return;\n    }\n\n    const refreshButton = document.createElement(\"button\");\n    refreshButton.id = \"operator-refresh-session\";\n    refreshButton.className = \"operator-action-button\";\n    refreshButton.type = \"button\";\n    refreshButton.textContent = \"Refresh session\";\n\n    const copyButton = document.createElement(\"button\");\n    copyButton.id = \"operator-copy-session-json\";\n    copyButton.className = \"operator-action-button\";\n    copyButton.type = \"button\";\n    copyButton.textContent = \"Copy /api/session JSON\";\n\n    actions.insertBefore(copyButton, actions.firstChild);\n    actions.insertBefore(refreshButton, actions.firstChild);\n\n    const output = document.createElement(\"pre\");\n    output.id = \"operator-session-json-output\";\n    output.className = \"operator-action-output\";\n    output.hidden = true;\n    actions.parentNode.insertBefore(output, actions.nextSibling);\n\n    refreshButton.addEventListener(\"click\", function () {\n      if (typeof loadOperatorSession === \"function\") {\n        loadOperatorSession();\n      }\n    });\n\n    copyButton.addEventListener(\"click\", async function () {\n      const response = await fetch(\"/api/session\", {\n        credentials: \"same-origin\",\n        cache: \"no-store\"\n      });\n\n      if (response.status === 401 || response.status === 403) {\n        window.location.href = \"/login\";\n        return;\n      }\n\n      const session = await response.json();\n      const jsonText = JSON.stringify(session, null, 2);\n      output.textContent = jsonText;\n      output.hidden = false;\n\n      try {\n        await navigator.clipboard.writeText(jsonText);\n        copyButton.textContent = \"Copied /api/session JSON\";\n        window.setTimeout(function () {\n          copyButton.textContent = \"Copy /api/session JSON\";\n        }, 1600);\n      } catch (error) {\n        copyButton.textContent = \"Copy unavailable\";\n        window.setTimeout(function () {\n          copyButton.textContent = \"Copy /api/session JSON\";\n        }, 1600);\n      }\n    });\n  }\n\n  if (document.readyState === \"loading\") {\n    document.addEventListener(\"DOMContentLoaded\", ensureActionControls);\n  } else {\n    ensureActionControls();\n  }\n})();\n</script>\n\n  <script id=\"deltaaegis-operator-access-audit-script\">\n    function operatorAuditText(value) {\n      if (value === null || value === undefined || value === \"\") { return \"\u2014\"; }\n      return String(value);\n    }\n\n    function operatorAuditEscape(value) {\n      return operatorAuditText(value)\n        .replaceAll(\"&\", \"&amp;\")\n        .replaceAll(\"<\", \"&lt;\")\n        .replaceAll(\">\", \"&gt;\")\n        .replaceAll('\"', \"&quot;\")\n        .replaceAll(\"'\", \"&#039;\");\n    }\n\n    function operatorAuditEventsFromPayload(payload) {\n      if (!payload) { return []; }\n      if (Array.isArray(payload.events)) { return payload.events; }\n      if (Array.isArray(payload.audit_events)) { return payload.audit_events; }\n      if (Array.isArray(payload.rows)) { return payload.rows; }\n      if (Array.isArray(payload.items)) { return payload.items; }\n      return [];\n    }\n\n    function operatorAuditSafeDetails(event) {\n      const details = Object.assign({}, event.details || {});\n      if (details.actor) {\n        details.actor = {\n          username: details.actor.username || details.actor.token_name || \"\u2014\",\n          role: details.actor.role || \"\u2014\",\n          auth_type: details.actor.auth_type || \"\u2014\"\n        };\n      }\n\n      for (const key of Object.keys(details)) {\n        const lower = key.toLowerCase();\n        if (lower.includes(\"password\") || lower.includes(\"token\") || lower.includes(\"secret\") || lower.includes(\"hash\")) {\n          details[key] = \"[redacted]\";\n        }\n      }\n\n      return JSON.stringify(details, null, 2);\n    }\n\n    async function loadOperatorAccessAuditTrail() {\n      const status = document.getElementById(\"operator-access-audit-status\");\n      const tableWrap = document.getElementById(\"operator-access-audit-table-wrap\");\n      const body = document.getElementById(\"operator-access-audit-body\");\n\n      try {\n        const response = await fetch(\"/api/access-audit?limit=50\", {\n          credentials: \"same-origin\",\n          cache: \"no-store\"\n        });\n\n        if (response.status === 401) {\n          window.location.href = \"/login\";\n          return;\n        }\n\n        if (response.status === 403) {\n          status.textContent = \"Admin role required for access audit visibility.\";\n          return;\n        }\n\n        if (!response.ok) {\n          status.textContent = \"Access audit lookup failed.\";\n          return;\n        }\n\n        const payload = await response.json();\n        const events = operatorAuditEventsFromPayload(payload).slice(0, 50);\n\n        body.innerHTML = events.length\n          ? events.map(function (event) {\n              const details = event.details || {};\n              const actor = details.actor || {};\n              const actorText = event.actor_username || event.username || actor.username || actor.token_name || actor.user_id || \"\u2014\";\n              const targetText = event.target_key || event.target_username || event.target || event.resource || \"\u2014\";\n\n              return `\n                <tr>\n                  <td>${operatorAuditEscape(event.created_at || event.timestamp || event.event_time)}</td>\n                  <td><span class=\"pill\">${operatorAuditEscape(event.action)}</span></td>\n                  <td>${operatorAuditEscape(targetText)}</td>\n                  <td>${operatorAuditEscape(actorText)}</td>\n                  <td><pre class=\"muted\">${operatorAuditEscape(operatorAuditSafeDetails(event))}</pre></td>\n                </tr>\n              `;\n            }).join(\"\")\n          : '<tr><td colspan=\"5\" class=\"muted\">No access audit events found.</td></tr>';\n\n        status.textContent = `Loaded ${events.length} access audit event(s).`;\n        tableWrap.hidden = false;\n      } catch (error) {\n        status.textContent = `Access audit lookup failed: ${error.message || error}`;\n      }\n    }\n\n    document.getElementById(\"operator-access-audit-refresh\").addEventListener(\"click\", loadOperatorAccessAuditTrail);\n    loadOperatorAccessAuditTrail();\n  </script>\n\n</body>\n</html>"
@@ -25423,6 +25474,43 @@ def dashboard_operator_reset_shell_html() -> str:
     function cleanupEscape(value) {
       return cleanupText(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
     }
+    function cleanupReceiptLabel(value) {
+      return String(value || "")
+        .replaceAll("_", " ")
+        .replaceAll("-", " ")
+        .split(" ")
+        .filter(function (part) { return Boolean(part); })
+        .map(function (part) {
+          return part.charAt(0).toUpperCase() + part.slice(1);
+        })
+        .join(" ");
+    }
+    function cleanupReceiptValue(value) {
+      if (value === true) { return "Yes"; }
+      if (value === false) { return "No"; }
+      if (value === null || value === undefined || value === "") { return "—"; }
+      return String(value);
+    }
+    function cleanupReceiptText(receipt, fallbackMessage) {
+      const safeReceipt = receipt && typeof receipt === "object"
+        ? receipt
+        : {};
+      const lines = [
+        String(safeReceipt.message || fallbackMessage || "Action completed.")
+      ];
+      const summary = safeReceipt.summary && typeof safeReceipt.summary === "object"
+        ? safeReceipt.summary
+        : {};
+
+      Object.entries(summary).forEach(function (entry) {
+        lines.push(
+          cleanupReceiptLabel(entry[0]) + ": "
+          + cleanupReceiptValue(entry[1])
+        );
+      });
+
+      return lines.join("\n");
+    }
     function cleanupRowsFromObject(rows, behavior) {
       return Object.entries(rows || {}).sort(function (a, b) { return a[0].localeCompare(b[0]); }).map(function (entry) {
         return "<tr><td><code>" + cleanupEscape(entry[0]) + "</code></td><td>" + cleanupEscape(entry[1]) + "</td><td>" + cleanupEscape(behavior) + "</td></tr>";
@@ -25436,12 +25524,25 @@ def dashboard_operator_reset_shell_html() -> str:
       const protectedTables = payload.protected_tables || payload.protected_tables_after || {};
       const protectedRows = payload.protected_total_rows ?? Object.values(protectedTables).reduce(function (sum, value) { return sum + Number(value || 0); }, 0);
       const totalRows = payload.total_rows ?? payload.total_deleted_rows ?? 0;
-      panel.textContent = [
-        payload.message || "Telemetry cleanup preview loaded.",
-        "Cleanup rows: " + totalRows,
-        "Protected rows: " + protectedRows,
-        "Confirmation phrase: " + (payload.confirmation_required || "DELETE TELEMETRY")
-      ].join("\\n");
+      if (payload.receipt) {
+        panel.textContent = cleanupReceiptText(
+          payload.receipt,
+          payload.message
+        );
+        panel.dataset.receiptSeverity = String(
+          payload.receipt.severity || "info"
+        ).toLowerCase();
+        panel.dataset.receiptAction = String(
+          payload.receipt.action || ""
+        );
+      } else {
+        panel.textContent = [
+          payload.message || "Telemetry cleanup preview loaded.",
+          "Cleanup rows: " + totalRows,
+          "Protected rows: " + protectedRows,
+          "Confirmation phrase: " + (payload.confirmation_required || "DELETE TELEMETRY")
+        ].join("\n");
+      }
       const cleanupTables = payload.tables || payload.tables_after || payload.deleted_rows || {};
       body.innerHTML = cleanupRowsFromObject(cleanupTables, payload.dry_run === false ? "deleted/now empty" : "will be deleted") + cleanupRowsFromObject(protectedTables, "preserved");
       wrap.hidden = false;
@@ -25580,6 +25681,7 @@ def dashboard_operator_reset_shell_html() -> str:
         if (!response.ok) { throw new Error(payload.message || payload.error || "Cleanup failed."); }
         confirmation.value = "";
         renderTelemetryCleanup(payload);
+        loadTelemetryResetAuditEvents();
       } catch (error) {
         if (panel) { panel.textContent = "Telemetry cleanup failed: " + (error.message || error); }
       }
@@ -25766,16 +25868,191 @@ def dashboard_record_admin_user_action(
     )
 
 
+def dashboard_ticket_status_action_receipt(
+    state: dict[str, Any],
+    subject_key: str,
+    scope: str | None,
+) -> dict[str, Any]:
+    ticket_key = str(state.get("ticket_key") or subject_key or "").strip()
+    ticket_status = str(
+        state.get("ticket_status")
+        or state.get("status")
+        or ""
+    ).strip().upper()
+    analyst = str(state.get("analyst") or "").strip()
+
+    return dashboard_action_receipt(
+        "workflow.ticket_status",
+        (
+            f"Ticket workflow status updated to {ticket_status}."
+            if ticket_status
+            else "Ticket workflow status updated."
+        ),
+        summary={
+            "status": ticket_status,
+            "scope": str(scope or "").strip() or "all scopes",
+            "analyst": analyst or "dashboard",
+            "note_recorded": bool(state.get("note")),
+        },
+        identifiers={
+            "ticket_key": ticket_key,
+        },
+    )
+
+
+def dashboard_asset_investigation_action_receipt(
+    record: dict[str, Any],
+    asset_key: str,
+    scope: str,
+    ticket_state: dict[str, Any] | None,
+) -> dict[str, Any]:
+    investigation_status = str(
+        record.get("status")
+        or ""
+    ).strip().upper()
+    ticket_status = str(
+        (ticket_state or {}).get("ticket_status")
+        or (ticket_state or {}).get("status")
+        or ""
+    ).strip().upper()
+
+    return dashboard_action_receipt(
+        "workflow.asset_investigation",
+        (
+            f"Asset investigation status saved as {investigation_status}."
+            if investigation_status
+            else "Asset investigation status saved."
+        ),
+        summary={
+            "status": investigation_status,
+            "scope": scope,
+            "reason_recorded": bool(record.get("reason")),
+            "ticket_status": ticket_status,
+        },
+        identifiers={
+            "asset_key": asset_key,
+        },
+    )
+
+
+def dashboard_admin_user_action_receipt(
+    action: str,
+    target_username: str,
+    user: dict[str, Any] | None,
+) -> dict[str, Any]:
+    clean_action = str(action or "").strip().lower()
+    messages = {
+        "create": f"Created user {target_username}.",
+        "enable": f"Enabled user {target_username}.",
+        "disable": f"Disabled user {target_username}.",
+        "role": f"Updated the role for {target_username}.",
+        "password": f"Rotated the password for {target_username}.",
+    }
+    receipt_actions = {
+        "create": "admin.user_create",
+        "enable": "admin.user_enable",
+        "disable": "admin.user_disable",
+        "role": "admin.user_role",
+        "password": "admin.user_password",
+    }
+    safe_user = dict(user or {})
+
+    return dashboard_action_receipt(
+        receipt_actions.get(clean_action, "admin.user_update"),
+        messages.get(
+            clean_action,
+            f"Updated user {target_username}.",
+        ),
+        summary={
+            "role": safe_user.get("role"),
+            "enabled": safe_user.get("enabled"),
+            "password_configured": safe_user.get(
+                "password_configured"
+            ),
+            "active_token_count": safe_user.get(
+                "active_token_count",
+                0,
+            ),
+        },
+        identifiers={
+            "username": target_username,
+        },
+    )
+
+
+def dashboard_telemetry_cleanup_action_receipt(
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    dry_run = bool(result.get("dry_run"))
+    total_deleted_rows = int(
+        result.get("total_deleted_rows")
+        or result.get("total_rows")
+        or 0
+    )
+
+    if dry_run:
+        message = "Telemetry cleanup preview generated."
+        severity = "info"
+        action = "admin.telemetry_cleanup_preview"
+    else:
+        message = (
+            f"Telemetry cleanup completed; "
+            f"{total_deleted_rows} imported row(s) deleted."
+        )
+        severity = "warning"
+        action = "admin.telemetry_cleanup"
+
+    return dashboard_action_receipt(
+        action,
+        message,
+        severity=severity,
+        summary={
+            "dry_run": dry_run,
+            "deleted_rows": total_deleted_rows,
+            "protected_tables_preserved": result.get(
+                "protected_tables_preserved",
+                True,
+            ),
+        },
+        diagnostic_detail={
+            "available": True,
+            "deleted_rows_by_table": result.get(
+                "deleted_rows",
+                {},
+            ),
+            "protected_tables_after": result.get(
+                "protected_tables_after",
+                result.get("protected_tables", {}),
+            ),
+        },
+    )
+
 def dashboard_admin_user_action_response(
     connection: sqlite3.Connection,
     action: str,
     target_username: str,
 ) -> dict[str, Any]:
+    access = dashboard_admin_users_payload(connection)
+    target_user = next(
+        (
+            user
+            for user in access.get("users", [])
+            if str(user.get("username") or "") == target_username
+        ),
+        None,
+    )
+    receipt = dashboard_admin_user_action_receipt(
+        action,
+        target_username,
+        target_user,
+    )
+
     return {
         "ok": True,
         "action": action,
         "target_username": target_username,
-        "access": dashboard_admin_users_payload(connection),
+        "access": access,
+        "receipt": receipt,
     }
 
 
@@ -28978,6 +29255,11 @@ def command_dashboard(args):
                                 "ok": True,
                                 "ticket_state": state,
                                 "investigation_center": investigation_center,
+                                "receipt": dashboard_ticket_status_action_receipt(
+                                    state,
+                                    subject_key,
+                                    raw_scope,
+                                ),
                             },
                         )
                     finally:
@@ -29071,6 +29353,12 @@ def command_dashboard(args):
                             "investigation": record,
                             "ticket_state": ticket_state,
                             "asset_detail": detail,
+                                "receipt": dashboard_asset_investigation_action_receipt(
+                                    record,
+                                    asset_key,
+                                    resolved_scope,
+                                    ticket_state,
+                                ),
                         },
                     )
                 finally:
