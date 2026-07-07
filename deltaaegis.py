@@ -6071,7 +6071,6 @@ def dashboard_netsniper_schedule_create_payload(
         "ok": True,
         "action": "schedule.create",
         "schedule": schedule,
-        "schedules": dashboard_scan_schedules_payload(connection),
         "receipt": receipt,
     }
 
@@ -6104,7 +6103,6 @@ def dashboard_netsniper_schedule_enabled_payload(
         "ok": True,
         "action": action,
         "schedule": schedule,
-        "schedules": dashboard_scan_schedules_payload(connection),
         "receipt": receipt,
     }
 
@@ -6168,11 +6166,6 @@ def dashboard_netsniper_schedule_delete_payload(
             "schedule definition deleted; linked scan jobs and history "
             "were preserved; active jobs were not cancelled"
         ),
-        "schedules": dashboard_scan_schedules_payload(connection),
-        "schedule_history": dashboard_netsniper_schedule_history_payload(
-            connection,
-            limit=50,
-        )["history"],
         "receipt": receipt,
     }
 
@@ -6268,9 +6261,6 @@ def dashboard_netsniper_schedule_run_due_payload(
         "ok": True,
         "action": "schedule.run_due",
         "results": results,
-        "schedules": dashboard_scan_schedules_payload(connection),
-        "scan_jobs": dashboard_scan_jobs_payload(connection, limit=20),
-        "schedule_history": dashboard_netsniper_schedule_history_payload(connection, limit=25)["history"],
         "receipt": receipt,
     }
 
@@ -6337,7 +6327,6 @@ def dashboard_netsniper_hourly_monitoring_payload(
             "ok": True,
             "action": "hourly_monitoring.disable",
             "schedule": updated_schedule,
-            "schedules": dashboard_scan_schedules_payload(connection),
             "receipt": receipt,
         }
 
@@ -6383,7 +6372,6 @@ def dashboard_netsniper_hourly_monitoring_payload(
         "ok": True,
         "action": "hourly_monitoring.enable",
         "schedule": schedule,
-        "schedules": dashboard_scan_schedules_payload(connection),
         "receipt": receipt,
     }
 
@@ -6909,9 +6897,6 @@ def dashboard_netsniper_stale_scan_recovery_payload(
         "stale_before_count": len(before),
         "recovered_count": recovered_count,
         "stale_after_count": len(after),
-        "recovered_jobs": recovered,
-        "remaining_stale_jobs": after,
-        "scan_jobs": dashboard_scan_jobs_payload(connection, limit=20),
         "receipt": receipt,
     }
 
@@ -26058,7 +26043,6 @@ def dashboard_admin_user_action_response(
         "ok": True,
         "action": action,
         "target_username": target_username,
-        "access": access,
         "receipt": receipt,
     }
 
@@ -29687,7 +29671,6 @@ def dashboard_trueaegis_validation_ingest_payload(
     connection.commit()
 
     summary = dashboard_validation_summary_payload(connection)
-    observations = dashboard_validations_payload(connection, limit=25)
     validation_run_id = result.get("validation_run_id")
     observation_count = (
         result.get("observation_count")
@@ -29719,8 +29702,6 @@ def dashboard_trueaegis_validation_ingest_payload(
         "source_path": str(validation_path),
         "validation_run_id": validation_run_id,
         "import_result": result,
-        "summary": summary,
-        "observations": observations,
         "receipt": receipt,
     }
 

@@ -217,8 +217,15 @@ admin = module.dashboard_admin_user_action_response(
 if admin["receipt"]["action"] != "admin.user_role":
     raise SystemExit("admin user receipt action mismatch")
 
-if admin["access"] is not access_payload:
-    raise SystemExit("legacy admin access payload was not preserved")
+if "access" in admin:
+    raise SystemExit(
+        "admin mutation response still embeds access read model"
+    )
+
+if module.dashboard_admin_users_payload(object()) is not access_payload:
+    raise SystemExit(
+        "admin access read-model helper did not preserve user payload"
+    )
 
 cleanup_result = {
     "ok": True,
@@ -281,7 +288,7 @@ unexpected_paths="$(
   {
     git diff --name-only
     git ls-files --others --exclude-standard
-  } | sort -u | grep -Ev '^$|^deltaaegis\.py$|^tools/validate_v0_40_action_receipt_contract\.sh$|^tools/validate_v0_40_netsniper_action_receipts\.sh$|^tools/validate_v0_40_schedule_action_receipts\.sh$|^tools/validate_v0_40_trueaegis_action_receipts\.sh$|^tools/validate_v0_40_admin_workflow_action_receipts\.sh$|^tools/validate_v0_40_progressive_technical_disclosure\.sh$|^tools/validate_v0_40_all\.sh$' || true
+  } | sort -u | grep -Ev '^$|^deltaaegis\.py$|^tools/validate_v0_40_action_receipt_contract\.sh$|^tools/validate_v0_40_netsniper_action_receipts\.sh$|^tools/validate_v0_40_schedule_action_receipts\.sh$|^tools/validate_v0_40_trueaegis_action_receipts\.sh$|^tools/validate_v0_40_admin_workflow_action_receipts\.sh$|^tools/validate_v0_40_progressive_technical_disclosure\.sh$|^tools/validate_v0_40_payload_separation\.sh$|^tools/validate_v0_40_all\.sh$' || true
 )"
 
 if [[ -n "$unexpected_paths" ]]; then

@@ -15,6 +15,7 @@ validators=(
   "tools/validate_v0_40_trueaegis_action_receipts.sh"
   "tools/validate_v0_40_admin_workflow_action_receipts.sh"
   "tools/validate_v0_40_progressive_technical_disclosure.sh"
+  "tools/validate_v0_40_payload_separation.sh"
 )
 
 for validator in "${validators[@]}"; do
