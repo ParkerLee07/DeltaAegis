@@ -14277,6 +14277,24 @@ def dashboard_trueaegis_validation_start_payload(
         trueaegis_path=trueaegis_path,
         logs_dir=DEFAULT_TRUEAEGIS_LOGS,
     )
+    receipt = dashboard_action_receipt(
+        "trueaegis.validation_start",
+        "TrueAegis validation queued successfully.",
+        summary={
+            "status": job["status"],
+            "scan_id": latest_scan.get("scan_id"),
+            "network_scope": latest_scan.get("network_scope"),
+        },
+        identifiers={
+            "job_id": job["job_id"],
+        },
+        diagnostic_detail={
+            "available": True,
+            "manifest_path": str(manifest_path),
+            "trueaegis_path": str(trueaegis_path),
+            "logs_dir": str(DEFAULT_TRUEAEGIS_LOGS),
+        },
+    )
 
     return {
         "ok": True,
@@ -14289,6 +14307,7 @@ def dashboard_trueaegis_validation_start_payload(
         "trueaegis_path": str(trueaegis_path),
         "logs_dir": str(DEFAULT_TRUEAEGIS_LOGS),
         "message": "TrueAegis validation job queued and started in a guarded dashboard background worker",
+        "receipt": receipt,
     }
 
 
@@ -20868,10 +20887,45 @@ def dashboard_index_html_base_v025_operator_link():
       padding: 11px 13px;
     }
 
-    #trueaegis-validation-import-status.error {
+    #trueaegis-validation-import-status,
+    #trueaegis-run-receipt {
+      white-space: pre-line;
+    }
+
+    #trueaegis-validation-import-status.error,
+    #trueaegis-validation-import-status[data-receipt-severity="error"],
+    #trueaegis-run-receipt[data-receipt-severity="error"] {
       background: rgba(127, 29, 29, 0.22);
       border-color: rgba(248, 113, 113, 0.34);
       color: #fecaca;
+    }
+
+    #trueaegis-validation-import-status[data-receipt-severity="success"],
+    #trueaegis-run-receipt[data-receipt-severity="success"] {
+      background: rgba(6, 78, 59, 0.22);
+      border: 1px solid rgba(52, 211, 153, 0.32);
+      border-radius: 12px;
+      color: #a7f3d0;
+      margin-top: 12px;
+      padding: 10px 12px;
+    }
+
+    #trueaegis-validation-import-status[data-receipt-severity="warning"],
+    #trueaegis-run-receipt[data-receipt-severity="warning"] {
+      background: rgba(120, 53, 15, 0.22);
+      border: 1px solid rgba(251, 191, 36, 0.32);
+      border-radius: 12px;
+      color: #fde68a;
+      margin-top: 12px;
+      padding: 10px 12px;
+    }
+
+    #trueaegis-run-receipt[data-receipt-severity="info"] {
+      background: rgba(15, 23, 42, 0.62);
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 12px;
+      margin-top: 12px;
+      padding: 10px 12px;
     }
 
     #trueaegis-validation-status-counts {
@@ -23935,6 +23989,95 @@ def dashboard_index_html_base_v025_operator_link():
         .replaceAll("'", "&#039;");
     }
 
+    function trueAegisActionReceiptLabel(value) {
+      return String(value || "")
+        .replaceAll("_", " ")
+        .replaceAll("-", " ")
+        .split(" ")
+        .filter(function (part) { return Boolean(part); })
+        .map(function (part) {
+          return part.charAt(0).toUpperCase() + part.slice(1);
+        })
+        .join(" ");
+    }
+
+    function trueAegisActionReceiptValue(value) {
+      if (value === true) { return "Yes"; }
+      if (value === false) { return "No"; }
+      if (value === null || value === undefined || value === "") { return "—"; }
+
+      if (Array.isArray(value)) {
+        return value.length
+          ? value.map(trueAegisActionReceiptValue).join(", ")
+          : "None";
+      }
+
+      if (typeof value === "object") {
+        return Object.entries(value)
+          .map(function (entry) {
+            return `${trueAegisActionReceiptLabel(entry[0])}: ${trueAegisActionReceiptValue(entry[1])}`;
+          })
+          .join("; ");
+      }
+
+      return String(value);
+    }
+
+    function trueAegisActionReceiptText(receipt, fallbackMessage) {
+      const safeReceipt = receipt && typeof receipt === "object"
+        ? receipt
+        : {};
+      const lines = [
+        String(safeReceipt.message || fallbackMessage || "Action completed.")
+      ];
+      const summary = safeReceipt.summary && typeof safeReceipt.summary === "object"
+        ? safeReceipt.summary
+        : {};
+      const identifiers = safeReceipt.identifiers && typeof safeReceipt.identifiers === "object"
+        ? safeReceipt.identifiers
+        : {};
+
+      Object.entries(summary).forEach(function (entry) {
+        lines.push(
+          `${trueAegisActionReceiptLabel(entry[0])}: ${trueAegisActionReceiptValue(entry[1])}`
+        );
+      });
+
+      Object.entries(identifiers).forEach(function (entry) {
+        if (entry[1] === null || entry[1] === undefined || entry[1] === "") {
+          return;
+        }
+
+        lines.push(
+          `${trueAegisActionReceiptLabel(entry[0])}: ${trueAegisActionReceiptValue(entry[1])}`
+        );
+      });
+
+      return lines.join("\n");
+    }
+
+    function trueAegisRenderActionReceipt(element, receipt, fallbackMessage) {
+      if (!element) {
+        return;
+      }
+
+      const safeReceipt = receipt && typeof receipt === "object"
+        ? receipt
+        : {};
+      element.textContent = trueAegisActionReceiptText(
+        safeReceipt,
+        fallbackMessage
+      );
+      element.dataset.receiptSeverity = String(
+        safeReceipt.severity || "info"
+      ).toLowerCase();
+      element.dataset.receiptAction = String(
+        safeReceipt.action || ""
+      );
+    }
+
+    let deltaAegisTrueAegisLastRunReceipt = null;
+
     function deltaAegisTrueAegisOrchestrationEnsurePanel() {
       let panel = document.getElementById("trueaegis-orchestration-panel");
 
@@ -24073,6 +24216,11 @@ def dashboard_index_html_base_v025_operator_link():
               type="button"
               id="trueaegis-refresh-button"
             >Refresh</button>
+            <div
+              id="trueaegis-run-receipt"
+              class="muted"
+              data-receipt-severity="info"
+            >No TrueAegis validation has been started from this dashboard session.</div>
             <h4>Command preview</h4>
             <pre><code>${deltaAegisTrueAegisOrchestrationEsc(commandPreview.join(" "))}</code></pre>
           </div>
@@ -24096,6 +24244,12 @@ def dashboard_index_html_base_v025_operator_link():
           <tbody>${deltaAegisTrueAegisJobRows(jobs)}</tbody>
         </table>
       `;
+
+      trueAegisRenderActionReceipt(
+        document.getElementById("trueaegis-run-receipt"),
+        deltaAegisTrueAegisLastRunReceipt,
+        "No TrueAegis validation has been started from this dashboard session."
+      );
 
       const refreshButton = document.getElementById("trueaegis-refresh-button");
       if (refreshButton) {
@@ -24128,16 +24282,34 @@ def dashboard_index_html_base_v025_operator_link():
       }
 
       try {
-        await deltaAegisTrueAegisOrchestrationFetchJson("/api/trueaegis/run", {
+        const result = await deltaAegisTrueAegisOrchestrationFetchJson("/api/trueaegis/run", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: "{}"
         });
+        deltaAegisTrueAegisLastRunReceipt = result.receipt || {
+          action: "trueaegis.validation_start",
+          severity: "success",
+          message: result.message || "TrueAegis validation queued successfully.",
+          summary: {
+            status: result.status || "QUEUED",
+            scan_id: result.scan_id || "",
+            network_scope: result.network_scope || ""
+          },
+          identifiers: {
+            job_id: result.job_id || ""
+          }
+        };
         await deltaAegisTrueAegisOrchestrationRefresh();
       } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        deltaAegisTrueAegisLastRunReceipt = {
+          action: "trueaegis.validation_start",
+          severity: "error",
+          message: `TrueAegis validation could not be started: ${message}`
+        };
         await deltaAegisTrueAegisOrchestrationRefresh();
         const panel = deltaAegisTrueAegisOrchestrationEnsurePanel();
-        const message = error && error.message ? error.message : String(error);
         panel.insertAdjacentHTML(
           "afterbegin",
           `<div class="alert error">${deltaAegisTrueAegisOrchestrationEsc(message)}</div>`
@@ -24293,11 +24465,14 @@ def dashboard_index_html_base_v025_operator_link():
     }
 
 
-    function trueAegisValidationSetImportStatus(message, isError) {
+    function trueAegisValidationSetImportStatus(message, isError, severity = "") {
       const status = document.getElementById("trueaegis-validation-import-status");
       if (!status) { return; }
       status.textContent = message || "";
       status.classList.toggle("error", !!isError);
+      status.dataset.receiptSeverity = String(
+        severity || (isError ? "error" : "info")
+      ).toLowerCase();
     }
 
     async function importTrueAegisValidation(mode) {
@@ -24342,9 +24517,14 @@ def dashboard_index_html_base_v025_operator_link():
 
         const imported = result.import_result || {};
         const count = imported.observation_count || imported.imported_observation_count || 0;
+        const fallbackMessage = (
+          `Imported ${count} TrueAegis validation observation(s) from `
+          + `${result.source_path || "selected file"}.`
+        );
         trueAegisValidationSetImportStatus(
-          `Imported ${count} TrueAegis validation observation(s) from ${result.source_path || "selected file"}.`,
-          false
+          trueAegisActionReceiptText(result.receipt, fallbackMessage),
+          false,
+          (result.receipt || {}).severity || "success"
         );
 
         await renderTrueAegisValidationPanel();
@@ -29207,16 +29387,40 @@ def dashboard_trueaegis_validation_ingest_payload(
 
     summary = dashboard_validation_summary_payload(connection)
     observations = dashboard_validations_payload(connection, limit=25)
+    validation_run_id = result.get("validation_run_id")
+    observation_count = (
+        result.get("observation_count")
+        or result.get("imported_observation_count")
+        or 0
+    )
+    receipt = dashboard_action_receipt(
+        "trueaegis.validation_ingest",
+        f"Imported {observation_count} TrueAegis validation observation(s).",
+        summary={
+            "mode": mode or "path",
+            "observations_imported": observation_count,
+            "total_validation_runs": summary.get("validation_run_count", 0),
+            "total_observations": summary.get("observation_count", 0),
+        },
+        identifiers={
+            "validation_run_id": validation_run_id or "",
+        },
+        diagnostic_detail={
+            "available": True,
+            "source_path": str(validation_path),
+        },
+    )
 
     return {
         "ok": True,
         "schema_version": "deltaaegis-trueaegis-validation-ingest-v1",
         "mode": mode or "path",
         "source_path": str(validation_path),
-        "validation_run_id": result.get("validation_run_id"),
+        "validation_run_id": validation_run_id,
         "import_result": result,
         "summary": summary,
         "observations": observations,
+        "receipt": receipt,
     }
 
 def command_validation_ingest(args) -> int:
