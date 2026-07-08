@@ -3,13 +3,15 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-expected_branch="feature/v0.41-data-durability-recovery"
+expected_feature_branch="feature/v0.41-data-durability-recovery"
+current_branch="$(git branch --show-current)"
 
 echo "DeltaAegis v0.41 Backup Manifest Validator"
 echo "==========================================="
 
-if [ "$(git branch --show-current)" != "$expected_branch" ]; then
-    echo "FAIL: expected branch $expected_branch"
+if [ "$current_branch" != "$expected_feature_branch" ] && \
+   [ "$current_branch" != "main" ]; then
+    echo "FAIL: expected branch $expected_feature_branch or main, found $current_branch"
     exit 1
 fi
 
