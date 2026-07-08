@@ -14053,6 +14053,1370 @@ def dashboard_telemetry_cleanup_clear_all_payload(
 
 
 # v0.42 checkpoint 3: logical site dashboard foundation
+# v0.42 checkpoint 4: logical site core SIEM aggregation
+def dashboard_site_aggregation_context(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    detail = logical_site_detail_payload(connection, site_id)
+    site = detail["site"]
+    scopes = [
+        str(item["network_scope"])
+        for item in detail["members"]
+    ]
+
+    return {
+        "site": site,
+        "site_id": str(site["site_id"]),
+        "site_name": str(site["name"]),
+        "member_scopes": scopes,
+        "coverage": detail["coverage"],
+        "members": detail["members"],
+    }
+
+
+def dashboard_site_aggregation_metadata(
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    coverage = context["coverage"]
+
+    return {
+        "site_aggregate": True,
+        "selected_scope": None,
+        "selected_site_id": context["site_id"],
+        "selected_site": {
+            "site_id": context["site_id"],
+            "name": context["site_name"],
+            "status": context["site"].get("status"),
+            "description": context["site"].get("description"),
+        },
+        "member_scopes": list(context["member_scopes"]),
+        "member_scope_count": int(
+            coverage.get("member_scope_count") or 0
+        ),
+        "observed_scope_count": int(
+            coverage.get("observed_scope_count") or 0
+        ),
+        "unobserved_scope_count": int(
+            coverage.get("unobserved_scope_count") or 0
+        ),
+    }
+
+
+def dashboard_site_tag_rows(
+    rows: Iterable[dict[str, Any]],
+    scope: str,
+    context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    tagged: list[dict[str, Any]] = []
+
+    for source in rows or []:
+        row = dict(source)
+        row_scope = str(
+            row.get("network_scope") or scope
+        )
+        row["network_scope"] = row_scope
+        row["site_id"] = context["site_id"]
+        row["site_name"] = context["site_name"]
+
+        identity = (
+            row.get("asset_key")
+            or row.get("subject_key")
+            or row.get("mac_identity")
+            or row.get("alert_id")
+            or row.get("event_id")
+            or row.get("job_id")
+            or row.get("annotation_id")
+            or "-"
+        )
+        row["site_scope_key"] = (
+            f"{row_scope}|{identity}"
+        )
+        tagged.append(row)
+
+    return tagged
+
+
+def dashboard_site_merge_count_rows(
+    row_groups: Iterable[Iterable[dict[str, Any]]],
+    label_key: str,
+) -> list[dict[str, Any]]:
+    totals: dict[str, int] = {}
+
+    for rows in row_groups:
+        for row in rows or []:
+            label = str(row.get(label_key) or "UNKNOWN")
+            totals[label] = totals.get(label, 0) + int(
+                row.get("count") or 0
+            )
+
+    return [
+        {label_key: label, "count": count}
+        for label, count in sorted(
+            totals.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    ]
+
+
+def dashboard_site_merge_classification_summaries(
+    summaries: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    items = [
+        dict(item)
+        for item in summaries
+        if isinstance(item, dict)
+    ]
+
+    if not items:
+        return {
+            "available": False,
+            "site_aggregate": True,
+        }
+
+    result: dict[str, Any] = {
+        "available": any(
+            bool(item.get("available", True))
+            for item in items
+        ),
+        "site_aggregate": True,
+    }
+    count_tokens = (
+        "count",
+        "total",
+        "host",
+        "asset",
+        "classified",
+        "possible",
+        "unknown",
+        "review",
+        "contradiction",
+        "confidence_candidate",
+    )
+
+    all_keys = {
+        key
+        for item in items
+        for key in item
+    }
+
+    for key in sorted(all_keys):
+        values = [
+            item.get(key)
+            for item in items
+            if item.get(key) is not None
+        ]
+
+        if not values or key in {
+            "available",
+            "site_aggregate",
+            "selected_scope",
+            "scope",
+        }:
+            continue
+
+        if all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            for value in values
+        ) and any(token in key.lower() for token in count_tokens):
+            result[key] = sum(values)
+            continue
+
+        if all(isinstance(value, dict) for value in values):
+            merged: dict[str, int] = {}
+            numeric = True
+
+            for value in values:
+                for subkey, subvalue in value.items():
+                    if (
+                        not isinstance(subvalue, (int, float))
+                        or isinstance(subvalue, bool)
+                    ):
+                        numeric = False
+                        break
+                    merged[str(subkey)] = (
+                        merged.get(str(subkey), 0)
+                        + int(subvalue)
+                    )
+
+                if not numeric:
+                    break
+
+            if numeric:
+                result[key] = merged
+            continue
+
+        if all(isinstance(value, list) for value in values):
+            flattened = [
+                dict(row)
+                for value in values
+                for row in value
+                if isinstance(row, dict)
+            ]
+
+            if flattened and all(
+                "count" in row for row in flattened
+            ):
+                possible_labels = (
+                    "type",
+                    "device_type",
+                    "decision",
+                    "band",
+                    "label",
+                    "name",
+                    "status",
+                )
+                label_key = next(
+                    (
+                        candidate
+                        for candidate in possible_labels
+                        if all(
+                            candidate in row
+                            for row in flattened
+                        )
+                    ),
+                    None,
+                )
+
+                if label_key:
+                    result[key] = dashboard_site_merge_count_rows(
+                        [flattened],
+                        label_key,
+                    )
+
+    return result
+
+
+def dashboard_site_summary_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    per_scope = [
+        (
+            scope,
+            dashboard_summary_payload(
+                connection,
+                scope=scope,
+            ),
+        )
+        for scope in context["member_scopes"]
+    ]
+    risk_rows: list[dict[str, Any]] = []
+
+    for scope, payload in per_scope:
+        risk_rows.extend(
+            dashboard_site_tag_rows(
+                payload.get("top_risks") or [],
+                scope,
+                context,
+            )
+        )
+
+    risk_rows.sort(
+        key=lambda row: (
+            -float(row.get("score") or 0),
+            str(row.get("network_scope") or ""),
+            str(row.get("subject_key") or ""),
+        )
+    )
+
+    result = {
+        **dashboard_site_aggregation_metadata(context),
+        "snapshots": sum(
+            int(payload.get("snapshots") or 0)
+            for _, payload in per_scope
+        ),
+        "events": sum(
+            int(payload.get("events") or 0)
+            for _, payload in per_scope
+        ),
+        "alerts": sum(
+            int(payload.get("alerts") or 0)
+            for _, payload in per_scope
+        ),
+        "open_alerts": sum(
+            int(payload.get("open_alerts") or 0)
+            for _, payload in per_scope
+        ),
+        "asset_annotations": sum(
+            int(payload.get("asset_annotations") or 0)
+            for _, payload in per_scope
+        ),
+        "alert_status_counts": (
+            dashboard_site_merge_count_rows(
+                [
+                    payload.get("alert_status_counts") or []
+                    for _, payload in per_scope
+                ],
+                "status",
+            )
+        ),
+        "event_severity_counts": (
+            dashboard_site_merge_count_rows(
+                [
+                    payload.get("event_severity_counts") or []
+                    for _, payload in per_scope
+                ],
+                "severity",
+            )
+        ),
+        "classification_summary": (
+            dashboard_site_merge_classification_summaries(
+                [
+                    payload.get("classification_summary") or {}
+                    for _, payload in per_scope
+                ]
+            )
+        ),
+        "netsniper_intelligence_summary": {},
+        "top_risks": risk_rows[:5],
+        "per_scope": {
+            scope: payload
+            for scope, payload in per_scope
+        },
+    }
+
+    return result
+
+
+def dashboard_site_current_state_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    states = []
+
+    for scope in context["member_scopes"]:
+        state = dashboard_current_state_payload(
+            connection,
+            scope=scope,
+        )
+        state = dict(state)
+        state["network_scope"] = scope
+        states.append(state)
+
+    available = [
+        state
+        for state in states
+        if state.get("available")
+    ]
+
+    if not available:
+        return {
+            **dashboard_site_aggregation_metadata(context),
+            "available": False,
+            "message": (
+                "No accepted snapshot is available for any "
+                "member subnet scope in this logical site."
+            ),
+            "member_states": states,
+        }
+
+    numeric_fields = (
+        "hosts_up",
+        "hosts_total",
+        "mac_backed_assets",
+        "assets",
+        "intelligence_hosts",
+        "service_observed_assets",
+        "discovery_only_or_no_open_service_assets",
+        "summary_host_count",
+        "classified",
+        "possible_or_review",
+        "unknown",
+        "contradiction_hosts",
+        "false_confidence_candidates",
+        "unknown_with_exposed_services",
+    )
+    totals = {
+        field: sum(
+            int(state.get(field) or 0)
+            for state in available
+        )
+        for field in numeric_fields
+    }
+    weights = [
+        max(
+            int(state.get("hosts_total") or 0),
+            int(state.get("assets") or 0),
+            1,
+        )
+        for state in available
+    ]
+    identity_coverage = (
+        sum(
+            float(state.get("identity_coverage") or 0.0)
+            * weight
+            for state, weight in zip(available, weights)
+        )
+        / sum(weights)
+    )
+    newest = max(
+        available,
+        key=lambda state: (
+            str(state.get("imported_at") or ""),
+            str(state.get("created_at") or ""),
+            str(state.get("scan_id") or ""),
+        ),
+    )
+    scanner_versions = {
+        str(state.get("scanner_version") or "")
+        for state in available
+        if state.get("scanner_version")
+    }
+    scan_profiles = {
+        str(state.get("scan_profile") or "")
+        for state in available
+        if state.get("scan_profile")
+    }
+
+    return {
+        **dashboard_site_aggregation_metadata(context),
+        "available": True,
+        "scan_id": f"site:{context['site_id']}:latest-per-scope",
+        "target": context["site_name"],
+        "network_scope": f"site:{context['site_id']}",
+        "created_at": max(
+            str(state.get("created_at") or "")
+            for state in available
+        ),
+        "imported_at": max(
+            str(state.get("imported_at") or "")
+            for state in available
+        ),
+        "scanner_version": (
+            next(iter(scanner_versions))
+            if len(scanner_versions) == 1
+            else "mixed"
+        ),
+        "scan_profile": (
+            next(iter(scan_profiles))
+            if len(scan_profiles) == 1
+            else "mixed"
+        ),
+        "quality_status": "ACCEPTED",
+        "identity_coverage": identity_coverage,
+        **totals,
+        "snapshot": newest.get("snapshot"),
+        "member_states": states,
+        "message": (
+            f"Aggregated latest accepted state from "
+            f"{len(available)} of "
+            f"{len(context['member_scopes'])} member subnet scopes."
+        ),
+    }
+
+
+def dashboard_site_scan_context_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    member_contexts = []
+    delta_pairs: list[dict[str, Any]] = []
+
+    for scope in context["member_scopes"]:
+        payload = dashboard_scan_context_payload(
+            connection,
+            scope=scope,
+        )
+        payload = dict(payload)
+        payload["network_scope"] = scope
+        member_contexts.append(payload)
+        delta_pairs.extend(
+            dashboard_site_tag_rows(
+                payload.get("delta_scan_pairs") or [],
+                scope,
+                context,
+            )
+        )
+
+    candidates = [
+        payload
+        for payload in member_contexts
+        if payload.get("latest_scan")
+    ]
+    selected = (
+        max(
+            candidates,
+            key=lambda payload: (
+                str(
+                    payload["latest_scan"].get(
+                        "imported_at"
+                    )
+                    or ""
+                ),
+                str(
+                    payload["latest_scan"].get(
+                        "created_at"
+                    )
+                    or ""
+                ),
+                str(
+                    payload["latest_scan"].get(
+                        "scan_id"
+                    )
+                    or ""
+                ),
+            ),
+        )
+        if candidates
+        else {}
+    )
+    delta_pairs.sort(
+        key=lambda row: (
+            str(row.get("created_at") or ""),
+            str(row.get("scan_id") or ""),
+        ),
+        reverse=True,
+    )
+
+    return {
+        **dashboard_site_aggregation_metadata(context),
+        "latest_scan": selected.get("latest_scan"),
+        "baseline_scan": selected.get("baseline_scan"),
+        "delta_scan_pairs": delta_pairs[:10],
+        "member_contexts": member_contexts,
+    }
+
+
+def dashboard_site_assets_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+    state: str | None = None,
+    identity: str | None = None,
+) -> list[dict[str, Any]]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    requested_limit = max(1, int(limit or 25))
+    rows: list[dict[str, Any]] = []
+
+    for scope in context["member_scopes"]:
+        rows.extend(
+            dashboard_site_tag_rows(
+                dashboard_assets_payload(
+                    connection,
+                    requested_limit,
+                    scope=scope,
+                    state=state,
+                    identity=identity,
+                ),
+                scope,
+                context,
+            )
+        )
+
+    rows.sort(
+        key=lambda row: (
+            str(row.get("state") or ""),
+            str(row.get("network_scope") or ""),
+            str(row.get("current_ip") or ""),
+            str(row.get("asset_key") or ""),
+        )
+    )
+    return rows[:requested_limit]
+
+
+def dashboard_site_merge_list_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+    loader,
+    *,
+    sort_key,
+    reverse: bool = False,
+    loader_kwargs: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    requested_limit = max(1, int(limit or 20))
+    rows: list[dict[str, Any]] = []
+    loader_kwargs = dict(loader_kwargs or {})
+
+    for scope in context["member_scopes"]:
+        rows.extend(
+            dashboard_site_tag_rows(
+                loader(
+                    connection,
+                    requested_limit,
+                    scope=scope,
+                    **loader_kwargs,
+                ),
+                scope,
+                context,
+            )
+        )
+
+    rows.sort(key=sort_key, reverse=reverse)
+    return rows[:requested_limit]
+
+
+def dashboard_site_events_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+) -> list[dict[str, Any]]:
+    return dashboard_site_merge_list_payload(
+        connection,
+        site_id,
+        limit,
+        dashboard_events_payload,
+        sort_key=lambda row: (
+            int(row.get("event_id") or 0),
+            str(row.get("created_at") or ""),
+        ),
+        reverse=True,
+    )
+
+
+def dashboard_site_alerts_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+) -> list[dict[str, Any]]:
+    return dashboard_site_merge_list_payload(
+        connection,
+        site_id,
+        limit,
+        dashboard_alerts_payload,
+        sort_key=lambda row: (
+            int(row.get("alert_id") or 0),
+            str(row.get("last_seen_at") or ""),
+        ),
+        reverse=True,
+    )
+
+
+def dashboard_site_annotations_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+) -> list[dict[str, Any]]:
+    return dashboard_site_merge_list_payload(
+        connection,
+        site_id,
+        limit,
+        dashboard_annotations_payload,
+        sort_key=lambda row: (
+            str(row.get("updated_at") or ""),
+            str(row.get("network_scope") or ""),
+            str(row.get("asset_key") or ""),
+        ),
+        reverse=True,
+    )
+
+
+def dashboard_site_scan_jobs_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    return dashboard_site_merge_list_payload(
+        connection,
+        site_id,
+        limit,
+        dashboard_scan_jobs_payload,
+        sort_key=lambda row: (
+            str(row.get("created_at") or ""),
+            str(row.get("updated_at") or ""),
+            str(row.get("job_id") or ""),
+        ),
+        reverse=True,
+        loader_kwargs={"status": status},
+    )
+
+
+def dashboard_site_trueaegis_jobs_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    return dashboard_site_merge_list_payload(
+        connection,
+        site_id,
+        limit,
+        dashboard_trueaegis_jobs_payload,
+        sort_key=lambda row: (
+            str(row.get("created_at") or ""),
+            str(row.get("updated_at") or ""),
+            str(row.get("job_id") or ""),
+        ),
+        reverse=True,
+        loader_kwargs={"status": status},
+    )
+
+
+def dashboard_site_port_behavior_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+    lookback: int = 5,
+) -> list[dict[str, Any]]:
+    return dashboard_site_merge_list_payload(
+        connection,
+        site_id,
+        limit,
+        dashboard_port_behavior_payload,
+        sort_key=lambda row: (
+            int(row.get("transition_count") or 0),
+            int(row.get("seen_count") or 0),
+            str(row.get("network_scope") or ""),
+            str(row.get("asset_key") or ""),
+        ),
+        reverse=True,
+        loader_kwargs={"lookback": lookback},
+    )
+
+
+def dashboard_site_current_risk_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+) -> list[dict[str, Any]]:
+    return dashboard_site_merge_list_payload(
+        connection,
+        site_id,
+        limit,
+        dashboard_current_risk_payload,
+        sort_key=lambda row: (
+            float(row.get("score") or 0),
+            str(row.get("network_scope") or ""),
+            str(row.get("subject_key") or ""),
+        ),
+        reverse=True,
+    )
+
+
+def dashboard_site_risk_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+) -> list[dict[str, Any]]:
+    return dashboard_site_merge_list_payload(
+        connection,
+        site_id,
+        limit,
+        dashboard_risk_payload,
+        sort_key=lambda row: (
+            float(row.get("score") or 0),
+            str(row.get("network_scope") or ""),
+            str(row.get("subject_key") or ""),
+        ),
+        reverse=True,
+    )
+
+
+def dashboard_site_investigation_center_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int = 25,
+    ticket_status: str | None = None,
+    ticket_signal: str | None = None,
+    triage_bucket: str | None = None,
+    triage_urgency: str | None = None,
+) -> dict[str, Any]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    requested_limit = max(1, int(limit or 25))
+    query_limit = max(requested_limit * 4, 50)
+    rows: list[dict[str, Any]] = []
+    per_scope = []
+
+    for scope in context["member_scopes"]:
+        payload = dashboard_investigation_center_payload(
+            connection,
+            limit=query_limit,
+            scope=scope,
+            ticket_status=ticket_status,
+            ticket_signal=ticket_signal,
+            triage_bucket=triage_bucket,
+            triage_urgency=triage_urgency,
+        )
+        per_scope.append(
+            {"network_scope": scope, "payload": payload}
+        )
+        rows.extend(
+            dashboard_site_tag_rows(
+                payload.get("items") or [],
+                scope,
+                context,
+            )
+        )
+
+    rows = sorted(
+        rows,
+        key=operator_triage_queue_sort_key,
+    )
+    total_item_count = len(rows)
+    visible = rows[:requested_limit]
+    filters = (
+        per_scope[0]["payload"].get("filters")
+        if per_scope
+        else investigation_center_filter_payload(
+            ticket_status=ticket_status,
+            ticket_signal=ticket_signal,
+            triage_bucket=triage_bucket,
+            triage_urgency=triage_urgency,
+        )
+    )
+
+    return {
+        **dashboard_site_aggregation_metadata(context),
+        "available": True,
+        "filters": filters,
+        "item_count": len(visible),
+        "total_item_count": total_item_count,
+        "summary": investigation_center_summary(visible),
+        "workflow_summary": (
+            investigation_center_workflow_summary(rows)
+        ),
+        "signal_summary": (
+            investigation_center_signal_summary(rows)
+        ),
+        "triage_summary": operator_triage_summary(visible),
+        "view_workflow_summary": (
+            investigation_center_workflow_summary(visible)
+        ),
+        "view_signal_summary": (
+            investigation_center_signal_summary(visible)
+        ),
+        "items": visible,
+        "per_scope": per_scope,
+    }
+
+
+def dashboard_site_asset_detail_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    identifier: str,
+    limit: int = 20,
+) -> dict[str, Any]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    matches = []
+
+    for scope in context["member_scopes"]:
+        payload = dashboard_asset_detail_payload(
+            connection,
+            identifier,
+            scope=scope,
+            limit=limit,
+        )
+
+        if payload.get("found"):
+            payload = dict(payload)
+            payload.update(
+                dashboard_site_aggregation_metadata(context)
+            )
+            matches.append(payload)
+
+    if not matches:
+        return {
+            **dashboard_site_aggregation_metadata(context),
+            "found": False,
+            "identifier": identifier,
+            "message": (
+                "No asset matched the requested identifier "
+                "inside this logical site."
+            ),
+        }
+
+    if len(matches) > 1:
+        return {
+            **dashboard_site_aggregation_metadata(context),
+            "found": False,
+            "ambiguous": True,
+            "identifier": identifier,
+            "message": (
+                "Multiple member subnets matched this asset. "
+                "Select a subnet scope before opening detail."
+            ),
+            "matches": [
+                {
+                    "network_scope": match["asset"].get(
+                        "network_scope"
+                    ),
+                    "asset_key": match["asset"].get("asset_key"),
+                    "current_ip": match["asset"].get("current_ip"),
+                }
+                for match in matches
+            ],
+        }
+
+    return matches[0]
+
+
+def dashboard_site_ticket_evidence_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    subject_key: str,
+    limit: int = 10,
+) -> dict[str, Any]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    matches = []
+
+    for scope in context["member_scopes"]:
+        payload = dashboard_ticket_evidence_payload(
+            connection,
+            subject_key=subject_key,
+            scope=scope,
+            limit=limit,
+        )
+
+        if payload.get("available"):
+            payload = dict(payload)
+            payload.update(
+                dashboard_site_aggregation_metadata(context)
+            )
+            matches.append(payload)
+
+    if not matches:
+        return {
+            **dashboard_site_aggregation_metadata(context),
+            "available": False,
+            "subject_key": subject_key,
+            "message": (
+                "No ticket evidence matched this logical site."
+            ),
+        }
+
+    if len(matches) > 1:
+        return {
+            **dashboard_site_aggregation_metadata(context),
+            "available": False,
+            "ambiguous": True,
+            "subject_key": subject_key,
+            "message": (
+                "Ticket evidence exists in multiple member "
+                "subnets. Select a subnet for scoped evidence."
+            ),
+            "matches": [
+                match.get("selected_scope")
+                or match.get("scope")
+                for match in matches
+            ],
+        }
+
+    return matches[0]
+
+
+def dashboard_site_latest_network_changes_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int = 20,
+) -> dict[str, Any]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    requested_limit = max(1, min(int(limit or 20), 100))
+    member_results = []
+    events: list[dict[str, Any]] = []
+
+    for scope in context["member_scopes"]:
+        payload = dashboard_latest_network_changes_payload(
+            connection,
+            limit=requested_limit,
+            scope=scope,
+        )
+        member_results.append(
+            {"network_scope": scope, "payload": payload}
+        )
+        events.extend(
+            dashboard_site_tag_rows(
+                payload.get("events") or [],
+                scope,
+                context,
+            )
+        )
+
+    events.sort(
+        key=lambda row: (
+            str(row.get("created_at") or ""),
+            int(row.get("event_id") or 0),
+        ),
+        reverse=True,
+    )
+    event_type_counts = dashboard_site_merge_count_rows(
+        [
+            item["payload"].get("summary", {}).get(
+                "event_type_counts"
+            )
+            or []
+            for item in member_results
+        ],
+        "event_type",
+    )
+    severity_counts = dashboard_site_merge_count_rows(
+        [
+            item["payload"].get("summary", {}).get(
+                "severity_counts"
+            )
+            or []
+            for item in member_results
+        ],
+        "severity",
+    )
+    snapshots = [
+        item["payload"].get("latest_snapshot")
+        for item in member_results
+        if item["payload"].get("latest_snapshot")
+    ]
+    latest_snapshot = (
+        max(
+            snapshots,
+            key=lambda snapshot: (
+                str(snapshot.get("imported_at") or ""),
+                str(snapshot.get("created_at") or ""),
+                str(snapshot.get("scan_id") or ""),
+            ),
+        )
+        if snapshots
+        else None
+    )
+    total_changes = sum(
+        int(row.get("count") or 0)
+        for row in event_type_counts
+    )
+
+    return {
+        **dashboard_site_aggregation_metadata(context),
+        "ok": True,
+        "generated_at": utc_now_text(),
+        "scope": "",
+        "has_latest_accepted_scan": bool(snapshots),
+        "has_changes": bool(total_changes),
+        "message": (
+            f"Latest accepted member scans produced "
+            f"{total_changes} delta event(s) across this site."
+        ),
+        "latest_snapshot": latest_snapshot,
+        "summary": {
+            "total_changes": total_changes,
+            "event_type_counts": event_type_counts,
+            "severity_counts": severity_counts,
+        },
+        "events": events[:requested_limit],
+        "member_results": member_results,
+    }
+
+
+def dashboard_site_scan_freshness_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    members = []
+
+    for scope in context["member_scopes"]:
+        payload = dashboard_scan_freshness_payload(
+            connection,
+            scope=scope,
+        )
+        members.append(
+            {"network_scope": scope, **dict(payload)}
+        )
+
+    rank = {
+        "FRESH": 0,
+        "AGING": 1,
+        "STALE": 2,
+        "NO_ACCEPTED_SCAN": 3,
+    }
+    worst = (
+        max(
+            members,
+            key=lambda item: rank.get(
+                str(item.get("state") or ""),
+                4,
+            ),
+        )
+        if members
+        else {
+            "state": "NO_ACCEPTED_SCAN",
+            "message": (
+                "This logical site has no member subnet scopes."
+            ),
+        }
+    )
+    snapshots = [
+        item.get("latest_snapshot")
+        for item in members
+        if item.get("latest_snapshot")
+    ]
+
+    return {
+        **dashboard_site_aggregation_metadata(context),
+        "ok": True,
+        "generated_at": utc_now_text(),
+        "scope": "",
+        "state": worst.get("state"),
+        "has_latest_accepted_scan": bool(snapshots),
+        "message": (
+            f"Site freshness follows the least healthy member: "
+            f"{worst.get('network_scope') or '-'} "
+            f"({worst.get('state')})."
+        ),
+        "thresholds": worst.get("thresholds") or {},
+        "latest_snapshot": (
+            max(
+                snapshots,
+                key=lambda snapshot: (
+                    str(snapshot.get("imported_at") or ""),
+                    str(snapshot.get("created_at") or ""),
+                    str(snapshot.get("scan_id") or ""),
+                ),
+            )
+            if snapshots
+            else None
+        ),
+        "age_seconds": worst.get("age_seconds"),
+        "age_hours": worst.get("age_hours"),
+        "timestamp_field": worst.get("timestamp_field") or "",
+        "timestamp": worst.get("timestamp"),
+        "member_freshness": members,
+    }
+
+
+def dashboard_site_trueaegis_context_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+
+    return {
+        **dashboard_site_aggregation_metadata(context),
+        "ok": True,
+        "ready": False,
+        "available": False,
+        "blockers": [
+            (
+                "TrueAegis execution remains subnet-scoped. "
+                "Select one member subnet before starting a run."
+            )
+        ],
+        "message": (
+            "Logical-site aggregation is read-only for "
+            "TrueAegis orchestration."
+        ),
+    }
+
+
+def dashboard_site_route_payload(
+    connection: sqlite3.Connection,
+    route: str,
+    query: dict[str, list[str]],
+    site_id: str,
+    *,
+    limit: int,
+    state: str | None = None,
+    identity: str | None = None,
+) -> dict[str, Any] | list[dict[str, Any]] | None:
+    if route == "/api/summary":
+        return dashboard_site_summary_payload(
+            connection,
+            site_id,
+        )
+
+    if route == "/api/scan-context":
+        return dashboard_site_scan_context_payload(
+            connection,
+            site_id,
+        )
+
+    if route == "/api/current-state":
+        return dashboard_site_current_state_payload(
+            connection,
+            site_id,
+        )
+
+    if route == "/api/scan-jobs":
+        status = query.get("status", [""])[0].strip() or None
+        return dashboard_site_scan_jobs_payload(
+            connection,
+            site_id,
+            limit,
+            status=status,
+        )
+
+    if route == "/api/trueaegis-jobs":
+        status = query.get("status", [""])[0].strip() or None
+        return dashboard_site_trueaegis_jobs_payload(
+            connection,
+            site_id,
+            limit,
+            status=status,
+        )
+
+    if route == "/api/assets":
+        return dashboard_site_assets_payload(
+            connection,
+            site_id,
+            limit,
+            state=state,
+            identity=identity,
+        )
+
+    if route == "/api/asset":
+        identifier = query.get(
+            "identifier",
+            query.get("asset_key", [""]),
+        )[0].strip()
+        return dashboard_site_asset_detail_payload(
+            connection,
+            site_id,
+            identifier,
+            limit=limit,
+        )
+
+    if route == "/api/investigation-center":
+        return dashboard_site_investigation_center_payload(
+            connection,
+            site_id,
+            limit=limit,
+            ticket_status=query.get(
+                "ticket_status",
+                ["ALL"],
+            )[0],
+            ticket_signal=query.get(
+                "ticket_signal",
+                ["ALL"],
+            )[0],
+            triage_bucket=query.get(
+                "triage_bucket",
+                ["ALL"],
+            )[0],
+            triage_urgency=query.get(
+                "triage_urgency",
+                ["ALL"],
+            )[0],
+        )
+
+    if route == "/api/ticket-evidence":
+        return dashboard_site_ticket_evidence_payload(
+            connection,
+            site_id,
+            subject_key=query.get(
+                "subject_key",
+                [""],
+            )[0],
+            limit=int(
+                query.get("limit", ["10"])[0] or 10
+            ),
+        )
+
+    if route == "/api/events":
+        return dashboard_site_events_payload(
+            connection,
+            site_id,
+            limit,
+        )
+
+    if route == "/api/alerts":
+        return dashboard_site_alerts_payload(
+            connection,
+            site_id,
+            limit,
+        )
+
+    if route == "/api/annotations":
+        return dashboard_site_annotations_payload(
+            connection,
+            site_id,
+            limit,
+        )
+
+    if route == "/api/port-behavior":
+        try:
+            lookback = max(
+                1,
+                min(
+                    25,
+                    int(
+                        query.get(
+                            "lookback",
+                            ["5"],
+                        )[0]
+                    ),
+                ),
+            )
+        except ValueError:
+            lookback = 5
+
+        return dashboard_site_port_behavior_payload(
+            connection,
+            site_id,
+            limit,
+            lookback=lookback,
+        )
+
+    if route == "/api/current-risk":
+        return dashboard_site_current_risk_payload(
+            connection,
+            site_id,
+            limit,
+        )
+
+    if route == "/api/risk":
+        return dashboard_site_risk_payload(
+            connection,
+            site_id,
+            limit,
+        )
+
+    if route == "/api/latest-network-changes":
+        return dashboard_site_latest_network_changes_payload(
+            connection,
+            site_id,
+            limit=limit,
+        )
+
+    if route == "/api/scan-freshness":
+        return dashboard_site_scan_freshness_payload(
+            connection,
+            site_id,
+        )
+
+    if route == "/api/trueaegis/context":
+        return dashboard_site_trueaegis_context_payload(
+            connection,
+            site_id,
+        )
+
+    return None
+
+
 def dashboard_sites_payload(
     connection: sqlite3.Connection,
 ) -> dict[str, Any]:
@@ -23075,12 +24439,40 @@ def dashboard_index_html_base_v025_operator_link():
     }
 
     function scopedPath(path) {
+      const siteId = selectedSiteId();
       const scope = selectedScope();
+      const separator = path.includes("?") ? "&" : "?";
 
-      if (!scope) return path;
+      if (siteId) {
+        return path
+          + separator
+          + "site_id="
+          + encodeURIComponent(siteId);
+      }
+
+      if (scope) {
+        return path
+          + separator
+          + "scope="
+          + encodeURIComponent(scope);
+      }
+
+      return path;
+    }
+
+    function siteAwareInvestigationCenterPath() {
+      const path = investigationCenterFilterPath();
+      const siteId = selectedSiteId();
+
+      if (!siteId || path.includes("site_id=")) {
+        return path;
+      }
 
       const separator = path.includes("?") ? "&" : "?";
-      return path + separator + "scope=" + encodeURIComponent(scope);
+      return path
+        + separator
+        + "site_id="
+        + encodeURIComponent(siteId);
     }
 
     function selectedSiteDetailPath() {
@@ -23144,7 +24536,7 @@ def dashboard_index_html_base_v025_operator_link():
 
       if (scopeLinksLabel) {
         scopeLinksLabel.textContent = selectedSite
-          ? "Member subnet scopes — choose one to filter SIEM data"
+          ? "Member subnet scopes — select one for subnet drilldown"
           : "Subnet scopes";
       }
 
@@ -23169,7 +24561,7 @@ def dashboard_index_html_base_v025_operator_link():
             <strong>${esc(site.name)}</strong><br>
             ${esc(coverage.observed_scope_count)} of ${esc(coverage.member_scope_count)}
             member subnet scopes have snapshot history.
-            <br><span class="muted">Site-wide SIEM aggregation is not enabled in this checkpoint. Select a member subnet above for filtered assets, events, alerts, and risk.</span>
+            <br><span class="muted">Core site-wide SIEM aggregation is active across member subnets. Rows retain network-scope provenance; select a member subnet for asset detail or subnet-specific operations.</span>
           `;
         } else {
           siteDetailBox.hidden = true;
@@ -25969,7 +27361,7 @@ def dashboard_index_html_base_v025_operator_link():
           api(scopedPath("/api/summary")),
           api(scopedPath("/api/scan-context")),
           api(scopedPath("/api/current-state")),
-          api(investigationCenterFilterPath()),
+          api(siteAwareInvestigationCenterPath()),
           api(scopedPath("/api/scan-jobs?limit=10")),
           api(scopedPath("/api/assets?limit=25")),
           api(scopedPath("/api/current-risk?limit=10000")),
@@ -29572,6 +30964,24 @@ def command_dashboard(args):
                     )
                     return
 
+            site_id = query.get("site_id", [""])[0].strip()
+
+            if scope and site_id:
+                dashboard_json_response(
+                    self,
+                    {
+                        "ok": False,
+                        "error": "ambiguous_scope_selection",
+                        "message": (
+                            "Use either scope or site_id, not both."
+                        ),
+                        "scope": scope,
+                        "site_id": site_id,
+                    },
+                    status=400,
+                )
+                return
+
             state = query.get("state", [""])[0].strip().upper() or None
             identity = query.get("identity", [""])[0].strip().upper() or None
 
@@ -29605,6 +31015,60 @@ def command_dashboard(args):
             connection = self.open_connection()
 
             try:
+                if (
+                    site_id
+                    and route
+                    not in {"/api/sites", "/api/site-detail"}
+                ):
+                    try:
+                        site_payload = dashboard_site_route_payload(
+                            connection,
+                            route,
+                            query,
+                            site_id,
+                            limit=limit,
+                            state=state,
+                            identity=identity,
+                        )
+                    except DeltaAegisError as exc:
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "logical_site_not_found",
+                                "site_id": site_id,
+                                "message": str(exc),
+                            },
+                            status=404,
+                        )
+                        return
+
+                    if site_payload is None:
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": (
+                                    "site_aggregation_not_supported"
+                                ),
+                                "site_id": site_id,
+                                "path": route,
+                                "message": (
+                                    "This endpoint remains "
+                                    "subnet-scoped. Select one member "
+                                    "subnet before using it."
+                                ),
+                            },
+                            status=400,
+                        )
+                        return
+
+                    dashboard_json_response(
+                        self,
+                        site_payload,
+                    )
+                    return
+
                 if route == "/api/sites":
                     dashboard_json_response(
                         self,

@@ -47,7 +47,7 @@ required = (
     "function renderScopeNavigation(",
     'api("/api/sites")',
     "Promise.resolve(null)",
-    "Site-wide SIEM aggregation is not enabled",
+    # The selector notice changes after site aggregation is enabled.
 )
 
 for marker in required:
