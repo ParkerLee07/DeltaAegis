@@ -28394,15 +28394,31 @@ def command_dashboard(args):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import parse_qs, urlparse
 
+    # v0.42 dashboard LAN binding
+    lan_mode = bool(getattr(args, "lan", False))
+    bind_host = "0.0.0.0" if lan_mode else args.host
+
     db_path = args.db
     token = args.token
+    has_active_password_users = False
     login_required = bool(token or getattr(args, "require_login", False))
 
     try:
         with connect(db_path) as dashboard_auth_connection:
-            login_required = login_required or dashboard_has_active_password_users(dashboard_auth_connection)
+            has_active_password_users = dashboard_has_active_password_users(
+                dashboard_auth_connection
+            )
+            login_required = login_required or has_active_password_users
     except Exception:
+        has_active_password_users = False
         login_required = bool(token or getattr(args, "require_login", False))
+
+    if lan_mode and not (token or has_active_password_users):
+        raise DeltaAegisError(
+            "dashboard --lan requires an active password user "
+            "or an explicit --token; refusing unauthenticated "
+            "network exposure"
+        )
 
 
     class DeltaAegisDashboardHandler(BaseHTTPRequestHandler):
@@ -29888,7 +29904,7 @@ def command_dashboard(args):
                     status=400,
                 )
 
-    server_address = (args.host, args.port)
+    server_address = (bind_host, args.port)
     server = ThreadingHTTPServer(server_address, DeltaAegisDashboardHandler)
 
     dashboard_schedule_worker_thread = None
@@ -29915,7 +29931,7 @@ def command_dashboard(args):
 
     print("DeltaAegis dashboard starting")
     print("============================")
-    print(f"URL:      http://{args.host}:{args.port}")
+    print(f"URL:      http://{bind_host}:{args.port}")
     print(f"Database: {db_path}")
     print("Mode:     dashboard + investigation status updates")
     if getattr(args, "enable_scheduled_scans", True):
@@ -29929,7 +29945,7 @@ def command_dashboard(args):
         print("DB Tokens: accepted via X-DeltaAegis-Token")
     elif login_required:
         print("Auth:     username/password login required")
-        print("Login:    http://{host}:{port}/login".format(host=args.host, port=args.port))
+        print("Login:    http://{host}:{port}/login".format(host=bind_host, port=args.port))
         print("Sessions: HttpOnly SameSite=Lax cookie")
         print("DB Tokens: still accepted for automation via X-DeltaAegis-Token")
     else:
@@ -35893,6 +35909,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("identity", help="Host ID, IP, MAC, or hostname")
     p = sub.add_parser("dashboard")
     p.add_argument("--host", default="127.0.0.1")
+    p.add_argument(
+        "--lan",
+        action="store_true",
+        help=(
+            "Listen on all network interfaces (0.0.0.0). "
+            "Requires an active password user or --token."
+        ),
+    )
     p.add_argument("--port", type=int, default=8090)
     p.add_argument("--token")
     p.add_argument("--scope")
