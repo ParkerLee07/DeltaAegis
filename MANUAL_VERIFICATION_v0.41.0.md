@@ -103,3 +103,38 @@ Use disposable databases and backup directories for destructive verification. Do
 - [ ] Run the clean release gate again on merged `main`.
 - [ ] Only after the merged gate passes and Parker approves: create and push tag `v0.41.0`.
 - [ ] Only after tag verification and Parker approves: publish the GitHub release.
+
+## Publication Verification Record
+
+**Recorded:** 2026-07-08T15:05:22Z
+**Release candidate:** `2c136f5b93925cdb8f1858a8cf59c6140e1dcca4`
+**Decision:** APPROVED FOR PUBLICATION
+
+The following checks were completed manually before publication:
+
+- Confirmed the release-candidate branch, commit, and clean working tree.
+- Confirmed the configured active database remains
+  `data/deltaaegis.db`.
+- Confirmed the ignored legacy root database is untracked and has a
+  different file identity from the active database.
+- Confirmed all eight v0.41 durability and recovery commands are exposed
+  through the CLI.
+- Confirmed empty catalog and retention previews are non-destructive.
+- Confirmed missing backups, incorrect confirmation phrases, symlinked
+  backup roots, and blocked restore plans fail closed.
+- Confirmed a matching restore plan digest and exact confirmation phrase
+  cannot bypass backup verification or active-database blockers.
+- Confirmed no database, backup, or manifest was created during the
+  non-destructive boundary checks.
+- Confirmed the localhost dashboard remained available at
+  `127.0.0.1:8090`, displayed the v0.41 interface, preserved existing
+  operational data, and showed no observed UI regression.
+
+The positive backup, restore rehearsal, retention deletion, restore
+cutover, and rollback paths were not repeated manually against the normal
+active database. Those paths were exercised with isolated temporary
+databases by the complete v0.41 automated release gate.
+No production database restore was performed.
+
+Parker explicitly approved publication of DeltaAegis v0.41.0 after these
+manual checks.
