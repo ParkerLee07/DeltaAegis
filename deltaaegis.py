@@ -31909,6 +31909,1195 @@ def command_backup_retention_preview(args) -> int:
     return 1 if plan["summary"]["protected"] else 0
 
 
+
+# v0.41 checkpoint 6: guarded backup retention execution
+DATABASE_BACKUP_RETENTION_RECEIPT_SCHEMA_VERSION = (
+    "deltaaegis-backup-retention-receipt-v1"
+)
+DATABASE_BACKUP_RETENTION_EXECUTION_CONFIRMATION = (
+    "DELETE ELIGIBLE BACKUP BUNDLES"
+)
+
+
+def _database_backup_retention_file_identity(
+    path: Path,
+) -> dict[str, int]:
+    resolved_path = _normalize_new_backup_path(Path(path))
+
+    if not os.path.lexists(resolved_path):
+        raise DeltaAegisError(
+            f"retention candidate path does not exist: "
+            f"{resolved_path}"
+        )
+
+    if resolved_path.is_symlink():
+        raise DeltaAegisError(
+            f"retention candidate must not be a symlink: "
+            f"{resolved_path}"
+        )
+
+    if not resolved_path.is_file():
+        raise DeltaAegisError(
+            f"retention candidate is not a regular file: "
+            f"{resolved_path}"
+        )
+
+    try:
+        path_stat = os.lstat(resolved_path)
+    except OSError as exc:
+        raise DeltaAegisError(
+            f"could not inspect retention candidate "
+            f"{resolved_path}: {exc}"
+        ) from exc
+
+    return {
+        "device": int(path_stat.st_dev),
+        "inode": int(path_stat.st_ino),
+        "size": int(path_stat.st_size),
+        "mtime_ns": int(path_stat.st_mtime_ns),
+    }
+
+
+def _database_backup_retention_fsync_directory(
+    directory: Path,
+) -> None:
+    resolved_directory = _normalize_new_backup_path(
+        Path(directory)
+    )
+    directory_flags = os.O_RDONLY | getattr(
+        os,
+        "O_DIRECTORY",
+        0,
+    )
+
+    try:
+        directory_descriptor = os.open(
+            resolved_directory,
+            directory_flags,
+        )
+    except OSError as exc:
+        raise DeltaAegisError(
+            f"could not open retention directory for fsync "
+            f"{resolved_directory}: {exc}"
+        ) from exc
+
+    try:
+        os.fsync(directory_descriptor)
+    except OSError as exc:
+        raise DeltaAegisError(
+            f"could not fsync retention directory "
+            f"{resolved_directory}: {exc}"
+        ) from exc
+    finally:
+        os.close(directory_descriptor)
+
+
+def _database_backup_retention_existing_paths(
+    entry: dict[str, Any],
+) -> list[str]:
+    existing_paths: list[str] = []
+
+    for key in ("backup_path", "manifest_path"):
+        candidate = _normalize_new_backup_path(
+            Path(str(entry.get(key) or ""))
+        )
+
+        if os.path.lexists(candidate):
+            existing_paths.append(str(candidate))
+
+    return existing_paths
+
+
+def _database_backup_retention_plan_digest(
+    plan: dict[str, Any],
+) -> str:
+    eligible = []
+
+    for entry in plan["entries"]:
+        if entry["retention_action"] != "ELIGIBLE":
+            continue
+
+        eligible.append(
+            {
+                "backup_path": entry["backup_path"],
+                "manifest_path": entry["manifest_path"],
+                "created_at": entry.get("created_at"),
+                "size_bytes": entry.get("size_bytes"),
+                "backup_sha256": entry.get("backup_sha256"),
+                "schema_fingerprint": (
+                    entry.get("schema_fingerprint")
+                ),
+                "logical_fingerprint": (
+                    entry.get("logical_fingerprint")
+                ),
+                "valid_rank": entry.get("valid_rank"),
+                "age_days": entry.get("age_days"),
+            }
+        )
+
+    canonical = json.dumps(
+        {
+            "schema_version": plan["schema_version"],
+            "backups_dir": plan["backups_dir"],
+            "policy": plan["policy"],
+            "eligible": eligible,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _database_backup_retention_prepare_candidate(
+    entry: dict[str, Any],
+    *,
+    backups_root: Path,
+    active_database_path: Path,
+) -> dict[str, Any]:
+    result = {
+        "outcome": "CHANGED",
+        "review_required": True,
+        "detail": "",
+        "backup_path": str(entry["backup_path"]),
+        "manifest_path": str(entry["manifest_path"]),
+        "deleted_paths": [],
+        "restored_paths": [],
+        "changed_paths": [],
+        "failed_paths": [],
+        "quarantine_path": None,
+    }
+
+    if (
+        entry.get("retention_action") != "ELIGIBLE"
+        or entry.get("status") != "VALID"
+    ):
+        result.update(
+            {
+                "outcome": "SKIPPED",
+                "review_required": (
+                    entry.get("retention_action")
+                    == "PROTECTED"
+                ),
+                "detail": (
+                    "retention plan did not classify this "
+                    "bundle as a verified deletion candidate"
+                ),
+            }
+        )
+        return result
+
+    root = _database_backup_catalog_root(backups_root)
+    backup_path = _normalize_new_backup_path(
+        Path(entry["backup_path"])
+    )
+    manifest_path = _normalize_new_backup_path(
+        Path(entry["manifest_path"])
+    )
+    active_path = Path(
+        active_database_path
+    ).expanduser().resolve(strict=False)
+
+    result["backup_path"] = str(backup_path)
+    result["manifest_path"] = str(manifest_path)
+
+    if (
+        backup_path.parent != root
+        or manifest_path.parent != root
+    ):
+        result["detail"] = (
+            "retention candidate escaped the top-level "
+            "backup directory"
+        )
+        result["changed_paths"] = [
+            str(backup_path),
+            str(manifest_path),
+        ]
+        return result
+
+    for candidate in (backup_path, manifest_path):
+        if (
+            candidate == active_path
+            or _existing_paths_share_file_identity(
+                candidate,
+                active_path,
+            )
+        ):
+            result.update(
+                {
+                    "outcome": "SKIPPED",
+                    "review_required": True,
+                    "detail": (
+                        "active database paths and hard-link "
+                        "aliases are protected from retention"
+                    ),
+                    "changed_paths": [str(candidate)],
+                }
+            )
+            return result
+
+    try:
+        before_backup_identity = (
+            _database_backup_retention_file_identity(
+                backup_path
+            )
+        )
+        before_manifest_identity = (
+            _database_backup_retention_file_identity(
+                manifest_path
+            )
+        )
+        fresh_entry = inspect_database_backup_bundle(
+            backup_path,
+            manifest_path,
+        )
+        after_backup_identity = (
+            _database_backup_retention_file_identity(
+                backup_path
+            )
+        )
+        after_manifest_identity = (
+            _database_backup_retention_file_identity(
+                manifest_path
+            )
+        )
+    except DeltaAegisError as exc:
+        result["detail"] = (
+            f"retention candidate could not be freshly "
+            f"verified: {exc}"
+        )
+        result["changed_paths"] = [
+            str(backup_path),
+            str(manifest_path),
+        ]
+        return result
+
+    if (
+        before_backup_identity != after_backup_identity
+        or before_manifest_identity != after_manifest_identity
+    ):
+        result["detail"] = (
+            "retention candidate identity changed during "
+            "fresh verification"
+        )
+        result["changed_paths"] = [
+            str(backup_path),
+            str(manifest_path),
+        ]
+        return result
+
+    if fresh_entry["status"] != "VALID":
+        result["detail"] = (
+            "retention candidate is no longer a valid "
+            f"backup bundle: {fresh_entry['detail']}"
+        )
+        result["changed_paths"] = [
+            str(backup_path),
+            str(manifest_path),
+        ]
+        return result
+
+    comparison_keys = (
+        "created_at",
+        "size_bytes",
+        "backup_sha256",
+        "schema_fingerprint",
+        "logical_fingerprint",
+        "integrity_status",
+    )
+
+    for key in comparison_keys:
+        if fresh_entry.get(key) != entry.get(key):
+            result["detail"] = (
+                f"retention candidate metadata changed "
+                f"after planning: {key}"
+            )
+            result["changed_paths"] = [
+                str(backup_path),
+                str(manifest_path),
+            ]
+            return result
+
+    result.update(
+        {
+            "outcome": "READY",
+            "review_required": False,
+            "detail": "candidate freshly verified",
+            "backup_identity": after_backup_identity,
+            "manifest_identity": after_manifest_identity,
+            "candidate_bytes": (
+                after_backup_identity["size"]
+                + after_manifest_identity["size"]
+            ),
+        }
+    )
+    return result
+
+
+def _database_backup_retention_unlink_if_identity_matches(
+    path: Path,
+    expected_identity: dict[str, int],
+) -> tuple[str, str]:
+    resolved_path = _normalize_new_backup_path(Path(path))
+
+    try:
+        current_identity = (
+            _database_backup_retention_file_identity(
+                resolved_path
+            )
+        )
+    except DeltaAegisError as exc:
+        return "CHANGED", str(exc)
+
+    if current_identity != expected_identity:
+        return (
+            "CHANGED",
+            "retention candidate identity no longer matches "
+            f"the verified file: {resolved_path}",
+        )
+
+    try:
+        resolved_path.unlink()
+    except OSError as exc:
+        return (
+            "FAILED",
+            f"could not remove retention candidate "
+            f"{resolved_path}: {exc}",
+        )
+
+    if os.path.lexists(resolved_path):
+        return (
+            "FAILED",
+            f"retention candidate still exists after unlink: "
+            f"{resolved_path}",
+        )
+
+    return "DELETED", "deleted"
+
+
+def _database_backup_retention_cleanup_quarantine(
+    quarantine_path: Path,
+    quarantine_links: list[Path],
+    backups_root: Path,
+) -> list[str]:
+    errors: list[str] = []
+
+    for link_path in quarantine_links:
+        if not os.path.lexists(link_path):
+            continue
+
+        try:
+            link_path.unlink()
+        except OSError as exc:
+            errors.append(
+                f"could not remove quarantine link "
+                f"{link_path}: {exc}"
+            )
+
+    if os.path.lexists(quarantine_path):
+        try:
+            quarantine_path.rmdir()
+        except OSError as exc:
+            errors.append(
+                f"could not remove quarantine directory "
+                f"{quarantine_path}: {exc}"
+            )
+
+    try:
+        _database_backup_retention_fsync_directory(
+            backups_root
+        )
+    except DeltaAegisError as exc:
+        errors.append(str(exc))
+
+    return errors
+
+
+def _database_backup_retention_restore_from_quarantine(
+    original_path: Path,
+    quarantine_link: Path,
+    expected_identity: dict[str, int],
+) -> tuple[bool, str]:
+    if os.path.lexists(original_path):
+        try:
+            current_identity = (
+                _database_backup_retention_file_identity(
+                    original_path
+                )
+            )
+        except DeltaAegisError as exc:
+            return False, str(exc)
+
+        if current_identity == expected_identity:
+            return True, "original path remained intact"
+
+        return (
+            False,
+            "original path was replaced and was not "
+            f"overwritten during rollback: {original_path}",
+        )
+
+    try:
+        os.link(
+            quarantine_link,
+            original_path,
+            follow_symlinks=False,
+        )
+    except OSError as exc:
+        return (
+            False,
+            f"could not restore {original_path} from "
+            f"quarantine: {exc}",
+        )
+
+    try:
+        restored_identity = (
+            _database_backup_retention_file_identity(
+                original_path
+            )
+        )
+    except DeltaAegisError as exc:
+        return False, str(exc)
+
+    if restored_identity != expected_identity:
+        return (
+            False,
+            f"restored path identity mismatch: "
+            f"{original_path}",
+        )
+
+    return True, "restored from quarantine"
+
+
+def _database_backup_retention_delete_prepared_candidate(
+    prepared: dict[str, Any],
+    *,
+    backups_root: Path,
+) -> dict[str, Any]:
+    if prepared.get("outcome") != "READY":
+        return prepared
+
+    root = _database_backup_catalog_root(backups_root)
+    backup_path = _normalize_new_backup_path(
+        Path(prepared["backup_path"])
+    )
+    manifest_path = _normalize_new_backup_path(
+        Path(prepared["manifest_path"])
+    )
+    backup_identity = dict(prepared["backup_identity"])
+    manifest_identity = dict(
+        prepared["manifest_identity"]
+    )
+    result = {
+        "outcome": "FAILED",
+        "review_required": True,
+        "detail": "",
+        "backup_path": str(backup_path),
+        "manifest_path": str(manifest_path),
+        "deleted_paths": [],
+        "restored_paths": [],
+        "changed_paths": [],
+        "failed_paths": [],
+        "quarantine_path": None,
+        "candidate_bytes": int(
+            prepared.get("candidate_bytes") or 0
+        ),
+    }
+    quarantine_path: Path | None = None
+    quarantine_backup: Path | None = None
+    quarantine_manifest: Path | None = None
+
+    try:
+        quarantine_path = Path(
+            tempfile.mkdtemp(
+                prefix=".deltaaegis-retention-",
+                dir=str(root),
+            )
+        )
+        os.chmod(quarantine_path, 0o700)
+        quarantine_backup = quarantine_path / "backup"
+        quarantine_manifest = quarantine_path / "manifest"
+
+        os.link(
+            backup_path,
+            quarantine_backup,
+            follow_symlinks=False,
+        )
+        os.link(
+            manifest_path,
+            quarantine_manifest,
+            follow_symlinks=False,
+        )
+
+        if (
+            _database_backup_retention_file_identity(
+                quarantine_backup
+            )
+            != backup_identity
+            or _database_backup_retention_file_identity(
+                quarantine_manifest
+            )
+            != manifest_identity
+        ):
+            result.update(
+                {
+                    "outcome": "CHANGED",
+                    "detail": (
+                        "quarantine hard-link identities did "
+                        "not match the verified candidate"
+                    ),
+                    "changed_paths": [
+                        str(backup_path),
+                        str(manifest_path),
+                    ],
+                }
+            )
+            cleanup_errors = (
+                _database_backup_retention_cleanup_quarantine(
+                    quarantine_path,
+                    [
+                        quarantine_backup,
+                        quarantine_manifest,
+                    ],
+                    root,
+                )
+            )
+
+            if cleanup_errors:
+                result["outcome"] = "FAILED"
+                result["failed_paths"] = [
+                    str(quarantine_path)
+                ]
+                result["detail"] += "; " + "; ".join(
+                    cleanup_errors
+                )
+                result["quarantine_path"] = str(
+                    quarantine_path
+                )
+
+            return result
+
+        _database_backup_retention_fsync_directory(
+            quarantine_path
+        )
+        _database_backup_retention_fsync_directory(root)
+
+        for candidate, expected_identity in (
+            (backup_path, backup_identity),
+            (manifest_path, manifest_identity),
+        ):
+            if (
+                _database_backup_retention_file_identity(
+                    candidate
+                )
+                != expected_identity
+            ):
+                result.update(
+                    {
+                        "outcome": "CHANGED",
+                        "detail": (
+                            "retention candidate changed "
+                            "before deletion"
+                        ),
+                        "changed_paths": [str(candidate)],
+                    }
+                )
+                cleanup_errors = (
+                    _database_backup_retention_cleanup_quarantine(
+                        quarantine_path,
+                        [
+                            quarantine_backup,
+                            quarantine_manifest,
+                        ],
+                        root,
+                    )
+                )
+
+                if cleanup_errors:
+                    result["outcome"] = "FAILED"
+                    result["failed_paths"] = [
+                        str(quarantine_path)
+                    ]
+                    result["detail"] += "; " + "; ".join(
+                        cleanup_errors
+                    )
+                    result["quarantine_path"] = str(
+                        quarantine_path
+                    )
+
+                return result
+
+        deletion_sequence = (
+            (
+                manifest_path,
+                manifest_identity,
+            ),
+            (
+                backup_path,
+                backup_identity,
+            ),
+        )
+        deletion_error: tuple[str, str, Path] | None = None
+
+        for candidate, expected_identity in deletion_sequence:
+            status, detail = (
+                _database_backup_retention_unlink_if_identity_matches(
+                    candidate,
+                    expected_identity,
+                )
+            )
+
+            if status != "DELETED":
+                deletion_error = (
+                    status,
+                    detail,
+                    candidate,
+                )
+                break
+
+            result["deleted_paths"].append(
+                str(candidate)
+            )
+            _database_backup_retention_fsync_directory(
+                root
+            )
+
+        if deletion_error is not None:
+            status, detail, failed_candidate = deletion_error
+            result["outcome"] = status
+            result["detail"] = detail
+
+            if status == "CHANGED":
+                result["changed_paths"].append(
+                    str(failed_candidate)
+                )
+            else:
+                result["failed_paths"].append(
+                    str(failed_candidate)
+                )
+
+            rollback_pairs = (
+                (
+                    backup_path,
+                    quarantine_backup,
+                    backup_identity,
+                ),
+                (
+                    manifest_path,
+                    quarantine_manifest,
+                    manifest_identity,
+                ),
+            )
+            rollback_complete = True
+
+            for (
+                original_path,
+                quarantine_link,
+                expected_identity,
+            ) in rollback_pairs:
+                restored, restore_detail = (
+                    _database_backup_retention_restore_from_quarantine(
+                        original_path,
+                        quarantine_link,
+                        expected_identity,
+                    )
+                )
+
+                if restored:
+                    if (
+                        restore_detail
+                        == "restored from quarantine"
+                    ):
+                        result["restored_paths"].append(
+                            str(original_path)
+                        )
+                else:
+                    rollback_complete = False
+                    result["failed_paths"].append(
+                        str(original_path)
+                    )
+                    result["detail"] += (
+                        f"; rollback: {restore_detail}"
+                    )
+
+            _database_backup_retention_fsync_directory(root)
+
+            if rollback_complete:
+                result["deleted_paths"] = []
+                cleanup_errors = (
+                    _database_backup_retention_cleanup_quarantine(
+                        quarantine_path,
+                        [
+                            quarantine_backup,
+                            quarantine_manifest,
+                        ],
+                        root,
+                    )
+                )
+
+                if cleanup_errors:
+                    result["outcome"] = "FAILED"
+                    result["failed_paths"].append(
+                        str(quarantine_path)
+                    )
+                    result["detail"] += "; " + "; ".join(
+                        cleanup_errors
+                    )
+                    result["quarantine_path"] = str(
+                        quarantine_path
+                    )
+            else:
+                result["outcome"] = "FAILED"
+                result["quarantine_path"] = str(
+                    quarantine_path
+                )
+                result["detail"] += (
+                    "; quarantine preserved because rollback "
+                    "was incomplete"
+                )
+
+            return result
+
+        cleanup_errors = (
+            _database_backup_retention_cleanup_quarantine(
+                quarantine_path,
+                [
+                    quarantine_backup,
+                    quarantine_manifest,
+                ],
+                root,
+            )
+        )
+
+        if cleanup_errors:
+            result.update(
+                {
+                    "outcome": "FAILED",
+                    "review_required": True,
+                    "detail": (
+                        "backup originals were removed, but "
+                        "quarantine cleanup failed: "
+                        + "; ".join(cleanup_errors)
+                    ),
+                    "failed_paths": [
+                        str(quarantine_path)
+                    ],
+                    "quarantine_path": str(
+                        quarantine_path
+                    ),
+                }
+            )
+            return result
+
+        result.update(
+            {
+                "outcome": "DELETED",
+                "review_required": False,
+                "detail": (
+                    "verified eligible backup bundle deleted"
+                ),
+                "quarantine_path": None,
+            }
+        )
+        return result
+
+    except (OSError, DeltaAegisError) as exc:
+        result["detail"] = (
+            f"retention deletion failed before completion: "
+            f"{exc}"
+        )
+        result["failed_paths"] = [
+            str(backup_path),
+            str(manifest_path),
+        ]
+
+        if (
+            quarantine_path is not None
+            and quarantine_backup is not None
+            and quarantine_manifest is not None
+        ):
+            rollback_complete = True
+
+            for (
+                original_path,
+                quarantine_link,
+                expected_identity,
+            ) in (
+                (
+                    backup_path,
+                    quarantine_backup,
+                    backup_identity,
+                ),
+                (
+                    manifest_path,
+                    quarantine_manifest,
+                    manifest_identity,
+                ),
+            ):
+                if not os.path.lexists(quarantine_link):
+                    continue
+
+                restored, restore_detail = (
+                    _database_backup_retention_restore_from_quarantine(
+                        original_path,
+                        quarantine_link,
+                        expected_identity,
+                    )
+                )
+
+                if restored:
+                    if (
+                        restore_detail
+                        == "restored from quarantine"
+                    ):
+                        result["restored_paths"].append(
+                            str(original_path)
+                        )
+                else:
+                    rollback_complete = False
+                    result["detail"] += (
+                        f"; rollback: {restore_detail}"
+                    )
+
+            if rollback_complete:
+                cleanup_errors = (
+                    _database_backup_retention_cleanup_quarantine(
+                        quarantine_path,
+                        [
+                            quarantine_backup,
+                            quarantine_manifest,
+                        ],
+                        root,
+                    )
+                )
+
+                if cleanup_errors:
+                    result["detail"] += "; " + "; ".join(
+                        cleanup_errors
+                    )
+                    result["quarantine_path"] = str(
+                        quarantine_path
+                    )
+            else:
+                result["quarantine_path"] = str(
+                    quarantine_path
+                )
+                result["detail"] += (
+                    "; quarantine preserved because rollback "
+                    "was incomplete"
+                )
+
+        return result
+
+
+def execute_database_backup_retention(
+    active_database_path: Path,
+    backups_dir: Path,
+    *,
+    keep_newest: int,
+    minimum_age_days: int,
+    confirmation: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    if str(confirmation or "").strip() != (
+        DATABASE_BACKUP_RETENTION_EXECUTION_CONFIRMATION
+    ):
+        raise DeltaAegisError(
+            "backup retention execution requires the exact "
+            "confirmation phrase: "
+            f"{DATABASE_BACKUP_RETENTION_EXECUTION_CONFIRMATION}"
+        )
+
+    plan = plan_database_backup_retention(
+        backups_dir,
+        keep_newest=keep_newest,
+        minimum_age_days=minimum_age_days,
+        now=now,
+    )
+    root = _database_backup_catalog_root(
+        Path(plan["backups_dir"])
+    )
+    active_path = Path(
+        active_database_path
+    ).expanduser().resolve(strict=False)
+    plan_digest = _database_backup_retention_plan_digest(
+        plan
+    )
+    results: list[dict[str, Any]] = []
+
+    for entry in plan["entries"]:
+        if entry["retention_action"] != "ELIGIBLE":
+            results.append(
+                {
+                    "outcome": "SKIPPED",
+                    "review_required": (
+                        entry["retention_action"]
+                        == "PROTECTED"
+                    ),
+                    "detail": entry["retention_reason"],
+                    "retention_action": (
+                        entry["retention_action"]
+                    ),
+                    "backup_path": entry["backup_path"],
+                    "manifest_path": (
+                        entry["manifest_path"]
+                    ),
+                    "deleted_paths": [],
+                    "restored_paths": [],
+                    "changed_paths": [],
+                    "failed_paths": [],
+                    "skipped_paths": (
+                        _database_backup_retention_existing_paths(
+                            entry
+                        )
+                    ),
+                    "quarantine_path": None,
+                    "candidate_bytes": 0,
+                }
+            )
+            continue
+
+        prepared = (
+            _database_backup_retention_prepare_candidate(
+                entry,
+                backups_root=root,
+                active_database_path=active_path,
+            )
+        )
+        prepared["retention_action"] = (
+            entry["retention_action"]
+        )
+        prepared.setdefault("skipped_paths", [])
+
+        if prepared["outcome"] == "SKIPPED":
+            prepared["skipped_paths"] = (
+                _database_backup_retention_existing_paths(
+                    entry
+                )
+            )
+            results.append(prepared)
+            continue
+
+        result = (
+            _database_backup_retention_delete_prepared_candidate(
+                prepared,
+                backups_root=root,
+            )
+        )
+        result["retention_action"] = (
+            entry["retention_action"]
+        )
+        result.setdefault("skipped_paths", [])
+        results.append(result)
+
+    deleted_paths = [
+        path
+        for result in results
+        for path in result.get("deleted_paths", [])
+    ]
+    skipped_paths = [
+        path
+        for result in results
+        for path in result.get("skipped_paths", [])
+    ]
+    changed_paths = [
+        path
+        for result in results
+        for path in result.get("changed_paths", [])
+    ]
+    failed_paths = [
+        path
+        for result in results
+        for path in result.get("failed_paths", [])
+    ]
+    restored_paths = [
+        path
+        for result in results
+        for path in result.get("restored_paths", [])
+    ]
+    quarantine_paths = [
+        str(result["quarantine_path"])
+        for result in results
+        if result.get("quarantine_path")
+    ]
+    summary = {
+        "total_plan_entries": len(results),
+        "eligible_bundles": int(
+            plan["summary"]["eligible"]
+        ),
+        "deleted_bundles": sum(
+            1
+            for result in results
+            if result["outcome"] == "DELETED"
+        ),
+        "skipped_bundles": sum(
+            1
+            for result in results
+            if result["outcome"] == "SKIPPED"
+        ),
+        "changed_bundles": sum(
+            1
+            for result in results
+            if result["outcome"] == "CHANGED"
+        ),
+        "failed_bundles": sum(
+            1
+            for result in results
+            if result["outcome"] == "FAILED"
+        ),
+        "deleted_files": len(deleted_paths),
+        "deleted_candidate_bytes": sum(
+            int(result.get("candidate_bytes") or 0)
+            for result in results
+            if result["outcome"] == "DELETED"
+        ),
+        "keep_preserved": int(
+            plan["summary"]["keep"]
+        ),
+        "protected_preserved": int(
+            plan["summary"]["protected"]
+        ),
+        "restored_files": len(restored_paths),
+        "quarantine_residue": len(
+            quarantine_paths
+        ),
+    }
+    review_required = bool(
+        plan["summary"]["protected"]
+        or summary["changed_bundles"]
+        or summary["failed_bundles"]
+        or any(
+            bool(result.get("review_required"))
+            for result in results
+        )
+    )
+    completed_at = (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+    return {
+        "schema_version": (
+            DATABASE_BACKUP_RETENTION_RECEIPT_SCHEMA_VERSION
+        ),
+        "action": "backup.retention.execute",
+        "completed_at": completed_at,
+        "dry_run": False,
+        "destructive": True,
+        "confirmation_required": (
+            DATABASE_BACKUP_RETENTION_EXECUTION_CONFIRMATION
+        ),
+        "confirmation_matched": True,
+        "active_database_path": str(active_path),
+        "backups_dir": str(root),
+        "policy": dict(plan["policy"]),
+        "plan_generated_at": plan["generated_at"],
+        "plan_digest": plan_digest,
+        "plan_summary": dict(plan["summary"]),
+        "summary": summary,
+        "review_required": review_required,
+        "deleted_paths": deleted_paths,
+        "skipped_paths": skipped_paths,
+        "changed_paths": changed_paths,
+        "failed_paths": failed_paths,
+        "restored_paths": restored_paths,
+        "quarantine_paths": quarantine_paths,
+        "results": results,
+        "message": (
+            "Backup retention execution completed; "
+            f"{summary['deleted_bundles']} bundle(s) deleted, "
+            f"{summary['changed_bundles']} changed, "
+            f"{summary['failed_bundles']} failed, and "
+            f"{summary['protected_preserved']} protected "
+            "bundle(s) preserved."
+        ),
+    }
+
+
+def _print_database_backup_retention_receipt_human(
+    receipt: dict[str, Any],
+) -> None:
+    summary = receipt["summary"]
+
+    print("DeltaAegis backup retention execution receipt")
+    print(f"Directory: {receipt['backups_dir']}")
+    print(
+        f"Confirmation: "
+        f"{receipt['confirmation_required']}"
+    )
+    print(f"Plan digest: {receipt['plan_digest']}")
+    print(
+        "Summary: "
+        f"{summary['deleted_bundles']} deleted, "
+        f"{summary['skipped_bundles']} skipped, "
+        f"{summary['changed_bundles']} changed, "
+        f"{summary['failed_bundles']} failed"
+    )
+    print(
+        f"Deleted files: {summary['deleted_files']}"
+    )
+    print(
+        "Deleted candidate bytes: "
+        f"{summary['deleted_candidate_bytes']}"
+    )
+    print(
+        f"Review required: "
+        f"{'yes' if receipt['review_required'] else 'no'}"
+    )
+
+    for result in receipt["results"]:
+        print()
+        print(
+            f"{result['outcome']}: "
+            f"{result['backup_path']}"
+        )
+        print(
+            f"  Retention action: "
+            f"{result['retention_action']}"
+        )
+        print(f"  Detail: {result['detail']}")
+
+        if result.get("restored_paths"):
+            print(
+                "  Restored: "
+                + ", ".join(result["restored_paths"])
+            )
+
+        if result.get("quarantine_path"):
+            print(
+                f"  Quarantine: "
+                f"{result['quarantine_path']}"
+            )
+
+
+def command_backup_retention_execute(args) -> int:
+    receipt = execute_database_backup_retention(
+        args.db,
+        args.backups_dir,
+        keep_newest=args.keep_newest,
+        minimum_age_days=args.minimum_age_days,
+        confirmation=args.confirmation,
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                receipt,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        _print_database_backup_retention_receipt_human(
+            receipt
+        )
+
+    return 1 if receipt["review_required"] else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DeltaAegis v0.40.0 — Human-Readable Operator Actions, stable dashboard action receipts, progressive technical disclosure, compact mutation payloads, guarded NetSniper and TrueAegis orchestration, reporting, RBAC, and the current-state SIEM dashboard")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -32063,6 +33252,58 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Print structured JSON output",
+    )
+
+    p = sub.add_parser(
+        "backup-retention-execute",
+        help=(
+            "Delete only freshly verified retention-eligible "
+            "backup bundles"
+        ),
+    )
+    p.add_argument(
+        "--backups-dir",
+        type=Path,
+        default=DEFAULT_BACKUPS,
+        help=(
+            "Directory containing DeltaAegis database backups "
+            "and manifests"
+        ),
+    )
+    p.add_argument(
+        "--keep-newest",
+        type=database_backup_retention_positive_int,
+        default=(
+            DATABASE_BACKUP_RETENTION_DEFAULT_KEEP_NEWEST
+        ),
+        help=(
+            "Always keep at least this many newest verified "
+            "backup bundles"
+        ),
+    )
+    p.add_argument(
+        "--minimum-age-days",
+        type=database_backup_retention_nonnegative_int,
+        default=(
+            DATABASE_BACKUP_RETENTION_DEFAULT_MINIMUM_AGE_DAYS
+        ),
+        help=(
+            "Only delete older verified backups after this "
+            "many full days"
+        ),
+    )
+    p.add_argument(
+        "--confirmation",
+        required=True,
+        help=(
+            "Exact required phrase: "
+            f"{DATABASE_BACKUP_RETENTION_EXECUTION_CONFIRMATION}"
+        ),
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a structured execution receipt",
     )
 
     p = sub.add_parser("user-create", help="Create a local DeltaAegis access user")
@@ -32305,6 +33546,7 @@ def main() -> int:
         if args.command == "backup-catalog": return command_backup_catalog(args)
         if args.command == "backup-verify": return command_backup_verify(args)
         if args.command == "backup-retention-preview": return command_backup_retention_preview(args)
+        if args.command == "backup-retention-execute": return command_backup_retention_execute(args)
         if args.command == "user-create": return command_user_create(args)
         if args.command == "users": return command_users(args)
         if args.command == "user-password": return command_user_password(args)
