@@ -33098,6 +33098,891 @@ def command_backup_retention_execute(args) -> int:
     return 1 if receipt["review_required"] else 0
 
 
+
+# v0.41 checkpoint 7: active restore cutover preview
+DATABASE_RESTORE_CUTOVER_PLAN_SCHEMA_VERSION = (
+    "deltaaegis-restore-cutover-plan-v1"
+)
+
+
+def _database_restore_cutover_absolute_path(
+    path: Path,
+) -> Path:
+    return Path(
+        os.path.abspath(
+            os.path.expanduser(
+                str(path)
+            )
+        )
+    )
+
+
+def _database_restore_cutover_file_identity(
+    path: Path,
+) -> dict[str, int]:
+    resolved_path = _database_restore_cutover_absolute_path(
+        Path(path)
+    )
+
+    try:
+        path_stat = os.lstat(resolved_path)
+    except OSError as exc:
+        raise DeltaAegisError(
+            f"could not inspect restore cutover path "
+            f"{resolved_path}: {exc}"
+        ) from exc
+
+    return {
+        "device": int(path_stat.st_dev),
+        "inode": int(path_stat.st_ino),
+        "size": int(path_stat.st_size),
+        "mtime_ns": int(path_stat.st_mtime_ns),
+        "mode": int(path_stat.st_mode),
+    }
+
+
+def _database_restore_cutover_paths_share_identity(
+    first_path: Path,
+    second_path: Path,
+) -> bool:
+    if (
+        not os.path.lexists(first_path)
+        or not os.path.lexists(second_path)
+    ):
+        return False
+
+    try:
+        return os.path.samefile(
+            first_path,
+            second_path,
+        )
+    except OSError as exc:
+        raise DeltaAegisError(
+            "could not compare restore cutover file "
+            f"identities: {first_path} and {second_path}: "
+            f"{exc}"
+        ) from exc
+
+
+def _database_restore_cutover_sidecars(
+    active_database_path: Path,
+) -> list[dict[str, Any]]:
+    active_path = _database_restore_cutover_absolute_path(
+        Path(active_database_path)
+    )
+    sidecars: list[dict[str, Any]] = []
+
+    for suffix in ("-wal", "-shm", "-journal"):
+        candidate = Path(str(active_path) + suffix)
+
+        if not os.path.lexists(candidate):
+            continue
+
+        entry: dict[str, Any] = {
+            "path": str(candidate),
+            "suffix": suffix,
+            "is_symlink": candidate.is_symlink(),
+            "is_file": candidate.is_file(),
+            "size_bytes": None,
+        }
+
+        try:
+            entry["size_bytes"] = int(
+                os.lstat(candidate).st_size
+            )
+        except OSError:
+            pass
+
+        sidecars.append(entry)
+
+    return sidecars
+
+
+def _database_restore_cutover_dashboard_processes(
+    active_database_path: Path,
+    *,
+    process_root: Path = Path("/proc"),
+    current_pid: int | None = None,
+) -> dict[str, Any]:
+    active_path = _database_restore_cutover_absolute_path(
+        Path(active_database_path)
+    )
+    root = _database_restore_cutover_absolute_path(
+        Path(process_root)
+    )
+    ignored_pid = (
+        os.getpid()
+        if current_pid is None
+        else int(current_pid)
+    )
+    result: dict[str, Any] = {
+        "available": False,
+        "process_root": str(root),
+        "inspected_processes": 0,
+        "unreadable_processes": 0,
+        "matches": [],
+    }
+
+    if not root.exists() or not root.is_dir():
+        return result
+
+    result["available"] = True
+
+    try:
+        process_directories = sorted(
+            (
+                child
+                for child in root.iterdir()
+                if child.name.isdigit()
+            ),
+            key=lambda child: int(child.name),
+        )
+    except OSError:
+        result["available"] = False
+        return result
+
+    for process_directory in process_directories:
+        pid = int(process_directory.name)
+
+        if pid == ignored_pid:
+            continue
+
+        cmdline_path = process_directory / "cmdline"
+
+        try:
+            raw_cmdline = cmdline_path.read_bytes()
+        except OSError:
+            result["unreadable_processes"] += 1
+            continue
+
+        if not raw_cmdline:
+            continue
+
+        argv = [
+            part.decode(
+                "utf-8",
+                errors="replace",
+            )
+            for part in raw_cmdline.split(b"\0")
+            if part
+        ]
+
+        if not argv:
+            continue
+
+        result["inspected_processes"] += 1
+
+        if "dashboard" not in argv:
+            continue
+
+        if not any(
+            Path(argument).name == "deltaaegis.py"
+            for argument in argv
+        ):
+            continue
+
+        configured_database: Path | None = None
+
+        for index, argument in enumerate(argv):
+            if argument == "--db" and index + 1 < len(argv):
+                configured_database = (
+                    _database_restore_cutover_absolute_path(
+                        Path(argv[index + 1])
+                    )
+                )
+                break
+
+            if argument.startswith("--db="):
+                configured_database = (
+                    _database_restore_cutover_absolute_path(
+                        Path(argument.split("=", 1)[1])
+                    )
+                )
+                break
+
+        if configured_database is None:
+            configured_database = (
+                _database_restore_cutover_absolute_path(
+                    DEFAULT_DB
+                )
+            )
+
+        same_database = (
+            configured_database == active_path
+        )
+
+        if (
+            not same_database
+            and os.path.lexists(configured_database)
+            and os.path.lexists(active_path)
+        ):
+            try:
+                same_database = os.path.samefile(
+                    configured_database,
+                    active_path,
+                )
+            except OSError:
+                same_database = False
+
+        if not same_database:
+            continue
+
+        result["matches"].append(
+            {
+                "pid": pid,
+                "command": "dashboard",
+                "database_path": str(
+                    configured_database
+                ),
+                "match_reason": (
+                    "DeltaAegis dashboard is using the "
+                    "active database"
+                ),
+            }
+        )
+
+    return result
+
+
+def _database_restore_cutover_active_state(
+    active_database_path: Path,
+    *,
+    inspect_database: bool = True,
+) -> dict[str, Any]:
+    active_path = _database_restore_cutover_absolute_path(
+        Path(active_database_path)
+    )
+    state: dict[str, Any] = {
+        "path": str(active_path),
+        "exists": os.path.lexists(active_path),
+        "is_symlink": False,
+        "is_file": False,
+        "parent_path": str(active_path.parent),
+        "parent_exists": active_path.parent.exists(),
+        "parent_is_directory": active_path.parent.is_dir(),
+        "parent_writable": False,
+        "identity": None,
+        "size_bytes": None,
+        "sha256": None,
+        "integrity_status": None,
+        "logical_fingerprint": None,
+        "inspection_error": None,
+        "inspection_skipped_reason": None,
+    }
+
+    if state["parent_exists"] and state["parent_is_directory"]:
+        state["parent_writable"] = os.access(
+            active_path.parent,
+            os.W_OK | os.X_OK,
+        )
+
+    if not state["exists"]:
+        return state
+
+    state["is_symlink"] = active_path.is_symlink()
+    state["is_file"] = active_path.is_file()
+
+    if state["is_symlink"] or not state["is_file"]:
+        return state
+
+    if not inspect_database:
+        state["inspection_skipped_reason"] = (
+            "active SQLite sidecars are present; database "
+            "content inspection was skipped to preserve "
+            "preview-only behavior"
+        )
+        return state
+
+    try:
+        state["identity"] = (
+            _database_restore_cutover_file_identity(
+                active_path
+            )
+        )
+        state["size_bytes"] = int(
+            state["identity"]["size"]
+        )
+        state["sha256"] = _database_backup_sha256(
+            active_path
+        )
+        integrity_rows = (
+            _sqlite_database_integrity_check(
+                active_path
+            )
+        )
+        state["integrity_status"] = (
+            "ok"
+            if integrity_rows == ["ok"]
+            else "; ".join(integrity_rows)
+        )
+        state["logical_fingerprint"] = (
+            _sqlite_database_logical_fingerprint(
+                active_path
+            )
+        )
+    except (DeltaAegisError, OSError) as exc:
+        state["inspection_error"] = str(exc)
+
+    return state
+
+
+def _database_restore_cutover_safety_backup_state(
+    backups_dir: Path,
+    *,
+    active_state: dict[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    root = _database_restore_cutover_absolute_path(
+        Path(backups_dir)
+    )
+    active_sha256 = str(
+        active_state.get("sha256") or "unknown"
+    )
+    suffix = (
+        active_sha256[:8]
+        if re.fullmatch(r"[0-9a-f]{64}", active_sha256)
+        else "unverified"
+    )
+    timestamp = now.strftime("%Y%m%dT%H%M%SZ")
+    backup_path = root / (
+        "deltaaegis-pre-restore-"
+        f"{timestamp}-{suffix}.db"
+    )
+    manifest_path = database_backup_manifest_path(
+        backup_path
+    )
+    state = {
+        "required": True,
+        "directory_path": str(root),
+        "directory_exists": os.path.lexists(root),
+        "directory_is_symlink": False,
+        "directory_is_directory": False,
+        "directory_writable": False,
+        "proposed_backup_path": str(backup_path),
+        "proposed_manifest_path": str(
+            manifest_path
+        ),
+        "backup_path_exists": os.path.lexists(
+            backup_path
+        ),
+        "manifest_path_exists": os.path.lexists(
+            manifest_path
+        ),
+    }
+
+    if state["directory_exists"]:
+        state["directory_is_symlink"] = (
+            root.is_symlink()
+        )
+        state["directory_is_directory"] = (
+            root.is_dir()
+        )
+
+        if (
+            state["directory_is_directory"]
+            and not state["directory_is_symlink"]
+        ):
+            state["directory_writable"] = os.access(
+                root,
+                os.W_OK | os.X_OK,
+            )
+
+    return state
+
+
+def _database_restore_cutover_plan_digest(
+    plan: dict[str, Any],
+) -> str:
+    canonical_payload = {
+        "schema_version": plan["schema_version"],
+        "active_database": plan["active_database"],
+        "backup": plan["backup"],
+        "safety_backup": plan["safety_backup"],
+        "sqlite_sidecars": plan["sqlite_sidecars"],
+        "dashboard_processes": (
+            plan["dashboard_processes"]
+        ),
+        "blockers": plan["blockers"],
+        "warnings": plan["warnings"],
+        "cutover_ready": plan["cutover_ready"],
+    }
+    canonical = json.dumps(
+        canonical_payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def plan_database_restore_cutover(
+    active_database_path: Path,
+    backup_path: Path,
+    *,
+    manifest_path: Path | None = None,
+    safety_backups_dir: Path = DEFAULT_BACKUPS,
+    now: datetime | None = None,
+    process_root: Path = Path("/proc"),
+    current_pid: int | None = None,
+) -> dict[str, Any]:
+    effective_now = now or datetime.now(timezone.utc)
+
+    if effective_now.tzinfo is None:
+        raise DeltaAegisError(
+            "restore cutover reference time must include "
+            "a timezone"
+        )
+
+    effective_now = effective_now.astimezone(
+        timezone.utc
+    )
+    active_path = (
+        _database_restore_cutover_absolute_path(
+            Path(active_database_path)
+        )
+    )
+    resolved_backup = (
+        _database_restore_cutover_absolute_path(
+            Path(backup_path)
+        )
+    )
+    resolved_manifest = (
+        _database_restore_cutover_absolute_path(
+            Path(
+                manifest_path
+                if manifest_path is not None
+                else database_backup_manifest_path(
+                    resolved_backup
+                )
+            )
+        )
+    )
+    blockers: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
+    sidecars = _database_restore_cutover_sidecars(
+        active_path
+    )
+    active_state = (
+        _database_restore_cutover_active_state(
+            active_path,
+            inspect_database=not bool(sidecars),
+        )
+    )
+    process_probe = (
+        _database_restore_cutover_dashboard_processes(
+            active_path,
+            process_root=process_root,
+            current_pid=current_pid,
+        )
+    )
+    backup_state: dict[str, Any] = {
+        "backup_path": str(resolved_backup),
+        "manifest_path": str(resolved_manifest),
+        "status": "INVALID",
+        "detail": "",
+        "backup_identity": None,
+        "manifest_identity": None,
+        "size_bytes": None,
+        "backup_sha256": None,
+        "schema_fingerprint": None,
+        "logical_fingerprint": None,
+        "integrity_status": None,
+    }
+
+    try:
+        if (
+            resolved_backup == active_path
+            or _database_restore_cutover_paths_share_identity(
+                resolved_backup,
+                active_path,
+            )
+        ):
+            raise DeltaAegisError(
+                "restore backup must not be the active "
+                "database or a hard-link alias"
+            )
+
+        if (
+            resolved_manifest == active_path
+            or _database_restore_cutover_paths_share_identity(
+                resolved_manifest,
+                active_path,
+            )
+        ):
+            raise DeltaAegisError(
+                "restore manifest must not be the active "
+                "database or a hard-link alias"
+            )
+
+        verification = verify_database_backup_bundle(
+            resolved_backup,
+            resolved_manifest,
+        )
+        backup_state.update(
+            {
+                "status": "VALID",
+                "detail": "backup bundle verified",
+                "backup_identity": (
+                    _database_restore_cutover_file_identity(
+                        resolved_backup
+                    )
+                ),
+                "manifest_identity": (
+                    _database_restore_cutover_file_identity(
+                        resolved_manifest
+                    )
+                ),
+                "size_bytes": verification["size_bytes"],
+                "backup_sha256": (
+                    verification["backup_sha256"]
+                ),
+                "schema_fingerprint": (
+                    verification["schema_fingerprint"]
+                ),
+                "logical_fingerprint": (
+                    verification["logical_fingerprint"]
+                ),
+                "integrity_status": (
+                    verification["integrity_status"]
+                ),
+            }
+        )
+    except DeltaAegisError as exc:
+        backup_state["detail"] = str(exc)
+        blockers.append(
+            {
+                "code": "BACKUP_NOT_VERIFIED",
+                "message": str(exc),
+            }
+        )
+
+    if not active_state["exists"]:
+        blockers.append(
+            {
+                "code": "ACTIVE_DATABASE_MISSING",
+                "message": (
+                    "active database does not exist; this "
+                    "cutover workflow requires a fresh safety "
+                    "backup before replacement"
+                ),
+            }
+        )
+    elif active_state["is_symlink"]:
+        blockers.append(
+            {
+                "code": "ACTIVE_DATABASE_SYMLINK",
+                "message": (
+                    "active database path must not be a symlink"
+                ),
+            }
+        )
+    elif not active_state["is_file"]:
+        blockers.append(
+            {
+                "code": "ACTIVE_DATABASE_NOT_REGULAR",
+                "message": (
+                    "active database path is not a regular file"
+                ),
+            }
+        )
+
+    if not active_state["parent_exists"]:
+        blockers.append(
+            {
+                "code": "ACTIVE_PARENT_MISSING",
+                "message": (
+                    "active database parent directory "
+                    "does not exist"
+                ),
+            }
+        )
+    elif not active_state["parent_is_directory"]:
+        blockers.append(
+            {
+                "code": "ACTIVE_PARENT_NOT_DIRECTORY",
+                "message": (
+                    "active database parent path is not "
+                    "a directory"
+                ),
+            }
+        )
+    elif not active_state["parent_writable"]:
+        blockers.append(
+            {
+                "code": "ACTIVE_PARENT_NOT_WRITABLE",
+                "message": (
+                    "active database parent directory is "
+                    "not writable"
+                ),
+            }
+        )
+
+    if active_state.get("inspection_error"):
+        warnings.append(
+            {
+                "code": "ACTIVE_DATABASE_INSPECTION_FAILED",
+                "message": str(
+                    active_state["inspection_error"]
+                ),
+            }
+        )
+    elif active_state.get("inspection_skipped_reason"):
+        warnings.append(
+            {
+                "code": "ACTIVE_DATABASE_INSPECTION_SKIPPED",
+                "message": str(
+                    active_state["inspection_skipped_reason"]
+                ),
+            }
+        )
+    elif (
+        active_state.get("integrity_status")
+        not in (None, "ok")
+    ):
+        warnings.append(
+            {
+                "code": "ACTIVE_DATABASE_INTEGRITY_WARNING",
+                "message": (
+                    "active database integrity check did not "
+                    f"return ok: "
+                    f"{active_state['integrity_status']}"
+                ),
+            }
+        )
+
+    if sidecars:
+        blockers.append(
+            {
+                "code": "SQLITE_SIDECARS_PRESENT",
+                "message": (
+                    "active SQLite WAL, SHM, or journal files "
+                    "must be cleared before cutover"
+                ),
+            }
+        )
+
+    if not process_probe["available"]:
+        blockers.append(
+            {
+                "code": "PROCESS_PROBE_UNAVAILABLE",
+                "message": (
+                    "DeltaAegis could not inspect running "
+                    "processes for an active dashboard"
+                ),
+            }
+        )
+    elif process_probe["matches"]:
+        blockers.append(
+            {
+                "code": "DASHBOARD_PROCESS_ACTIVE",
+                "message": (
+                    "a DeltaAegis dashboard process is using "
+                    "the active database"
+                ),
+            }
+        )
+
+    safety_state = (
+        _database_restore_cutover_safety_backup_state(
+            safety_backups_dir,
+            active_state=active_state,
+            now=effective_now,
+        )
+    )
+
+    if not safety_state["directory_exists"]:
+        blockers.append(
+            {
+                "code": "SAFETY_BACKUP_DIRECTORY_MISSING",
+                "message": (
+                    "safety backup directory must exist "
+                    "before cutover"
+                ),
+            }
+        )
+    elif safety_state["directory_is_symlink"]:
+        blockers.append(
+            {
+                "code": "SAFETY_BACKUP_DIRECTORY_SYMLINK",
+                "message": (
+                    "safety backup directory must not "
+                    "be a symlink"
+                ),
+            }
+        )
+    elif not safety_state["directory_is_directory"]:
+        blockers.append(
+            {
+                "code": "SAFETY_BACKUP_PATH_NOT_DIRECTORY",
+                "message": (
+                    "safety backup path is not a directory"
+                ),
+            }
+        )
+    elif not safety_state["directory_writable"]:
+        blockers.append(
+            {
+                "code": "SAFETY_BACKUP_DIRECTORY_NOT_WRITABLE",
+                "message": (
+                    "safety backup directory is not writable"
+                ),
+            }
+        )
+
+    if (
+        safety_state["backup_path_exists"]
+        or safety_state["manifest_path_exists"]
+    ):
+        blockers.append(
+            {
+                "code": "SAFETY_BACKUP_DESTINATION_EXISTS",
+                "message": (
+                    "proposed safety backup or manifest "
+                    "already exists"
+                ),
+            }
+        )
+
+    plan: dict[str, Any] = {
+        "schema_version": (
+            DATABASE_RESTORE_CUTOVER_PLAN_SCHEMA_VERSION
+        ),
+        "action": "database.restore.cutover.preview",
+        "generated_at": (
+            effective_now.replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        ),
+        "dry_run": True,
+        "destructive": False,
+        "execution_supported": False,
+        "cutover_ready": not blockers,
+        "review_required": bool(
+            blockers or warnings
+        ),
+        "active_database": active_state,
+        "backup": backup_state,
+        "safety_backup": safety_state,
+        "sqlite_sidecars": sidecars,
+        "dashboard_processes": process_probe,
+        "blockers": blockers,
+        "warnings": warnings,
+        "required_steps": [
+            (
+                "Stop every DeltaAegis dashboard process "
+                "using the active database."
+            ),
+            (
+                "Confirm no SQLite WAL, SHM, or journal "
+                "sidecar remains."
+            ),
+            (
+                "Re-verify backup and manifest identities, "
+                "checksums, integrity, schema, and logical "
+                "fingerprint."
+            ),
+            (
+                "Create and verify a fresh SQLite-consistent "
+                "safety backup of the active database."
+            ),
+            (
+                "Restore the verified backup into a temporary "
+                "database in the active data directory."
+            ),
+            (
+                "Verify restored integrity, schema, and "
+                "logical fingerprint before cutover."
+            ),
+            (
+                "Replace the active database with rollback "
+                "protection and durable directory syncing."
+            ),
+            (
+                "Verify the new active database and preserve "
+                "the safety backup and execution receipt."
+            ),
+        ],
+    }
+    plan["plan_digest"] = (
+        _database_restore_cutover_plan_digest(plan)
+    )
+    return plan
+
+
+def _print_database_restore_cutover_plan_human(
+    plan: dict[str, Any],
+) -> None:
+    active = plan["active_database"]
+    backup = plan["backup"]
+    safety = plan["safety_backup"]
+
+    print("DeltaAegis active restore cutover preview")
+    print("Mode: dry run; active database will not be modified")
+    print(f"Active database: {active['path']}")
+    print(f"Restore backup: {backup['backup_path']}")
+    print(f"Backup status: {backup['status']}")
+    print(
+        f"Safety backup: "
+        f"{safety['proposed_backup_path']}"
+    )
+    print(
+        f"Cutover ready: "
+        f"{'yes' if plan['cutover_ready'] else 'no'}"
+    )
+    print(f"Plan digest: {plan['plan_digest']}")
+    print(
+        f"Blockers: {len(plan['blockers'])}; "
+        f"warnings: {len(plan['warnings'])}"
+    )
+
+    for blocker in plan["blockers"]:
+        print()
+        print(
+            f"BLOCKER {blocker['code']}: "
+            f"{blocker['message']}"
+        )
+
+    for warning in plan["warnings"]:
+        print()
+        print(
+            f"WARNING {warning['code']}: "
+            f"{warning['message']}"
+        )
+
+    print()
+    print("Required execution sequence:")
+
+    for index, step in enumerate(
+        plan["required_steps"],
+        start=1,
+    ):
+        print(f"  {index}. {step}")
+
+
+def command_restore_cutover_preview(args) -> int:
+    plan = plan_database_restore_cutover(
+        args.db,
+        args.backup,
+        manifest_path=args.manifest,
+        safety_backups_dir=args.safety_backups_dir,
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                plan,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        _print_database_restore_cutover_plan_human(
+            plan
+        )
+
+    return 0 if plan["cutover_ready"] else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DeltaAegis v0.40.0 — Human-Readable Operator Actions, stable dashboard action receipts, progressive technical disclosure, compact mutation payloads, guarded NetSniper and TrueAegis orchestration, reporting, RBAC, and the current-state SIEM dashboard")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -33304,6 +34189,41 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Print a structured execution receipt",
+    )
+
+    p = sub.add_parser(
+        "restore-cutover-preview",
+        help=(
+            "Preview active database restore blockers and "
+            "rollback requirements"
+        ),
+    )
+    p.add_argument(
+        "backup",
+        type=Path,
+        help="Verified DeltaAegis backup database",
+    )
+    p.add_argument(
+        "--manifest",
+        type=Path,
+        help=(
+            "Backup manifest path; defaults to "
+            "BACKUP.manifest.json"
+        ),
+    )
+    p.add_argument(
+        "--safety-backups-dir",
+        type=Path,
+        default=DEFAULT_BACKUPS,
+        help=(
+            "Existing directory for the required fresh "
+            "pre-restore safety backup"
+        ),
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the structured cutover plan",
     )
 
     p = sub.add_parser("user-create", help="Create a local DeltaAegis access user")
@@ -33547,6 +34467,7 @@ def main() -> int:
         if args.command == "backup-verify": return command_backup_verify(args)
         if args.command == "backup-retention-preview": return command_backup_retention_preview(args)
         if args.command == "backup-retention-execute": return command_backup_retention_execute(args)
+        if args.command == "restore-cutover-preview": return command_restore_cutover_preview(args)
         if args.command == "user-create": return command_user_create(args)
         if args.command == "users": return command_users(args)
         if args.command == "user-password": return command_user_password(args)
