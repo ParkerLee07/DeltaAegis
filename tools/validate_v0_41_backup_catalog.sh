@@ -56,7 +56,7 @@ start = text.index(
     "# v0.41 checkpoint 4: backup catalog and verification CLI"
 )
 end = text.index(
-    "def build_parser() -> argparse.ArgumentParser:",
+    '# v0.41 checkpoint 5: backup retention planning and preview',
     start,
 )
 checkpoint = text[start:end]

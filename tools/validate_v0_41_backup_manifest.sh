@@ -30,7 +30,7 @@ from pathlib import Path
 text = Path("deltaaegis.py").read_text(encoding="utf-8")
 
 required = (
-    'DELTAAEGIS_VERSION = "0.41.0-dev"',
+    'DELTAAEGIS_VERSION = "0.41.0"',
     '"deltaaegis-backup-manifest-v1"',
     "def database_backup_manifest_path(",
     "def _database_backup_sha256(",
@@ -58,7 +58,7 @@ start = text.index(
     "# v0.41 checkpoint 2: backup metadata manifest and checksum"
 )
 end = text.index(
-    "def build_parser() -> argparse.ArgumentParser:",
+    '# v0.41 checkpoint 3: verified restore rehearsal',
     start,
 )
 
@@ -244,7 +244,7 @@ with tempfile.TemporaryDirectory(
 
     if manifest["application"] != {
         "name": "DeltaAegis",
-        "version": "0.41.0-dev",
+        "version": "0.41.0",
     }:
         raise SystemExit(
             f"unexpected application metadata: "

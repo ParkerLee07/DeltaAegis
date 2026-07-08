@@ -54,7 +54,7 @@ start = text.index(
     "# v0.41 checkpoint 1: SQLite-consistent backup foundation"
 )
 end = text.index(
-    "def build_parser() -> argparse.ArgumentParser:",
+    '# v0.41 checkpoint 2: backup metadata manifest and checksum',
     start,
 )
 

@@ -63,7 +63,7 @@ start = text.index(
     "# v0.41 checkpoint 7: active restore cutover preview"
 )
 end = text.index(
-    "def build_parser() -> argparse.ArgumentParser:",
+    '# v0.41 checkpoint 8: guarded active restore cutover execution',
     start,
 )
 checkpoint = text[start:end]
