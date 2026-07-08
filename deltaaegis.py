@@ -642,6 +642,35 @@ CREATE INDEX IF NOT EXISTS idx_scan_schedule_deletions_scope
     ON scan_schedule_deletions(network_scope);
 
 
+
+
+-- v0.42 checkpoint 1: logical site scope foundation
+CREATE TABLE IF NOT EXISTS logical_sites (
+    site_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'ACTIVE'
+        CHECK (status IN ('ACTIVE', 'ARCHIVED')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    archived_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_logical_sites_status_name
+    ON logical_sites(status, name);
+
+CREATE TABLE IF NOT EXISTS logical_site_memberships (
+    network_scope TEXT PRIMARY KEY,
+    site_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (site_id)
+        REFERENCES logical_sites(site_id)
+        ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_logical_site_memberships_site
+    ON logical_site_memberships(site_id, network_scope);
 """
 
 
@@ -1682,6 +1711,453 @@ def optional_network_scope(value: str | None) -> str | None:
         return None
 
     return canonical_network_scope(value)
+
+
+
+# v0.42 checkpoint 1: logical site scope foundation
+LOGICAL_SITE_ACTIVE = "ACTIVE"
+LOGICAL_SITE_ARCHIVED = "ARCHIVED"
+LOGICAL_SITE_STATUSES = {
+    LOGICAL_SITE_ACTIVE,
+    LOGICAL_SITE_ARCHIVED,
+}
+
+
+def normalize_logical_site_id(value: Any) -> str:
+    site_id = str(value or "").strip()
+
+    if (
+        not site_id
+        or len(site_id) > 96
+        or re.fullmatch(r"[A-Za-z0-9._:-]+", site_id) is None
+    ):
+        raise DeltaAegisError(
+            "logical site id must be 1-96 characters using "
+            "letters, numbers, dot, underscore, colon, or hyphen"
+        )
+
+    return site_id
+
+
+def normalize_logical_site_name(value: Any) -> str:
+    name = " ".join(str(value or "").split())
+
+    if not name:
+        raise DeltaAegisError("logical site name is required")
+
+    if len(name) > 160:
+        raise DeltaAegisError(
+            "logical site name must not exceed 160 characters"
+        )
+
+    if any(ord(character) < 32 for character in name):
+        raise DeltaAegisError(
+            "logical site name contains unsupported control characters"
+        )
+
+    return name
+
+
+def normalize_logical_site_description(value: Any) -> str:
+    description = str(value or "").strip()
+
+    if len(description) > 2000:
+        raise DeltaAegisError(
+            "logical site description must not exceed 2000 characters"
+        )
+
+    if any(
+        ord(character) < 32
+        and character not in {"\n", "\r", "\t"}
+        for character in description
+    ):
+        raise DeltaAegisError(
+            "logical site description contains unsupported "
+            "control characters"
+        )
+
+    return description
+
+
+def logical_site_row_to_dict(
+    row: sqlite3.Row | dict[str, Any],
+) -> dict[str, Any]:
+    item = dict(row)
+
+    return {
+        "site_id": str(item.get("site_id") or ""),
+        "name": str(item.get("name") or ""),
+        "description": str(item.get("description") or ""),
+        "status": str(item.get("status") or LOGICAL_SITE_ACTIVE),
+        "created_at": item.get("created_at"),
+        "updated_at": item.get("updated_at"),
+        "archived_at": item.get("archived_at"),
+        "member_count": int(item.get("member_count") or 0),
+    }
+
+
+def get_logical_site(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any] | None:
+    safe_site_id = normalize_logical_site_id(site_id)
+    row = connection.execute(
+        """
+        SELECT
+            s.site_id,
+            s.name,
+            s.description,
+            s.status,
+            s.created_at,
+            s.updated_at,
+            s.archived_at,
+            COUNT(m.network_scope) AS member_count
+        FROM logical_sites s
+        LEFT JOIN logical_site_memberships m
+            ON m.site_id = s.site_id
+        WHERE s.site_id = ?
+        GROUP BY s.site_id
+        """,
+        (safe_site_id,),
+    ).fetchone()
+
+    return logical_site_row_to_dict(row) if row is not None else None
+
+
+def list_logical_sites(
+    connection: sqlite3.Connection,
+    include_archived: bool = False,
+) -> list[dict[str, Any]]:
+    where = "" if include_archived else "WHERE s.status = 'ACTIVE'"
+    rows = connection.execute(
+        f"""
+        SELECT
+            s.site_id,
+            s.name,
+            s.description,
+            s.status,
+            s.created_at,
+            s.updated_at,
+            s.archived_at,
+            COUNT(m.network_scope) AS member_count
+        FROM logical_sites s
+        LEFT JOIN logical_site_memberships m
+            ON m.site_id = s.site_id
+        {where}
+        GROUP BY s.site_id
+        ORDER BY
+            CASE s.status
+                WHEN 'ACTIVE' THEN 0
+                ELSE 1
+            END,
+            s.name COLLATE NOCASE,
+            s.site_id
+        """
+    ).fetchall()
+
+    return [logical_site_row_to_dict(row) for row in rows]
+
+
+def create_logical_site(
+    connection: sqlite3.Connection,
+    name: Any,
+    description: Any = "",
+) -> dict[str, Any]:
+    safe_name = normalize_logical_site_name(name)
+    safe_description = normalize_logical_site_description(description)
+    site_id = "site-" + uuid.uuid4().hex[:16]
+    now = utc_now()
+
+    try:
+        connection.execute(
+            """
+            INSERT INTO logical_sites (
+                site_id,
+                name,
+                description,
+                status,
+                created_at,
+                updated_at,
+                archived_at
+            )
+            VALUES (?, ?, ?, 'ACTIVE', ?, ?, NULL)
+            """,
+            (
+                site_id,
+                safe_name,
+                safe_description,
+                now,
+                now,
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise DeltaAegisError(
+            f"logical site name already exists: {safe_name}"
+        ) from exc
+
+    site = get_logical_site(connection, site_id)
+    if site is None:
+        raise DeltaAegisError(
+            f"logical site disappeared after creation: {site_id}"
+        )
+
+    return site
+
+
+def rename_logical_site(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    name: Any,
+) -> dict[str, Any]:
+    safe_site_id = normalize_logical_site_id(site_id)
+    safe_name = normalize_logical_site_name(name)
+
+    if get_logical_site(connection, safe_site_id) is None:
+        raise DeltaAegisError(
+            f"logical site not found: {safe_site_id}"
+        )
+
+    try:
+        connection.execute(
+            """
+            UPDATE logical_sites
+            SET name = ?, updated_at = ?
+            WHERE site_id = ?
+            """,
+            (safe_name, utc_now(), safe_site_id),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise DeltaAegisError(
+            f"logical site name already exists: {safe_name}"
+        ) from exc
+
+    site = get_logical_site(connection, safe_site_id)
+    if site is None:
+        raise DeltaAegisError(
+            f"logical site disappeared after rename: {safe_site_id}"
+        )
+
+    return site
+
+
+def update_logical_site_description(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    description: Any,
+) -> dict[str, Any]:
+    safe_site_id = normalize_logical_site_id(site_id)
+    safe_description = normalize_logical_site_description(
+        description
+    )
+
+    cursor = connection.execute(
+        """
+        UPDATE logical_sites
+        SET description = ?, updated_at = ?
+        WHERE site_id = ?
+        """,
+        (safe_description, utc_now(), safe_site_id),
+    )
+
+    if cursor.rowcount == 0:
+        raise DeltaAegisError(
+            f"logical site not found: {safe_site_id}"
+        )
+
+    site = get_logical_site(connection, safe_site_id)
+    if site is None:
+        raise DeltaAegisError(
+            "logical site disappeared after description update: "
+            f"{safe_site_id}"
+        )
+
+    return site
+
+
+def archive_logical_site(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    safe_site_id = normalize_logical_site_id(site_id)
+    site = get_logical_site(connection, safe_site_id)
+
+    if site is None:
+        raise DeltaAegisError(
+            f"logical site not found: {safe_site_id}"
+        )
+
+    if site["status"] == LOGICAL_SITE_ARCHIVED:
+        return site
+
+    now = utc_now()
+    connection.execute(
+        """
+        UPDATE logical_sites
+        SET
+            status = 'ARCHIVED',
+            archived_at = ?,
+            updated_at = ?
+        WHERE site_id = ?
+        """,
+        (now, now, safe_site_id),
+    )
+
+    archived = get_logical_site(connection, safe_site_id)
+    if archived is None:
+        raise DeltaAegisError(
+            f"logical site disappeared after archive: {safe_site_id}"
+        )
+
+    return archived
+
+
+def logical_site_member_scopes(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> list[str]:
+    safe_site_id = normalize_logical_site_id(site_id)
+
+    if get_logical_site(connection, safe_site_id) is None:
+        raise DeltaAegisError(
+            f"logical site not found: {safe_site_id}"
+        )
+
+    return [
+        str(row["network_scope"])
+        for row in connection.execute(
+            """
+            SELECT network_scope
+            FROM logical_site_memberships
+            WHERE site_id = ?
+            ORDER BY network_scope
+            """,
+            (safe_site_id,),
+        ).fetchall()
+    ]
+
+
+def logical_site_for_network_scope(
+    connection: sqlite3.Connection,
+    network_scope: Any,
+) -> dict[str, Any] | None:
+    safe_scope = canonical_network_scope(str(network_scope or ""))
+    row = connection.execute(
+        """
+        SELECT
+            s.site_id,
+            s.name,
+            s.description,
+            s.status,
+            s.created_at,
+            s.updated_at,
+            s.archived_at,
+            (
+                SELECT COUNT(*)
+                FROM logical_site_memberships members
+                WHERE members.site_id = s.site_id
+            ) AS member_count
+        FROM logical_site_memberships m
+        JOIN logical_sites s
+            ON s.site_id = m.site_id
+        WHERE m.network_scope = ?
+        """,
+        (safe_scope,),
+    ).fetchone()
+
+    return logical_site_row_to_dict(row) if row is not None else None
+
+
+def assign_network_scope_to_logical_site(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    network_scope: Any,
+) -> dict[str, Any]:
+    safe_site_id = normalize_logical_site_id(site_id)
+    safe_scope = canonical_network_scope(str(network_scope or ""))
+    site = get_logical_site(connection, safe_site_id)
+
+    if site is None:
+        raise DeltaAegisError(
+            f"logical site not found: {safe_site_id}"
+        )
+
+    if site["status"] != LOGICAL_SITE_ACTIVE:
+        raise DeltaAegisError(
+            f"logical site is archived: {safe_site_id}"
+        )
+
+    existing = connection.execute(
+        """
+        SELECT site_id
+        FROM logical_site_memberships
+        WHERE network_scope = ?
+        """,
+        (safe_scope,),
+    ).fetchone()
+
+    if existing is not None:
+        existing_site_id = str(existing["site_id"])
+
+        if existing_site_id == safe_site_id:
+            raise DeltaAegisError(
+                f"network scope is already assigned to logical site "
+                f"{safe_site_id}: {safe_scope}"
+            )
+
+        raise DeltaAegisError(
+            f"network scope {safe_scope} is already assigned to "
+            f"logical site {existing_site_id}"
+        )
+
+    now = utc_now()
+    connection.execute(
+        """
+        INSERT INTO logical_site_memberships (
+            network_scope,
+            site_id,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        (safe_scope, safe_site_id, now, now),
+    )
+
+    return {
+        "site_id": safe_site_id,
+        "network_scope": safe_scope,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def remove_network_scope_from_logical_site(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    network_scope: Any,
+) -> dict[str, Any]:
+    safe_site_id = normalize_logical_site_id(site_id)
+    safe_scope = canonical_network_scope(str(network_scope or ""))
+
+    cursor = connection.execute(
+        """
+        DELETE FROM logical_site_memberships
+        WHERE site_id = ? AND network_scope = ?
+        """,
+        (safe_site_id, safe_scope),
+    )
+
+    if cursor.rowcount == 0:
+        raise DeltaAegisError(
+            f"logical site membership not found: "
+            f"{safe_site_id} -> {safe_scope}"
+        )
+
+    return {
+        "site_id": safe_site_id,
+        "network_scope": safe_scope,
+        "removed": True,
+    }
 
 
 def snapshot_network_scope(snapshot_or_target) -> str:
