@@ -8222,39 +8222,667 @@ def command_events(args: argparse.Namespace) -> int:
 
     return 0
 
-def command_scopes(args: argparse.Namespace) -> int:
-    connection = connect(args.db)
+
+# v0.42 checkpoint 2: logical site CLI management
+def logical_site_member_detail_rows(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> list[dict[str, Any]]:
+    safe_site_id = normalize_logical_site_id(site_id)
+    site = get_logical_site(connection, safe_site_id)
+
+    if site is None:
+        raise DeltaAegisError(
+            f"logical site not found: {safe_site_id}"
+        )
 
     rows = connection.execute(
-        """
+        '''
+        WITH snapshot_summary AS (
+            SELECT
+                network_scope,
+                COUNT(*) AS snapshots,
+                SUM(
+                    CASE
+                        WHEN quality_status = 'ACCEPTED' THEN 1
+                        ELSE 0
+                    END
+                ) AS accepted_snapshots,
+                MAX(created_at) AS latest_scan_at
+            FROM snapshots
+            GROUP BY network_scope
+        )
         SELECT
-            network_scope,
-            COUNT(*) AS snapshots,
-            SUM(CASE WHEN quality_status = 'ACCEPTED' THEN 1 ELSE 0 END) AS accepted_snapshots,
-            MAX(created_at) AS latest_scan_at
-        FROM snapshots
-        GROUP BY network_scope
-        ORDER BY latest_scan_at DESC
-        """
+            m.network_scope,
+            m.created_at AS assigned_at,
+            m.updated_at AS membership_updated_at,
+            COALESCE(s.snapshots, 0) AS snapshots,
+            COALESCE(s.accepted_snapshots, 0) AS accepted_snapshots,
+            s.latest_scan_at
+        FROM logical_site_memberships m
+        LEFT JOIN snapshot_summary s
+            ON s.network_scope = m.network_scope
+        WHERE m.site_id = ?
+        ORDER BY m.network_scope
+        ''',
+        (safe_site_id,),
     ).fetchall()
 
-    if not rows:
-        print("No network scopes found.")
+    return [
+        {
+            "network_scope": str(row["network_scope"]),
+            "assigned_at": row["assigned_at"],
+            "membership_updated_at": row[
+                "membership_updated_at"
+            ],
+            "observed": int(row["snapshots"] or 0) > 0,
+            "snapshots": int(row["snapshots"] or 0),
+            "accepted_snapshots": int(
+                row["accepted_snapshots"] or 0
+            ),
+            "latest_scan_at": row["latest_scan_at"],
+        }
+        for row in rows
+    ]
+
+
+def logical_site_detail_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    site = get_logical_site(connection, site_id)
+
+    if site is None:
+        raise DeltaAegisError(
+            f"logical site not found: "
+            f"{normalize_logical_site_id(site_id)}"
+        )
+
+    members = logical_site_member_detail_rows(
+        connection,
+        site["site_id"],
+    )
+
+    return {
+        "ok": True,
+        "site": site,
+        "members": members,
+        "coverage": {
+            "member_scope_count": len(members),
+            "observed_scope_count": sum(
+                1 for item in members if item["observed"]
+            ),
+            "unobserved_scope_count": sum(
+                1 for item in members if not item["observed"]
+            ),
+            "snapshot_count": sum(
+                int(item["snapshots"]) for item in members
+            ),
+            "accepted_snapshot_count": sum(
+                int(item["accepted_snapshots"])
+                for item in members
+            ),
+        },
+    }
+
+
+def logical_site_list_payload(
+    connection: sqlite3.Connection,
+    include_archived: bool = False,
+) -> dict[str, Any]:
+    sites = list_logical_sites(
+        connection,
+        include_archived=include_archived,
+    )
+
+    return {
+        "ok": True,
+        "include_archived": bool(include_archived),
+        "site_count": len(sites),
+        "sites": sites,
+    }
+
+
+def logical_site_cli_actor(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "username": (
+            str(getattr(args, "actor", "") or "local_admin").strip()
+            or "local_admin"
+        ),
+        "role": "ADMIN",
+    }
+
+
+def logical_site_cli_receipt(
+    action: str,
+    message: str,
+    *,
+    site: dict[str, Any] | None = None,
+    membership: dict[str, Any] | None = None,
+    changed: bool = True,
+) -> dict[str, Any]:
+    receipt: dict[str, Any] = {
+        "ok": True,
+        "action": str(action),
+        "changed": bool(changed),
+        "message": str(message),
+    }
+
+    if site is not None:
+        receipt["site"] = site
+
+    if membership is not None:
+        receipt["membership"] = membership
+
+    return receipt
+
+
+def print_logical_site_json(payload: dict[str, Any]) -> None:
+    print(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+def print_logical_site_detail_human(
+    payload: dict[str, Any],
+) -> None:
+    site = payload["site"]
+    coverage = payload["coverage"]
+    members = payload["members"]
+
+    print("DeltaAegis Logical Site")
+    print("========================")
+    print(f"Site ID:      {site['site_id']}")
+    print(f"Name:         {site['name']}")
+    print(f"Status:       {site['status']}")
+    print(f"Description:  {site['description'] or '-'}")
+    print(f"Created:      {site['created_at']}")
+    print(f"Updated:      {site['updated_at']}")
+    print(f"Archived:     {site['archived_at'] or '-'}")
+    print(
+        "Coverage:     "
+        f"{coverage['observed_scope_count']}/"
+        f"{coverage['member_scope_count']} member scopes observed"
+    )
+    print()
+
+    if not members:
+        print("No network scopes are assigned to this logical site.")
+        return
+
+    print(
+        f"{'Network scope':<20} "
+        f"{'Observed':<9} "
+        f"{'Snapshots':>9} "
+        f"{'Accepted':>8} "
+        f"Latest scan"
+    )
+    print("-" * 86)
+
+    for member in members:
+        print(
+            f"{member['network_scope']:<20} "
+            f"{'yes' if member['observed'] else 'no':<9} "
+            f"{member['snapshots']:>9} "
+            f"{member['accepted_snapshots']:>8} "
+            f"{member['latest_scan_at'] or '-'}"
+        )
+
+
+def command_site_list(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        payload = logical_site_list_payload(
+            connection,
+            include_archived=args.include_archived,
+        )
+
+    if args.json:
+        print_logical_site_json(payload)
+        return 0
+
+    print("DeltaAegis Logical Sites")
+    print("========================")
+    print()
+
+    if not payload["sites"]:
+        print("No logical sites found.")
+        return 0
+
+    for site in payload["sites"]:
+        print(
+            f"{site['site_id']:<22} "
+            f"{site['status']:<8} "
+            f"members={site['member_count']:<3} "
+            f"name={site['name']}"
+        )
+
+    return 0
+
+
+def command_site_show(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        payload = logical_site_detail_payload(
+            connection,
+            args.site_id,
+        )
+
+    if args.json:
+        print_logical_site_json(payload)
+    else:
+        print_logical_site_detail_human(payload)
+
+    return 0
+
+
+def command_site_create(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        site = create_logical_site(
+            connection,
+            args.name,
+            args.description,
+        )
+        receipt = logical_site_cli_receipt(
+            "logical_site.create",
+            f"Created logical site {site['name']}.",
+            site=site,
+        )
+        record_access_audit_event(
+            connection,
+            action="LOGICAL_SITE_CREATE",
+            actor=logical_site_cli_actor(args),
+            target_type="logical_site",
+            target_key=site["site_id"],
+            details={
+                "name": site["name"],
+                "description": site["description"],
+                "status": site["status"],
+            },
+        )
+
+    if args.json:
+        print_logical_site_json(receipt)
+    else:
+        print(receipt["message"])
+        print(f"Site ID: {site['site_id']}")
+        print(f"Status:  {site['status']}")
+
+    return 0
+
+
+def command_site_rename(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        previous = get_logical_site(connection, args.site_id)
+
+        if previous is None:
+            raise DeltaAegisError(
+                f"logical site not found: "
+                f"{normalize_logical_site_id(args.site_id)}"
+            )
+
+        site = rename_logical_site(
+            connection,
+            args.site_id,
+            args.name,
+        )
+        changed = previous["name"] != site["name"]
+        receipt = logical_site_cli_receipt(
+            "logical_site.rename",
+            (
+                f"Renamed logical site to {site['name']}."
+                if changed
+                else f"Logical site already has name {site['name']}."
+            ),
+            site=site,
+            changed=changed,
+        )
+
+        if changed:
+            record_access_audit_event(
+                connection,
+                action="LOGICAL_SITE_RENAME",
+                actor=logical_site_cli_actor(args),
+                target_type="logical_site",
+                target_key=site["site_id"],
+                details={
+                    "previous_name": previous["name"],
+                    "current_name": site["name"],
+                },
+            )
+
+    if args.json:
+        print_logical_site_json(receipt)
+    else:
+        print(receipt["message"])
+        print(f"Site ID: {site['site_id']}")
+
+    return 0
+
+
+def command_site_description(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        previous = get_logical_site(connection, args.site_id)
+
+        if previous is None:
+            raise DeltaAegisError(
+                f"logical site not found: "
+                f"{normalize_logical_site_id(args.site_id)}"
+            )
+
+        site = update_logical_site_description(
+            connection,
+            args.site_id,
+            args.description,
+        )
+        changed = previous["description"] != site["description"]
+        receipt = logical_site_cli_receipt(
+            "logical_site.description.update",
+            (
+                f"Updated description for logical site "
+                f"{site['name']}."
+                if changed
+                else f"Logical site description is unchanged."
+            ),
+            site=site,
+            changed=changed,
+        )
+
+        if changed:
+            record_access_audit_event(
+                connection,
+                action="LOGICAL_SITE_DESCRIPTION_UPDATE",
+                actor=logical_site_cli_actor(args),
+                target_type="logical_site",
+                target_key=site["site_id"],
+                details={
+                    "previous_description": previous["description"],
+                    "current_description": site["description"],
+                },
+            )
+
+    if args.json:
+        print_logical_site_json(receipt)
+    else:
+        print(receipt["message"])
+        print(f"Site ID: {site['site_id']}")
+
+    return 0
+
+
+def command_site_archive(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        previous = get_logical_site(connection, args.site_id)
+
+        if previous is None:
+            raise DeltaAegisError(
+                f"logical site not found: "
+                f"{normalize_logical_site_id(args.site_id)}"
+            )
+
+        site = archive_logical_site(
+            connection,
+            args.site_id,
+        )
+        changed = previous["status"] != site["status"]
+        receipt = logical_site_cli_receipt(
+            "logical_site.archive",
+            (
+                f"Archived logical site {site['name']}."
+                if changed
+                else f"Logical site {site['name']} is already archived."
+            ),
+            site=site,
+            changed=changed,
+        )
+
+        if changed:
+            record_access_audit_event(
+                connection,
+                action="LOGICAL_SITE_ARCHIVE",
+                actor=logical_site_cli_actor(args),
+                target_type="logical_site",
+                target_key=site["site_id"],
+                details={
+                    "previous_status": previous["status"],
+                    "current_status": site["status"],
+                    "member_count": site["member_count"],
+                },
+            )
+
+    if args.json:
+        print_logical_site_json(receipt)
+    else:
+        print(receipt["message"])
+        print(f"Site ID: {site['site_id']}")
+        print(f"Members retained: {site['member_count']}")
+
+    return 0
+
+
+def command_site_assign_scope(args: argparse.Namespace) -> int:
+    safe_scope = validate_private_cidr(args.network_scope)
+
+    with connect(args.db) as connection:
+        membership = assign_network_scope_to_logical_site(
+            connection,
+            args.site_id,
+            safe_scope,
+        )
+        site = get_logical_site(connection, args.site_id)
+
+        if site is None:
+            raise DeltaAegisError(
+                f"logical site not found after assignment: "
+                f"{normalize_logical_site_id(args.site_id)}"
+            )
+
+        observed_row = connection.execute(
+            '''
+            SELECT COUNT(*) AS count
+            FROM snapshots
+            WHERE network_scope = ?
+            ''',
+            (safe_scope,),
+        ).fetchone()
+        observed = int(observed_row["count"] or 0) > 0
+        membership = dict(membership)
+        membership["observed"] = observed
+
+        receipt = logical_site_cli_receipt(
+            "logical_site.scope.assign",
+            (
+                f"Assigned network scope {safe_scope} to "
+                f"logical site {site['name']}."
+            ),
+            site=site,
+            membership=membership,
+        )
+        record_access_audit_event(
+            connection,
+            action="LOGICAL_SITE_SCOPE_ASSIGN",
+            actor=logical_site_cli_actor(args),
+            target_type="logical_site",
+            target_key=site["site_id"],
+            details={
+                "network_scope": safe_scope,
+                "observed": observed,
+            },
+        )
+
+    if args.json:
+        print_logical_site_json(receipt)
+    else:
+        print(receipt["message"])
+        print(f"Observed in snapshots: {'yes' if observed else 'no'}")
+
+    return 0
+
+
+def command_site_remove_scope(args: argparse.Namespace) -> int:
+    safe_scope = validate_private_cidr(args.network_scope)
+
+    with connect(args.db) as connection:
+        site = get_logical_site(connection, args.site_id)
+
+        if site is None:
+            raise DeltaAegisError(
+                f"logical site not found: "
+                f"{normalize_logical_site_id(args.site_id)}"
+            )
+
+        membership = remove_network_scope_from_logical_site(
+            connection,
+            args.site_id,
+            safe_scope,
+        )
+        receipt = logical_site_cli_receipt(
+            "logical_site.scope.remove",
+            (
+                f"Removed network scope {safe_scope} from "
+                f"logical site {site['name']}."
+            ),
+            site=get_logical_site(connection, args.site_id),
+            membership=membership,
+        )
+        record_access_audit_event(
+            connection,
+            action="LOGICAL_SITE_SCOPE_REMOVE",
+            actor=logical_site_cli_actor(args),
+            target_type="logical_site",
+            target_key=site["site_id"],
+            details={"network_scope": safe_scope},
+        )
+
+    if args.json:
+        print_logical_site_json(receipt)
+    else:
+        print(receipt["message"])
+
+    return 0
+
+
+def query_network_scope_catalog(
+    connection: sqlite3.Connection,
+    *,
+    unassigned_only: bool = False,
+) -> list[dict[str, Any]]:
+    where = "WHERE m.site_id IS NULL" if unassigned_only else ""
+
+    rows = connection.execute(
+        f'''
+        WITH all_scopes AS (
+            SELECT network_scope
+            FROM snapshots
+            WHERE network_scope IS NOT NULL
+              AND network_scope != ''
+            UNION
+            SELECT network_scope
+            FROM logical_site_memberships
+        ),
+        snapshot_summary AS (
+            SELECT
+                network_scope,
+                COUNT(*) AS snapshots,
+                SUM(
+                    CASE
+                        WHEN quality_status = 'ACCEPTED' THEN 1
+                        ELSE 0
+                    END
+                ) AS accepted_snapshots,
+                MAX(created_at) AS latest_scan_at
+            FROM snapshots
+            GROUP BY network_scope
+        )
+        SELECT
+            a.network_scope,
+            COALESCE(s.snapshots, 0) AS snapshots,
+            COALESCE(s.accepted_snapshots, 0) AS accepted_snapshots,
+            s.latest_scan_at,
+            m.site_id,
+            ls.name AS site_name,
+            ls.status AS site_status
+        FROM all_scopes a
+        LEFT JOIN snapshot_summary s
+            ON s.network_scope = a.network_scope
+        LEFT JOIN logical_site_memberships m
+            ON m.network_scope = a.network_scope
+        LEFT JOIN logical_sites ls
+            ON ls.site_id = m.site_id
+        {where}
+        ORDER BY
+            CASE WHEN s.latest_scan_at IS NULL THEN 1 ELSE 0 END,
+            s.latest_scan_at DESC,
+            a.network_scope
+        '''
+    ).fetchall()
+
+    return [
+        {
+            "network_scope": str(row["network_scope"]),
+            "snapshots": int(row["snapshots"] or 0),
+            "accepted_snapshots": int(
+                row["accepted_snapshots"] or 0
+            ),
+            "latest_scan_at": row["latest_scan_at"],
+            "site_id": row["site_id"],
+            "site_name": row["site_name"],
+            "site_status": row["site_status"],
+            "assigned": bool(row["site_id"]),
+        }
+        for row in rows
+    ]
+
+
+def command_scopes(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        scopes = query_network_scope_catalog(
+            connection,
+            unassigned_only=bool(args.unassigned),
+        )
+
+    payload = {
+        "ok": True,
+        "unassigned_only": bool(args.unassigned),
+        "scope_count": len(scopes),
+        "scopes": scopes,
+    }
+
+    if args.json:
+        print_logical_site_json(payload)
+        return 0
+
+    if not scopes:
+        if args.unassigned:
+            print("No unassigned network scopes found.")
+        else:
+            print("No network scopes found.")
         return 0
 
     print("DeltaAegis Network Scopes")
     print("=========================")
     print()
 
-    for row in rows:
+    for row in scopes:
+        site_text = (
+            f"{row['site_name']} ({row['site_id']})"
+            if row["site_id"]
+            else "unassigned"
+        )
         print(
             f"{row['network_scope']:<18} "
             f"snapshots={row['snapshots']} "
             f"accepted={row['accepted_snapshots']} "
-            f"latest={row['latest_scan_at']}"
+            f"latest={row['latest_scan_at'] or '-'} "
+            f"site={site_text}"
         )
 
     return 0
+
+
 
 
 def command_snapshots(args: argparse.Namespace) -> int:
@@ -35841,7 +36469,123 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--scope")
     p.add_argument("--lookback", type=int, default=5, help="Accepted scan history depth to compare")
-    sub.add_parser("scopes")
+    p = sub.add_parser(
+        "site-list",
+        help="List logical building or site scopes",
+    )
+    p.add_argument(
+        "--include-archived",
+        action="store_true",
+        help="Include archived logical sites",
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print structured JSON output",
+    )
+
+    p = sub.add_parser(
+        "site-show",
+        help="Show one logical site and its member subnet scopes",
+    )
+    p.add_argument("site_id")
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print structured JSON output",
+    )
+
+    p = sub.add_parser(
+        "site-create",
+        help="Create a logical building or site scope",
+    )
+    p.add_argument("name")
+    p.add_argument("--description", default="")
+    p.add_argument("--actor", default="local_admin")
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a structured action receipt",
+    )
+
+    p = sub.add_parser(
+        "site-rename",
+        help="Rename a logical site without changing its stable ID",
+    )
+    p.add_argument("site_id")
+    p.add_argument("name")
+    p.add_argument("--actor", default="local_admin")
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a structured action receipt",
+    )
+
+    p = sub.add_parser(
+        "site-description",
+        help="Update a logical site description",
+    )
+    p.add_argument("site_id")
+    p.add_argument("description")
+    p.add_argument("--actor", default="local_admin")
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a structured action receipt",
+    )
+
+    p = sub.add_parser(
+        "site-archive",
+        help="Archive a logical site while retaining memberships",
+    )
+    p.add_argument("site_id")
+    p.add_argument("--actor", default="local_admin")
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a structured action receipt",
+    )
+
+    p = sub.add_parser(
+        "site-assign-scope",
+        help="Assign one private CIDR network scope to a logical site",
+    )
+    p.add_argument("site_id")
+    p.add_argument("network_scope")
+    p.add_argument("--actor", default="local_admin")
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a structured action receipt",
+    )
+
+    p = sub.add_parser(
+        "site-remove-scope",
+        help="Remove one network scope membership without deleting data",
+    )
+    p.add_argument("site_id")
+    p.add_argument("network_scope")
+    p.add_argument("--actor", default="local_admin")
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a structured action receipt",
+    )
+
+    p = sub.add_parser(
+        "scopes",
+        help="List subnet scopes and logical-site assignments",
+    )
+    p.add_argument(
+        "--unassigned",
+        action="store_true",
+        help="Show only subnet scopes without a logical site",
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print structured JSON output",
+    )
     p = sub.add_parser("summary")
     p = sub.add_parser("snapshots"); p.add_argument("--limit", type=int, default=20); p.add_argument("--scope")
     p = sub.add_parser("events"); p.add_argument("--limit", type=int, default=50); p.add_argument("--severity"); p.add_argument("--event-type"); p.add_argument("--scope")
@@ -36014,6 +36758,14 @@ def main() -> int:
         if args.command == "investigation-center": return command_investigation_center(args)
         if args.command == "port-behavior": return command_port_behavior(args)
         if args.command == "summary": return command_summary(args)
+        if args.command == "site-list": return command_site_list(args)
+        if args.command == "site-show": return command_site_show(args)
+        if args.command == "site-create": return command_site_create(args)
+        if args.command == "site-rename": return command_site_rename(args)
+        if args.command == "site-description": return command_site_description(args)
+        if args.command == "site-archive": return command_site_archive(args)
+        if args.command == "site-assign-scope": return command_site_assign_scope(args)
+        if args.command == "site-remove-scope": return command_site_remove_scope(args)
         if args.command == "scopes": return command_scopes(args)
         if args.command == "snapshots": return command_snapshots(args)
         if args.command == "events": return command_events(args)
