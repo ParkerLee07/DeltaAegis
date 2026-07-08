@@ -31211,6 +31211,332 @@ def command_restore_rehearsal(args) -> int:
     return 0
 
 
+
+# v0.41 checkpoint 4: backup catalog and verification CLI
+DATABASE_BACKUP_CATALOG_SCHEMA_VERSION = (
+    "deltaaegis-backup-catalog-v1"
+)
+
+
+def _database_backup_catalog_root(backups_dir: Path) -> Path:
+    root = _normalize_new_backup_path(Path(backups_dir))
+
+    if not os.path.lexists(root):
+        return root
+
+    if root.is_symlink():
+        raise DeltaAegisError(
+            f"backup catalog directory must not be a symlink: {root}"
+        )
+
+    if not root.is_dir():
+        raise DeltaAegisError(
+            f"backup catalog path is not a directory: {root}"
+        )
+
+    return root
+
+
+def _database_backup_catalog_entry(
+    backup_path: Path,
+    manifest_path: Path,
+) -> dict[str, Any]:
+    resolved_backup = _normalize_new_backup_path(
+        Path(backup_path)
+    )
+    resolved_manifest = _normalize_new_backup_path(
+        Path(manifest_path)
+    )
+    backup_exists = os.path.lexists(resolved_backup)
+    manifest_exists = os.path.lexists(resolved_manifest)
+
+    entry: dict[str, Any] = {
+        "backup_path": str(resolved_backup),
+        "manifest_path": str(resolved_manifest),
+        "backup_exists": backup_exists,
+        "manifest_exists": manifest_exists,
+        "status": "INCOMPLETE",
+        "detail": "",
+        "created_at": None,
+        "application_version": None,
+        "size_bytes": None,
+        "backup_sha256": None,
+        "schema_fingerprint": None,
+        "logical_fingerprint": None,
+        "integrity_status": None,
+    }
+
+    if not backup_exists and not manifest_exists:
+        entry["detail"] = "backup and manifest are missing"
+        return entry
+
+    if not backup_exists:
+        entry["detail"] = "backup database is missing"
+        return entry
+
+    if not manifest_exists:
+        entry["detail"] = "backup manifest is missing"
+        return entry
+
+    try:
+        verification = verify_database_backup_bundle(
+            resolved_backup,
+            resolved_manifest,
+        )
+        manifest = _read_database_backup_manifest(
+            resolved_manifest
+        )
+    except DeltaAegisError as exc:
+        entry["status"] = "INVALID"
+        entry["detail"] = str(exc)
+        return entry
+
+    application = manifest.get("application")
+
+    entry.update(
+        {
+            "status": "VALID",
+            "detail": "backup bundle verified",
+            "created_at": manifest.get("created_at"),
+            "application_version": (
+                application.get("version")
+                if isinstance(application, dict)
+                else None
+            ),
+            "size_bytes": verification["size_bytes"],
+            "backup_sha256": verification["backup_sha256"],
+            "schema_fingerprint": (
+                verification["schema_fingerprint"]
+            ),
+            "logical_fingerprint": (
+                verification["logical_fingerprint"]
+            ),
+            "integrity_status": (
+                verification["integrity_status"]
+            ),
+        }
+    )
+    return entry
+
+
+def catalog_database_backups(
+    backups_dir: Path,
+) -> dict[str, Any]:
+    root = _database_backup_catalog_root(backups_dir)
+    backup_paths: dict[str, Path] = {}
+    manifest_paths: dict[str, Path] = {}
+
+    if root.exists():
+        try:
+            children = list(root.iterdir())
+        except OSError as exc:
+            raise DeltaAegisError(
+                f"could not inspect backup catalog directory "
+                f"{root}: {exc}"
+            ) from exc
+
+        for child in children:
+            name = child.name
+
+            if name.endswith(".db.manifest.json"):
+                backup_name = name[: -len(".manifest.json")]
+                manifest_paths[backup_name] = child
+            elif name.endswith(".db"):
+                backup_paths[name] = child
+
+    entries: list[dict[str, Any]] = []
+
+    for backup_name in sorted(
+        set(backup_paths) | set(manifest_paths)
+    ):
+        backup_path = backup_paths.get(
+            backup_name,
+            root / backup_name,
+        )
+        manifest_path = manifest_paths.get(
+            backup_name,
+            root / f"{backup_name}.manifest.json",
+        )
+        entries.append(
+            _database_backup_catalog_entry(
+                backup_path,
+                manifest_path,
+            )
+        )
+
+    entries.sort(
+        key=lambda item: (
+            str(item.get("created_at") or ""),
+            str(item.get("backup_path") or ""),
+        ),
+        reverse=True,
+    )
+
+    summary = {
+        "total": len(entries),
+        "valid": sum(
+            1 for item in entries if item["status"] == "VALID"
+        ),
+        "invalid": sum(
+            1 for item in entries if item["status"] == "INVALID"
+        ),
+        "incomplete": sum(
+            1
+            for item in entries
+            if item["status"] == "INCOMPLETE"
+        ),
+    }
+
+    return {
+        "schema_version": DATABASE_BACKUP_CATALOG_SCHEMA_VERSION,
+        "backups_dir": str(root),
+        "directory_exists": root.exists(),
+        "summary": summary,
+        "entries": entries,
+    }
+
+
+def inspect_database_backup_bundle(
+    backup_path: Path,
+    manifest_path: Path | None = None,
+) -> dict[str, Any]:
+    resolved_backup = _normalize_new_backup_path(
+        Path(backup_path)
+    )
+    resolved_manifest = _normalize_new_backup_path(
+        Path(
+            manifest_path
+            if manifest_path is not None
+            else database_backup_manifest_path(
+                resolved_backup
+            )
+        )
+    )
+    return _database_backup_catalog_entry(
+        resolved_backup,
+        resolved_manifest,
+    )
+
+
+def _print_database_backup_catalog_human(
+    catalog: dict[str, Any],
+) -> None:
+    summary = catalog["summary"]
+
+    print("DeltaAegis backup catalog")
+    print(f"Directory: {catalog['backups_dir']}")
+    print(
+        "Summary: "
+        f"{summary['valid']} valid, "
+        f"{summary['invalid']} invalid, "
+        f"{summary['incomplete']} incomplete, "
+        f"{summary['total']} total"
+    )
+
+    if not catalog["directory_exists"]:
+        print("Backup directory does not exist.")
+        return
+
+    if not catalog["entries"]:
+        print("No DeltaAegis database backup bundles found.")
+        return
+
+    for entry in catalog["entries"]:
+        print()
+        print(
+            f"{entry['status']}: "
+            f"{entry['backup_path']}"
+        )
+        print(f"  Manifest: {entry['manifest_path']}")
+        print(
+            f"  Created: "
+            f"{entry.get('created_at') or '-'}"
+        )
+        print(
+            f"  Size: "
+            f"{entry.get('size_bytes') or '-'}"
+        )
+        print(f"  Detail: {entry['detail']}")
+
+
+def _print_database_backup_verification_human(
+    entry: dict[str, Any],
+) -> None:
+    print(f"Status: {entry['status']}")
+    print(f"Backup: {entry['backup_path']}")
+    print(f"Manifest: {entry['manifest_path']}")
+    print(f"Detail: {entry['detail']}")
+
+    if entry["status"] == "VALID":
+        print(f"Created: {entry.get('created_at') or '-'}")
+        print(f"Size: {entry['size_bytes']} bytes")
+        print(f"Integrity: {entry['integrity_status']}")
+        print(f"SHA-256: {entry['backup_sha256']}")
+        print(
+            f"Schema fingerprint: "
+            f"{entry['schema_fingerprint']}"
+        )
+        print(
+            f"Logical fingerprint: "
+            f"{entry['logical_fingerprint']}"
+        )
+
+
+def command_backup_catalog(args) -> int:
+    catalog = catalog_database_backups(
+        args.backups_dir
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                catalog,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        _print_database_backup_catalog_human(
+            catalog
+        )
+
+    summary = catalog["summary"]
+    return (
+        1
+        if summary["invalid"] or summary["incomplete"]
+        else 0
+    )
+
+
+def command_backup_verify(args) -> int:
+    entry = inspect_database_backup_bundle(
+        args.backup,
+        args.manifest,
+    )
+
+    payload = {
+        "schema_version": (
+            DATABASE_BACKUP_CATALOG_SCHEMA_VERSION
+        ),
+        "entry": entry,
+    }
+
+    if args.json:
+        print(
+            json.dumps(
+                payload,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        _print_database_backup_verification_human(
+            entry
+        )
+
+    return 0 if entry["status"] == "VALID" else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DeltaAegis v0.40.0 — Human-Readable Operator Actions, stable dashboard action receipts, progressive technical disclosure, compact mutation payloads, guarded NetSniper and TrueAegis orchestration, reporting, RBAC, and the current-state SIEM dashboard")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -31283,6 +31609,47 @@ def build_parser() -> argparse.ArgumentParser:
             "database filename"
         ),
     )
+    p = sub.add_parser(
+        "backup-catalog",
+        help=(
+            "List and verify top-level DeltaAegis database "
+            "backup bundles"
+        ),
+    )
+    p.add_argument(
+        "--backups-dir",
+        type=Path,
+        default=DEFAULT_BACKUPS,
+        help=(
+            "Directory containing DeltaAegis database backups "
+            "and manifests"
+        ),
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print structured JSON output",
+    )
+
+    p = sub.add_parser(
+        "backup-verify",
+        help="Verify one DeltaAegis database backup bundle",
+    )
+    p.add_argument("backup", type=Path)
+    p.add_argument(
+        "--manifest",
+        type=Path,
+        help=(
+            "Manifest path; defaults to "
+            "<backup>.manifest.json"
+        ),
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print structured JSON output",
+    )
+
     p = sub.add_parser("user-create", help="Create a local DeltaAegis access user")
     p.add_argument("username")
     p.add_argument("--role", choices=list(ACCESS_ROLES), default="VIEWER")
@@ -31520,6 +31887,8 @@ def main() -> int:
         if args.command in {None, "menu"}: return run_interactive_menu(args)
         if args.command == "backup": return command_backup(args)
         if args.command == "restore-rehearsal": return command_restore_rehearsal(args)
+        if args.command == "backup-catalog": return command_backup_catalog(args)
+        if args.command == "backup-verify": return command_backup_verify(args)
         if args.command == "user-create": return command_user_create(args)
         if args.command == "users": return command_users(args)
         if args.command == "user-password": return command_user_password(args)
