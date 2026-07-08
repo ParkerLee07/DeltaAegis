@@ -31537,6 +31537,378 @@ def command_backup_verify(args) -> int:
     return 0 if entry["status"] == "VALID" else 1
 
 
+
+# v0.41 checkpoint 5: backup retention planning and preview
+DATABASE_BACKUP_RETENTION_PLAN_SCHEMA_VERSION = (
+    "deltaaegis-backup-retention-plan-v1"
+)
+DATABASE_BACKUP_RETENTION_DEFAULT_KEEP_NEWEST = 5
+DATABASE_BACKUP_RETENTION_DEFAULT_MINIMUM_AGE_DAYS = 30
+
+
+def database_backup_retention_positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            "value must be a positive integer"
+        ) from exc
+
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(
+            "value must be at least 1"
+        )
+
+    return parsed
+
+
+def database_backup_retention_nonnegative_int(
+    value: str,
+) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            "value must be a non-negative integer"
+        ) from exc
+
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(
+            "value must be zero or greater"
+        )
+
+    return parsed
+
+
+def _database_backup_retention_timestamp(
+    value: Any,
+) -> datetime:
+    text = str(value or "").strip()
+
+    if not text:
+        raise DeltaAegisError(
+            "backup creation timestamp is missing"
+        )
+
+    try:
+        parsed = datetime.fromisoformat(
+            text.replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise DeltaAegisError(
+            f"backup creation timestamp is invalid: {text!r}"
+        ) from exc
+
+    if parsed.tzinfo is None:
+        raise DeltaAegisError(
+            "backup creation timestamp must include a timezone"
+        )
+
+    return parsed.astimezone(timezone.utc)
+
+
+def plan_database_backup_retention(
+    backups_dir: Path,
+    *,
+    keep_newest: int = (
+        DATABASE_BACKUP_RETENTION_DEFAULT_KEEP_NEWEST
+    ),
+    minimum_age_days: int = (
+        DATABASE_BACKUP_RETENTION_DEFAULT_MINIMUM_AGE_DAYS
+    ),
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    if keep_newest < 1:
+        raise DeltaAegisError(
+            "backup retention must keep at least one valid backup"
+        )
+
+    if minimum_age_days < 0:
+        raise DeltaAegisError(
+            "backup retention minimum age cannot be negative"
+        )
+
+    effective_now = now or datetime.now(timezone.utc)
+
+    if effective_now.tzinfo is None:
+        raise DeltaAegisError(
+            "backup retention reference time must include a timezone"
+        )
+
+    effective_now = effective_now.astimezone(timezone.utc)
+    catalog = catalog_database_backups(backups_dir)
+    parsed_valid_entries: list[
+        tuple[datetime, str, dict[str, Any]]
+    ] = []
+    timestamp_errors: dict[str, str] = {}
+
+    for entry in catalog["entries"]:
+        if entry["status"] != "VALID":
+            continue
+
+        backup_path = str(entry["backup_path"])
+
+        try:
+            created_at = _database_backup_retention_timestamp(
+                entry.get("created_at")
+            )
+        except DeltaAegisError as exc:
+            timestamp_errors[backup_path] = str(exc)
+            continue
+
+        parsed_valid_entries.append(
+            (
+                created_at,
+                backup_path,
+                entry,
+            )
+        )
+
+    parsed_valid_entries.sort(
+        key=lambda item: (
+            item[0],
+            item[1],
+        ),
+        reverse=True,
+    )
+
+    rank_by_path = {
+        backup_path: rank
+        for rank, (
+            _created_at,
+            backup_path,
+            _entry,
+        ) in enumerate(
+            parsed_valid_entries,
+            start=1,
+        )
+    }
+    timestamp_by_path = {
+        backup_path: created_at
+        for created_at, backup_path, _entry
+        in parsed_valid_entries
+    }
+
+    planned_entries: list[dict[str, Any]] = []
+
+    for entry in catalog["entries"]:
+        item = dict(entry)
+        backup_path = str(item["backup_path"])
+        item["retention_action"] = "PROTECTED"
+        item["retention_reason"] = ""
+        item["valid_rank"] = rank_by_path.get(
+            backup_path
+        )
+        item["age_days"] = None
+        item["candidate_paths"] = [
+            str(item["backup_path"]),
+            str(item["manifest_path"]),
+        ]
+
+        if item["status"] != "VALID":
+            item["retention_reason"] = (
+                f"{item['status']} backup bundles require "
+                "operator review and are never cleanup candidates"
+            )
+            planned_entries.append(item)
+            continue
+
+        if backup_path in timestamp_errors:
+            item["retention_reason"] = (
+                timestamp_errors[backup_path]
+                + "; timestamp anomalies are protected"
+            )
+            planned_entries.append(item)
+            continue
+
+        created_at = timestamp_by_path[backup_path]
+        age_seconds = (
+            effective_now - created_at
+        ).total_seconds()
+
+        if age_seconds < -300:
+            item["retention_reason"] = (
+                "backup creation timestamp is in the future; "
+                "timestamp anomalies are protected"
+            )
+            planned_entries.append(item)
+            continue
+
+        age_days = max(
+            0,
+            int(max(0.0, age_seconds) // 86400),
+        )
+        item["age_days"] = age_days
+        valid_rank = int(item["valid_rank"])
+
+        if valid_rank <= keep_newest:
+            item["retention_action"] = "KEEP"
+            item["retention_reason"] = (
+                f"protected as one of the newest "
+                f"{keep_newest} verified backups"
+            )
+        elif age_days < minimum_age_days:
+            item["retention_action"] = "KEEP"
+            item["retention_reason"] = (
+                f"verified backup is only {age_days} day(s) old; "
+                f"minimum cleanup age is {minimum_age_days} day(s)"
+            )
+        else:
+            item["retention_action"] = "ELIGIBLE"
+            item["retention_reason"] = (
+                f"verified backup is rank {valid_rank} and "
+                f"{age_days} day(s) old"
+            )
+
+        planned_entries.append(item)
+
+    action_order = {
+        "KEEP": 0,
+        "ELIGIBLE": 1,
+        "PROTECTED": 2,
+    }
+    planned_entries.sort(
+        key=lambda item: (
+            action_order[item["retention_action"]],
+            int(item.get("valid_rank") or 10**9),
+            str(item.get("backup_path") or ""),
+        )
+    )
+
+    summary = {
+        "total": len(planned_entries),
+        "keep": sum(
+            1
+            for item in planned_entries
+            if item["retention_action"] == "KEEP"
+        ),
+        "eligible": sum(
+            1
+            for item in planned_entries
+            if item["retention_action"] == "ELIGIBLE"
+        ),
+        "protected": sum(
+            1
+            for item in planned_entries
+            if item["retention_action"] == "PROTECTED"
+        ),
+        "eligible_bytes": sum(
+            int(item.get("size_bytes") or 0)
+            for item in planned_entries
+            if item["retention_action"] == "ELIGIBLE"
+        ),
+    }
+
+    return {
+        "schema_version": (
+            DATABASE_BACKUP_RETENTION_PLAN_SCHEMA_VERSION
+        ),
+        "generated_at": (
+            effective_now.replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        ),
+        "dry_run": True,
+        "destructive": False,
+        "execution_supported": False,
+        "backups_dir": catalog["backups_dir"],
+        "directory_exists": catalog["directory_exists"],
+        "policy": {
+            "keep_newest": keep_newest,
+            "minimum_age_days": minimum_age_days,
+            "invalid_and_incomplete": "PROTECTED",
+            "timestamp_anomalies": "PROTECTED",
+        },
+        "catalog_summary": catalog["summary"],
+        "summary": summary,
+        "entries": planned_entries,
+    }
+
+
+def _print_database_backup_retention_plan_human(
+    plan: dict[str, Any],
+) -> None:
+    summary = plan["summary"]
+    policy = plan["policy"]
+
+    print("DeltaAegis backup retention preview")
+    print(f"Directory: {plan['backups_dir']}")
+    print("Mode: dry run; no files will be deleted")
+    print(
+        "Policy: keep newest "
+        f"{policy['keep_newest']} verified backup(s); "
+        "older verified backups must be at least "
+        f"{policy['minimum_age_days']} day(s) old"
+    )
+    print(
+        "Summary: "
+        f"{summary['keep']} keep, "
+        f"{summary['eligible']} eligible, "
+        f"{summary['protected']} protected, "
+        f"{summary['total']} total"
+    )
+    print(
+        f"Potential reclaimable bytes: "
+        f"{summary['eligible_bytes']}"
+    )
+
+    if not plan["directory_exists"]:
+        print("Backup directory does not exist.")
+        return
+
+    if not plan["entries"]:
+        print("No DeltaAegis database backup bundles found.")
+        return
+
+    for entry in plan["entries"]:
+        print()
+        print(
+            f"{entry['retention_action']}: "
+            f"{entry['backup_path']}"
+        )
+        print(f"  Bundle status: {entry['status']}")
+        print(
+            f"  Created: "
+            f"{entry.get('created_at') or '-'}"
+        )
+        print(
+            f"  Age: "
+            f"{entry.get('age_days') if entry.get('age_days') is not None else '-'}"
+            " day(s)"
+        )
+        print(
+            f"  Rank: "
+            f"{entry.get('valid_rank') or '-'}"
+        )
+        print(
+            f"  Reason: "
+            f"{entry['retention_reason']}"
+        )
+
+
+def command_backup_retention_preview(args) -> int:
+    plan = plan_database_backup_retention(
+        args.backups_dir,
+        keep_newest=args.keep_newest,
+        minimum_age_days=args.minimum_age_days,
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                plan,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        _print_database_backup_retention_plan_human(
+            plan
+        )
+
+    return 1 if plan["summary"]["protected"] else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DeltaAegis v0.40.0 — Human-Readable Operator Actions, stable dashboard action receipts, progressive technical disclosure, compact mutation payloads, guarded NetSniper and TrueAegis orchestration, reporting, RBAC, and the current-state SIEM dashboard")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -31642,6 +32014,49 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Manifest path; defaults to "
             "<backup>.manifest.json"
+        ),
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print structured JSON output",
+    )
+
+    p = sub.add_parser(
+        "backup-retention-preview",
+        help=(
+            "Preview a non-destructive backup retention plan"
+        ),
+    )
+    p.add_argument(
+        "--backups-dir",
+        type=Path,
+        default=DEFAULT_BACKUPS,
+        help=(
+            "Directory containing DeltaAegis database backups "
+            "and manifests"
+        ),
+    )
+    p.add_argument(
+        "--keep-newest",
+        type=database_backup_retention_positive_int,
+        default=(
+            DATABASE_BACKUP_RETENTION_DEFAULT_KEEP_NEWEST
+        ),
+        help=(
+            "Always keep at least this many newest verified "
+            "backup bundles"
+        ),
+    )
+    p.add_argument(
+        "--minimum-age-days",
+        type=database_backup_retention_nonnegative_int,
+        default=(
+            DATABASE_BACKUP_RETENTION_DEFAULT_MINIMUM_AGE_DAYS
+        ),
+        help=(
+            "Only mark older verified backups eligible after "
+            "this many full days"
         ),
     )
     p.add_argument(
@@ -31889,6 +32304,7 @@ def main() -> int:
         if args.command == "restore-rehearsal": return command_restore_rehearsal(args)
         if args.command == "backup-catalog": return command_backup_catalog(args)
         if args.command == "backup-verify": return command_backup_verify(args)
+        if args.command == "backup-retention-preview": return command_backup_retention_preview(args)
         if args.command == "user-create": return command_user_create(args)
         if args.command == "users": return command_users(args)
         if args.command == "user-password": return command_user_password(args)
