@@ -87,6 +87,8 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("GET", "/operator/users", "admin.users.read"),
     ("GET", "/operator/reset", "admin.telemetry.cleanup"),
     ("GET", "/netsniper", "dashboard.read"),
+    ("GET", "/api/sites", "dashboard.read"),
+    ("GET", "/api/site-detail", "dashboard.read"),
     ("GET", "/api/netsniper/status", "dashboard.read"),
     ("GET", "/api/netsniper/job-detail", "dashboard.read"),
     ("GET", "/api/validation-summary", "dashboard.read"),
@@ -14050,6 +14052,26 @@ def dashboard_telemetry_cleanup_clear_all_payload(
     return result
 
 
+# v0.42 checkpoint 3: logical site dashboard foundation
+def dashboard_sites_payload(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    return logical_site_list_payload(
+        connection,
+        include_archived=False,
+    )
+
+
+def dashboard_site_detail_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    return logical_site_detail_payload(
+        connection,
+        site_id,
+    )
+
+
 def dashboard_scopes_payload(connection):
     rows = connection.execute(
         """
@@ -22276,10 +22298,13 @@ def dashboard_index_html_base_v025_operator_link():
     </section>
 
     <section class="card" data-tab-panel="overview">
-      <h2>Network Scopes</h2>
-      <p class="muted">Choose which subnet scope the dashboard should display. Deltas are only meaningful inside the same network scope.</p>
+      <h2>Sites &amp; Network Scopes</h2>
+      <p class="muted">Logical sites group related subnet scopes. Site selection shows membership and coverage in this checkpoint; choose a member subnet for filtered SIEM data until site aggregation is enabled.</p>
       <div id="selected-scope" class="callout">Viewing all network scopes.</div>
+      <div id="site-links" class="scope-links"></div>
+      <div id="scope-links-label" class="muted">Subnet scopes</div>
       <div id="scope-links" class="scope-links"></div>
+      <div id="site-detail" class="callout" hidden></div>
     </section>
 
     <section class="card" data-tab-panel="overview">
@@ -23040,7 +23065,12 @@ def dashboard_index_html_base_v025_operator_link():
 
 
 
+    function selectedSiteId() {
+      return new URLSearchParams(window.location.search).get("site_id") || "";
+    }
+
     function selectedScope() {
+      if (selectedSiteId()) return "";
       return new URLSearchParams(window.location.search).get("scope") || "";
     }
 
@@ -23053,31 +23083,98 @@ def dashboard_index_html_base_v025_operator_link():
       return path + separator + "scope=" + encodeURIComponent(scope);
     }
 
-    function renderScopes(scopes) {
+    function selectedSiteDetailPath() {
+      const siteId = selectedSiteId();
+      if (!siteId) return "";
+      return "/api/site-detail?site_id=" + encodeURIComponent(siteId);
+    }
+
+    function renderScopeNavigation(scopes, siteCatalog, siteDetail) {
       const selected = selectedScope();
-      const links = [];
+      const selectedSite = selectedSiteId();
+      const siteLinks = [];
+      const scopeLinks = [];
+      const sites = Array.isArray(siteCatalog && siteCatalog.sites)
+        ? siteCatalog.sites
+        : [];
+      const memberScopes = new Set(
+        Array.isArray(siteDetail && siteDetail.members)
+          ? siteDetail.members.map(item => item.network_scope || "")
+          : []
+      );
+      const visibleScopes = selectedSite
+        ? scopes.filter(item => memberScopes.has(item.network_scope || ""))
+        : scopes;
 
-      links.push(`<a class="${selected ? "" : "active"}" href="/">All scopes</a>`);
+      siteLinks.push(
+        `<a class="${selected || selectedSite ? "" : "active"}" href="/">All scopes</a>`
+      );
 
-      for (const scope of scopes) {
+      for (const site of sites) {
+        const siteId = site.site_id || "";
+        const active = selectedSite === siteId ? "active" : "";
+        siteLinks.push(
+          `<a class="${active}" href="/?site_id=${encodeURIComponent(siteId)}">${esc(site.name || siteId)} · ${esc(site.member_count || 0)} subnets</a>`
+        );
+      }
+
+      for (const scope of visibleScopes) {
         const name = scope.network_scope || "";
         const active = selected === name ? "active" : "";
-        links.push(
+        scopeLinks.push(
           `<a class="${active}" href="/?scope=${encodeURIComponent(name)}">${esc(name)} · ${esc(scope.snapshots)} scans · ${esc(scope.open_alerts)} open alerts</a>`
         );
       }
 
-      const scopeLinks = document.getElementById("scope-links");
+      const siteLinksTarget = document.getElementById("site-links");
+      const scopeLinksTarget = document.getElementById("scope-links");
+      const scopeLinksLabel = document.getElementById("scope-links-label");
       const selectedScopeBox = document.getElementById("selected-scope");
+      const siteDetailBox = document.getElementById("site-detail");
 
-      if (scopeLinks) {
-        scopeLinks.innerHTML = links.join("");
+      if (siteLinksTarget) {
+        siteLinksTarget.innerHTML = siteLinks.join("");
+      }
+
+      if (scopeLinksTarget) {
+        scopeLinksTarget.innerHTML = scopeLinks.length
+          ? scopeLinks.join("")
+          : '<span class="muted">No subnet scopes are available for this selection.</span>';
+      }
+
+      if (scopeLinksLabel) {
+        scopeLinksLabel.textContent = selectedSite
+          ? "Member subnet scopes — choose one to filter SIEM data"
+          : "Subnet scopes";
       }
 
       if (selectedScopeBox) {
-        selectedScopeBox.innerHTML = selected
-          ? `Viewing scope: <strong>${esc(selected)}</strong>`
-          : "Viewing all network scopes.";
+        if (selected) {
+          selectedScopeBox.innerHTML =
+            `Viewing subnet scope: <strong>${esc(selected)}</strong>`;
+        } else if (siteDetail && siteDetail.site) {
+          selectedScopeBox.innerHTML =
+            `Selected logical site: <strong>${esc(siteDetail.site.name)}</strong>`;
+        } else {
+          selectedScopeBox.innerHTML = "Viewing all network scopes.";
+        }
+      }
+
+      if (siteDetailBox) {
+        if (siteDetail && siteDetail.site && siteDetail.coverage) {
+          const site = siteDetail.site;
+          const coverage = siteDetail.coverage;
+          siteDetailBox.hidden = false;
+          siteDetailBox.innerHTML = `
+            <strong>${esc(site.name)}</strong><br>
+            ${esc(coverage.observed_scope_count)} of ${esc(coverage.member_scope_count)}
+            member subnet scopes have snapshot history.
+            <br><span class="muted">Site-wide SIEM aggregation is not enabled in this checkpoint. Select a member subnet above for filtered assets, events, alerts, and risk.</span>
+          `;
+        } else {
+          siteDetailBox.hidden = true;
+          siteDetailBox.innerHTML = "";
+        }
       }
     }
 
@@ -25864,8 +25961,11 @@ def dashboard_index_html_base_v025_operator_link():
       try {
         setupDashboardTabs();
 
-        const [scopes, summary, scanContext, currentState, investigationCenter, scanJobs, assets, currentRisk, historicalRisk, portBehavior, events, alerts, annotations] = await Promise.all([
+        const siteDetailPath = selectedSiteDetailPath();
+        const [scopes, siteCatalog, siteDetail, summary, scanContext, currentState, investigationCenter, scanJobs, assets, currentRisk, historicalRisk, portBehavior, events, alerts, annotations] = await Promise.all([
           api("/api/scopes"),
+          api("/api/sites"),
+          siteDetailPath ? api(siteDetailPath) : Promise.resolve(null),
           api(scopedPath("/api/summary")),
           api(scopedPath("/api/scan-context")),
           api(scopedPath("/api/current-state")),
@@ -25880,7 +25980,7 @@ def dashboard_index_html_base_v025_operator_link():
           api(scopedPath("/api/annotations?limit=20"))
         ]);
 
-        renderScopes(scopes);
+        renderScopeNavigation(scopes, siteCatalog, siteDetail);
         renderMetrics(summary);
         renderCurrentState(currentState);
         renderInvestigationCenter(investigationCenter);
@@ -29505,7 +29605,51 @@ def command_dashboard(args):
             connection = self.open_connection()
 
             try:
-                if route == "/api/scopes":
+                if route == "/api/sites":
+                    dashboard_json_response(
+                        self,
+                        dashboard_sites_payload(connection),
+                    )
+                elif route == "/api/site-detail":
+                    site_id = query.get("site_id", [""])[0].strip()
+
+                    if not site_id:
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "site_id_required",
+                                "message": (
+                                    "site_id query parameter is required"
+                                ),
+                            },
+                            status=400,
+                        )
+                    else:
+                        try:
+                            site_payload = (
+                                dashboard_site_detail_payload(
+                                    connection,
+                                    site_id,
+                                )
+                            )
+                        except DeltaAegisError as exc:
+                            dashboard_json_response(
+                                self,
+                                {
+                                    "ok": False,
+                                    "error": "logical_site_not_found",
+                                    "site_id": site_id,
+                                    "message": str(exc),
+                                },
+                                status=404,
+                            )
+                        else:
+                            dashboard_json_response(
+                                self,
+                                site_payload,
+                            )
+                elif route == "/api/scopes":
                     dashboard_json_response(self, dashboard_scopes_payload(connection))
                 elif route == "/api/summary":
                     dashboard_json_response(self, dashboard_summary_payload(connection, scope=scope))
