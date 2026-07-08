@@ -1,3 +1,18 @@
+## DeltaAegis v0.41.0 — Data Durability & Recovery
+
+- Added SQLite-consistent database backup creation using the SQLite backup API, read-only source access, integrity checks, secure temporary files, and no-overwrite publication.
+- Added `deltaaegis-backup-manifest-v1` sidecars with SHA-256 checksums, SQLite metadata, schema fingerprints, and atomic publication.
+- Added verified restore rehearsal into a separate non-active database with checksum, integrity, schema, and logical-fingerprint validation.
+- Added top-level backup catalog and single-bundle verification commands with `VALID`, `INVALID`, and `INCOMPLETE` outcomes.
+- Added non-destructive retention planning that keeps newest and young verified bundles while protecting invalid, incomplete, malformed, future-dated, and active-database aliases.
+- Added exact-confirmation retention execution with fresh verification, identity checks, quarantine links, rollback, durable directory syncing, and structured receipts.
+- Added active restore cutover preview with dashboard-process detection, SQLite sidecar blocking, path and identity checks, required safety-backup planning, and stable plan digests.
+- Added guarded active restore execution requiring the exact preview digest and `RESTORE ACTIVE DELTAAEGIS DATABASE` confirmation.
+- Added fresh verified pre-restore safety backups, temporary restore verification, atomic active-database replacement, post-cutover verification, and automatic rollback.
+- Preserved the default active database at `data/deltaaegis.db`; ignored root-level database files remain legacy local state and are never selected, deleted, or migrated automatically.
+- Added eight focused checkpoint validators, release metadata and documentation validators, release notes, manual verification, and the complete v0.41 release gate.
+- Preserved v0.40 human-readable operator actions, dashboard JavaScript checks, client-disconnect handling, and v0.39 functional compatibility.
+
 ## DeltaAegis v0.40.0 — Human-Readable Operator Actions
 
 - Added a shared action-receipt contract for successful dashboard mutations with stable action identifiers, severity, messages, summaries, identifiers, and optional diagnostic detail.

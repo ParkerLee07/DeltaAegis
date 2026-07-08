@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.40.0: Human-Readable Operator Actions.
+"""DeltaAegis v0.41.0: Data Durability & Recovery.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -30,8 +30,16 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 import html
+import datetime as _datetime
+import tempfile
 
 DEFAULT_DB = Path.home() / "DeltaAegis" / "data" / "deltaaegis.db"
+DEFAULT_BACKUPS = Path.home() / "DeltaAegis" / "backups"
+DELTAAEGIS_VERSION = "0.41.0"
+DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION = "deltaaegis-backup-manifest-v1"
+DEFAULT_RESTORE_REHEARSALS = (
+    Path.home() / "DeltaAegis" / "restore-rehearsals"
+)
 DEFAULT_RUNS = Path.home() / "NetSniper" / "runs"
 DEFAULT_NETSNIPER = Path.home() / "NetSniper" / "netsniper.sh"
 DEFAULT_SCAN_LOGS = Path.home() / "DeltaAegis" / "scan-logs"
@@ -21006,7 +21014,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.40 Human-Readable Operator Actions</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.41 Data Durability &amp; Recovery</span></div>
     </div>
   </header>
 
@@ -27922,7 +27930,7 @@ def command_dashboard(args):
 
 
     class DeltaAegisDashboardHandler(BaseHTTPRequestHandler):
-        server_version = "DeltaAegisDashboard/0.40.0"
+        server_version = "DeltaAegisDashboard/0.41.0"
 
         def log_message(self, fmt, *handler_args):
             if not args.quiet:
@@ -29813,14 +29821,5432 @@ def command_validations(args) -> int:
     return 0
 
 
+
+# v0.41 checkpoint 1: SQLite-consistent backup foundation
+def _normalize_new_backup_path(path: Path) -> Path:
+    """Resolve parent directories without following the final path."""
+
+    expanded = Path(path).expanduser()
+    absolute = Path(os.path.abspath(os.fspath(expanded)))
+    resolved_parent = absolute.parent.resolve(strict=False)
+    return resolved_parent / absolute.name
+
+
+def resolve_database_backup_destination(
+    source_path: Path,
+    *,
+    destination: Path | None = None,
+    backups_dir: Path | None = None,
+) -> Path:
+    """Resolve a new backup destination without opening the source."""
+
+    if destination is not None and backups_dir is not None:
+        raise DeltaAegisError(
+            "--destination and --backups-dir are mutually exclusive"
+        )
+
+    resolved_source = Path(source_path).expanduser().resolve(
+        strict=False
+    )
+
+    if destination is not None:
+        resolved_destination = _normalize_new_backup_path(
+            Path(destination)
+        )
+        destination_parent = resolved_destination.parent
+
+        if not destination_parent.exists():
+            raise DeltaAegisError(
+                "backup destination parent directory does not exist: "
+                f"{destination_parent}"
+            )
+
+        if not destination_parent.is_dir():
+            raise DeltaAegisError(
+                "backup destination parent is not a directory: "
+                f"{destination_parent}"
+            )
+    else:
+        backup_root = Path(
+            backups_dir if backups_dir is not None else DEFAULT_BACKUPS
+        ).expanduser().resolve(strict=False)
+
+        if os.path.lexists(backup_root) and not backup_root.is_dir():
+            raise DeltaAegisError(
+                f"backup directory is not a directory: {backup_root}"
+            )
+
+        try:
+            backup_root.mkdir(
+                parents=True,
+                exist_ok=True,
+                mode=0o700,
+            )
+        except OSError as exc:
+            raise DeltaAegisError(
+                f"could not create backup directory {backup_root}: {exc}"
+            ) from exc
+
+        timestamp = _datetime.datetime.now(
+            _datetime.timezone.utc
+        ).strftime("%Y%m%dT%H%M%SZ")
+
+        suffix = secrets.token_hex(4)
+
+        resolved_destination = (
+            backup_root
+            / f"deltaaegis-backup-{timestamp}-{suffix}.db"
+        )
+
+    if resolved_destination == resolved_source:
+        raise DeltaAegisError(
+            "backup source and destination must be different paths"
+        )
+
+    if os.path.lexists(resolved_destination):
+        raise DeltaAegisError(
+            f"backup destination already exists: {resolved_destination}"
+        )
+
+    return resolved_destination
+
+
+def create_sqlite_database_backup(
+    source_path: Path,
+    destination_path: Path,
+) -> dict[str, Any]:
+    """Create and verify a consistent SQLite backup."""
+
+    resolved_source = Path(source_path).expanduser().resolve(
+        strict=False
+    )
+    resolved_destination = _normalize_new_backup_path(
+        Path(destination_path)
+    )
+
+    if resolved_source == resolved_destination:
+        raise DeltaAegisError(
+            "backup source and destination must be different paths"
+        )
+
+    if not os.path.lexists(resolved_source):
+        raise DeltaAegisError(
+            f"source database does not exist: {resolved_source}"
+        )
+
+    if not resolved_source.is_file():
+        raise DeltaAegisError(
+            f"source database is not a regular file: {resolved_source}"
+        )
+
+    try:
+        source_size = resolved_source.stat().st_size
+    except OSError as exc:
+        raise DeltaAegisError(
+            f"could not inspect source database {resolved_source}: {exc}"
+        ) from exc
+
+    if source_size <= 0:
+        raise DeltaAegisError(
+            f"source database is empty: {resolved_source}"
+        )
+
+    destination_parent = resolved_destination.parent
+
+    if not destination_parent.exists():
+        raise DeltaAegisError(
+            "backup destination parent directory does not exist: "
+            f"{destination_parent}"
+        )
+
+    if not destination_parent.is_dir():
+        raise DeltaAegisError(
+            "backup destination parent is not a directory: "
+            f"{destination_parent}"
+        )
+
+    if os.path.lexists(resolved_destination):
+        raise DeltaAegisError(
+            f"backup destination already exists: "
+            f"{resolved_destination}"
+        )
+
+    temporary_path: Path | None = None
+    destination_published = False
+
+    try:
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{resolved_destination.name}.",
+            suffix=".tmp",
+            dir=str(destination_parent),
+        )
+        os.close(file_descriptor)
+        temporary_path = Path(temporary_name)
+
+        source_connection: sqlite3.Connection | None = None
+        backup_connection: sqlite3.Connection | None = None
+
+        try:
+            source_uri = resolved_source.as_uri() + "?mode=ro"
+
+            source_connection = sqlite3.connect(
+                source_uri,
+                uri=True,
+                timeout=30.0,
+            )
+
+            backup_connection = sqlite3.connect(
+                temporary_path,
+                timeout=30.0,
+            )
+
+            source_connection.backup(
+                backup_connection,
+                pages=256,
+                sleep=0.05,
+            )
+        finally:
+            if backup_connection is not None:
+                backup_connection.close()
+
+            if source_connection is not None:
+                source_connection.close()
+
+        verification_uri = (
+            temporary_path.resolve().as_uri() + "?mode=ro"
+        )
+        verification_connection: sqlite3.Connection | None = None
+
+        try:
+            verification_connection = sqlite3.connect(
+                verification_uri,
+                uri=True,
+                timeout=30.0,
+            )
+
+            quick_check_rows = [
+                str(row[0]).strip().lower()
+                for row in verification_connection.execute(
+                    "PRAGMA quick_check"
+                ).fetchall()
+            ]
+        finally:
+            if verification_connection is not None:
+                verification_connection.close()
+
+        if quick_check_rows != ["ok"]:
+            detail = "; ".join(quick_check_rows) or "no result"
+            raise DeltaAegisError(
+                f"backup integrity verification failed: {detail}"
+            )
+
+        try:
+            os.link(
+                temporary_path,
+                resolved_destination,
+            )
+            destination_published = True
+        except FileExistsError as exc:
+            raise DeltaAegisError(
+                f"backup destination already exists: "
+                f"{resolved_destination}"
+            ) from exc
+
+        temporary_path.unlink()
+        temporary_path = None
+
+        if not resolved_destination.is_file():
+            raise DeltaAegisError(
+                "backup publication did not create a regular file: "
+                f"{resolved_destination}"
+            )
+
+        final_size = resolved_destination.stat().st_size
+
+        if final_size <= 0:
+            raise DeltaAegisError(
+                f"completed backup is empty: {resolved_destination}"
+            )
+
+        return {
+            "source_path": str(resolved_source),
+            "backup_path": str(resolved_destination),
+            "size_bytes": final_size,
+            "integrity_status": "ok",
+        }
+
+    except DeltaAegisError:
+        if destination_published:
+            try:
+                resolved_destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        if destination_published:
+            try:
+                resolved_destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        raise DeltaAegisError(
+            f"database backup failed: {exc}"
+        ) from exc
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+
+# v0.41 checkpoint 2: backup metadata manifest and checksum
+def database_backup_manifest_path(backup_path: Path) -> Path:
+    normalized_backup = _normalize_new_backup_path(
+        Path(backup_path)
+    )
+    return _normalize_new_backup_path(
+        normalized_backup.with_name(
+            normalized_backup.name + ".manifest.json"
+        )
+    )
+
+
+def _database_backup_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+
+    try:
+        with Path(path).open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError as exc:
+        raise DeltaAegisError(
+            f"could not calculate backup checksum for {path}: {exc}"
+        ) from exc
+
+    return digest.hexdigest()
+
+
+def _sqlite_backup_metadata(
+    backup_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    resolved_backup = Path(backup_path).expanduser().resolve(
+        strict=True
+    )
+    connection: sqlite3.Connection | None = None
+
+    try:
+        connection = sqlite3.connect(
+            resolved_backup.as_uri() + "?mode=ro",
+            uri=True,
+            timeout=30.0,
+        )
+
+        pragma_names = (
+            "user_version",
+            "schema_version",
+            "application_id",
+            "page_size",
+            "page_count",
+            "journal_mode",
+        )
+        pragma_values: dict[str, Any] = {}
+
+        for pragma_name in pragma_names:
+            row = connection.execute(
+                f"PRAGMA {pragma_name}"
+            ).fetchone()
+
+            if row is None:
+                raise DeltaAegisError(
+                    f"backup metadata query returned no value for "
+                    f"PRAGMA {pragma_name}"
+                )
+
+            pragma_values[pragma_name] = row[0]
+
+        schema_rows = connection.execute(
+            "SELECT type, name, tbl_name, sql "
+            "FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' "
+            "AND sql IS NOT NULL "
+            "ORDER BY type, name, tbl_name"
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise DeltaAegisError(
+            f"could not inspect completed backup metadata: {exc}"
+        ) from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+    schema_objects = [
+        {
+            "type": str(row[0]),
+            "name": str(row[1]),
+            "table_name": str(row[2]),
+            "sql": str(row[3]),
+        }
+        for row in schema_rows
+    ]
+
+    canonical_schema = json.dumps(
+        schema_objects,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+    schema_fingerprint = hashlib.sha256(
+        canonical_schema
+    ).hexdigest()
+
+    sqlite_metadata = {
+        "library_version": sqlite3.sqlite_version,
+        "user_version": int(pragma_values["user_version"]),
+        "schema_version": int(pragma_values["schema_version"]),
+        "application_id": int(pragma_values["application_id"]),
+        "page_size": int(pragma_values["page_size"]),
+        "page_count": int(pragma_values["page_count"]),
+        "journal_mode": str(
+            pragma_values["journal_mode"]
+        ).lower(),
+    }
+
+    schema_metadata = {
+        "fingerprint_algorithm": "sha256",
+        "fingerprint": schema_fingerprint,
+        "object_count": len(schema_objects),
+    }
+
+    return sqlite_metadata, schema_metadata
+
+
+def _publish_database_backup_manifest(
+    manifest_path: Path,
+    payload: dict[str, Any],
+) -> None:
+    resolved_manifest = _normalize_new_backup_path(
+        Path(manifest_path)
+    )
+    manifest_parent = resolved_manifest.parent
+
+    if not manifest_parent.exists():
+        raise DeltaAegisError(
+            "backup manifest parent directory does not exist: "
+            f"{manifest_parent}"
+        )
+
+    if not manifest_parent.is_dir():
+        raise DeltaAegisError(
+            "backup manifest parent is not a directory: "
+            f"{manifest_parent}"
+        )
+
+    if os.path.lexists(resolved_manifest):
+        raise DeltaAegisError(
+            f"backup manifest already exists: {resolved_manifest}"
+        )
+
+    temporary_path: Path | None = None
+    manifest_published = False
+
+    try:
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{resolved_manifest.name}.",
+            suffix=".tmp",
+            dir=str(manifest_parent),
+        )
+        temporary_path = Path(temporary_name)
+
+        with os.fdopen(
+            file_descriptor,
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(
+                payload,
+                handle,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        try:
+            os.link(
+                temporary_path,
+                resolved_manifest,
+            )
+            manifest_published = True
+        except FileExistsError as exc:
+            raise DeltaAegisError(
+                f"backup manifest already exists: "
+                f"{resolved_manifest}"
+            ) from exc
+
+        temporary_path.unlink()
+        temporary_path = None
+    except DeltaAegisError:
+        if manifest_published:
+            try:
+                resolved_manifest.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    except (OSError, TypeError, ValueError) as exc:
+        if manifest_published:
+            try:
+                resolved_manifest.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        raise DeltaAegisError(
+            f"could not publish backup manifest "
+            f"{resolved_manifest}: {exc}"
+        ) from exc
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def create_sqlite_database_backup_bundle(
+    source_path: Path,
+    destination_path: Path,
+) -> dict[str, Any]:
+    resolved_source = Path(source_path).expanduser().resolve(
+        strict=False
+    )
+    resolved_destination = _normalize_new_backup_path(
+        Path(destination_path)
+    )
+    manifest_path = database_backup_manifest_path(
+        resolved_destination
+    )
+
+    if os.path.lexists(manifest_path):
+        raise DeltaAegisError(
+            f"backup manifest already exists: {manifest_path}"
+        )
+
+    try:
+        source_size = resolved_source.stat().st_size
+    except OSError as exc:
+        raise DeltaAegisError(
+            f"could not inspect source database "
+            f"{resolved_source}: {exc}"
+        ) from exc
+
+    backup_created = False
+    manifest_created = False
+
+    try:
+        backup_result = create_sqlite_database_backup(
+            resolved_source,
+            resolved_destination,
+        )
+        backup_created = True
+
+        backup_path = Path(backup_result["backup_path"])
+        backup_sha256 = _database_backup_sha256(
+            backup_path
+        )
+        sqlite_metadata, schema_metadata = (
+            _sqlite_backup_metadata(backup_path)
+        )
+
+        created_at = (
+            datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+
+        manifest_payload = {
+            "schema_version": (
+                DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION
+            ),
+            "application": {
+                "name": "DeltaAegis",
+                "version": DELTAAEGIS_VERSION,
+            },
+            "created_at": created_at,
+            "source": {
+                "path": str(resolved_source),
+                "size_bytes": int(source_size),
+            },
+            "backup": {
+                "filename": backup_path.name,
+                "path": str(backup_path),
+                "size_bytes": int(
+                    backup_result["size_bytes"]
+                ),
+                "sha256": backup_sha256,
+                "integrity_status": str(
+                    backup_result["integrity_status"]
+                ),
+            },
+            "sqlite": sqlite_metadata,
+            "schema": schema_metadata,
+        }
+
+        _publish_database_backup_manifest(
+            manifest_path,
+            manifest_payload,
+        )
+        manifest_created = True
+
+        result = dict(backup_result)
+        result.update(
+            {
+                "manifest_path": str(manifest_path),
+                "backup_sha256": backup_sha256,
+                "schema_fingerprint": (
+                    schema_metadata["fingerprint"]
+                ),
+            }
+        )
+        return result
+    except DeltaAegisError:
+        if manifest_created:
+            try:
+                manifest_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        if backup_created:
+            try:
+                resolved_destination.unlink(missing_ok=True)
+            except OSError as cleanup_exc:
+                raise DeltaAegisError(
+                    "backup metadata creation failed and the "
+                    "incomplete backup could not be removed: "
+                    f"{resolved_destination}: {cleanup_exc}"
+                ) from cleanup_exc
+
+        raise
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        if manifest_created:
+            try:
+                manifest_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        if backup_created:
+            try:
+                resolved_destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        raise DeltaAegisError(
+            f"database backup metadata creation failed: {exc}"
+        ) from exc
+
+
+def command_backup(args) -> int:
+    destination_path = resolve_database_backup_destination(
+        args.db,
+        destination=args.destination,
+        backups_dir=args.backups_dir,
+    )
+
+    result = create_sqlite_database_backup_bundle(
+        args.db,
+        destination_path,
+    )
+
+    print("DeltaAegis database backup completed.")
+    print(f"Source: {result['source_path']}")
+    print(f"Backup: {result['backup_path']}")
+    print(f"Manifest: {result['manifest_path']}")
+    print(f"Size: {result['size_bytes']} bytes")
+    print(f"Integrity: {result['integrity_status']}")
+    print(f"SHA-256: {result['backup_sha256']}")
+    print(
+        f"Schema fingerprint: "
+        f"{result['schema_fingerprint']}"
+    )
+
+    return 0
+
+
+
+# v0.41 checkpoint 3: verified restore rehearsal
+def _existing_paths_share_file_identity(
+    first_path: Path,
+    second_path: Path,
+) -> bool:
+    try:
+        return os.path.samefile(first_path, second_path)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise DeltaAegisError(
+            "could not compare restore rehearsal file identities: "
+            f"{first_path} and {second_path}: {exc}"
+        ) from exc
+
+
+def resolve_database_restore_rehearsal_paths(
+    active_database_path: Path,
+    backup_path: Path,
+    *,
+    manifest_path: Path | None = None,
+    destination: Path | None = None,
+    restore_dir: Path | None = None,
+) -> tuple[Path, Path, Path]:
+    if destination is not None and restore_dir is not None:
+        raise DeltaAegisError(
+            "--destination and --restore-dir are mutually exclusive"
+        )
+
+    resolved_active = Path(
+        active_database_path
+    ).expanduser().resolve(strict=False)
+    resolved_backup = _normalize_new_backup_path(
+        Path(backup_path)
+    )
+
+    if not os.path.lexists(resolved_backup):
+        raise DeltaAegisError(
+            f"backup database does not exist: {resolved_backup}"
+        )
+
+    if resolved_backup.is_symlink():
+        raise DeltaAegisError(
+            f"backup database must not be a symlink: {resolved_backup}"
+        )
+
+    if not resolved_backup.is_file():
+        raise DeltaAegisError(
+            f"backup database is not a regular file: {resolved_backup}"
+        )
+
+    if (
+        resolved_backup == resolved_active
+        or _existing_paths_share_file_identity(
+            resolved_backup,
+            resolved_active,
+        )
+    ):
+        raise DeltaAegisError(
+            "restore rehearsal backup must not be the active database"
+        )
+
+    resolved_manifest = _normalize_new_backup_path(
+        Path(
+            manifest_path
+            if manifest_path is not None
+            else database_backup_manifest_path(resolved_backup)
+        )
+    )
+
+    if not os.path.lexists(resolved_manifest):
+        raise DeltaAegisError(
+            f"backup manifest does not exist: {resolved_manifest}"
+        )
+
+    if resolved_manifest.is_symlink():
+        raise DeltaAegisError(
+            f"backup manifest must not be a symlink: {resolved_manifest}"
+        )
+
+    if not resolved_manifest.is_file():
+        raise DeltaAegisError(
+            f"backup manifest is not a regular file: "
+            f"{resolved_manifest}"
+        )
+
+    if destination is not None:
+        resolved_destination = _normalize_new_backup_path(
+            Path(destination)
+        )
+        destination_parent = resolved_destination.parent
+
+        if not destination_parent.exists():
+            raise DeltaAegisError(
+                "restore destination parent directory does not exist: "
+                f"{destination_parent}"
+            )
+
+        if not destination_parent.is_dir():
+            raise DeltaAegisError(
+                "restore destination parent is not a directory: "
+                f"{destination_parent}"
+            )
+    else:
+        restore_root = Path(
+            (
+                restore_dir
+                if restore_dir is not None
+                else DEFAULT_RESTORE_REHEARSALS
+            )
+        ).expanduser().resolve(strict=False)
+
+        if os.path.lexists(restore_root) and not restore_root.is_dir():
+            raise DeltaAegisError(
+                f"restore rehearsal directory is not a directory: "
+                f"{restore_root}"
+            )
+
+        try:
+            restore_root.mkdir(
+                parents=True,
+                exist_ok=True,
+                mode=0o700,
+            )
+        except OSError as exc:
+            raise DeltaAegisError(
+                f"could not create restore rehearsal directory "
+                f"{restore_root}: {exc}"
+            ) from exc
+
+        timestamp = datetime.now(timezone.utc).strftime(
+            "%Y%m%dT%H%M%SZ"
+        )
+        suffix = secrets.token_hex(4)
+        resolved_destination = (
+            restore_root
+            / (
+                "deltaaegis-restore-rehearsal-"
+                f"{timestamp}-{suffix}.db"
+            )
+        )
+
+    prohibited_destinations = {
+        resolved_active,
+        resolved_backup,
+        resolved_manifest,
+    }
+
+    if resolved_destination in prohibited_destinations:
+        raise DeltaAegisError(
+            "restore rehearsal destination must be separate from "
+            "the active database, backup, and manifest"
+        )
+
+    if os.path.lexists(resolved_destination):
+        raise DeltaAegisError(
+            f"restore rehearsal destination already exists: "
+            f"{resolved_destination}"
+        )
+
+    return (
+        resolved_backup,
+        resolved_manifest,
+        resolved_destination,
+    )
+
+
+def _read_database_backup_manifest(
+    manifest_path: Path,
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(
+            Path(manifest_path).read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise DeltaAegisError(
+            f"could not read backup manifest {manifest_path}: {exc}"
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise DeltaAegisError(
+            f"backup manifest must contain a JSON object: "
+            f"{manifest_path}"
+        )
+
+    return payload
+
+
+def _sqlite_database_integrity_check(
+    database_path: Path,
+) -> list[str]:
+    resolved_database = Path(database_path).resolve(strict=True)
+    connection: sqlite3.Connection | None = None
+
+    try:
+        connection = sqlite3.connect(
+            resolved_database.as_uri() + "?mode=ro",
+            uri=True,
+            timeout=30.0,
+        )
+        return [
+            str(row[0]).strip().lower()
+            for row in connection.execute(
+                "PRAGMA integrity_check"
+            ).fetchall()
+        ]
+    except sqlite3.Error as exc:
+        raise DeltaAegisError(
+            f"could not verify SQLite integrity for "
+            f"{resolved_database}: {exc}"
+        ) from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _sqlite_database_logical_fingerprint(
+    database_path: Path,
+) -> str:
+    resolved_database = Path(database_path).resolve(strict=True)
+    connection: sqlite3.Connection | None = None
+    digest = hashlib.sha256()
+
+    try:
+        connection = sqlite3.connect(
+            resolved_database.as_uri() + "?mode=ro",
+            uri=True,
+            timeout=30.0,
+        )
+
+        for statement in connection.iterdump():
+            digest.update(statement.encode("utf-8"))
+            digest.update(b"\n")
+    except (sqlite3.Error, UnicodeError) as exc:
+        raise DeltaAegisError(
+            f"could not calculate logical database fingerprint for "
+            f"{resolved_database}: {exc}"
+        ) from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+    return digest.hexdigest()
+
+
+def verify_database_backup_bundle(
+    backup_path: Path,
+    manifest_path: Path,
+) -> dict[str, Any]:
+    resolved_backup = _normalize_new_backup_path(
+        Path(backup_path)
+    )
+    resolved_manifest = _normalize_new_backup_path(
+        Path(manifest_path)
+    )
+
+    if not os.path.lexists(resolved_backup):
+        raise DeltaAegisError(
+            f"backup database does not exist: {resolved_backup}"
+        )
+
+    if resolved_backup.is_symlink():
+        raise DeltaAegisError(
+            f"backup database must not be a symlink: {resolved_backup}"
+        )
+
+    if not resolved_backup.is_file():
+        raise DeltaAegisError(
+            f"backup database is not a regular file: {resolved_backup}"
+        )
+
+    if not os.path.lexists(resolved_manifest):
+        raise DeltaAegisError(
+            f"backup manifest does not exist: {resolved_manifest}"
+        )
+
+    if resolved_manifest.is_symlink():
+        raise DeltaAegisError(
+            f"backup manifest must not be a symlink: {resolved_manifest}"
+        )
+
+    if not resolved_manifest.is_file():
+        raise DeltaAegisError(
+            f"backup manifest is not a regular file: "
+            f"{resolved_manifest}"
+        )
+
+    manifest = _read_database_backup_manifest(
+        resolved_manifest
+    )
+
+    if (
+        manifest.get("schema_version")
+        != DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION
+    ):
+        raise DeltaAegisError(
+            "unsupported backup manifest schema: "
+            f"{manifest.get('schema_version')!r}"
+        )
+
+    backup_metadata = manifest.get("backup")
+    schema_metadata = manifest.get("schema")
+    sqlite_manifest = manifest.get("sqlite")
+
+    if not isinstance(backup_metadata, dict):
+        raise DeltaAegisError(
+            "backup manifest is missing backup metadata"
+        )
+
+    if not isinstance(schema_metadata, dict):
+        raise DeltaAegisError(
+            "backup manifest is missing schema metadata"
+        )
+
+    if not isinstance(sqlite_manifest, dict):
+        raise DeltaAegisError(
+            "backup manifest is missing SQLite metadata"
+        )
+
+    if str(backup_metadata.get("filename") or "") != (
+        resolved_backup.name
+    ):
+        raise DeltaAegisError(
+            "backup filename does not match the manifest"
+        )
+
+    try:
+        actual_size = resolved_backup.stat().st_size
+        expected_size = int(backup_metadata["size_bytes"])
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise DeltaAegisError(
+            f"backup manifest contains invalid size metadata: {exc}"
+        ) from exc
+
+    if actual_size <= 0:
+        raise DeltaAegisError(
+            f"backup database is empty: {resolved_backup}"
+        )
+
+    if actual_size != expected_size:
+        raise DeltaAegisError(
+            "backup size does not match the manifest: "
+            f"expected {expected_size}, found {actual_size}"
+        )
+
+    expected_sha256 = str(
+        backup_metadata.get("sha256") or ""
+    ).lower()
+
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise DeltaAegisError(
+            "backup manifest contains an invalid SHA-256 checksum"
+        )
+
+    actual_sha256 = _database_backup_sha256(
+        resolved_backup
+    )
+
+    if actual_sha256 != expected_sha256:
+        raise DeltaAegisError(
+            "backup SHA-256 checksum does not match the manifest"
+        )
+
+    integrity_rows = _sqlite_database_integrity_check(
+        resolved_backup
+    )
+
+    if integrity_rows != ["ok"]:
+        detail = "; ".join(integrity_rows) or "no result"
+        raise DeltaAegisError(
+            f"backup SQLite integrity check failed: {detail}"
+        )
+
+    sqlite_metadata, actual_schema_metadata = (
+        _sqlite_backup_metadata(resolved_backup)
+    )
+    expected_schema_fingerprint = str(
+        schema_metadata.get("fingerprint") or ""
+    ).lower()
+
+    if not re.fullmatch(
+        r"[0-9a-f]{64}",
+        expected_schema_fingerprint,
+    ):
+        raise DeltaAegisError(
+            "backup manifest contains an invalid schema fingerprint"
+        )
+
+    if (
+        actual_schema_metadata["fingerprint"]
+        != expected_schema_fingerprint
+    ):
+        raise DeltaAegisError(
+            "backup schema fingerprint does not match the manifest"
+        )
+
+    for key in (
+        "user_version",
+        "schema_version",
+        "application_id",
+        "page_size",
+        "page_count",
+    ):
+        try:
+            expected_value = int(sqlite_manifest[key])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DeltaAegisError(
+                f"backup manifest contains invalid SQLite "
+                f"metadata for {key}"
+            ) from exc
+
+        if int(sqlite_metadata[key]) != expected_value:
+            raise DeltaAegisError(
+                f"backup SQLite metadata does not match for {key}: "
+                f"expected {expected_value}, "
+                f"found {sqlite_metadata[key]}"
+            )
+
+    logical_fingerprint = (
+        _sqlite_database_logical_fingerprint(
+            resolved_backup
+        )
+    )
+
+    return {
+        "backup_path": str(resolved_backup),
+        "manifest_path": str(resolved_manifest),
+        "size_bytes": actual_size,
+        "backup_sha256": actual_sha256,
+        "schema_fingerprint": (
+            actual_schema_metadata["fingerprint"]
+        ),
+        "logical_fingerprint": logical_fingerprint,
+        "integrity_status": "ok",
+    }
+
+
+def _unlink_if_inode_matches(
+    path: Path,
+    expected_identity: tuple[int, int] | None,
+) -> None:
+    if expected_identity is None:
+        return
+
+    try:
+        path_stat = os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+
+    if (
+        path_stat.st_dev,
+        path_stat.st_ino,
+    ) != expected_identity:
+        return
+
+    try:
+        Path(path).unlink()
+    except OSError:
+        pass
+
+
+def create_database_restore_rehearsal(
+    active_database_path: Path,
+    backup_path: Path,
+    manifest_path: Path,
+    destination_path: Path,
+) -> dict[str, Any]:
+    resolved_active = Path(
+        active_database_path
+    ).expanduser().resolve(strict=False)
+    resolved_backup = _normalize_new_backup_path(
+        Path(backup_path)
+    )
+    resolved_manifest = _normalize_new_backup_path(
+        Path(manifest_path)
+    )
+    resolved_destination = _normalize_new_backup_path(
+        Path(destination_path)
+    )
+
+    if (
+        resolved_backup == resolved_active
+        or _existing_paths_share_file_identity(
+            resolved_backup,
+            resolved_active,
+        )
+    ):
+        raise DeltaAegisError(
+            "restore rehearsal backup must not be the active database"
+        )
+
+    if resolved_destination in {
+        resolved_active,
+        resolved_backup,
+        resolved_manifest,
+    }:
+        raise DeltaAegisError(
+            "restore rehearsal destination must be separate from "
+            "the active database, backup, and manifest"
+        )
+
+    destination_parent = resolved_destination.parent
+
+    if not destination_parent.exists():
+        raise DeltaAegisError(
+            "restore destination parent directory does not exist: "
+            f"{destination_parent}"
+        )
+
+    if not destination_parent.is_dir():
+        raise DeltaAegisError(
+            "restore destination parent is not a directory: "
+            f"{destination_parent}"
+        )
+
+    if os.path.lexists(resolved_destination):
+        raise DeltaAegisError(
+            f"restore rehearsal destination already exists: "
+            f"{resolved_destination}"
+        )
+
+    verification = verify_database_backup_bundle(
+        resolved_backup,
+        resolved_manifest,
+    )
+
+    temporary_path: Path | None = None
+    temporary_identity: tuple[int, int] | None = None
+    published_identity: tuple[int, int] | None = None
+
+    try:
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{resolved_destination.name}.",
+            suffix=".tmp",
+            dir=str(destination_parent),
+        )
+        os.close(file_descriptor)
+        temporary_path = Path(temporary_name)
+        temporary_stat = os.lstat(temporary_path)
+        temporary_identity = (
+            temporary_stat.st_dev,
+            temporary_stat.st_ino,
+        )
+
+        source_connection: sqlite3.Connection | None = None
+        restore_connection: sqlite3.Connection | None = None
+
+        try:
+            source_connection = sqlite3.connect(
+                resolved_backup.as_uri() + "?mode=ro",
+                uri=True,
+                timeout=30.0,
+            )
+            restore_connection = sqlite3.connect(
+                temporary_path,
+                timeout=30.0,
+            )
+            source_connection.backup(
+                restore_connection,
+                pages=256,
+                sleep=0.05,
+            )
+        finally:
+            if restore_connection is not None:
+                restore_connection.close()
+
+            if source_connection is not None:
+                source_connection.close()
+
+        restored_integrity = _sqlite_database_integrity_check(
+            temporary_path
+        )
+
+        if restored_integrity != ["ok"]:
+            detail = "; ".join(restored_integrity) or "no result"
+            raise DeltaAegisError(
+                f"restored database integrity check failed: {detail}"
+            )
+
+        restored_logical_fingerprint = (
+            _sqlite_database_logical_fingerprint(
+                temporary_path
+            )
+        )
+
+        if (
+            restored_logical_fingerprint
+            != verification["logical_fingerprint"]
+        ):
+            raise DeltaAegisError(
+                "restored database logical fingerprint does not "
+                "match the verified backup"
+            )
+
+        _, restored_schema_metadata = _sqlite_backup_metadata(
+            temporary_path
+        )
+
+        if (
+            restored_schema_metadata["fingerprint"]
+            != verification["schema_fingerprint"]
+        ):
+            raise DeltaAegisError(
+                "restored database schema fingerprint does not "
+                "match the verified backup"
+            )
+
+        try:
+            os.link(
+                temporary_path,
+                resolved_destination,
+            )
+        except FileExistsError as exc:
+            raise DeltaAegisError(
+                f"restore rehearsal destination already exists: "
+                f"{resolved_destination}"
+            ) from exc
+
+        destination_stat = os.lstat(resolved_destination)
+        published_identity = (
+            destination_stat.st_dev,
+            destination_stat.st_ino,
+        )
+
+        if published_identity != temporary_identity:
+            raise DeltaAegisError(
+                "restore rehearsal publication identity mismatch"
+            )
+
+        _unlink_if_inode_matches(
+            temporary_path,
+            temporary_identity,
+        )
+        temporary_path = None
+        temporary_identity = None
+
+        if not resolved_destination.is_file():
+            raise DeltaAegisError(
+                "restore rehearsal publication did not create a "
+                f"regular file: {resolved_destination}"
+            )
+
+        restored_size = resolved_destination.stat().st_size
+
+        if restored_size <= 0:
+            raise DeltaAegisError(
+                f"restored rehearsal database is empty: "
+                f"{resolved_destination}"
+            )
+
+        return {
+            **verification,
+            "active_database_path": str(resolved_active),
+            "restored_path": str(resolved_destination),
+            "restored_size_bytes": restored_size,
+            "restored_integrity_status": "ok",
+            "restored_logical_fingerprint": (
+                restored_logical_fingerprint
+            ),
+        }
+    except DeltaAegisError:
+        _unlink_if_inode_matches(
+            resolved_destination,
+            published_identity,
+        )
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        _unlink_if_inode_matches(
+            resolved_destination,
+            published_identity,
+        )
+        raise DeltaAegisError(
+            f"restore rehearsal failed: {exc}"
+        ) from exc
+    finally:
+        if temporary_path is not None:
+            _unlink_if_inode_matches(
+                temporary_path,
+                temporary_identity,
+            )
+
+
+def command_restore_rehearsal(args) -> int:
+    (
+        backup_path,
+        manifest_path,
+        destination_path,
+    ) = resolve_database_restore_rehearsal_paths(
+        args.db,
+        args.backup,
+        manifest_path=args.manifest,
+        destination=args.destination,
+        restore_dir=args.restore_dir,
+    )
+
+    result = create_database_restore_rehearsal(
+        args.db,
+        backup_path,
+        manifest_path,
+        destination_path,
+    )
+
+    print("DeltaAegis restore rehearsal completed.")
+    print(f"Active database: {result['active_database_path']}")
+    print(f"Backup: {result['backup_path']}")
+    print(f"Manifest: {result['manifest_path']}")
+    print(f"Restored copy: {result['restored_path']}")
+    print(
+        f"Restored size: "
+        f"{result['restored_size_bytes']} bytes"
+    )
+    print(
+        f"Backup SHA-256 verified: "
+        f"{result['backup_sha256']}"
+    )
+    print(
+        f"Schema fingerprint verified: "
+        f"{result['schema_fingerprint']}"
+    )
+    print(
+        f"Logical fingerprint verified: "
+        f"{result['restored_logical_fingerprint']}"
+    )
+    print(
+        f"Integrity: "
+        f"{result['restored_integrity_status']}"
+    )
+    print("Active database was not modified.")
+
+    return 0
+
+
+
+# v0.41 checkpoint 4: backup catalog and verification CLI
+DATABASE_BACKUP_CATALOG_SCHEMA_VERSION = (
+    "deltaaegis-backup-catalog-v1"
+)
+
+
+def _database_backup_catalog_root(backups_dir: Path) -> Path:
+    root = _normalize_new_backup_path(Path(backups_dir))
+
+    if not os.path.lexists(root):
+        return root
+
+    if root.is_symlink():
+        raise DeltaAegisError(
+            f"backup catalog directory must not be a symlink: {root}"
+        )
+
+    if not root.is_dir():
+        raise DeltaAegisError(
+            f"backup catalog path is not a directory: {root}"
+        )
+
+    return root
+
+
+def _database_backup_catalog_entry(
+    backup_path: Path,
+    manifest_path: Path,
+) -> dict[str, Any]:
+    resolved_backup = _normalize_new_backup_path(
+        Path(backup_path)
+    )
+    resolved_manifest = _normalize_new_backup_path(
+        Path(manifest_path)
+    )
+    backup_exists = os.path.lexists(resolved_backup)
+    manifest_exists = os.path.lexists(resolved_manifest)
+
+    entry: dict[str, Any] = {
+        "backup_path": str(resolved_backup),
+        "manifest_path": str(resolved_manifest),
+        "backup_exists": backup_exists,
+        "manifest_exists": manifest_exists,
+        "status": "INCOMPLETE",
+        "detail": "",
+        "created_at": None,
+        "application_version": None,
+        "size_bytes": None,
+        "backup_sha256": None,
+        "schema_fingerprint": None,
+        "logical_fingerprint": None,
+        "integrity_status": None,
+    }
+
+    if not backup_exists and not manifest_exists:
+        entry["detail"] = "backup and manifest are missing"
+        return entry
+
+    if not backup_exists:
+        entry["detail"] = "backup database is missing"
+        return entry
+
+    if not manifest_exists:
+        entry["detail"] = "backup manifest is missing"
+        return entry
+
+    try:
+        verification = verify_database_backup_bundle(
+            resolved_backup,
+            resolved_manifest,
+        )
+        manifest = _read_database_backup_manifest(
+            resolved_manifest
+        )
+    except DeltaAegisError as exc:
+        entry["status"] = "INVALID"
+        entry["detail"] = str(exc)
+        return entry
+
+    application = manifest.get("application")
+
+    entry.update(
+        {
+            "status": "VALID",
+            "detail": "backup bundle verified",
+            "created_at": manifest.get("created_at"),
+            "application_version": (
+                application.get("version")
+                if isinstance(application, dict)
+                else None
+            ),
+            "size_bytes": verification["size_bytes"],
+            "backup_sha256": verification["backup_sha256"],
+            "schema_fingerprint": (
+                verification["schema_fingerprint"]
+            ),
+            "logical_fingerprint": (
+                verification["logical_fingerprint"]
+            ),
+            "integrity_status": (
+                verification["integrity_status"]
+            ),
+        }
+    )
+    return entry
+
+
+def catalog_database_backups(
+    backups_dir: Path,
+) -> dict[str, Any]:
+    root = _database_backup_catalog_root(backups_dir)
+    backup_paths: dict[str, Path] = {}
+    manifest_paths: dict[str, Path] = {}
+
+    if root.exists():
+        try:
+            children = list(root.iterdir())
+        except OSError as exc:
+            raise DeltaAegisError(
+                f"could not inspect backup catalog directory "
+                f"{root}: {exc}"
+            ) from exc
+
+        for child in children:
+            name = child.name
+
+            if name.endswith(".db.manifest.json"):
+                backup_name = name[: -len(".manifest.json")]
+                manifest_paths[backup_name] = child
+            elif name.endswith(".db"):
+                backup_paths[name] = child
+
+    entries: list[dict[str, Any]] = []
+
+    for backup_name in sorted(
+        set(backup_paths) | set(manifest_paths)
+    ):
+        backup_path = backup_paths.get(
+            backup_name,
+            root / backup_name,
+        )
+        manifest_path = manifest_paths.get(
+            backup_name,
+            root / f"{backup_name}.manifest.json",
+        )
+        entries.append(
+            _database_backup_catalog_entry(
+                backup_path,
+                manifest_path,
+            )
+        )
+
+    entries.sort(
+        key=lambda item: (
+            str(item.get("created_at") or ""),
+            str(item.get("backup_path") or ""),
+        ),
+        reverse=True,
+    )
+
+    summary = {
+        "total": len(entries),
+        "valid": sum(
+            1 for item in entries if item["status"] == "VALID"
+        ),
+        "invalid": sum(
+            1 for item in entries if item["status"] == "INVALID"
+        ),
+        "incomplete": sum(
+            1
+            for item in entries
+            if item["status"] == "INCOMPLETE"
+        ),
+    }
+
+    return {
+        "schema_version": DATABASE_BACKUP_CATALOG_SCHEMA_VERSION,
+        "backups_dir": str(root),
+        "directory_exists": root.exists(),
+        "summary": summary,
+        "entries": entries,
+    }
+
+
+def inspect_database_backup_bundle(
+    backup_path: Path,
+    manifest_path: Path | None = None,
+) -> dict[str, Any]:
+    resolved_backup = _normalize_new_backup_path(
+        Path(backup_path)
+    )
+    resolved_manifest = _normalize_new_backup_path(
+        Path(
+            manifest_path
+            if manifest_path is not None
+            else database_backup_manifest_path(
+                resolved_backup
+            )
+        )
+    )
+    return _database_backup_catalog_entry(
+        resolved_backup,
+        resolved_manifest,
+    )
+
+
+def _print_database_backup_catalog_human(
+    catalog: dict[str, Any],
+) -> None:
+    summary = catalog["summary"]
+
+    print("DeltaAegis backup catalog")
+    print(f"Directory: {catalog['backups_dir']}")
+    print(
+        "Summary: "
+        f"{summary['valid']} valid, "
+        f"{summary['invalid']} invalid, "
+        f"{summary['incomplete']} incomplete, "
+        f"{summary['total']} total"
+    )
+
+    if not catalog["directory_exists"]:
+        print("Backup directory does not exist.")
+        return
+
+    if not catalog["entries"]:
+        print("No DeltaAegis database backup bundles found.")
+        return
+
+    for entry in catalog["entries"]:
+        print()
+        print(
+            f"{entry['status']}: "
+            f"{entry['backup_path']}"
+        )
+        print(f"  Manifest: {entry['manifest_path']}")
+        print(
+            f"  Created: "
+            f"{entry.get('created_at') or '-'}"
+        )
+        print(
+            f"  Size: "
+            f"{entry.get('size_bytes') or '-'}"
+        )
+        print(f"  Detail: {entry['detail']}")
+
+
+def _print_database_backup_verification_human(
+    entry: dict[str, Any],
+) -> None:
+    print(f"Status: {entry['status']}")
+    print(f"Backup: {entry['backup_path']}")
+    print(f"Manifest: {entry['manifest_path']}")
+    print(f"Detail: {entry['detail']}")
+
+    if entry["status"] == "VALID":
+        print(f"Created: {entry.get('created_at') or '-'}")
+        print(f"Size: {entry['size_bytes']} bytes")
+        print(f"Integrity: {entry['integrity_status']}")
+        print(f"SHA-256: {entry['backup_sha256']}")
+        print(
+            f"Schema fingerprint: "
+            f"{entry['schema_fingerprint']}"
+        )
+        print(
+            f"Logical fingerprint: "
+            f"{entry['logical_fingerprint']}"
+        )
+
+
+def command_backup_catalog(args) -> int:
+    catalog = catalog_database_backups(
+        args.backups_dir
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                catalog,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        _print_database_backup_catalog_human(
+            catalog
+        )
+
+    summary = catalog["summary"]
+    return (
+        1
+        if summary["invalid"] or summary["incomplete"]
+        else 0
+    )
+
+
+def command_backup_verify(args) -> int:
+    entry = inspect_database_backup_bundle(
+        args.backup,
+        args.manifest,
+    )
+
+    payload = {
+        "schema_version": (
+            DATABASE_BACKUP_CATALOG_SCHEMA_VERSION
+        ),
+        "entry": entry,
+    }
+
+    if args.json:
+        print(
+            json.dumps(
+                payload,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        _print_database_backup_verification_human(
+            entry
+        )
+
+    return 0 if entry["status"] == "VALID" else 1
+
+
+
+# v0.41 checkpoint 5: backup retention planning and preview
+DATABASE_BACKUP_RETENTION_PLAN_SCHEMA_VERSION = (
+    "deltaaegis-backup-retention-plan-v1"
+)
+DATABASE_BACKUP_RETENTION_DEFAULT_KEEP_NEWEST = 5
+DATABASE_BACKUP_RETENTION_DEFAULT_MINIMUM_AGE_DAYS = 30
+
+
+def database_backup_retention_positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            "value must be a positive integer"
+        ) from exc
+
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(
+            "value must be at least 1"
+        )
+
+    return parsed
+
+
+def database_backup_retention_nonnegative_int(
+    value: str,
+) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            "value must be a non-negative integer"
+        ) from exc
+
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(
+            "value must be zero or greater"
+        )
+
+    return parsed
+
+
+def _database_backup_retention_timestamp(
+    value: Any,
+) -> datetime:
+    text = str(value or "").strip()
+
+    if not text:
+        raise DeltaAegisError(
+            "backup creation timestamp is missing"
+        )
+
+    try:
+        parsed = datetime.fromisoformat(
+            text.replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise DeltaAegisError(
+            f"backup creation timestamp is invalid: {text!r}"
+        ) from exc
+
+    if parsed.tzinfo is None:
+        raise DeltaAegisError(
+            "backup creation timestamp must include a timezone"
+        )
+
+    return parsed.astimezone(timezone.utc)
+
+
+def plan_database_backup_retention(
+    backups_dir: Path,
+    *,
+    keep_newest: int = (
+        DATABASE_BACKUP_RETENTION_DEFAULT_KEEP_NEWEST
+    ),
+    minimum_age_days: int = (
+        DATABASE_BACKUP_RETENTION_DEFAULT_MINIMUM_AGE_DAYS
+    ),
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    if keep_newest < 1:
+        raise DeltaAegisError(
+            "backup retention must keep at least one valid backup"
+        )
+
+    if minimum_age_days < 0:
+        raise DeltaAegisError(
+            "backup retention minimum age cannot be negative"
+        )
+
+    effective_now = now or datetime.now(timezone.utc)
+
+    if effective_now.tzinfo is None:
+        raise DeltaAegisError(
+            "backup retention reference time must include a timezone"
+        )
+
+    effective_now = effective_now.astimezone(timezone.utc)
+    catalog = catalog_database_backups(backups_dir)
+    parsed_valid_entries: list[
+        tuple[datetime, str, dict[str, Any]]
+    ] = []
+    timestamp_errors: dict[str, str] = {}
+
+    for entry in catalog["entries"]:
+        if entry["status"] != "VALID":
+            continue
+
+        backup_path = str(entry["backup_path"])
+
+        try:
+            created_at = _database_backup_retention_timestamp(
+                entry.get("created_at")
+            )
+        except DeltaAegisError as exc:
+            timestamp_errors[backup_path] = str(exc)
+            continue
+
+        parsed_valid_entries.append(
+            (
+                created_at,
+                backup_path,
+                entry,
+            )
+        )
+
+    parsed_valid_entries.sort(
+        key=lambda item: (
+            item[0],
+            item[1],
+        ),
+        reverse=True,
+    )
+
+    rank_by_path = {
+        backup_path: rank
+        for rank, (
+            _created_at,
+            backup_path,
+            _entry,
+        ) in enumerate(
+            parsed_valid_entries,
+            start=1,
+        )
+    }
+    timestamp_by_path = {
+        backup_path: created_at
+        for created_at, backup_path, _entry
+        in parsed_valid_entries
+    }
+
+    planned_entries: list[dict[str, Any]] = []
+
+    for entry in catalog["entries"]:
+        item = dict(entry)
+        backup_path = str(item["backup_path"])
+        item["retention_action"] = "PROTECTED"
+        item["retention_reason"] = ""
+        item["valid_rank"] = rank_by_path.get(
+            backup_path
+        )
+        item["age_days"] = None
+        item["candidate_paths"] = [
+            str(item["backup_path"]),
+            str(item["manifest_path"]),
+        ]
+
+        if item["status"] != "VALID":
+            item["retention_reason"] = (
+                f"{item['status']} backup bundles require "
+                "operator review and are never cleanup candidates"
+            )
+            planned_entries.append(item)
+            continue
+
+        if backup_path in timestamp_errors:
+            item["retention_reason"] = (
+                timestamp_errors[backup_path]
+                + "; timestamp anomalies are protected"
+            )
+            planned_entries.append(item)
+            continue
+
+        created_at = timestamp_by_path[backup_path]
+        age_seconds = (
+            effective_now - created_at
+        ).total_seconds()
+
+        if age_seconds < -300:
+            item["retention_reason"] = (
+                "backup creation timestamp is in the future; "
+                "timestamp anomalies are protected"
+            )
+            planned_entries.append(item)
+            continue
+
+        age_days = max(
+            0,
+            int(max(0.0, age_seconds) // 86400),
+        )
+        item["age_days"] = age_days
+        valid_rank = int(item["valid_rank"])
+
+        if valid_rank <= keep_newest:
+            item["retention_action"] = "KEEP"
+            item["retention_reason"] = (
+                f"protected as one of the newest "
+                f"{keep_newest} verified backups"
+            )
+        elif age_days < minimum_age_days:
+            item["retention_action"] = "KEEP"
+            item["retention_reason"] = (
+                f"verified backup is only {age_days} day(s) old; "
+                f"minimum cleanup age is {minimum_age_days} day(s)"
+            )
+        else:
+            item["retention_action"] = "ELIGIBLE"
+            item["retention_reason"] = (
+                f"verified backup is rank {valid_rank} and "
+                f"{age_days} day(s) old"
+            )
+
+        planned_entries.append(item)
+
+    action_order = {
+        "KEEP": 0,
+        "ELIGIBLE": 1,
+        "PROTECTED": 2,
+    }
+    planned_entries.sort(
+        key=lambda item: (
+            action_order[item["retention_action"]],
+            int(item.get("valid_rank") or 10**9),
+            str(item.get("backup_path") or ""),
+        )
+    )
+
+    summary = {
+        "total": len(planned_entries),
+        "keep": sum(
+            1
+            for item in planned_entries
+            if item["retention_action"] == "KEEP"
+        ),
+        "eligible": sum(
+            1
+            for item in planned_entries
+            if item["retention_action"] == "ELIGIBLE"
+        ),
+        "protected": sum(
+            1
+            for item in planned_entries
+            if item["retention_action"] == "PROTECTED"
+        ),
+        "eligible_bytes": sum(
+            int(item.get("size_bytes") or 0)
+            for item in planned_entries
+            if item["retention_action"] == "ELIGIBLE"
+        ),
+    }
+
+    return {
+        "schema_version": (
+            DATABASE_BACKUP_RETENTION_PLAN_SCHEMA_VERSION
+        ),
+        "generated_at": (
+            effective_now.replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        ),
+        "dry_run": True,
+        "destructive": False,
+        "execution_supported": False,
+        "backups_dir": catalog["backups_dir"],
+        "directory_exists": catalog["directory_exists"],
+        "policy": {
+            "keep_newest": keep_newest,
+            "minimum_age_days": minimum_age_days,
+            "invalid_and_incomplete": "PROTECTED",
+            "timestamp_anomalies": "PROTECTED",
+        },
+        "catalog_summary": catalog["summary"],
+        "summary": summary,
+        "entries": planned_entries,
+    }
+
+
+def _print_database_backup_retention_plan_human(
+    plan: dict[str, Any],
+) -> None:
+    summary = plan["summary"]
+    policy = plan["policy"]
+
+    print("DeltaAegis backup retention preview")
+    print(f"Directory: {plan['backups_dir']}")
+    print("Mode: dry run; no files will be deleted")
+    print(
+        "Policy: keep newest "
+        f"{policy['keep_newest']} verified backup(s); "
+        "older verified backups must be at least "
+        f"{policy['minimum_age_days']} day(s) old"
+    )
+    print(
+        "Summary: "
+        f"{summary['keep']} keep, "
+        f"{summary['eligible']} eligible, "
+        f"{summary['protected']} protected, "
+        f"{summary['total']} total"
+    )
+    print(
+        f"Potential reclaimable bytes: "
+        f"{summary['eligible_bytes']}"
+    )
+
+    if not plan["directory_exists"]:
+        print("Backup directory does not exist.")
+        return
+
+    if not plan["entries"]:
+        print("No DeltaAegis database backup bundles found.")
+        return
+
+    for entry in plan["entries"]:
+        print()
+        print(
+            f"{entry['retention_action']}: "
+            f"{entry['backup_path']}"
+        )
+        print(f"  Bundle status: {entry['status']}")
+        print(
+            f"  Created: "
+            f"{entry.get('created_at') or '-'}"
+        )
+        print(
+            f"  Age: "
+            f"{entry.get('age_days') if entry.get('age_days') is not None else '-'}"
+            " day(s)"
+        )
+        print(
+            f"  Rank: "
+            f"{entry.get('valid_rank') or '-'}"
+        )
+        print(
+            f"  Reason: "
+            f"{entry['retention_reason']}"
+        )
+
+
+def command_backup_retention_preview(args) -> int:
+    plan = plan_database_backup_retention(
+        args.backups_dir,
+        keep_newest=args.keep_newest,
+        minimum_age_days=args.minimum_age_days,
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                plan,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        _print_database_backup_retention_plan_human(
+            plan
+        )
+
+    return 1 if plan["summary"]["protected"] else 0
+
+
+
+# v0.41 checkpoint 6: guarded backup retention execution
+DATABASE_BACKUP_RETENTION_RECEIPT_SCHEMA_VERSION = (
+    "deltaaegis-backup-retention-receipt-v1"
+)
+DATABASE_BACKUP_RETENTION_EXECUTION_CONFIRMATION = (
+    "DELETE ELIGIBLE BACKUP BUNDLES"
+)
+
+
+def _database_backup_retention_file_identity(
+    path: Path,
+) -> dict[str, int]:
+    resolved_path = _normalize_new_backup_path(Path(path))
+
+    if not os.path.lexists(resolved_path):
+        raise DeltaAegisError(
+            f"retention candidate path does not exist: "
+            f"{resolved_path}"
+        )
+
+    if resolved_path.is_symlink():
+        raise DeltaAegisError(
+            f"retention candidate must not be a symlink: "
+            f"{resolved_path}"
+        )
+
+    if not resolved_path.is_file():
+        raise DeltaAegisError(
+            f"retention candidate is not a regular file: "
+            f"{resolved_path}"
+        )
+
+    try:
+        path_stat = os.lstat(resolved_path)
+    except OSError as exc:
+        raise DeltaAegisError(
+            f"could not inspect retention candidate "
+            f"{resolved_path}: {exc}"
+        ) from exc
+
+    return {
+        "device": int(path_stat.st_dev),
+        "inode": int(path_stat.st_ino),
+        "size": int(path_stat.st_size),
+        "mtime_ns": int(path_stat.st_mtime_ns),
+    }
+
+
+def _database_backup_retention_fsync_directory(
+    directory: Path,
+) -> None:
+    resolved_directory = _normalize_new_backup_path(
+        Path(directory)
+    )
+    directory_flags = os.O_RDONLY | getattr(
+        os,
+        "O_DIRECTORY",
+        0,
+    )
+
+    try:
+        directory_descriptor = os.open(
+            resolved_directory,
+            directory_flags,
+        )
+    except OSError as exc:
+        raise DeltaAegisError(
+            f"could not open retention directory for fsync "
+            f"{resolved_directory}: {exc}"
+        ) from exc
+
+    try:
+        os.fsync(directory_descriptor)
+    except OSError as exc:
+        raise DeltaAegisError(
+            f"could not fsync retention directory "
+            f"{resolved_directory}: {exc}"
+        ) from exc
+    finally:
+        os.close(directory_descriptor)
+
+
+def _database_backup_retention_existing_paths(
+    entry: dict[str, Any],
+) -> list[str]:
+    existing_paths: list[str] = []
+
+    for key in ("backup_path", "manifest_path"):
+        candidate = _normalize_new_backup_path(
+            Path(str(entry.get(key) or ""))
+        )
+
+        if os.path.lexists(candidate):
+            existing_paths.append(str(candidate))
+
+    return existing_paths
+
+
+def _database_backup_retention_plan_digest(
+    plan: dict[str, Any],
+) -> str:
+    eligible = []
+
+    for entry in plan["entries"]:
+        if entry["retention_action"] != "ELIGIBLE":
+            continue
+
+        eligible.append(
+            {
+                "backup_path": entry["backup_path"],
+                "manifest_path": entry["manifest_path"],
+                "created_at": entry.get("created_at"),
+                "size_bytes": entry.get("size_bytes"),
+                "backup_sha256": entry.get("backup_sha256"),
+                "schema_fingerprint": (
+                    entry.get("schema_fingerprint")
+                ),
+                "logical_fingerprint": (
+                    entry.get("logical_fingerprint")
+                ),
+                "valid_rank": entry.get("valid_rank"),
+                "age_days": entry.get("age_days"),
+            }
+        )
+
+    canonical = json.dumps(
+        {
+            "schema_version": plan["schema_version"],
+            "backups_dir": plan["backups_dir"],
+            "policy": plan["policy"],
+            "eligible": eligible,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _database_backup_retention_prepare_candidate(
+    entry: dict[str, Any],
+    *,
+    backups_root: Path,
+    active_database_path: Path,
+) -> dict[str, Any]:
+    result = {
+        "outcome": "CHANGED",
+        "review_required": True,
+        "detail": "",
+        "backup_path": str(entry["backup_path"]),
+        "manifest_path": str(entry["manifest_path"]),
+        "deleted_paths": [],
+        "restored_paths": [],
+        "changed_paths": [],
+        "failed_paths": [],
+        "quarantine_path": None,
+    }
+
+    if (
+        entry.get("retention_action") != "ELIGIBLE"
+        or entry.get("status") != "VALID"
+    ):
+        result.update(
+            {
+                "outcome": "SKIPPED",
+                "review_required": (
+                    entry.get("retention_action")
+                    == "PROTECTED"
+                ),
+                "detail": (
+                    "retention plan did not classify this "
+                    "bundle as a verified deletion candidate"
+                ),
+            }
+        )
+        return result
+
+    root = _database_backup_catalog_root(backups_root)
+    backup_path = _normalize_new_backup_path(
+        Path(entry["backup_path"])
+    )
+    manifest_path = _normalize_new_backup_path(
+        Path(entry["manifest_path"])
+    )
+    active_path = Path(
+        active_database_path
+    ).expanduser().resolve(strict=False)
+
+    result["backup_path"] = str(backup_path)
+    result["manifest_path"] = str(manifest_path)
+
+    if (
+        backup_path.parent != root
+        or manifest_path.parent != root
+    ):
+        result["detail"] = (
+            "retention candidate escaped the top-level "
+            "backup directory"
+        )
+        result["changed_paths"] = [
+            str(backup_path),
+            str(manifest_path),
+        ]
+        return result
+
+    for candidate in (backup_path, manifest_path):
+        if (
+            candidate == active_path
+            or _existing_paths_share_file_identity(
+                candidate,
+                active_path,
+            )
+        ):
+            result.update(
+                {
+                    "outcome": "SKIPPED",
+                    "review_required": True,
+                    "detail": (
+                        "active database paths and hard-link "
+                        "aliases are protected from retention"
+                    ),
+                    "changed_paths": [str(candidate)],
+                }
+            )
+            return result
+
+    try:
+        before_backup_identity = (
+            _database_backup_retention_file_identity(
+                backup_path
+            )
+        )
+        before_manifest_identity = (
+            _database_backup_retention_file_identity(
+                manifest_path
+            )
+        )
+        fresh_entry = inspect_database_backup_bundle(
+            backup_path,
+            manifest_path,
+        )
+        after_backup_identity = (
+            _database_backup_retention_file_identity(
+                backup_path
+            )
+        )
+        after_manifest_identity = (
+            _database_backup_retention_file_identity(
+                manifest_path
+            )
+        )
+    except DeltaAegisError as exc:
+        result["detail"] = (
+            f"retention candidate could not be freshly "
+            f"verified: {exc}"
+        )
+        result["changed_paths"] = [
+            str(backup_path),
+            str(manifest_path),
+        ]
+        return result
+
+    if (
+        before_backup_identity != after_backup_identity
+        or before_manifest_identity != after_manifest_identity
+    ):
+        result["detail"] = (
+            "retention candidate identity changed during "
+            "fresh verification"
+        )
+        result["changed_paths"] = [
+            str(backup_path),
+            str(manifest_path),
+        ]
+        return result
+
+    if fresh_entry["status"] != "VALID":
+        result["detail"] = (
+            "retention candidate is no longer a valid "
+            f"backup bundle: {fresh_entry['detail']}"
+        )
+        result["changed_paths"] = [
+            str(backup_path),
+            str(manifest_path),
+        ]
+        return result
+
+    comparison_keys = (
+        "created_at",
+        "size_bytes",
+        "backup_sha256",
+        "schema_fingerprint",
+        "logical_fingerprint",
+        "integrity_status",
+    )
+
+    for key in comparison_keys:
+        if fresh_entry.get(key) != entry.get(key):
+            result["detail"] = (
+                f"retention candidate metadata changed "
+                f"after planning: {key}"
+            )
+            result["changed_paths"] = [
+                str(backup_path),
+                str(manifest_path),
+            ]
+            return result
+
+    result.update(
+        {
+            "outcome": "READY",
+            "review_required": False,
+            "detail": "candidate freshly verified",
+            "backup_identity": after_backup_identity,
+            "manifest_identity": after_manifest_identity,
+            "candidate_bytes": (
+                after_backup_identity["size"]
+                + after_manifest_identity["size"]
+            ),
+        }
+    )
+    return result
+
+
+def _database_backup_retention_unlink_if_identity_matches(
+    path: Path,
+    expected_identity: dict[str, int],
+) -> tuple[str, str]:
+    resolved_path = _normalize_new_backup_path(Path(path))
+
+    try:
+        current_identity = (
+            _database_backup_retention_file_identity(
+                resolved_path
+            )
+        )
+    except DeltaAegisError as exc:
+        return "CHANGED", str(exc)
+
+    if current_identity != expected_identity:
+        return (
+            "CHANGED",
+            "retention candidate identity no longer matches "
+            f"the verified file: {resolved_path}",
+        )
+
+    try:
+        resolved_path.unlink()
+    except OSError as exc:
+        return (
+            "FAILED",
+            f"could not remove retention candidate "
+            f"{resolved_path}: {exc}",
+        )
+
+    if os.path.lexists(resolved_path):
+        return (
+            "FAILED",
+            f"retention candidate still exists after unlink: "
+            f"{resolved_path}",
+        )
+
+    return "DELETED", "deleted"
+
+
+def _database_backup_retention_cleanup_quarantine(
+    quarantine_path: Path,
+    quarantine_links: list[Path],
+    backups_root: Path,
+) -> list[str]:
+    errors: list[str] = []
+
+    for link_path in quarantine_links:
+        if not os.path.lexists(link_path):
+            continue
+
+        try:
+            link_path.unlink()
+        except OSError as exc:
+            errors.append(
+                f"could not remove quarantine link "
+                f"{link_path}: {exc}"
+            )
+
+    if os.path.lexists(quarantine_path):
+        try:
+            quarantine_path.rmdir()
+        except OSError as exc:
+            errors.append(
+                f"could not remove quarantine directory "
+                f"{quarantine_path}: {exc}"
+            )
+
+    try:
+        _database_backup_retention_fsync_directory(
+            backups_root
+        )
+    except DeltaAegisError as exc:
+        errors.append(str(exc))
+
+    return errors
+
+
+def _database_backup_retention_restore_from_quarantine(
+    original_path: Path,
+    quarantine_link: Path,
+    expected_identity: dict[str, int],
+) -> tuple[bool, str]:
+    if os.path.lexists(original_path):
+        try:
+            current_identity = (
+                _database_backup_retention_file_identity(
+                    original_path
+                )
+            )
+        except DeltaAegisError as exc:
+            return False, str(exc)
+
+        if current_identity == expected_identity:
+            return True, "original path remained intact"
+
+        return (
+            False,
+            "original path was replaced and was not "
+            f"overwritten during rollback: {original_path}",
+        )
+
+    try:
+        os.link(
+            quarantine_link,
+            original_path,
+            follow_symlinks=False,
+        )
+    except OSError as exc:
+        return (
+            False,
+            f"could not restore {original_path} from "
+            f"quarantine: {exc}",
+        )
+
+    try:
+        restored_identity = (
+            _database_backup_retention_file_identity(
+                original_path
+            )
+        )
+    except DeltaAegisError as exc:
+        return False, str(exc)
+
+    if restored_identity != expected_identity:
+        return (
+            False,
+            f"restored path identity mismatch: "
+            f"{original_path}",
+        )
+
+    return True, "restored from quarantine"
+
+
+def _database_backup_retention_delete_prepared_candidate(
+    prepared: dict[str, Any],
+    *,
+    backups_root: Path,
+) -> dict[str, Any]:
+    if prepared.get("outcome") != "READY":
+        return prepared
+
+    root = _database_backup_catalog_root(backups_root)
+    backup_path = _normalize_new_backup_path(
+        Path(prepared["backup_path"])
+    )
+    manifest_path = _normalize_new_backup_path(
+        Path(prepared["manifest_path"])
+    )
+    backup_identity = dict(prepared["backup_identity"])
+    manifest_identity = dict(
+        prepared["manifest_identity"]
+    )
+    result = {
+        "outcome": "FAILED",
+        "review_required": True,
+        "detail": "",
+        "backup_path": str(backup_path),
+        "manifest_path": str(manifest_path),
+        "deleted_paths": [],
+        "restored_paths": [],
+        "changed_paths": [],
+        "failed_paths": [],
+        "quarantine_path": None,
+        "candidate_bytes": int(
+            prepared.get("candidate_bytes") or 0
+        ),
+    }
+    quarantine_path: Path | None = None
+    quarantine_backup: Path | None = None
+    quarantine_manifest: Path | None = None
+
+    try:
+        quarantine_path = Path(
+            tempfile.mkdtemp(
+                prefix=".deltaaegis-retention-",
+                dir=str(root),
+            )
+        )
+        os.chmod(quarantine_path, 0o700)
+        quarantine_backup = quarantine_path / "backup"
+        quarantine_manifest = quarantine_path / "manifest"
+
+        os.link(
+            backup_path,
+            quarantine_backup,
+            follow_symlinks=False,
+        )
+        os.link(
+            manifest_path,
+            quarantine_manifest,
+            follow_symlinks=False,
+        )
+
+        if (
+            _database_backup_retention_file_identity(
+                quarantine_backup
+            )
+            != backup_identity
+            or _database_backup_retention_file_identity(
+                quarantine_manifest
+            )
+            != manifest_identity
+        ):
+            result.update(
+                {
+                    "outcome": "CHANGED",
+                    "detail": (
+                        "quarantine hard-link identities did "
+                        "not match the verified candidate"
+                    ),
+                    "changed_paths": [
+                        str(backup_path),
+                        str(manifest_path),
+                    ],
+                }
+            )
+            cleanup_errors = (
+                _database_backup_retention_cleanup_quarantine(
+                    quarantine_path,
+                    [
+                        quarantine_backup,
+                        quarantine_manifest,
+                    ],
+                    root,
+                )
+            )
+
+            if cleanup_errors:
+                result["outcome"] = "FAILED"
+                result["failed_paths"] = [
+                    str(quarantine_path)
+                ]
+                result["detail"] += "; " + "; ".join(
+                    cleanup_errors
+                )
+                result["quarantine_path"] = str(
+                    quarantine_path
+                )
+
+            return result
+
+        _database_backup_retention_fsync_directory(
+            quarantine_path
+        )
+        _database_backup_retention_fsync_directory(root)
+
+        for candidate, expected_identity in (
+            (backup_path, backup_identity),
+            (manifest_path, manifest_identity),
+        ):
+            if (
+                _database_backup_retention_file_identity(
+                    candidate
+                )
+                != expected_identity
+            ):
+                result.update(
+                    {
+                        "outcome": "CHANGED",
+                        "detail": (
+                            "retention candidate changed "
+                            "before deletion"
+                        ),
+                        "changed_paths": [str(candidate)],
+                    }
+                )
+                cleanup_errors = (
+                    _database_backup_retention_cleanup_quarantine(
+                        quarantine_path,
+                        [
+                            quarantine_backup,
+                            quarantine_manifest,
+                        ],
+                        root,
+                    )
+                )
+
+                if cleanup_errors:
+                    result["outcome"] = "FAILED"
+                    result["failed_paths"] = [
+                        str(quarantine_path)
+                    ]
+                    result["detail"] += "; " + "; ".join(
+                        cleanup_errors
+                    )
+                    result["quarantine_path"] = str(
+                        quarantine_path
+                    )
+
+                return result
+
+        deletion_sequence = (
+            (
+                manifest_path,
+                manifest_identity,
+            ),
+            (
+                backup_path,
+                backup_identity,
+            ),
+        )
+        deletion_error: tuple[str, str, Path] | None = None
+
+        for candidate, expected_identity in deletion_sequence:
+            status, detail = (
+                _database_backup_retention_unlink_if_identity_matches(
+                    candidate,
+                    expected_identity,
+                )
+            )
+
+            if status != "DELETED":
+                deletion_error = (
+                    status,
+                    detail,
+                    candidate,
+                )
+                break
+
+            result["deleted_paths"].append(
+                str(candidate)
+            )
+            _database_backup_retention_fsync_directory(
+                root
+            )
+
+        if deletion_error is not None:
+            status, detail, failed_candidate = deletion_error
+            result["outcome"] = status
+            result["detail"] = detail
+
+            if status == "CHANGED":
+                result["changed_paths"].append(
+                    str(failed_candidate)
+                )
+            else:
+                result["failed_paths"].append(
+                    str(failed_candidate)
+                )
+
+            rollback_pairs = (
+                (
+                    backup_path,
+                    quarantine_backup,
+                    backup_identity,
+                ),
+                (
+                    manifest_path,
+                    quarantine_manifest,
+                    manifest_identity,
+                ),
+            )
+            rollback_complete = True
+
+            for (
+                original_path,
+                quarantine_link,
+                expected_identity,
+            ) in rollback_pairs:
+                restored, restore_detail = (
+                    _database_backup_retention_restore_from_quarantine(
+                        original_path,
+                        quarantine_link,
+                        expected_identity,
+                    )
+                )
+
+                if restored:
+                    if (
+                        restore_detail
+                        == "restored from quarantine"
+                    ):
+                        result["restored_paths"].append(
+                            str(original_path)
+                        )
+                else:
+                    rollback_complete = False
+                    result["failed_paths"].append(
+                        str(original_path)
+                    )
+                    result["detail"] += (
+                        f"; rollback: {restore_detail}"
+                    )
+
+            _database_backup_retention_fsync_directory(root)
+
+            if rollback_complete:
+                result["deleted_paths"] = []
+                cleanup_errors = (
+                    _database_backup_retention_cleanup_quarantine(
+                        quarantine_path,
+                        [
+                            quarantine_backup,
+                            quarantine_manifest,
+                        ],
+                        root,
+                    )
+                )
+
+                if cleanup_errors:
+                    result["outcome"] = "FAILED"
+                    result["failed_paths"].append(
+                        str(quarantine_path)
+                    )
+                    result["detail"] += "; " + "; ".join(
+                        cleanup_errors
+                    )
+                    result["quarantine_path"] = str(
+                        quarantine_path
+                    )
+            else:
+                result["outcome"] = "FAILED"
+                result["quarantine_path"] = str(
+                    quarantine_path
+                )
+                result["detail"] += (
+                    "; quarantine preserved because rollback "
+                    "was incomplete"
+                )
+
+            return result
+
+        cleanup_errors = (
+            _database_backup_retention_cleanup_quarantine(
+                quarantine_path,
+                [
+                    quarantine_backup,
+                    quarantine_manifest,
+                ],
+                root,
+            )
+        )
+
+        if cleanup_errors:
+            result.update(
+                {
+                    "outcome": "FAILED",
+                    "review_required": True,
+                    "detail": (
+                        "backup originals were removed, but "
+                        "quarantine cleanup failed: "
+                        + "; ".join(cleanup_errors)
+                    ),
+                    "failed_paths": [
+                        str(quarantine_path)
+                    ],
+                    "quarantine_path": str(
+                        quarantine_path
+                    ),
+                }
+            )
+            return result
+
+        result.update(
+            {
+                "outcome": "DELETED",
+                "review_required": False,
+                "detail": (
+                    "verified eligible backup bundle deleted"
+                ),
+                "quarantine_path": None,
+            }
+        )
+        return result
+
+    except (OSError, DeltaAegisError) as exc:
+        result["detail"] = (
+            f"retention deletion failed before completion: "
+            f"{exc}"
+        )
+        result["failed_paths"] = [
+            str(backup_path),
+            str(manifest_path),
+        ]
+
+        if (
+            quarantine_path is not None
+            and quarantine_backup is not None
+            and quarantine_manifest is not None
+        ):
+            rollback_complete = True
+
+            for (
+                original_path,
+                quarantine_link,
+                expected_identity,
+            ) in (
+                (
+                    backup_path,
+                    quarantine_backup,
+                    backup_identity,
+                ),
+                (
+                    manifest_path,
+                    quarantine_manifest,
+                    manifest_identity,
+                ),
+            ):
+                if not os.path.lexists(quarantine_link):
+                    continue
+
+                restored, restore_detail = (
+                    _database_backup_retention_restore_from_quarantine(
+                        original_path,
+                        quarantine_link,
+                        expected_identity,
+                    )
+                )
+
+                if restored:
+                    if (
+                        restore_detail
+                        == "restored from quarantine"
+                    ):
+                        result["restored_paths"].append(
+                            str(original_path)
+                        )
+                else:
+                    rollback_complete = False
+                    result["detail"] += (
+                        f"; rollback: {restore_detail}"
+                    )
+
+            if rollback_complete:
+                cleanup_errors = (
+                    _database_backup_retention_cleanup_quarantine(
+                        quarantine_path,
+                        [
+                            quarantine_backup,
+                            quarantine_manifest,
+                        ],
+                        root,
+                    )
+                )
+
+                if cleanup_errors:
+                    result["detail"] += "; " + "; ".join(
+                        cleanup_errors
+                    )
+                    result["quarantine_path"] = str(
+                        quarantine_path
+                    )
+            else:
+                result["quarantine_path"] = str(
+                    quarantine_path
+                )
+                result["detail"] += (
+                    "; quarantine preserved because rollback "
+                    "was incomplete"
+                )
+
+        return result
+
+
+def execute_database_backup_retention(
+    active_database_path: Path,
+    backups_dir: Path,
+    *,
+    keep_newest: int,
+    minimum_age_days: int,
+    confirmation: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    if str(confirmation or "").strip() != (
+        DATABASE_BACKUP_RETENTION_EXECUTION_CONFIRMATION
+    ):
+        raise DeltaAegisError(
+            "backup retention execution requires the exact "
+            "confirmation phrase: "
+            f"{DATABASE_BACKUP_RETENTION_EXECUTION_CONFIRMATION}"
+        )
+
+    plan = plan_database_backup_retention(
+        backups_dir,
+        keep_newest=keep_newest,
+        minimum_age_days=minimum_age_days,
+        now=now,
+    )
+    root = _database_backup_catalog_root(
+        Path(plan["backups_dir"])
+    )
+    active_path = Path(
+        active_database_path
+    ).expanduser().resolve(strict=False)
+    plan_digest = _database_backup_retention_plan_digest(
+        plan
+    )
+    results: list[dict[str, Any]] = []
+
+    for entry in plan["entries"]:
+        if entry["retention_action"] != "ELIGIBLE":
+            results.append(
+                {
+                    "outcome": "SKIPPED",
+                    "review_required": (
+                        entry["retention_action"]
+                        == "PROTECTED"
+                    ),
+                    "detail": entry["retention_reason"],
+                    "retention_action": (
+                        entry["retention_action"]
+                    ),
+                    "backup_path": entry["backup_path"],
+                    "manifest_path": (
+                        entry["manifest_path"]
+                    ),
+                    "deleted_paths": [],
+                    "restored_paths": [],
+                    "changed_paths": [],
+                    "failed_paths": [],
+                    "skipped_paths": (
+                        _database_backup_retention_existing_paths(
+                            entry
+                        )
+                    ),
+                    "quarantine_path": None,
+                    "candidate_bytes": 0,
+                }
+            )
+            continue
+
+        prepared = (
+            _database_backup_retention_prepare_candidate(
+                entry,
+                backups_root=root,
+                active_database_path=active_path,
+            )
+        )
+        prepared["retention_action"] = (
+            entry["retention_action"]
+        )
+        prepared.setdefault("skipped_paths", [])
+
+        if prepared["outcome"] == "SKIPPED":
+            prepared["skipped_paths"] = (
+                _database_backup_retention_existing_paths(
+                    entry
+                )
+            )
+            results.append(prepared)
+            continue
+
+        result = (
+            _database_backup_retention_delete_prepared_candidate(
+                prepared,
+                backups_root=root,
+            )
+        )
+        result["retention_action"] = (
+            entry["retention_action"]
+        )
+        result.setdefault("skipped_paths", [])
+        results.append(result)
+
+    deleted_paths = [
+        path
+        for result in results
+        for path in result.get("deleted_paths", [])
+    ]
+    skipped_paths = [
+        path
+        for result in results
+        for path in result.get("skipped_paths", [])
+    ]
+    changed_paths = [
+        path
+        for result in results
+        for path in result.get("changed_paths", [])
+    ]
+    failed_paths = [
+        path
+        for result in results
+        for path in result.get("failed_paths", [])
+    ]
+    restored_paths = [
+        path
+        for result in results
+        for path in result.get("restored_paths", [])
+    ]
+    quarantine_paths = [
+        str(result["quarantine_path"])
+        for result in results
+        if result.get("quarantine_path")
+    ]
+    summary = {
+        "total_plan_entries": len(results),
+        "eligible_bundles": int(
+            plan["summary"]["eligible"]
+        ),
+        "deleted_bundles": sum(
+            1
+            for result in results
+            if result["outcome"] == "DELETED"
+        ),
+        "skipped_bundles": sum(
+            1
+            for result in results
+            if result["outcome"] == "SKIPPED"
+        ),
+        "changed_bundles": sum(
+            1
+            for result in results
+            if result["outcome"] == "CHANGED"
+        ),
+        "failed_bundles": sum(
+            1
+            for result in results
+            if result["outcome"] == "FAILED"
+        ),
+        "deleted_files": len(deleted_paths),
+        "deleted_candidate_bytes": sum(
+            int(result.get("candidate_bytes") or 0)
+            for result in results
+            if result["outcome"] == "DELETED"
+        ),
+        "keep_preserved": int(
+            plan["summary"]["keep"]
+        ),
+        "protected_preserved": int(
+            plan["summary"]["protected"]
+        ),
+        "restored_files": len(restored_paths),
+        "quarantine_residue": len(
+            quarantine_paths
+        ),
+    }
+    review_required = bool(
+        plan["summary"]["protected"]
+        or summary["changed_bundles"]
+        or summary["failed_bundles"]
+        or any(
+            bool(result.get("review_required"))
+            for result in results
+        )
+    )
+    completed_at = (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+    return {
+        "schema_version": (
+            DATABASE_BACKUP_RETENTION_RECEIPT_SCHEMA_VERSION
+        ),
+        "action": "backup.retention.execute",
+        "completed_at": completed_at,
+        "dry_run": False,
+        "destructive": True,
+        "confirmation_required": (
+            DATABASE_BACKUP_RETENTION_EXECUTION_CONFIRMATION
+        ),
+        "confirmation_matched": True,
+        "active_database_path": str(active_path),
+        "backups_dir": str(root),
+        "policy": dict(plan["policy"]),
+        "plan_generated_at": plan["generated_at"],
+        "plan_digest": plan_digest,
+        "plan_summary": dict(plan["summary"]),
+        "summary": summary,
+        "review_required": review_required,
+        "deleted_paths": deleted_paths,
+        "skipped_paths": skipped_paths,
+        "changed_paths": changed_paths,
+        "failed_paths": failed_paths,
+        "restored_paths": restored_paths,
+        "quarantine_paths": quarantine_paths,
+        "results": results,
+        "message": (
+            "Backup retention execution completed; "
+            f"{summary['deleted_bundles']} bundle(s) deleted, "
+            f"{summary['changed_bundles']} changed, "
+            f"{summary['failed_bundles']} failed, and "
+            f"{summary['protected_preserved']} protected "
+            "bundle(s) preserved."
+        ),
+    }
+
+
+def _print_database_backup_retention_receipt_human(
+    receipt: dict[str, Any],
+) -> None:
+    summary = receipt["summary"]
+
+    print("DeltaAegis backup retention execution receipt")
+    print(f"Directory: {receipt['backups_dir']}")
+    print(
+        f"Confirmation: "
+        f"{receipt['confirmation_required']}"
+    )
+    print(f"Plan digest: {receipt['plan_digest']}")
+    print(
+        "Summary: "
+        f"{summary['deleted_bundles']} deleted, "
+        f"{summary['skipped_bundles']} skipped, "
+        f"{summary['changed_bundles']} changed, "
+        f"{summary['failed_bundles']} failed"
+    )
+    print(
+        f"Deleted files: {summary['deleted_files']}"
+    )
+    print(
+        "Deleted candidate bytes: "
+        f"{summary['deleted_candidate_bytes']}"
+    )
+    print(
+        f"Review required: "
+        f"{'yes' if receipt['review_required'] else 'no'}"
+    )
+
+    for result in receipt["results"]:
+        print()
+        print(
+            f"{result['outcome']}: "
+            f"{result['backup_path']}"
+        )
+        print(
+            f"  Retention action: "
+            f"{result['retention_action']}"
+        )
+        print(f"  Detail: {result['detail']}")
+
+        if result.get("restored_paths"):
+            print(
+                "  Restored: "
+                + ", ".join(result["restored_paths"])
+            )
+
+        if result.get("quarantine_path"):
+            print(
+                f"  Quarantine: "
+                f"{result['quarantine_path']}"
+            )
+
+
+def command_backup_retention_execute(args) -> int:
+    receipt = execute_database_backup_retention(
+        args.db,
+        args.backups_dir,
+        keep_newest=args.keep_newest,
+        minimum_age_days=args.minimum_age_days,
+        confirmation=args.confirmation,
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                receipt,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        _print_database_backup_retention_receipt_human(
+            receipt
+        )
+
+    return 1 if receipt["review_required"] else 0
+
+
+
+# v0.41 checkpoint 7: active restore cutover preview
+DATABASE_RESTORE_CUTOVER_PLAN_SCHEMA_VERSION = (
+    "deltaaegis-restore-cutover-plan-v1"
+)
+
+
+def _database_restore_cutover_absolute_path(
+    path: Path,
+) -> Path:
+    return Path(
+        os.path.abspath(
+            os.path.expanduser(
+                str(path)
+            )
+        )
+    )
+
+
+def _database_restore_cutover_file_identity(
+    path: Path,
+) -> dict[str, int]:
+    resolved_path = _database_restore_cutover_absolute_path(
+        Path(path)
+    )
+
+    try:
+        path_stat = os.lstat(resolved_path)
+    except OSError as exc:
+        raise DeltaAegisError(
+            f"could not inspect restore cutover path "
+            f"{resolved_path}: {exc}"
+        ) from exc
+
+    return {
+        "device": int(path_stat.st_dev),
+        "inode": int(path_stat.st_ino),
+        "size": int(path_stat.st_size),
+        "mtime_ns": int(path_stat.st_mtime_ns),
+        "mode": int(path_stat.st_mode),
+    }
+
+
+def _database_restore_cutover_paths_share_identity(
+    first_path: Path,
+    second_path: Path,
+) -> bool:
+    if (
+        not os.path.lexists(first_path)
+        or not os.path.lexists(second_path)
+    ):
+        return False
+
+    try:
+        return os.path.samefile(
+            first_path,
+            second_path,
+        )
+    except OSError as exc:
+        raise DeltaAegisError(
+            "could not compare restore cutover file "
+            f"identities: {first_path} and {second_path}: "
+            f"{exc}"
+        ) from exc
+
+
+def _database_restore_cutover_sidecars(
+    active_database_path: Path,
+) -> list[dict[str, Any]]:
+    active_path = _database_restore_cutover_absolute_path(
+        Path(active_database_path)
+    )
+    sidecars: list[dict[str, Any]] = []
+
+    for suffix in ("-wal", "-shm", "-journal"):
+        candidate = Path(str(active_path) + suffix)
+
+        if not os.path.lexists(candidate):
+            continue
+
+        entry: dict[str, Any] = {
+            "path": str(candidate),
+            "suffix": suffix,
+            "is_symlink": candidate.is_symlink(),
+            "is_file": candidate.is_file(),
+            "size_bytes": None,
+        }
+
+        try:
+            entry["size_bytes"] = int(
+                os.lstat(candidate).st_size
+            )
+        except OSError:
+            pass
+
+        sidecars.append(entry)
+
+    return sidecars
+
+
+def _database_restore_cutover_dashboard_processes(
+    active_database_path: Path,
+    *,
+    process_root: Path = Path("/proc"),
+    current_pid: int | None = None,
+) -> dict[str, Any]:
+    active_path = _database_restore_cutover_absolute_path(
+        Path(active_database_path)
+    )
+    root = _database_restore_cutover_absolute_path(
+        Path(process_root)
+    )
+    ignored_pid = (
+        os.getpid()
+        if current_pid is None
+        else int(current_pid)
+    )
+    result: dict[str, Any] = {
+        "available": False,
+        "process_root": str(root),
+        "inspected_processes": 0,
+        "unreadable_processes": 0,
+        "matches": [],
+    }
+
+    if not root.exists() or not root.is_dir():
+        return result
+
+    result["available"] = True
+
+    try:
+        process_directories = sorted(
+            (
+                child
+                for child in root.iterdir()
+                if child.name.isdigit()
+            ),
+            key=lambda child: int(child.name),
+        )
+    except OSError:
+        result["available"] = False
+        return result
+
+    for process_directory in process_directories:
+        pid = int(process_directory.name)
+
+        if pid == ignored_pid:
+            continue
+
+        cmdline_path = process_directory / "cmdline"
+
+        try:
+            raw_cmdline = cmdline_path.read_bytes()
+        except OSError:
+            result["unreadable_processes"] += 1
+            continue
+
+        if not raw_cmdline:
+            continue
+
+        argv = [
+            part.decode(
+                "utf-8",
+                errors="replace",
+            )
+            for part in raw_cmdline.split(b"\0")
+            if part
+        ]
+
+        if not argv:
+            continue
+
+        result["inspected_processes"] += 1
+
+        if "dashboard" not in argv:
+            continue
+
+        if not any(
+            Path(argument).name == "deltaaegis.py"
+            for argument in argv
+        ):
+            continue
+
+        configured_database: Path | None = None
+
+        for index, argument in enumerate(argv):
+            if argument == "--db" and index + 1 < len(argv):
+                configured_database = (
+                    _database_restore_cutover_absolute_path(
+                        Path(argv[index + 1])
+                    )
+                )
+                break
+
+            if argument.startswith("--db="):
+                configured_database = (
+                    _database_restore_cutover_absolute_path(
+                        Path(argument.split("=", 1)[1])
+                    )
+                )
+                break
+
+        if configured_database is None:
+            configured_database = (
+                _database_restore_cutover_absolute_path(
+                    DEFAULT_DB
+                )
+            )
+
+        same_database = (
+            configured_database == active_path
+        )
+
+        if (
+            not same_database
+            and os.path.lexists(configured_database)
+            and os.path.lexists(active_path)
+        ):
+            try:
+                same_database = os.path.samefile(
+                    configured_database,
+                    active_path,
+                )
+            except OSError:
+                same_database = False
+
+        if not same_database:
+            continue
+
+        result["matches"].append(
+            {
+                "pid": pid,
+                "command": "dashboard",
+                "database_path": str(
+                    configured_database
+                ),
+                "match_reason": (
+                    "DeltaAegis dashboard is using the "
+                    "active database"
+                ),
+            }
+        )
+
+    return result
+
+
+def _database_restore_cutover_active_state(
+    active_database_path: Path,
+    *,
+    inspect_database: bool = True,
+) -> dict[str, Any]:
+    active_path = _database_restore_cutover_absolute_path(
+        Path(active_database_path)
+    )
+    state: dict[str, Any] = {
+        "path": str(active_path),
+        "exists": os.path.lexists(active_path),
+        "is_symlink": False,
+        "is_file": False,
+        "parent_path": str(active_path.parent),
+        "parent_exists": active_path.parent.exists(),
+        "parent_is_directory": active_path.parent.is_dir(),
+        "parent_writable": False,
+        "identity": None,
+        "size_bytes": None,
+        "sha256": None,
+        "schema_fingerprint": None,
+        "integrity_status": None,
+        "logical_fingerprint": None,
+        "inspection_error": None,
+        "inspection_skipped_reason": None,
+    }
+
+    if state["parent_exists"] and state["parent_is_directory"]:
+        state["parent_writable"] = os.access(
+            active_path.parent,
+            os.W_OK | os.X_OK,
+        )
+
+    if not state["exists"]:
+        return state
+
+    state["is_symlink"] = active_path.is_symlink()
+    state["is_file"] = active_path.is_file()
+
+    if state["is_symlink"] or not state["is_file"]:
+        return state
+
+    if not inspect_database:
+        state["inspection_skipped_reason"] = (
+            "active SQLite sidecars are present; database "
+            "content inspection was skipped to preserve "
+            "preview-only behavior"
+        )
+        return state
+
+    try:
+        state["identity"] = (
+            _database_restore_cutover_file_identity(
+                active_path
+            )
+        )
+        state["size_bytes"] = int(
+            state["identity"]["size"]
+        )
+        state["sha256"] = _database_backup_sha256(
+            active_path
+        )
+        _, active_schema = _sqlite_backup_metadata(
+            active_path
+        )
+        state["schema_fingerprint"] = (
+            active_schema["fingerprint"]
+        )
+        integrity_rows = (
+            _sqlite_database_integrity_check(
+                active_path
+            )
+        )
+        state["integrity_status"] = (
+            "ok"
+            if integrity_rows == ["ok"]
+            else "; ".join(integrity_rows)
+        )
+        state["logical_fingerprint"] = (
+            _sqlite_database_logical_fingerprint(
+                active_path
+            )
+        )
+    except (DeltaAegisError, OSError) as exc:
+        state["inspection_error"] = str(exc)
+
+    return state
+
+
+def _database_restore_cutover_safety_backup_state(
+    backups_dir: Path,
+    *,
+    active_state: dict[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    root = _database_restore_cutover_absolute_path(
+        Path(backups_dir)
+    )
+    active_sha256 = str(
+        active_state.get("sha256") or "unknown"
+    )
+    suffix = (
+        active_sha256[:8]
+        if re.fullmatch(r"[0-9a-f]{64}", active_sha256)
+        else "unverified"
+    )
+    timestamp = now.strftime("%Y%m%dT%H%M%SZ")
+    backup_path = root / (
+        "deltaaegis-pre-restore-"
+        f"{timestamp}-{suffix}.db"
+    )
+    manifest_path = database_backup_manifest_path(
+        backup_path
+    )
+    state = {
+        "required": True,
+        "directory_path": str(root),
+        "directory_exists": os.path.lexists(root),
+        "directory_is_symlink": False,
+        "directory_is_directory": False,
+        "directory_writable": False,
+        "proposed_backup_path": str(backup_path),
+        "proposed_manifest_path": str(
+            manifest_path
+        ),
+        "backup_path_exists": os.path.lexists(
+            backup_path
+        ),
+        "manifest_path_exists": os.path.lexists(
+            manifest_path
+        ),
+    }
+
+    if state["directory_exists"]:
+        state["directory_is_symlink"] = (
+            root.is_symlink()
+        )
+        state["directory_is_directory"] = (
+            root.is_dir()
+        )
+
+        if (
+            state["directory_is_directory"]
+            and not state["directory_is_symlink"]
+        ):
+            state["directory_writable"] = os.access(
+                root,
+                os.W_OK | os.X_OK,
+            )
+
+    return state
+
+
+def _database_restore_cutover_plan_digest(
+    plan: dict[str, Any],
+) -> str:
+    active = plan["active_database"]
+    backup = plan["backup"]
+    safety = plan["safety_backup"]
+    processes = plan["dashboard_processes"]
+    canonical_payload = {
+        "schema_version": plan["schema_version"],
+        "active_database": {
+            "path": active.get("path"),
+            "exists": active.get("exists"),
+            "is_symlink": active.get("is_symlink"),
+            "is_file": active.get("is_file"),
+            "parent_path": active.get("parent_path"),
+            "parent_exists": active.get("parent_exists"),
+            "parent_is_directory": (
+                active.get("parent_is_directory")
+            ),
+            "parent_writable": active.get("parent_writable"),
+            "identity": active.get("identity"),
+            "size_bytes": active.get("size_bytes"),
+            "sha256": active.get("sha256"),
+            "schema_fingerprint": (
+                active.get("schema_fingerprint")
+            ),
+            "integrity_status": (
+                active.get("integrity_status")
+            ),
+            "logical_fingerprint": (
+                active.get("logical_fingerprint")
+            ),
+            "inspection_error": (
+                active.get("inspection_error")
+            ),
+            "inspection_skipped_reason": (
+                active.get("inspection_skipped_reason")
+            ),
+        },
+        "backup": {
+            "backup_path": backup.get("backup_path"),
+            "manifest_path": backup.get("manifest_path"),
+            "status": backup.get("status"),
+            "detail": backup.get("detail"),
+            "backup_identity": (
+                backup.get("backup_identity")
+            ),
+            "manifest_identity": (
+                backup.get("manifest_identity")
+            ),
+            "size_bytes": backup.get("size_bytes"),
+            "backup_sha256": backup.get("backup_sha256"),
+            "schema_fingerprint": (
+                backup.get("schema_fingerprint")
+            ),
+            "logical_fingerprint": (
+                backup.get("logical_fingerprint")
+            ),
+            "integrity_status": (
+                backup.get("integrity_status")
+            ),
+        },
+        "safety_backup": {
+            "directory_path": safety.get(
+                "directory_path"
+            ),
+            "directory_exists": safety.get(
+                "directory_exists"
+            ),
+            "directory_is_symlink": safety.get(
+                "directory_is_symlink"
+            ),
+            "directory_is_directory": safety.get(
+                "directory_is_directory"
+            ),
+            "directory_writable": safety.get(
+                "directory_writable"
+            ),
+        },
+        "sqlite_sidecars": plan["sqlite_sidecars"],
+        "dashboard_processes": {
+            "available": processes.get("available"),
+            "matches": processes.get("matches"),
+        },
+        "blockers": plan["blockers"],
+        "warnings": plan["warnings"],
+        "cutover_ready": plan["cutover_ready"],
+    }
+    canonical = json.dumps(
+        canonical_payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def plan_database_restore_cutover(
+    active_database_path: Path,
+    backup_path: Path,
+    *,
+    manifest_path: Path | None = None,
+    safety_backups_dir: Path = DEFAULT_BACKUPS,
+    now: datetime | None = None,
+    process_root: Path = Path("/proc"),
+    current_pid: int | None = None,
+) -> dict[str, Any]:
+    effective_now = now or datetime.now(timezone.utc)
+
+    if effective_now.tzinfo is None:
+        raise DeltaAegisError(
+            "restore cutover reference time must include "
+            "a timezone"
+        )
+
+    effective_now = effective_now.astimezone(
+        timezone.utc
+    )
+    active_path = (
+        _database_restore_cutover_absolute_path(
+            Path(active_database_path)
+        )
+    )
+    resolved_backup = (
+        _database_restore_cutover_absolute_path(
+            Path(backup_path)
+        )
+    )
+    resolved_manifest = (
+        _database_restore_cutover_absolute_path(
+            Path(
+                manifest_path
+                if manifest_path is not None
+                else database_backup_manifest_path(
+                    resolved_backup
+                )
+            )
+        )
+    )
+    blockers: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
+    sidecars = _database_restore_cutover_sidecars(
+        active_path
+    )
+    active_state = (
+        _database_restore_cutover_active_state(
+            active_path,
+            inspect_database=not bool(sidecars),
+        )
+    )
+    process_probe = (
+        _database_restore_cutover_dashboard_processes(
+            active_path,
+            process_root=process_root,
+            current_pid=current_pid,
+        )
+    )
+    backup_state: dict[str, Any] = {
+        "backup_path": str(resolved_backup),
+        "manifest_path": str(resolved_manifest),
+        "status": "INVALID",
+        "detail": "",
+        "backup_identity": None,
+        "manifest_identity": None,
+        "size_bytes": None,
+        "backup_sha256": None,
+        "schema_fingerprint": None,
+        "logical_fingerprint": None,
+        "integrity_status": None,
+    }
+
+    try:
+        if (
+            resolved_backup == active_path
+            or _database_restore_cutover_paths_share_identity(
+                resolved_backup,
+                active_path,
+            )
+        ):
+            raise DeltaAegisError(
+                "restore backup must not be the active "
+                "database or a hard-link alias"
+            )
+
+        if (
+            resolved_manifest == active_path
+            or _database_restore_cutover_paths_share_identity(
+                resolved_manifest,
+                active_path,
+            )
+        ):
+            raise DeltaAegisError(
+                "restore manifest must not be the active "
+                "database or a hard-link alias"
+            )
+
+        verification = verify_database_backup_bundle(
+            resolved_backup,
+            resolved_manifest,
+        )
+        backup_state.update(
+            {
+                "status": "VALID",
+                "detail": "backup bundle verified",
+                "backup_identity": (
+                    _database_restore_cutover_file_identity(
+                        resolved_backup
+                    )
+                ),
+                "manifest_identity": (
+                    _database_restore_cutover_file_identity(
+                        resolved_manifest
+                    )
+                ),
+                "size_bytes": verification["size_bytes"],
+                "backup_sha256": (
+                    verification["backup_sha256"]
+                ),
+                "schema_fingerprint": (
+                    verification["schema_fingerprint"]
+                ),
+                "logical_fingerprint": (
+                    verification["logical_fingerprint"]
+                ),
+                "integrity_status": (
+                    verification["integrity_status"]
+                ),
+            }
+        )
+    except DeltaAegisError as exc:
+        backup_state["detail"] = str(exc)
+        blockers.append(
+            {
+                "code": "BACKUP_NOT_VERIFIED",
+                "message": str(exc),
+            }
+        )
+
+    if not active_state["exists"]:
+        blockers.append(
+            {
+                "code": "ACTIVE_DATABASE_MISSING",
+                "message": (
+                    "active database does not exist; this "
+                    "cutover workflow requires a fresh safety "
+                    "backup before replacement"
+                ),
+            }
+        )
+    elif active_state["is_symlink"]:
+        blockers.append(
+            {
+                "code": "ACTIVE_DATABASE_SYMLINK",
+                "message": (
+                    "active database path must not be a symlink"
+                ),
+            }
+        )
+    elif not active_state["is_file"]:
+        blockers.append(
+            {
+                "code": "ACTIVE_DATABASE_NOT_REGULAR",
+                "message": (
+                    "active database path is not a regular file"
+                ),
+            }
+        )
+
+    if not active_state["parent_exists"]:
+        blockers.append(
+            {
+                "code": "ACTIVE_PARENT_MISSING",
+                "message": (
+                    "active database parent directory "
+                    "does not exist"
+                ),
+            }
+        )
+    elif not active_state["parent_is_directory"]:
+        blockers.append(
+            {
+                "code": "ACTIVE_PARENT_NOT_DIRECTORY",
+                "message": (
+                    "active database parent path is not "
+                    "a directory"
+                ),
+            }
+        )
+    elif not active_state["parent_writable"]:
+        blockers.append(
+            {
+                "code": "ACTIVE_PARENT_NOT_WRITABLE",
+                "message": (
+                    "active database parent directory is "
+                    "not writable"
+                ),
+            }
+        )
+
+    if active_state.get("inspection_error"):
+        warnings.append(
+            {
+                "code": "ACTIVE_DATABASE_INSPECTION_FAILED",
+                "message": str(
+                    active_state["inspection_error"]
+                ),
+            }
+        )
+    elif active_state.get("inspection_skipped_reason"):
+        warnings.append(
+            {
+                "code": "ACTIVE_DATABASE_INSPECTION_SKIPPED",
+                "message": str(
+                    active_state["inspection_skipped_reason"]
+                ),
+            }
+        )
+    elif (
+        active_state.get("integrity_status")
+        not in (None, "ok")
+    ):
+        warnings.append(
+            {
+                "code": "ACTIVE_DATABASE_INTEGRITY_WARNING",
+                "message": (
+                    "active database integrity check did not "
+                    f"return ok: "
+                    f"{active_state['integrity_status']}"
+                ),
+            }
+        )
+
+    if sidecars:
+        blockers.append(
+            {
+                "code": "SQLITE_SIDECARS_PRESENT",
+                "message": (
+                    "active SQLite WAL, SHM, or journal files "
+                    "must be cleared before cutover"
+                ),
+            }
+        )
+
+    if not process_probe["available"]:
+        blockers.append(
+            {
+                "code": "PROCESS_PROBE_UNAVAILABLE",
+                "message": (
+                    "DeltaAegis could not inspect running "
+                    "processes for an active dashboard"
+                ),
+            }
+        )
+    elif process_probe["matches"]:
+        blockers.append(
+            {
+                "code": "DASHBOARD_PROCESS_ACTIVE",
+                "message": (
+                    "a DeltaAegis dashboard process is using "
+                    "the active database"
+                ),
+            }
+        )
+
+    safety_state = (
+        _database_restore_cutover_safety_backup_state(
+            safety_backups_dir,
+            active_state=active_state,
+            now=effective_now,
+        )
+    )
+
+    if not safety_state["directory_exists"]:
+        blockers.append(
+            {
+                "code": "SAFETY_BACKUP_DIRECTORY_MISSING",
+                "message": (
+                    "safety backup directory must exist "
+                    "before cutover"
+                ),
+            }
+        )
+    elif safety_state["directory_is_symlink"]:
+        blockers.append(
+            {
+                "code": "SAFETY_BACKUP_DIRECTORY_SYMLINK",
+                "message": (
+                    "safety backup directory must not "
+                    "be a symlink"
+                ),
+            }
+        )
+    elif not safety_state["directory_is_directory"]:
+        blockers.append(
+            {
+                "code": "SAFETY_BACKUP_PATH_NOT_DIRECTORY",
+                "message": (
+                    "safety backup path is not a directory"
+                ),
+            }
+        )
+    elif not safety_state["directory_writable"]:
+        blockers.append(
+            {
+                "code": "SAFETY_BACKUP_DIRECTORY_NOT_WRITABLE",
+                "message": (
+                    "safety backup directory is not writable"
+                ),
+            }
+        )
+
+    if (
+        safety_state["backup_path_exists"]
+        or safety_state["manifest_path_exists"]
+    ):
+        blockers.append(
+            {
+                "code": "SAFETY_BACKUP_DESTINATION_EXISTS",
+                "message": (
+                    "proposed safety backup or manifest "
+                    "already exists"
+                ),
+            }
+        )
+
+    plan: dict[str, Any] = {
+        "schema_version": (
+            DATABASE_RESTORE_CUTOVER_PLAN_SCHEMA_VERSION
+        ),
+        "action": "database.restore.cutover.preview",
+        "generated_at": (
+            effective_now.replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        ),
+        "dry_run": True,
+        "destructive": False,
+        "execution_supported": False,
+        "cutover_ready": not blockers,
+        "review_required": bool(
+            blockers or warnings
+        ),
+        "active_database": active_state,
+        "backup": backup_state,
+        "safety_backup": safety_state,
+        "sqlite_sidecars": sidecars,
+        "dashboard_processes": process_probe,
+        "blockers": blockers,
+        "warnings": warnings,
+        "required_steps": [
+            (
+                "Stop every DeltaAegis dashboard process "
+                "using the active database."
+            ),
+            (
+                "Confirm no SQLite WAL, SHM, or journal "
+                "sidecar remains."
+            ),
+            (
+                "Re-verify backup and manifest identities, "
+                "checksums, integrity, schema, and logical "
+                "fingerprint."
+            ),
+            (
+                "Create and verify a fresh SQLite-consistent "
+                "safety backup of the active database."
+            ),
+            (
+                "Restore the verified backup into a temporary "
+                "database in the active data directory."
+            ),
+            (
+                "Verify restored integrity, schema, and "
+                "logical fingerprint before cutover."
+            ),
+            (
+                "Replace the active database with rollback "
+                "protection and durable directory syncing."
+            ),
+            (
+                "Verify the new active database and preserve "
+                "the safety backup and execution receipt."
+            ),
+        ],
+    }
+    plan["plan_digest"] = (
+        _database_restore_cutover_plan_digest(plan)
+    )
+    return plan
+
+
+def _print_database_restore_cutover_plan_human(
+    plan: dict[str, Any],
+) -> None:
+    active = plan["active_database"]
+    backup = plan["backup"]
+    safety = plan["safety_backup"]
+
+    print("DeltaAegis active restore cutover preview")
+    print("Mode: dry run; active database will not be modified")
+    print(f"Active database: {active['path']}")
+    print(f"Restore backup: {backup['backup_path']}")
+    print(f"Backup status: {backup['status']}")
+    print(
+        f"Safety backup: "
+        f"{safety['proposed_backup_path']}"
+    )
+    print(
+        f"Cutover ready: "
+        f"{'yes' if plan['cutover_ready'] else 'no'}"
+    )
+    print(f"Plan digest: {plan['plan_digest']}")
+    print(
+        f"Blockers: {len(plan['blockers'])}; "
+        f"warnings: {len(plan['warnings'])}"
+    )
+
+    for blocker in plan["blockers"]:
+        print()
+        print(
+            f"BLOCKER {blocker['code']}: "
+            f"{blocker['message']}"
+        )
+
+    for warning in plan["warnings"]:
+        print()
+        print(
+            f"WARNING {warning['code']}: "
+            f"{warning['message']}"
+        )
+
+    print()
+    print("Required execution sequence:")
+
+    for index, step in enumerate(
+        plan["required_steps"],
+        start=1,
+    ):
+        print(f"  {index}. {step}")
+
+
+def command_restore_cutover_preview(args) -> int:
+    plan = plan_database_restore_cutover(
+        args.db,
+        args.backup,
+        manifest_path=args.manifest,
+        safety_backups_dir=args.safety_backups_dir,
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                plan,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        _print_database_restore_cutover_plan_human(
+            plan
+        )
+
+    return 0 if plan["cutover_ready"] else 1
+
+
+
+# v0.41 checkpoint 8: guarded active restore cutover execution
+DATABASE_RESTORE_CUTOVER_RECEIPT_SCHEMA_VERSION = (
+    "deltaaegis-restore-cutover-receipt-v1"
+)
+DATABASE_RESTORE_CUTOVER_EXECUTION_CONFIRMATION = (
+    "RESTORE ACTIVE DELTAAEGIS DATABASE"
+)
+
+
+def _database_restore_cutover_unique_path(
+    parent: Path,
+    *,
+    prefix: str,
+    suffix: str,
+) -> Path:
+    resolved_parent = (
+        _database_restore_cutover_absolute_path(
+            Path(parent)
+        )
+    )
+
+    for _attempt in range(64):
+        candidate = resolved_parent / (
+            f"{prefix}{secrets.token_hex(8)}{suffix}"
+        )
+
+        if not os.path.lexists(candidate):
+            return candidate
+
+    raise DeltaAegisError(
+        "could not allocate a unique restore cutover path "
+        f"in {resolved_parent}"
+    )
+
+
+def _database_restore_cutover_verify_expected(
+    database_path: Path,
+    *,
+    expected_logical_fingerprint: str,
+    expected_schema_fingerprint: str,
+    verification_context: str,
+) -> dict[str, Any]:
+    resolved_database = (
+        _database_restore_cutover_absolute_path(
+            Path(database_path)
+        )
+    )
+
+    if not os.path.lexists(resolved_database):
+        raise DeltaAegisError(
+            f"{verification_context} database does not exist: "
+            f"{resolved_database}"
+        )
+
+    if resolved_database.is_symlink():
+        raise DeltaAegisError(
+            f"{verification_context} database must not be a "
+            f"symlink: {resolved_database}"
+        )
+
+    if not resolved_database.is_file():
+        raise DeltaAegisError(
+            f"{verification_context} database is not a "
+            f"regular file: {resolved_database}"
+        )
+
+    integrity_rows = _sqlite_database_integrity_check(
+        resolved_database
+    )
+
+    if integrity_rows != ["ok"]:
+        detail = "; ".join(integrity_rows) or "no result"
+        raise DeltaAegisError(
+            f"{verification_context} database integrity "
+            f"check failed: {detail}"
+        )
+
+    logical_fingerprint = (
+        _sqlite_database_logical_fingerprint(
+            resolved_database
+        )
+    )
+
+    if (
+        logical_fingerprint
+        != expected_logical_fingerprint
+    ):
+        raise DeltaAegisError(
+            f"{verification_context} database logical "
+            "fingerprint does not match the expected database"
+        )
+
+    _, schema_metadata = _sqlite_backup_metadata(
+        resolved_database
+    )
+    schema_fingerprint = str(
+        schema_metadata["fingerprint"]
+    )
+
+    if (
+        schema_fingerprint
+        != expected_schema_fingerprint
+    ):
+        raise DeltaAegisError(
+            f"{verification_context} database schema "
+            "fingerprint does not match the expected database"
+        )
+
+    identity = _database_restore_cutover_file_identity(
+        resolved_database
+    )
+
+    return {
+        "path": str(resolved_database),
+        "identity": identity,
+        "size_bytes": int(identity["size"]),
+        "sha256": _database_backup_sha256(
+            resolved_database
+        ),
+        "integrity_status": "ok",
+        "logical_fingerprint": logical_fingerprint,
+        "schema_fingerprint": schema_fingerprint,
+    }
+
+
+def _database_restore_cutover_recheck_inputs(
+    plan: dict[str, Any],
+    *,
+    active_database_path: Path,
+    backup_path: Path,
+    manifest_path: Path,
+    process_root: Path,
+    current_pid: int | None,
+) -> dict[str, Any]:
+    active_path = (
+        _database_restore_cutover_absolute_path(
+            Path(active_database_path)
+        )
+    )
+    resolved_backup = (
+        _database_restore_cutover_absolute_path(
+            Path(backup_path)
+        )
+    )
+    resolved_manifest = (
+        _database_restore_cutover_absolute_path(
+            Path(manifest_path)
+        )
+    )
+    sidecars = _database_restore_cutover_sidecars(
+        active_path
+    )
+
+    if sidecars:
+        raise DeltaAegisError(
+            "active SQLite sidecars appeared after planning"
+        )
+
+    process_probe = (
+        _database_restore_cutover_dashboard_processes(
+            active_path,
+            process_root=process_root,
+            current_pid=current_pid,
+        )
+    )
+
+    if not process_probe["available"]:
+        raise DeltaAegisError(
+            "running-process inspection became unavailable "
+            "after planning"
+        )
+
+    if process_probe["matches"]:
+        raise DeltaAegisError(
+            "a DeltaAegis dashboard process began using the "
+            "active database after planning"
+        )
+
+    active_identity = (
+        _database_restore_cutover_file_identity(
+            active_path
+        )
+    )
+
+    if (
+        active_identity
+        != plan["active_database"]["identity"]
+    ):
+        raise DeltaAegisError(
+            "active database identity changed after planning"
+        )
+
+    backup_identity = (
+        _database_restore_cutover_file_identity(
+            resolved_backup
+        )
+    )
+    manifest_identity = (
+        _database_restore_cutover_file_identity(
+            resolved_manifest
+        )
+    )
+
+    if (
+        backup_identity
+        != plan["backup"]["backup_identity"]
+    ):
+        raise DeltaAegisError(
+            "restore backup identity changed after planning"
+        )
+
+    if (
+        manifest_identity
+        != plan["backup"]["manifest_identity"]
+    ):
+        raise DeltaAegisError(
+            "restore manifest identity changed after planning"
+        )
+
+    verification = verify_database_backup_bundle(
+        resolved_backup,
+        resolved_manifest,
+    )
+
+    for key in (
+        "size_bytes",
+        "backup_sha256",
+        "schema_fingerprint",
+        "logical_fingerprint",
+        "integrity_status",
+    ):
+        if verification.get(key) != plan["backup"].get(key):
+            raise DeltaAegisError(
+                f"restore backup verification changed after "
+                f"planning: {key}"
+            )
+
+    return {
+        "active_identity": active_identity,
+        "backup_identity": backup_identity,
+        "manifest_identity": manifest_identity,
+        "process_probe": process_probe,
+        "verification": verification,
+    }
+
+
+def _database_restore_cutover_remove_identity_path(
+    path: Path,
+    expected_identity: dict[str, int] | None,
+) -> None:
+    if expected_identity is None:
+        return
+
+    resolved_path = _database_restore_cutover_absolute_path(
+        Path(path)
+    )
+
+    if not os.path.lexists(resolved_path):
+        return
+
+    try:
+        current_identity = (
+            _database_restore_cutover_file_identity(
+                resolved_path
+            )
+        )
+    except DeltaAegisError:
+        return
+
+    if current_identity != expected_identity:
+        return
+
+    try:
+        resolved_path.unlink()
+    except OSError:
+        return
+
+
+def execute_database_restore_cutover(
+    active_database_path: Path,
+    backup_path: Path,
+    *,
+    manifest_path: Path | None = None,
+    safety_backups_dir: Path = DEFAULT_BACKUPS,
+    expected_plan_digest: str,
+    confirmation: str,
+    now: datetime | None = None,
+    process_root: Path = Path("/proc"),
+    current_pid: int | None = None,
+) -> dict[str, Any]:
+    if str(confirmation or "").strip() != (
+        DATABASE_RESTORE_CUTOVER_EXECUTION_CONFIRMATION
+    ):
+        raise DeltaAegisError(
+            "active restore cutover requires the exact "
+            "confirmation phrase: "
+            f"{DATABASE_RESTORE_CUTOVER_EXECUTION_CONFIRMATION}"
+        )
+
+    normalized_expected_digest = str(
+        expected_plan_digest or ""
+    ).strip().lower()
+
+    if not re.fullmatch(
+        r"[0-9a-f]{64}",
+        normalized_expected_digest,
+    ):
+        raise DeltaAegisError(
+            "restore cutover plan digest must be a "
+            "64-character SHA-256 value"
+        )
+
+    effective_now = now or datetime.now(timezone.utc)
+
+    if effective_now.tzinfo is None:
+        raise DeltaAegisError(
+            "restore cutover reference time must include "
+            "a timezone"
+        )
+
+    effective_now = effective_now.astimezone(
+        timezone.utc
+    )
+    active_path = (
+        _database_restore_cutover_absolute_path(
+            Path(active_database_path)
+        )
+    )
+    resolved_backup = (
+        _database_restore_cutover_absolute_path(
+            Path(backup_path)
+        )
+    )
+    resolved_manifest = (
+        _database_restore_cutover_absolute_path(
+            Path(
+                manifest_path
+                if manifest_path is not None
+                else database_backup_manifest_path(
+                    resolved_backup
+                )
+            )
+        )
+    )
+    plan = plan_database_restore_cutover(
+        active_path,
+        resolved_backup,
+        manifest_path=resolved_manifest,
+        safety_backups_dir=safety_backups_dir,
+        now=effective_now,
+        process_root=process_root,
+        current_pid=current_pid,
+    )
+    actual_plan_digest = str(
+        plan["plan_digest"]
+    ).lower()
+
+    if actual_plan_digest != normalized_expected_digest:
+        raise DeltaAegisError(
+            "restore cutover plan changed after preview; "
+            f"expected {normalized_expected_digest}, "
+            f"found {actual_plan_digest}"
+        )
+
+    if not plan["cutover_ready"]:
+        blocker_codes = ", ".join(
+            str(blocker["code"])
+            for blocker in plan["blockers"]
+        )
+        raise DeltaAegisError(
+            "restore cutover is blocked"
+            + (
+                f": {blocker_codes}"
+                if blocker_codes
+                else ""
+            )
+        )
+
+    old_active = dict(plan["active_database"])
+    safety_backup_path = (
+        _database_restore_cutover_absolute_path(
+            Path(
+                plan["safety_backup"][
+                    "proposed_backup_path"
+                ]
+            )
+        )
+    )
+    safety_manifest_path = (
+        _database_restore_cutover_absolute_path(
+            Path(
+                plan["safety_backup"][
+                    "proposed_manifest_path"
+                ]
+            )
+        )
+    )
+    receipt: dict[str, Any] = {
+        "schema_version": (
+            DATABASE_RESTORE_CUTOVER_RECEIPT_SCHEMA_VERSION
+        ),
+        "action": "database.restore.cutover.execute",
+        "started_at": (
+            effective_now.replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        ),
+        "completed_at": None,
+        "dry_run": False,
+        "destructive": True,
+        "confirmation_required": (
+            DATABASE_RESTORE_CUTOVER_EXECUTION_CONFIRMATION
+        ),
+        "confirmation_matched": True,
+        "expected_plan_digest": (
+            normalized_expected_digest
+        ),
+        "actual_plan_digest": actual_plan_digest,
+        "status": "FAILED",
+        "review_required": True,
+        "active_database_path": str(active_path),
+        "backup_path": str(resolved_backup),
+        "manifest_path": str(resolved_manifest),
+        "safety_backup_path": str(
+            safety_backup_path
+        ),
+        "safety_manifest_path": str(
+            safety_manifest_path
+        ),
+        "temporary_restore_path": None,
+        "rollback_path": None,
+        "replacement_started": False,
+        "rollback_attempted": False,
+        "rollback_completed": False,
+        "safety_backup": None,
+        "restored_database": None,
+        "final_active_database": None,
+        "error": None,
+        "cleanup_warnings": [],
+    }
+    temporary_restore_path: Path | None = None
+    temporary_restore_identity: dict[str, int] | None = None
+    rollback_path: Path | None = None
+    rollback_identity: dict[str, int] | None = None
+    replacement_started = False
+
+    try:
+        create_sqlite_database_backup_bundle(
+            active_path,
+            safety_backup_path,
+        )
+        safety_verification = (
+            verify_database_backup_bundle(
+                safety_backup_path,
+                safety_manifest_path,
+            )
+        )
+
+        if (
+            safety_verification[
+                "logical_fingerprint"
+            ]
+            != old_active["logical_fingerprint"]
+        ):
+            raise DeltaAegisError(
+                "fresh safety backup logical fingerprint "
+                "does not match the active database"
+            )
+
+        if (
+            safety_verification[
+                "schema_fingerprint"
+            ]
+            != old_active["schema_fingerprint"]
+        ):
+            raise DeltaAegisError(
+                "fresh safety backup schema fingerprint "
+                "does not match the active database"
+            )
+
+        receipt["safety_backup"] = {
+            **safety_verification,
+            "status": "VERIFIED",
+        }
+
+        _database_restore_cutover_recheck_inputs(
+            plan,
+            active_database_path=active_path,
+            backup_path=resolved_backup,
+            manifest_path=resolved_manifest,
+            process_root=process_root,
+            current_pid=current_pid,
+        )
+
+        temporary_restore_path = (
+            _database_restore_cutover_unique_path(
+                active_path.parent,
+                prefix=(
+                    ".deltaaegis-restore-cutover-"
+                ),
+                suffix=".db",
+            )
+        )
+        receipt["temporary_restore_path"] = str(
+            temporary_restore_path
+        )
+        create_database_restore_rehearsal(
+            active_path,
+            resolved_backup,
+            resolved_manifest,
+            temporary_restore_path,
+        )
+        restored_verification = (
+            _database_restore_cutover_verify_expected(
+                temporary_restore_path,
+                expected_logical_fingerprint=(
+                    plan["backup"][
+                        "logical_fingerprint"
+                    ]
+                ),
+                expected_schema_fingerprint=(
+                    plan["backup"][
+                        "schema_fingerprint"
+                    ]
+                ),
+                verification_context=(
+                    "temporary restored"
+                ),
+            )
+        )
+        temporary_restore_identity = dict(
+            restored_verification["identity"]
+        )
+        receipt["restored_database"] = {
+            **restored_verification,
+            "status": "VERIFIED",
+        }
+
+        _database_restore_cutover_recheck_inputs(
+            plan,
+            active_database_path=active_path,
+            backup_path=resolved_backup,
+            manifest_path=resolved_manifest,
+            process_root=process_root,
+            current_pid=current_pid,
+        )
+
+        rollback_path = (
+            _database_restore_cutover_unique_path(
+                active_path.parent,
+                prefix=(
+                    ".deltaaegis-restore-rollback-"
+                ),
+                suffix=".db",
+            )
+        )
+        receipt["rollback_path"] = str(
+            rollback_path
+        )
+        os.link(
+            active_path,
+            rollback_path,
+            follow_symlinks=False,
+        )
+        rollback_identity = (
+            _database_restore_cutover_file_identity(
+                rollback_path
+            )
+        )
+
+        if (
+            rollback_identity
+            != old_active["identity"]
+        ):
+            raise DeltaAegisError(
+                "rollback hard-link identity does not match "
+                "the planned active database"
+            )
+
+        _database_backup_retention_fsync_directory(
+            active_path.parent
+        )
+        replacement_started = True
+        receipt["replacement_started"] = True
+        os.replace(
+            temporary_restore_path,
+            active_path,
+        )
+        temporary_restore_path = None
+        _database_backup_retention_fsync_directory(
+            active_path.parent
+        )
+        final_verification = (
+            _database_restore_cutover_verify_expected(
+                active_path,
+                expected_logical_fingerprint=(
+                    plan["backup"][
+                        "logical_fingerprint"
+                    ]
+                ),
+                expected_schema_fingerprint=(
+                    plan["backup"][
+                        "schema_fingerprint"
+                    ]
+                ),
+                verification_context=(
+                    "restored active"
+                ),
+            )
+        )
+
+        if (
+            final_verification["identity"]
+            != temporary_restore_identity
+        ):
+            raise DeltaAegisError(
+                "active database identity does not match "
+                "the verified temporary restore"
+            )
+
+        receipt["final_active_database"] = {
+            **final_verification,
+            "status": "VERIFIED",
+        }
+        _database_restore_cutover_remove_identity_path(
+            rollback_path,
+            rollback_identity,
+        )
+
+        if os.path.lexists(rollback_path):
+            raise DeltaAegisError(
+                "temporary rollback link could not be removed "
+                "after successful cutover"
+            )
+
+        rollback_path = None
+        rollback_identity = None
+        _database_backup_retention_fsync_directory(
+            active_path.parent
+        )
+        receipt["rollback_path"] = None
+        receipt["status"] = "COMPLETED"
+        receipt["review_required"] = False
+        receipt["message"] = (
+            "Active database restore cutover completed and "
+            "the fresh pre-restore safety backup was retained."
+        )
+
+    except (DeltaAegisError, OSError, sqlite3.Error) as exc:
+        receipt["error"] = str(exc)
+
+        if replacement_started:
+            receipt["rollback_attempted"] = True
+
+            if (
+                rollback_path is not None
+                and os.path.lexists(rollback_path)
+            ):
+                try:
+                    os.replace(
+                        rollback_path,
+                        active_path,
+                    )
+                    rollback_path = None
+                    rollback_identity = None
+                    _database_backup_retention_fsync_directory(
+                        active_path.parent
+                    )
+                    rollback_verification = (
+                        _database_restore_cutover_verify_expected(
+                            active_path,
+                            expected_logical_fingerprint=(
+                                old_active[
+                                    "logical_fingerprint"
+                                ]
+                            ),
+                            expected_schema_fingerprint=(
+                                old_active[
+                                    "schema_fingerprint"
+                                ]
+                            ),
+                            verification_context=(
+                                "rolled-back active"
+                            ),
+                        )
+                    )
+
+                    if (
+                        rollback_verification["identity"]
+                        != old_active["identity"]
+                    ):
+                        raise DeltaAegisError(
+                            "rolled-back active database "
+                            "identity does not match the "
+                            "original database"
+                        )
+
+                    if (
+                        rollback_verification["sha256"]
+                        != old_active["sha256"]
+                    ):
+                        raise DeltaAegisError(
+                            "rolled-back active database "
+                            "checksum does not match the "
+                            "original database"
+                        )
+
+                    receipt["rollback_completed"] = True
+                    receipt["final_active_database"] = {
+                        **rollback_verification,
+                        "status": "ROLLED_BACK",
+                    }
+                    receipt["status"] = "ROLLED_BACK"
+                    receipt["message"] = (
+                        "Restore cutover failed after active "
+                        "replacement; the original active "
+                        "database was restored successfully."
+                    )
+                except (
+                    DeltaAegisError,
+                    OSError,
+                    sqlite3.Error,
+                ) as rollback_exc:
+                    receipt["status"] = "FAILED"
+                    receipt["error"] = (
+                        f"{receipt['error']}; rollback failed: "
+                        f"{rollback_exc}"
+                    )
+                    receipt["message"] = (
+                        "Restore cutover failed and automatic "
+                        "rollback could not be verified. "
+                        "Operator recovery is required."
+                    )
+            else:
+                receipt["status"] = "FAILED"
+                receipt["error"] = (
+                    f"{receipt['error']}; rollback link is "
+                    "missing"
+                )
+                receipt["message"] = (
+                    "Restore cutover failed after active "
+                    "replacement and no rollback link was "
+                    "available. Operator recovery is required."
+                )
+        else:
+            receipt["status"] = "FAILED"
+            receipt["message"] = (
+                "Restore cutover stopped before replacing "
+                "the active database. The fresh safety backup "
+                "is retained when creation completed."
+            )
+
+    finally:
+        if temporary_restore_path is not None:
+            _database_restore_cutover_remove_identity_path(
+                temporary_restore_path,
+                temporary_restore_identity,
+            )
+
+            if os.path.lexists(temporary_restore_path):
+                receipt["cleanup_warnings"].append(
+                    "temporary restore path remains: "
+                    f"{temporary_restore_path}"
+                )
+
+        if (
+            not replacement_started
+            and rollback_path is not None
+        ):
+            _database_restore_cutover_remove_identity_path(
+                rollback_path,
+                rollback_identity,
+            )
+
+            if os.path.lexists(rollback_path):
+                receipt["cleanup_warnings"].append(
+                    "temporary rollback path remains: "
+                    f"{rollback_path}"
+                )
+            else:
+                rollback_path = None
+                rollback_identity = None
+
+        if rollback_path is not None:
+            receipt["rollback_path"] = str(
+                rollback_path
+            )
+        elif receipt["status"] in {
+            "COMPLETED",
+            "ROLLED_BACK",
+        }:
+            receipt["rollback_path"] = None
+
+        try:
+            _database_backup_retention_fsync_directory(
+                active_path.parent
+            )
+        except DeltaAegisError as exc:
+            receipt["cleanup_warnings"].append(
+                str(exc)
+            )
+
+        receipt["completed_at"] = (
+            datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        receipt["review_required"] = bool(
+            receipt["status"] != "COMPLETED"
+            or receipt["cleanup_warnings"]
+        )
+
+    return receipt
+
+
+def _print_database_restore_cutover_receipt_human(
+    receipt: dict[str, Any],
+) -> None:
+    print("DeltaAegis active restore cutover receipt")
+    print(f"Status: {receipt['status']}")
+    print(
+        f"Active database: "
+        f"{receipt['active_database_path']}"
+    )
+    print(f"Restore backup: {receipt['backup_path']}")
+    print(
+        f"Safety backup: "
+        f"{receipt['safety_backup_path']}"
+    )
+    print(
+        f"Plan digest: "
+        f"{receipt['actual_plan_digest']}"
+    )
+    print(
+        f"Rollback attempted: "
+        f"{'yes' if receipt['rollback_attempted'] else 'no'}"
+    )
+    print(
+        f"Rollback completed: "
+        f"{'yes' if receipt['rollback_completed'] else 'no'}"
+    )
+    print(
+        f"Review required: "
+        f"{'yes' if receipt['review_required'] else 'no'}"
+    )
+    print(receipt.get("message") or "")
+
+    if receipt.get("error"):
+        print(f"Error: {receipt['error']}")
+
+    for warning in receipt["cleanup_warnings"]:
+        print(f"Cleanup warning: {warning}")
+
+
+def command_restore_cutover_execute(args) -> int:
+    receipt = execute_database_restore_cutover(
+        args.db,
+        args.backup,
+        manifest_path=args.manifest,
+        safety_backups_dir=args.safety_backups_dir,
+        expected_plan_digest=args.plan_digest,
+        confirmation=args.confirmation,
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                receipt,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        _print_database_restore_cutover_receipt_human(
+            receipt
+        )
+
+    return 0 if receipt["status"] == "COMPLETED" else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeltaAegis v0.40.0 — Human-Readable Operator Actions, stable dashboard action receipts, progressive technical disclosure, compact mutation payloads, guarded NetSniper and TrueAegis orchestration, reporting, RBAC, and the current-state SIEM dashboard")
+    parser = argparse.ArgumentParser(
+        description=(
+            "DeltaAegis v0.41.0 — Data Durability & Recovery, "
+            "SQLite-consistent backups, verified manifests, "
+            "restore rehearsal, guarded retention, active restore "
+            "cutover planning and rollback, operator actions, "
+            "NetSniper and TrueAegis orchestration, reporting, "
+            "RBAC, and the current-state SIEM dashboard"
+        )
+    )
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--runs-dir", type=Path, default=DEFAULT_RUNS)
     parser.add_argument("--events", type=Path, default=DEFAULT_EVENTS)
     parser.add_argument("--reports-dir", type=Path, default=DEFAULT_REPORTS)
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("menu")
+
+    p = sub.add_parser(
+        "backup",
+        help=(
+            "Create a consistent backup of the "
+            "DeltaAegis SQLite database"
+        ),
+    )
+    backup_destination_group = p.add_mutually_exclusive_group()
+    backup_destination_group.add_argument(
+        "--destination",
+        type=Path,
+        help=(
+            "Exact new backup file path; its parent "
+            "directory must already exist"
+        ),
+    )
+    backup_destination_group.add_argument(
+        "--backups-dir",
+        type=Path,
+        help=(
+            "Directory for a generated timestamped "
+            "backup filename"
+        ),
+    )
+    p = sub.add_parser(
+        "restore-rehearsal",
+        help=(
+            "Verify a backup bundle and restore it to a separate "
+            "non-active database"
+        ),
+    )
+    p.add_argument(
+        "backup",
+        type=Path,
+        help="SQLite backup database to verify and rehearse",
+    )
+    p.add_argument(
+        "--manifest",
+        type=Path,
+        help=(
+            "Backup manifest path; defaults to "
+            "<backup>.manifest.json"
+        ),
+    )
+    restore_destination_group = (
+        p.add_mutually_exclusive_group()
+    )
+    restore_destination_group.add_argument(
+        "--destination",
+        type=Path,
+        help=(
+            "Exact new restore-rehearsal database path; its "
+            "parent directory must already exist"
+        ),
+    )
+    restore_destination_group.add_argument(
+        "--restore-dir",
+        type=Path,
+        help=(
+            "Directory for a generated restore-rehearsal "
+            "database filename"
+        ),
+    )
+    p = sub.add_parser(
+        "backup-catalog",
+        help=(
+            "List and verify top-level DeltaAegis database "
+            "backup bundles"
+        ),
+    )
+    p.add_argument(
+        "--backups-dir",
+        type=Path,
+        default=DEFAULT_BACKUPS,
+        help=(
+            "Directory containing DeltaAegis database backups "
+            "and manifests"
+        ),
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print structured JSON output",
+    )
+
+    p = sub.add_parser(
+        "backup-verify",
+        help="Verify one DeltaAegis database backup bundle",
+    )
+    p.add_argument("backup", type=Path)
+    p.add_argument(
+        "--manifest",
+        type=Path,
+        help=(
+            "Manifest path; defaults to "
+            "<backup>.manifest.json"
+        ),
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print structured JSON output",
+    )
+
+    p = sub.add_parser(
+        "backup-retention-preview",
+        help=(
+            "Preview a non-destructive backup retention plan"
+        ),
+    )
+    p.add_argument(
+        "--backups-dir",
+        type=Path,
+        default=DEFAULT_BACKUPS,
+        help=(
+            "Directory containing DeltaAegis database backups "
+            "and manifests"
+        ),
+    )
+    p.add_argument(
+        "--keep-newest",
+        type=database_backup_retention_positive_int,
+        default=(
+            DATABASE_BACKUP_RETENTION_DEFAULT_KEEP_NEWEST
+        ),
+        help=(
+            "Always keep at least this many newest verified "
+            "backup bundles"
+        ),
+    )
+    p.add_argument(
+        "--minimum-age-days",
+        type=database_backup_retention_nonnegative_int,
+        default=(
+            DATABASE_BACKUP_RETENTION_DEFAULT_MINIMUM_AGE_DAYS
+        ),
+        help=(
+            "Only mark older verified backups eligible after "
+            "this many full days"
+        ),
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print structured JSON output",
+    )
+
+    p = sub.add_parser(
+        "backup-retention-execute",
+        help=(
+            "Delete only freshly verified retention-eligible "
+            "backup bundles"
+        ),
+    )
+    p.add_argument(
+        "--backups-dir",
+        type=Path,
+        default=DEFAULT_BACKUPS,
+        help=(
+            "Directory containing DeltaAegis database backups "
+            "and manifests"
+        ),
+    )
+    p.add_argument(
+        "--keep-newest",
+        type=database_backup_retention_positive_int,
+        default=(
+            DATABASE_BACKUP_RETENTION_DEFAULT_KEEP_NEWEST
+        ),
+        help=(
+            "Always keep at least this many newest verified "
+            "backup bundles"
+        ),
+    )
+    p.add_argument(
+        "--minimum-age-days",
+        type=database_backup_retention_nonnegative_int,
+        default=(
+            DATABASE_BACKUP_RETENTION_DEFAULT_MINIMUM_AGE_DAYS
+        ),
+        help=(
+            "Only delete older verified backups after this "
+            "many full days"
+        ),
+    )
+    p.add_argument(
+        "--confirmation",
+        required=True,
+        help=(
+            "Exact required phrase: "
+            f"{DATABASE_BACKUP_RETENTION_EXECUTION_CONFIRMATION}"
+        ),
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a structured execution receipt",
+    )
+
+    p = sub.add_parser(
+        "restore-cutover-preview",
+        help=(
+            "Preview active database restore blockers and "
+            "rollback requirements"
+        ),
+    )
+    p.add_argument(
+        "backup",
+        type=Path,
+        help="Verified DeltaAegis backup database",
+    )
+    p.add_argument(
+        "--manifest",
+        type=Path,
+        help=(
+            "Backup manifest path; defaults to "
+            "BACKUP.manifest.json"
+        ),
+    )
+    p.add_argument(
+        "--safety-backups-dir",
+        type=Path,
+        default=DEFAULT_BACKUPS,
+        help=(
+            "Existing directory for the required fresh "
+            "pre-restore safety backup"
+        ),
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the structured cutover plan",
+    )
+
+    p = sub.add_parser(
+        "restore-cutover-execute",
+        help=(
+            "Replace the active database using a verified "
+            "preview plan and fresh safety backup"
+        ),
+    )
+    p.add_argument(
+        "backup",
+        type=Path,
+        help="Verified DeltaAegis backup database",
+    )
+    p.add_argument(
+        "--manifest",
+        type=Path,
+        help=(
+            "Backup manifest path; defaults to "
+            "BACKUP.manifest.json"
+        ),
+    )
+    p.add_argument(
+        "--safety-backups-dir",
+        type=Path,
+        default=DEFAULT_BACKUPS,
+        help=(
+            "Existing directory for the required fresh "
+            "pre-restore safety backup"
+        ),
+    )
+    p.add_argument(
+        "--plan-digest",
+        required=True,
+        help=(
+            "SHA-256 plan digest from a successful "
+            "restore-cutover-preview"
+        ),
+    )
+    p.add_argument(
+        "--confirmation",
+        required=True,
+        help=(
+            "Exact required phrase: "
+            f"{DATABASE_RESTORE_CUTOVER_EXECUTION_CONFIRMATION}"
+        ),
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the structured cutover receipt",
+    )
+
     p = sub.add_parser("user-create", help="Create a local DeltaAegis access user")
     p.add_argument("username")
     p.add_argument("--role", choices=list(ACCESS_ROLES), default="VIEWER")
@@ -30056,6 +35482,14 @@ def main() -> int:
     args = build_parser().parse_args()
     try:
         if args.command in {None, "menu"}: return run_interactive_menu(args)
+        if args.command == "backup": return command_backup(args)
+        if args.command == "restore-rehearsal": return command_restore_rehearsal(args)
+        if args.command == "backup-catalog": return command_backup_catalog(args)
+        if args.command == "backup-verify": return command_backup_verify(args)
+        if args.command == "backup-retention-preview": return command_backup_retention_preview(args)
+        if args.command == "backup-retention-execute": return command_backup_retention_execute(args)
+        if args.command == "restore-cutover-preview": return command_restore_cutover_preview(args)
+        if args.command == "restore-cutover-execute": return command_restore_cutover_execute(args)
         if args.command == "user-create": return command_user_create(args)
         if args.command == "users": return command_users(args)
         if args.command == "user-password": return command_user_password(args)

@@ -4,17 +4,15 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.40.0
+## Current Release — v0.41.0
 
-**DeltaAegis v0.40.0 — Human-Readable Operator Actions**
+**DeltaAegis v0.41.0 — Data Durability & Recovery**
 
-DeltaAegis v0.40.0 replaces default raw JSON mutation output with the shared `deltaaegis-dashboard-action-receipt-v1` contract. Successful operator actions now provide a stable action identifier, severity, human-readable message, concise summary, identifiers, and optional diagnostic detail.
+DeltaAegis v0.41.0 adds a guarded lifecycle for the local SQLite evidence store. Operators can create SQLite-consistent backups, publish checksum and schema manifests, catalog and verify backup bundles, rehearse restores into a non-active database, preview retention decisions, and delete only freshly verified retention-eligible bundles.
 
-Receipt coverage spans NetSniper import, scan start and cancellation, scheduled monitoring, TrueAegis launch and ingestion, investigation workflow actions, administrative user controls, and telemetry cleanup. Errors remain visible and actionable.
+Active restore is deliberately split into planning and execution. The preview verifies the selected backup, detects running DeltaAegis dashboard processes, blocks on SQLite WAL/SHM/journal files, checks active and backup file identities, and requires an existing writable safety-backup directory. Execution requires the exact preview digest and confirmation phrase, creates a fresh verified pre-restore safety backup, restores into a temporary database, atomically replaces the active database, verifies the result, and automatically rolls back when post-cutover verification fails.
 
-Progressive technical disclosure keeps command previews, paths, run metadata, cancellation evidence, log tails, and audit JSON closed by default. Explicit raw API links and Copy JSON remain available for deliberate technical inspection.
-
-Mutation and read-model separation removes refreshed collections from POST responses when the dashboard already reloads them through GET endpoints. Action-specific objects remain available, while asset investigation detail and telemetry cleanup models remain intentional immediate-response exceptions.
+The default active database remains `data/deltaaegis.db`. An ignored root-level `deltaaegis.db` is treated as legacy local state and is never selected automatically. Use `--db` explicitly when operating on any non-default database.
 
 ## What DeltaAegis Does
 
@@ -174,9 +172,76 @@ Import the latest completed NetSniper run from the dashboard using the `/netsnip
 deltaaegis ingest --runs-dir ~/NetSniper/runs
 ```
 
+## Data Durability and Recovery
+
+The default active database is:
+
+```text
+data/deltaaegis.db
+```
+
+Create a SQLite-consistent backup and manifest:
+
+```bash
+deltaaegis backup
+```
+
+Inspect all top-level backup bundles:
+
+```bash
+deltaaegis backup-catalog
+```
+
+Verify a specific bundle:
+
+```bash
+deltaaegis backup-verify backups/example.db
+```
+
+Rehearse a restore without modifying the active database:
+
+```bash
+deltaaegis restore-rehearsal backups/example.db
+```
+
+Preview retention decisions:
+
+```bash
+deltaaegis backup-retention-preview   --keep-newest 5   --minimum-age-days 30
+```
+
+Retention execution deletes only bundles that are still verified and eligible when execution begins:
+
+```bash
+deltaaegis backup-retention-execute   --keep-newest 5   --minimum-age-days 30   --confirmation "DELETE ELIGIBLE BACKUP BUNDLES"
+```
+
+Preview an active restore cutover:
+
+```bash
+deltaaegis restore-cutover-preview backups/example.db --json
+```
+
+The preview returns a SHA-256 plan digest. After reviewing a blocker-free plan, execute with that exact digest:
+
+```bash
+deltaaegis restore-cutover-execute backups/example.db   --plan-digest <preview-plan-digest>   --confirmation "RESTORE ACTIVE DELTAAEGIS DATABASE"   --json
+```
+
+Active restore execution requires:
+
+- A valid backup and matching manifest.
+- No running DeltaAegis dashboard process using the active database.
+- No active SQLite `-wal`, `-shm`, or `-journal` sidecar.
+- An unchanged active database, backup, manifest, and preview digest.
+- A fresh verified pre-restore safety backup.
+- Successful temporary-restore and post-cutover verification.
+
+The safety backup is retained after success or rollback. DeltaAegis does not delete, migrate, or automatically select an ignored root-level `deltaaegis.db`.
+
 ## Security Boundary
 
-DeltaAegis v0.40.0 does not expose arbitrary shell command execution from the dashboard.
+DeltaAegis v0.41.0 does not expose arbitrary shell command execution from the dashboard.
 
 Dashboard NetSniper execution uses guarded job records, validated private IPv4 CIDRs, and fixed argument-vector process creation. Live job-detail reads are bounded and confined to the configured scan-log root.
 
@@ -311,24 +376,18 @@ Preview uninstall actions without deleting anything:
 
 ## Validation
 
-Run the complete v0.40 automated release gate from a clean checkout:
+Run the complete v0.41 automated release gate from a clean checkout:
 
 ```bash
-./tools/validate_v0_40_release_gate.sh
+./tools/validate_v0_41_release_gate.sh
 ```
 
-The release gate validates rendered dashboard JavaScript syntax, client-disconnect response handling, release metadata, scan-cancellation receipt completion, all seven v0.40 readability checkpoints, repository path accuracy, and the complete v0.39 lifecycle, HTTP, cancellation, and schedule-deletion functional suite in an isolated compatibility clone.
+The release gate validates release metadata and documentation, rendered dashboard JavaScript, client-disconnect handling, all eight v0.41 durability and recovery checkpoints, the v0.40 operator-action suite, and the v0.39 compatibility suite. Every v0.41 checkpoint validator is invoked directly and exactly once.
 
-Complete the manual dashboard checklist before merge, tag, or publication:
+Complete the manual backup and restore checklist before merge, tag, or publication:
 
 ```text
-MANUAL_VERIFICATION_v0.40.0.md
-```
-
-For the pre-commit release-hardening checkpoint only:
-
-```bash
-./tools/validate_v0_40_release_gate.sh --allow-dirty
+MANUAL_VERIFICATION_v0.41.0.md
 ```
 
 Basic syntax check:
@@ -353,6 +412,9 @@ DeltaAegis does not currently:
 - Run more than one active NetSniper scan job at a time.
 - Treat schedule deletion as scan cancellation; cancellation remains a separate explicit action.
 - Replace manual analyst review.
+- Stop active dashboard processes automatically before a restore.
+- Bypass SQLite sidecar, identity, checksum, or preview-digest blockers.
+- Delete or migrate an ignored legacy root-level `deltaaegis.db` automatically.
 
 Its conclusions are limited to NetSniper telemetry, stored historical snapshots, analyst annotations, investigation state, and local DeltaAegis database records.
 
