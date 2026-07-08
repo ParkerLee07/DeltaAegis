@@ -33364,6 +33364,7 @@ def _database_restore_cutover_active_state(
         "identity": None,
         "size_bytes": None,
         "sha256": None,
+        "schema_fingerprint": None,
         "integrity_status": None,
         "logical_fingerprint": None,
         "inspection_error": None,
@@ -33404,6 +33405,12 @@ def _database_restore_cutover_active_state(
         )
         state["sha256"] = _database_backup_sha256(
             active_path
+        )
+        _, active_schema = _sqlite_backup_metadata(
+            active_path
+        )
+        state["schema_fingerprint"] = (
+            active_schema["fingerprint"]
         )
         integrity_rows = (
             _sqlite_database_integrity_check(
@@ -33493,15 +33500,87 @@ def _database_restore_cutover_safety_backup_state(
 def _database_restore_cutover_plan_digest(
     plan: dict[str, Any],
 ) -> str:
+    active = plan["active_database"]
+    backup = plan["backup"]
+    safety = plan["safety_backup"]
+    processes = plan["dashboard_processes"]
     canonical_payload = {
         "schema_version": plan["schema_version"],
-        "active_database": plan["active_database"],
-        "backup": plan["backup"],
-        "safety_backup": plan["safety_backup"],
+        "active_database": {
+            "path": active.get("path"),
+            "exists": active.get("exists"),
+            "is_symlink": active.get("is_symlink"),
+            "is_file": active.get("is_file"),
+            "parent_path": active.get("parent_path"),
+            "parent_exists": active.get("parent_exists"),
+            "parent_is_directory": (
+                active.get("parent_is_directory")
+            ),
+            "parent_writable": active.get("parent_writable"),
+            "identity": active.get("identity"),
+            "size_bytes": active.get("size_bytes"),
+            "sha256": active.get("sha256"),
+            "schema_fingerprint": (
+                active.get("schema_fingerprint")
+            ),
+            "integrity_status": (
+                active.get("integrity_status")
+            ),
+            "logical_fingerprint": (
+                active.get("logical_fingerprint")
+            ),
+            "inspection_error": (
+                active.get("inspection_error")
+            ),
+            "inspection_skipped_reason": (
+                active.get("inspection_skipped_reason")
+            ),
+        },
+        "backup": {
+            "backup_path": backup.get("backup_path"),
+            "manifest_path": backup.get("manifest_path"),
+            "status": backup.get("status"),
+            "detail": backup.get("detail"),
+            "backup_identity": (
+                backup.get("backup_identity")
+            ),
+            "manifest_identity": (
+                backup.get("manifest_identity")
+            ),
+            "size_bytes": backup.get("size_bytes"),
+            "backup_sha256": backup.get("backup_sha256"),
+            "schema_fingerprint": (
+                backup.get("schema_fingerprint")
+            ),
+            "logical_fingerprint": (
+                backup.get("logical_fingerprint")
+            ),
+            "integrity_status": (
+                backup.get("integrity_status")
+            ),
+        },
+        "safety_backup": {
+            "directory_path": safety.get(
+                "directory_path"
+            ),
+            "directory_exists": safety.get(
+                "directory_exists"
+            ),
+            "directory_is_symlink": safety.get(
+                "directory_is_symlink"
+            ),
+            "directory_is_directory": safety.get(
+                "directory_is_directory"
+            ),
+            "directory_writable": safety.get(
+                "directory_writable"
+            ),
+        },
         "sqlite_sidecars": plan["sqlite_sidecars"],
-        "dashboard_processes": (
-            plan["dashboard_processes"]
-        ),
+        "dashboard_processes": {
+            "available": processes.get("available"),
+            "matches": processes.get("matches"),
+        },
         "blockers": plan["blockers"],
         "warnings": plan["warnings"],
         "cutover_ready": plan["cutover_ready"],
@@ -33983,6 +34062,888 @@ def command_restore_cutover_preview(args) -> int:
     return 0 if plan["cutover_ready"] else 1
 
 
+
+# v0.41 checkpoint 8: guarded active restore cutover execution
+DATABASE_RESTORE_CUTOVER_RECEIPT_SCHEMA_VERSION = (
+    "deltaaegis-restore-cutover-receipt-v1"
+)
+DATABASE_RESTORE_CUTOVER_EXECUTION_CONFIRMATION = (
+    "RESTORE ACTIVE DELTAAEGIS DATABASE"
+)
+
+
+def _database_restore_cutover_unique_path(
+    parent: Path,
+    *,
+    prefix: str,
+    suffix: str,
+) -> Path:
+    resolved_parent = (
+        _database_restore_cutover_absolute_path(
+            Path(parent)
+        )
+    )
+
+    for _attempt in range(64):
+        candidate = resolved_parent / (
+            f"{prefix}{secrets.token_hex(8)}{suffix}"
+        )
+
+        if not os.path.lexists(candidate):
+            return candidate
+
+    raise DeltaAegisError(
+        "could not allocate a unique restore cutover path "
+        f"in {resolved_parent}"
+    )
+
+
+def _database_restore_cutover_verify_expected(
+    database_path: Path,
+    *,
+    expected_logical_fingerprint: str,
+    expected_schema_fingerprint: str,
+    verification_context: str,
+) -> dict[str, Any]:
+    resolved_database = (
+        _database_restore_cutover_absolute_path(
+            Path(database_path)
+        )
+    )
+
+    if not os.path.lexists(resolved_database):
+        raise DeltaAegisError(
+            f"{verification_context} database does not exist: "
+            f"{resolved_database}"
+        )
+
+    if resolved_database.is_symlink():
+        raise DeltaAegisError(
+            f"{verification_context} database must not be a "
+            f"symlink: {resolved_database}"
+        )
+
+    if not resolved_database.is_file():
+        raise DeltaAegisError(
+            f"{verification_context} database is not a "
+            f"regular file: {resolved_database}"
+        )
+
+    integrity_rows = _sqlite_database_integrity_check(
+        resolved_database
+    )
+
+    if integrity_rows != ["ok"]:
+        detail = "; ".join(integrity_rows) or "no result"
+        raise DeltaAegisError(
+            f"{verification_context} database integrity "
+            f"check failed: {detail}"
+        )
+
+    logical_fingerprint = (
+        _sqlite_database_logical_fingerprint(
+            resolved_database
+        )
+    )
+
+    if (
+        logical_fingerprint
+        != expected_logical_fingerprint
+    ):
+        raise DeltaAegisError(
+            f"{verification_context} database logical "
+            "fingerprint does not match the expected database"
+        )
+
+    _, schema_metadata = _sqlite_backup_metadata(
+        resolved_database
+    )
+    schema_fingerprint = str(
+        schema_metadata["fingerprint"]
+    )
+
+    if (
+        schema_fingerprint
+        != expected_schema_fingerprint
+    ):
+        raise DeltaAegisError(
+            f"{verification_context} database schema "
+            "fingerprint does not match the expected database"
+        )
+
+    identity = _database_restore_cutover_file_identity(
+        resolved_database
+    )
+
+    return {
+        "path": str(resolved_database),
+        "identity": identity,
+        "size_bytes": int(identity["size"]),
+        "sha256": _database_backup_sha256(
+            resolved_database
+        ),
+        "integrity_status": "ok",
+        "logical_fingerprint": logical_fingerprint,
+        "schema_fingerprint": schema_fingerprint,
+    }
+
+
+def _database_restore_cutover_recheck_inputs(
+    plan: dict[str, Any],
+    *,
+    active_database_path: Path,
+    backup_path: Path,
+    manifest_path: Path,
+    process_root: Path,
+    current_pid: int | None,
+) -> dict[str, Any]:
+    active_path = (
+        _database_restore_cutover_absolute_path(
+            Path(active_database_path)
+        )
+    )
+    resolved_backup = (
+        _database_restore_cutover_absolute_path(
+            Path(backup_path)
+        )
+    )
+    resolved_manifest = (
+        _database_restore_cutover_absolute_path(
+            Path(manifest_path)
+        )
+    )
+    sidecars = _database_restore_cutover_sidecars(
+        active_path
+    )
+
+    if sidecars:
+        raise DeltaAegisError(
+            "active SQLite sidecars appeared after planning"
+        )
+
+    process_probe = (
+        _database_restore_cutover_dashboard_processes(
+            active_path,
+            process_root=process_root,
+            current_pid=current_pid,
+        )
+    )
+
+    if not process_probe["available"]:
+        raise DeltaAegisError(
+            "running-process inspection became unavailable "
+            "after planning"
+        )
+
+    if process_probe["matches"]:
+        raise DeltaAegisError(
+            "a DeltaAegis dashboard process began using the "
+            "active database after planning"
+        )
+
+    active_identity = (
+        _database_restore_cutover_file_identity(
+            active_path
+        )
+    )
+
+    if (
+        active_identity
+        != plan["active_database"]["identity"]
+    ):
+        raise DeltaAegisError(
+            "active database identity changed after planning"
+        )
+
+    backup_identity = (
+        _database_restore_cutover_file_identity(
+            resolved_backup
+        )
+    )
+    manifest_identity = (
+        _database_restore_cutover_file_identity(
+            resolved_manifest
+        )
+    )
+
+    if (
+        backup_identity
+        != plan["backup"]["backup_identity"]
+    ):
+        raise DeltaAegisError(
+            "restore backup identity changed after planning"
+        )
+
+    if (
+        manifest_identity
+        != plan["backup"]["manifest_identity"]
+    ):
+        raise DeltaAegisError(
+            "restore manifest identity changed after planning"
+        )
+
+    verification = verify_database_backup_bundle(
+        resolved_backup,
+        resolved_manifest,
+    )
+
+    for key in (
+        "size_bytes",
+        "backup_sha256",
+        "schema_fingerprint",
+        "logical_fingerprint",
+        "integrity_status",
+    ):
+        if verification.get(key) != plan["backup"].get(key):
+            raise DeltaAegisError(
+                f"restore backup verification changed after "
+                f"planning: {key}"
+            )
+
+    return {
+        "active_identity": active_identity,
+        "backup_identity": backup_identity,
+        "manifest_identity": manifest_identity,
+        "process_probe": process_probe,
+        "verification": verification,
+    }
+
+
+def _database_restore_cutover_remove_identity_path(
+    path: Path,
+    expected_identity: dict[str, int] | None,
+) -> None:
+    if expected_identity is None:
+        return
+
+    resolved_path = _database_restore_cutover_absolute_path(
+        Path(path)
+    )
+
+    if not os.path.lexists(resolved_path):
+        return
+
+    try:
+        current_identity = (
+            _database_restore_cutover_file_identity(
+                resolved_path
+            )
+        )
+    except DeltaAegisError:
+        return
+
+    if current_identity != expected_identity:
+        return
+
+    try:
+        resolved_path.unlink()
+    except OSError:
+        return
+
+
+def execute_database_restore_cutover(
+    active_database_path: Path,
+    backup_path: Path,
+    *,
+    manifest_path: Path | None = None,
+    safety_backups_dir: Path = DEFAULT_BACKUPS,
+    expected_plan_digest: str,
+    confirmation: str,
+    now: datetime | None = None,
+    process_root: Path = Path("/proc"),
+    current_pid: int | None = None,
+) -> dict[str, Any]:
+    if str(confirmation or "").strip() != (
+        DATABASE_RESTORE_CUTOVER_EXECUTION_CONFIRMATION
+    ):
+        raise DeltaAegisError(
+            "active restore cutover requires the exact "
+            "confirmation phrase: "
+            f"{DATABASE_RESTORE_CUTOVER_EXECUTION_CONFIRMATION}"
+        )
+
+    normalized_expected_digest = str(
+        expected_plan_digest or ""
+    ).strip().lower()
+
+    if not re.fullmatch(
+        r"[0-9a-f]{64}",
+        normalized_expected_digest,
+    ):
+        raise DeltaAegisError(
+            "restore cutover plan digest must be a "
+            "64-character SHA-256 value"
+        )
+
+    effective_now = now or datetime.now(timezone.utc)
+
+    if effective_now.tzinfo is None:
+        raise DeltaAegisError(
+            "restore cutover reference time must include "
+            "a timezone"
+        )
+
+    effective_now = effective_now.astimezone(
+        timezone.utc
+    )
+    active_path = (
+        _database_restore_cutover_absolute_path(
+            Path(active_database_path)
+        )
+    )
+    resolved_backup = (
+        _database_restore_cutover_absolute_path(
+            Path(backup_path)
+        )
+    )
+    resolved_manifest = (
+        _database_restore_cutover_absolute_path(
+            Path(
+                manifest_path
+                if manifest_path is not None
+                else database_backup_manifest_path(
+                    resolved_backup
+                )
+            )
+        )
+    )
+    plan = plan_database_restore_cutover(
+        active_path,
+        resolved_backup,
+        manifest_path=resolved_manifest,
+        safety_backups_dir=safety_backups_dir,
+        now=effective_now,
+        process_root=process_root,
+        current_pid=current_pid,
+    )
+    actual_plan_digest = str(
+        plan["plan_digest"]
+    ).lower()
+
+    if actual_plan_digest != normalized_expected_digest:
+        raise DeltaAegisError(
+            "restore cutover plan changed after preview; "
+            f"expected {normalized_expected_digest}, "
+            f"found {actual_plan_digest}"
+        )
+
+    if not plan["cutover_ready"]:
+        blocker_codes = ", ".join(
+            str(blocker["code"])
+            for blocker in plan["blockers"]
+        )
+        raise DeltaAegisError(
+            "restore cutover is blocked"
+            + (
+                f": {blocker_codes}"
+                if blocker_codes
+                else ""
+            )
+        )
+
+    old_active = dict(plan["active_database"])
+    safety_backup_path = (
+        _database_restore_cutover_absolute_path(
+            Path(
+                plan["safety_backup"][
+                    "proposed_backup_path"
+                ]
+            )
+        )
+    )
+    safety_manifest_path = (
+        _database_restore_cutover_absolute_path(
+            Path(
+                plan["safety_backup"][
+                    "proposed_manifest_path"
+                ]
+            )
+        )
+    )
+    receipt: dict[str, Any] = {
+        "schema_version": (
+            DATABASE_RESTORE_CUTOVER_RECEIPT_SCHEMA_VERSION
+        ),
+        "action": "database.restore.cutover.execute",
+        "started_at": (
+            effective_now.replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        ),
+        "completed_at": None,
+        "dry_run": False,
+        "destructive": True,
+        "confirmation_required": (
+            DATABASE_RESTORE_CUTOVER_EXECUTION_CONFIRMATION
+        ),
+        "confirmation_matched": True,
+        "expected_plan_digest": (
+            normalized_expected_digest
+        ),
+        "actual_plan_digest": actual_plan_digest,
+        "status": "FAILED",
+        "review_required": True,
+        "active_database_path": str(active_path),
+        "backup_path": str(resolved_backup),
+        "manifest_path": str(resolved_manifest),
+        "safety_backup_path": str(
+            safety_backup_path
+        ),
+        "safety_manifest_path": str(
+            safety_manifest_path
+        ),
+        "temporary_restore_path": None,
+        "rollback_path": None,
+        "replacement_started": False,
+        "rollback_attempted": False,
+        "rollback_completed": False,
+        "safety_backup": None,
+        "restored_database": None,
+        "final_active_database": None,
+        "error": None,
+        "cleanup_warnings": [],
+    }
+    temporary_restore_path: Path | None = None
+    temporary_restore_identity: dict[str, int] | None = None
+    rollback_path: Path | None = None
+    rollback_identity: dict[str, int] | None = None
+    replacement_started = False
+
+    try:
+        create_sqlite_database_backup_bundle(
+            active_path,
+            safety_backup_path,
+        )
+        safety_verification = (
+            verify_database_backup_bundle(
+                safety_backup_path,
+                safety_manifest_path,
+            )
+        )
+
+        if (
+            safety_verification[
+                "logical_fingerprint"
+            ]
+            != old_active["logical_fingerprint"]
+        ):
+            raise DeltaAegisError(
+                "fresh safety backup logical fingerprint "
+                "does not match the active database"
+            )
+
+        if (
+            safety_verification[
+                "schema_fingerprint"
+            ]
+            != old_active["schema_fingerprint"]
+        ):
+            raise DeltaAegisError(
+                "fresh safety backup schema fingerprint "
+                "does not match the active database"
+            )
+
+        receipt["safety_backup"] = {
+            **safety_verification,
+            "status": "VERIFIED",
+        }
+
+        _database_restore_cutover_recheck_inputs(
+            plan,
+            active_database_path=active_path,
+            backup_path=resolved_backup,
+            manifest_path=resolved_manifest,
+            process_root=process_root,
+            current_pid=current_pid,
+        )
+
+        temporary_restore_path = (
+            _database_restore_cutover_unique_path(
+                active_path.parent,
+                prefix=(
+                    ".deltaaegis-restore-cutover-"
+                ),
+                suffix=".db",
+            )
+        )
+        receipt["temporary_restore_path"] = str(
+            temporary_restore_path
+        )
+        create_database_restore_rehearsal(
+            active_path,
+            resolved_backup,
+            resolved_manifest,
+            temporary_restore_path,
+        )
+        restored_verification = (
+            _database_restore_cutover_verify_expected(
+                temporary_restore_path,
+                expected_logical_fingerprint=(
+                    plan["backup"][
+                        "logical_fingerprint"
+                    ]
+                ),
+                expected_schema_fingerprint=(
+                    plan["backup"][
+                        "schema_fingerprint"
+                    ]
+                ),
+                verification_context=(
+                    "temporary restored"
+                ),
+            )
+        )
+        temporary_restore_identity = dict(
+            restored_verification["identity"]
+        )
+        receipt["restored_database"] = {
+            **restored_verification,
+            "status": "VERIFIED",
+        }
+
+        _database_restore_cutover_recheck_inputs(
+            plan,
+            active_database_path=active_path,
+            backup_path=resolved_backup,
+            manifest_path=resolved_manifest,
+            process_root=process_root,
+            current_pid=current_pid,
+        )
+
+        rollback_path = (
+            _database_restore_cutover_unique_path(
+                active_path.parent,
+                prefix=(
+                    ".deltaaegis-restore-rollback-"
+                ),
+                suffix=".db",
+            )
+        )
+        receipt["rollback_path"] = str(
+            rollback_path
+        )
+        os.link(
+            active_path,
+            rollback_path,
+            follow_symlinks=False,
+        )
+        rollback_identity = (
+            _database_restore_cutover_file_identity(
+                rollback_path
+            )
+        )
+
+        if (
+            rollback_identity
+            != old_active["identity"]
+        ):
+            raise DeltaAegisError(
+                "rollback hard-link identity does not match "
+                "the planned active database"
+            )
+
+        _database_backup_retention_fsync_directory(
+            active_path.parent
+        )
+        replacement_started = True
+        receipt["replacement_started"] = True
+        os.replace(
+            temporary_restore_path,
+            active_path,
+        )
+        temporary_restore_path = None
+        _database_backup_retention_fsync_directory(
+            active_path.parent
+        )
+        final_verification = (
+            _database_restore_cutover_verify_expected(
+                active_path,
+                expected_logical_fingerprint=(
+                    plan["backup"][
+                        "logical_fingerprint"
+                    ]
+                ),
+                expected_schema_fingerprint=(
+                    plan["backup"][
+                        "schema_fingerprint"
+                    ]
+                ),
+                verification_context=(
+                    "restored active"
+                ),
+            )
+        )
+
+        if (
+            final_verification["identity"]
+            != temporary_restore_identity
+        ):
+            raise DeltaAegisError(
+                "active database identity does not match "
+                "the verified temporary restore"
+            )
+
+        receipt["final_active_database"] = {
+            **final_verification,
+            "status": "VERIFIED",
+        }
+        _database_restore_cutover_remove_identity_path(
+            rollback_path,
+            rollback_identity,
+        )
+
+        if os.path.lexists(rollback_path):
+            raise DeltaAegisError(
+                "temporary rollback link could not be removed "
+                "after successful cutover"
+            )
+
+        rollback_path = None
+        rollback_identity = None
+        _database_backup_retention_fsync_directory(
+            active_path.parent
+        )
+        receipt["rollback_path"] = None
+        receipt["status"] = "COMPLETED"
+        receipt["review_required"] = False
+        receipt["message"] = (
+            "Active database restore cutover completed and "
+            "the fresh pre-restore safety backup was retained."
+        )
+
+    except (DeltaAegisError, OSError, sqlite3.Error) as exc:
+        receipt["error"] = str(exc)
+
+        if replacement_started:
+            receipt["rollback_attempted"] = True
+
+            if (
+                rollback_path is not None
+                and os.path.lexists(rollback_path)
+            ):
+                try:
+                    os.replace(
+                        rollback_path,
+                        active_path,
+                    )
+                    rollback_path = None
+                    rollback_identity = None
+                    _database_backup_retention_fsync_directory(
+                        active_path.parent
+                    )
+                    rollback_verification = (
+                        _database_restore_cutover_verify_expected(
+                            active_path,
+                            expected_logical_fingerprint=(
+                                old_active[
+                                    "logical_fingerprint"
+                                ]
+                            ),
+                            expected_schema_fingerprint=(
+                                old_active[
+                                    "schema_fingerprint"
+                                ]
+                            ),
+                            verification_context=(
+                                "rolled-back active"
+                            ),
+                        )
+                    )
+
+                    if (
+                        rollback_verification["identity"]
+                        != old_active["identity"]
+                    ):
+                        raise DeltaAegisError(
+                            "rolled-back active database "
+                            "identity does not match the "
+                            "original database"
+                        )
+
+                    if (
+                        rollback_verification["sha256"]
+                        != old_active["sha256"]
+                    ):
+                        raise DeltaAegisError(
+                            "rolled-back active database "
+                            "checksum does not match the "
+                            "original database"
+                        )
+
+                    receipt["rollback_completed"] = True
+                    receipt["final_active_database"] = {
+                        **rollback_verification,
+                        "status": "ROLLED_BACK",
+                    }
+                    receipt["status"] = "ROLLED_BACK"
+                    receipt["message"] = (
+                        "Restore cutover failed after active "
+                        "replacement; the original active "
+                        "database was restored successfully."
+                    )
+                except (
+                    DeltaAegisError,
+                    OSError,
+                    sqlite3.Error,
+                ) as rollback_exc:
+                    receipt["status"] = "FAILED"
+                    receipt["error"] = (
+                        f"{receipt['error']}; rollback failed: "
+                        f"{rollback_exc}"
+                    )
+                    receipt["message"] = (
+                        "Restore cutover failed and automatic "
+                        "rollback could not be verified. "
+                        "Operator recovery is required."
+                    )
+            else:
+                receipt["status"] = "FAILED"
+                receipt["error"] = (
+                    f"{receipt['error']}; rollback link is "
+                    "missing"
+                )
+                receipt["message"] = (
+                    "Restore cutover failed after active "
+                    "replacement and no rollback link was "
+                    "available. Operator recovery is required."
+                )
+        else:
+            receipt["status"] = "FAILED"
+            receipt["message"] = (
+                "Restore cutover stopped before replacing "
+                "the active database. The fresh safety backup "
+                "is retained when creation completed."
+            )
+
+    finally:
+        if temporary_restore_path is not None:
+            _database_restore_cutover_remove_identity_path(
+                temporary_restore_path,
+                temporary_restore_identity,
+            )
+
+            if os.path.lexists(temporary_restore_path):
+                receipt["cleanup_warnings"].append(
+                    "temporary restore path remains: "
+                    f"{temporary_restore_path}"
+                )
+
+        if (
+            not replacement_started
+            and rollback_path is not None
+        ):
+            _database_restore_cutover_remove_identity_path(
+                rollback_path,
+                rollback_identity,
+            )
+
+            if os.path.lexists(rollback_path):
+                receipt["cleanup_warnings"].append(
+                    "temporary rollback path remains: "
+                    f"{rollback_path}"
+                )
+            else:
+                rollback_path = None
+                rollback_identity = None
+
+        if rollback_path is not None:
+            receipt["rollback_path"] = str(
+                rollback_path
+            )
+        elif receipt["status"] in {
+            "COMPLETED",
+            "ROLLED_BACK",
+        }:
+            receipt["rollback_path"] = None
+
+        try:
+            _database_backup_retention_fsync_directory(
+                active_path.parent
+            )
+        except DeltaAegisError as exc:
+            receipt["cleanup_warnings"].append(
+                str(exc)
+            )
+
+        receipt["completed_at"] = (
+            datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        receipt["review_required"] = bool(
+            receipt["status"] != "COMPLETED"
+            or receipt["cleanup_warnings"]
+        )
+
+    return receipt
+
+
+def _print_database_restore_cutover_receipt_human(
+    receipt: dict[str, Any],
+) -> None:
+    print("DeltaAegis active restore cutover receipt")
+    print(f"Status: {receipt['status']}")
+    print(
+        f"Active database: "
+        f"{receipt['active_database_path']}"
+    )
+    print(f"Restore backup: {receipt['backup_path']}")
+    print(
+        f"Safety backup: "
+        f"{receipt['safety_backup_path']}"
+    )
+    print(
+        f"Plan digest: "
+        f"{receipt['actual_plan_digest']}"
+    )
+    print(
+        f"Rollback attempted: "
+        f"{'yes' if receipt['rollback_attempted'] else 'no'}"
+    )
+    print(
+        f"Rollback completed: "
+        f"{'yes' if receipt['rollback_completed'] else 'no'}"
+    )
+    print(
+        f"Review required: "
+        f"{'yes' if receipt['review_required'] else 'no'}"
+    )
+    print(receipt.get("message") or "")
+
+    if receipt.get("error"):
+        print(f"Error: {receipt['error']}")
+
+    for warning in receipt["cleanup_warnings"]:
+        print(f"Cleanup warning: {warning}")
+
+
+def command_restore_cutover_execute(args) -> int:
+    receipt = execute_database_restore_cutover(
+        args.db,
+        args.backup,
+        manifest_path=args.manifest,
+        safety_backups_dir=args.safety_backups_dir,
+        expected_plan_digest=args.plan_digest,
+        confirmation=args.confirmation,
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                receipt,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        _print_database_restore_cutover_receipt_human(
+            receipt
+        )
+
+    return 0 if receipt["status"] == "COMPLETED" else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DeltaAegis v0.40.0 — Human-Readable Operator Actions, stable dashboard action receipts, progressive technical disclosure, compact mutation payloads, guarded NetSniper and TrueAegis orchestration, reporting, RBAC, and the current-state SIEM dashboard")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -34224,6 +35185,57 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Print the structured cutover plan",
+    )
+
+    p = sub.add_parser(
+        "restore-cutover-execute",
+        help=(
+            "Replace the active database using a verified "
+            "preview plan and fresh safety backup"
+        ),
+    )
+    p.add_argument(
+        "backup",
+        type=Path,
+        help="Verified DeltaAegis backup database",
+    )
+    p.add_argument(
+        "--manifest",
+        type=Path,
+        help=(
+            "Backup manifest path; defaults to "
+            "BACKUP.manifest.json"
+        ),
+    )
+    p.add_argument(
+        "--safety-backups-dir",
+        type=Path,
+        default=DEFAULT_BACKUPS,
+        help=(
+            "Existing directory for the required fresh "
+            "pre-restore safety backup"
+        ),
+    )
+    p.add_argument(
+        "--plan-digest",
+        required=True,
+        help=(
+            "SHA-256 plan digest from a successful "
+            "restore-cutover-preview"
+        ),
+    )
+    p.add_argument(
+        "--confirmation",
+        required=True,
+        help=(
+            "Exact required phrase: "
+            f"{DATABASE_RESTORE_CUTOVER_EXECUTION_CONFIRMATION}"
+        ),
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the structured cutover receipt",
     )
 
     p = sub.add_parser("user-create", help="Create a local DeltaAegis access user")
@@ -34468,6 +35480,7 @@ def main() -> int:
         if args.command == "backup-retention-preview": return command_backup_retention_preview(args)
         if args.command == "backup-retention-execute": return command_backup_retention_execute(args)
         if args.command == "restore-cutover-preview": return command_restore_cutover_preview(args)
+        if args.command == "restore-cutover-execute": return command_restore_cutover_execute(args)
         if args.command == "user-create": return command_user_create(args)
         if args.command == "users": return command_users(args)
         if args.command == "user-password": return command_user_password(args)
