@@ -37,6 +37,9 @@ DEFAULT_DB = Path.home() / "DeltaAegis" / "data" / "deltaaegis.db"
 DEFAULT_BACKUPS = Path.home() / "DeltaAegis" / "backups"
 DELTAAEGIS_VERSION = "0.41.0-dev"
 DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION = "deltaaegis-backup-manifest-v1"
+DEFAULT_RESTORE_REHEARSALS = (
+    Path.home() / "DeltaAegis" / "restore-rehearsals"
+)
 DEFAULT_RUNS = Path.home() / "NetSniper" / "runs"
 DEFAULT_NETSNIPER = Path.home() / "NetSniper" / "netsniper.sh"
 DEFAULT_SCAN_LOGS = Path.home() / "DeltaAegis" / "scan-logs"
@@ -30473,6 +30476,741 @@ def command_backup(args) -> int:
     return 0
 
 
+
+# v0.41 checkpoint 3: verified restore rehearsal
+def _existing_paths_share_file_identity(
+    first_path: Path,
+    second_path: Path,
+) -> bool:
+    try:
+        return os.path.samefile(first_path, second_path)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise DeltaAegisError(
+            "could not compare restore rehearsal file identities: "
+            f"{first_path} and {second_path}: {exc}"
+        ) from exc
+
+
+def resolve_database_restore_rehearsal_paths(
+    active_database_path: Path,
+    backup_path: Path,
+    *,
+    manifest_path: Path | None = None,
+    destination: Path | None = None,
+    restore_dir: Path | None = None,
+) -> tuple[Path, Path, Path]:
+    if destination is not None and restore_dir is not None:
+        raise DeltaAegisError(
+            "--destination and --restore-dir are mutually exclusive"
+        )
+
+    resolved_active = Path(
+        active_database_path
+    ).expanduser().resolve(strict=False)
+    resolved_backup = _normalize_new_backup_path(
+        Path(backup_path)
+    )
+
+    if not os.path.lexists(resolved_backup):
+        raise DeltaAegisError(
+            f"backup database does not exist: {resolved_backup}"
+        )
+
+    if resolved_backup.is_symlink():
+        raise DeltaAegisError(
+            f"backup database must not be a symlink: {resolved_backup}"
+        )
+
+    if not resolved_backup.is_file():
+        raise DeltaAegisError(
+            f"backup database is not a regular file: {resolved_backup}"
+        )
+
+    if (
+        resolved_backup == resolved_active
+        or _existing_paths_share_file_identity(
+            resolved_backup,
+            resolved_active,
+        )
+    ):
+        raise DeltaAegisError(
+            "restore rehearsal backup must not be the active database"
+        )
+
+    resolved_manifest = _normalize_new_backup_path(
+        Path(
+            manifest_path
+            if manifest_path is not None
+            else database_backup_manifest_path(resolved_backup)
+        )
+    )
+
+    if not os.path.lexists(resolved_manifest):
+        raise DeltaAegisError(
+            f"backup manifest does not exist: {resolved_manifest}"
+        )
+
+    if resolved_manifest.is_symlink():
+        raise DeltaAegisError(
+            f"backup manifest must not be a symlink: {resolved_manifest}"
+        )
+
+    if not resolved_manifest.is_file():
+        raise DeltaAegisError(
+            f"backup manifest is not a regular file: "
+            f"{resolved_manifest}"
+        )
+
+    if destination is not None:
+        resolved_destination = _normalize_new_backup_path(
+            Path(destination)
+        )
+        destination_parent = resolved_destination.parent
+
+        if not destination_parent.exists():
+            raise DeltaAegisError(
+                "restore destination parent directory does not exist: "
+                f"{destination_parent}"
+            )
+
+        if not destination_parent.is_dir():
+            raise DeltaAegisError(
+                "restore destination parent is not a directory: "
+                f"{destination_parent}"
+            )
+    else:
+        restore_root = Path(
+            (
+                restore_dir
+                if restore_dir is not None
+                else DEFAULT_RESTORE_REHEARSALS
+            )
+        ).expanduser().resolve(strict=False)
+
+        if os.path.lexists(restore_root) and not restore_root.is_dir():
+            raise DeltaAegisError(
+                f"restore rehearsal directory is not a directory: "
+                f"{restore_root}"
+            )
+
+        try:
+            restore_root.mkdir(
+                parents=True,
+                exist_ok=True,
+                mode=0o700,
+            )
+        except OSError as exc:
+            raise DeltaAegisError(
+                f"could not create restore rehearsal directory "
+                f"{restore_root}: {exc}"
+            ) from exc
+
+        timestamp = datetime.now(timezone.utc).strftime(
+            "%Y%m%dT%H%M%SZ"
+        )
+        suffix = secrets.token_hex(4)
+        resolved_destination = (
+            restore_root
+            / (
+                "deltaaegis-restore-rehearsal-"
+                f"{timestamp}-{suffix}.db"
+            )
+        )
+
+    prohibited_destinations = {
+        resolved_active,
+        resolved_backup,
+        resolved_manifest,
+    }
+
+    if resolved_destination in prohibited_destinations:
+        raise DeltaAegisError(
+            "restore rehearsal destination must be separate from "
+            "the active database, backup, and manifest"
+        )
+
+    if os.path.lexists(resolved_destination):
+        raise DeltaAegisError(
+            f"restore rehearsal destination already exists: "
+            f"{resolved_destination}"
+        )
+
+    return (
+        resolved_backup,
+        resolved_manifest,
+        resolved_destination,
+    )
+
+
+def _read_database_backup_manifest(
+    manifest_path: Path,
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(
+            Path(manifest_path).read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise DeltaAegisError(
+            f"could not read backup manifest {manifest_path}: {exc}"
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise DeltaAegisError(
+            f"backup manifest must contain a JSON object: "
+            f"{manifest_path}"
+        )
+
+    return payload
+
+
+def _sqlite_database_integrity_check(
+    database_path: Path,
+) -> list[str]:
+    resolved_database = Path(database_path).resolve(strict=True)
+    connection: sqlite3.Connection | None = None
+
+    try:
+        connection = sqlite3.connect(
+            resolved_database.as_uri() + "?mode=ro",
+            uri=True,
+            timeout=30.0,
+        )
+        return [
+            str(row[0]).strip().lower()
+            for row in connection.execute(
+                "PRAGMA integrity_check"
+            ).fetchall()
+        ]
+    except sqlite3.Error as exc:
+        raise DeltaAegisError(
+            f"could not verify SQLite integrity for "
+            f"{resolved_database}: {exc}"
+        ) from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _sqlite_database_logical_fingerprint(
+    database_path: Path,
+) -> str:
+    resolved_database = Path(database_path).resolve(strict=True)
+    connection: sqlite3.Connection | None = None
+    digest = hashlib.sha256()
+
+    try:
+        connection = sqlite3.connect(
+            resolved_database.as_uri() + "?mode=ro",
+            uri=True,
+            timeout=30.0,
+        )
+
+        for statement in connection.iterdump():
+            digest.update(statement.encode("utf-8"))
+            digest.update(b"\n")
+    except (sqlite3.Error, UnicodeError) as exc:
+        raise DeltaAegisError(
+            f"could not calculate logical database fingerprint for "
+            f"{resolved_database}: {exc}"
+        ) from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+    return digest.hexdigest()
+
+
+def verify_database_backup_bundle(
+    backup_path: Path,
+    manifest_path: Path,
+) -> dict[str, Any]:
+    resolved_backup = _normalize_new_backup_path(
+        Path(backup_path)
+    )
+    resolved_manifest = _normalize_new_backup_path(
+        Path(manifest_path)
+    )
+
+    if not os.path.lexists(resolved_backup):
+        raise DeltaAegisError(
+            f"backup database does not exist: {resolved_backup}"
+        )
+
+    if resolved_backup.is_symlink():
+        raise DeltaAegisError(
+            f"backup database must not be a symlink: {resolved_backup}"
+        )
+
+    if not resolved_backup.is_file():
+        raise DeltaAegisError(
+            f"backup database is not a regular file: {resolved_backup}"
+        )
+
+    if not os.path.lexists(resolved_manifest):
+        raise DeltaAegisError(
+            f"backup manifest does not exist: {resolved_manifest}"
+        )
+
+    if resolved_manifest.is_symlink():
+        raise DeltaAegisError(
+            f"backup manifest must not be a symlink: {resolved_manifest}"
+        )
+
+    if not resolved_manifest.is_file():
+        raise DeltaAegisError(
+            f"backup manifest is not a regular file: "
+            f"{resolved_manifest}"
+        )
+
+    manifest = _read_database_backup_manifest(
+        resolved_manifest
+    )
+
+    if (
+        manifest.get("schema_version")
+        != DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION
+    ):
+        raise DeltaAegisError(
+            "unsupported backup manifest schema: "
+            f"{manifest.get('schema_version')!r}"
+        )
+
+    backup_metadata = manifest.get("backup")
+    schema_metadata = manifest.get("schema")
+    sqlite_manifest = manifest.get("sqlite")
+
+    if not isinstance(backup_metadata, dict):
+        raise DeltaAegisError(
+            "backup manifest is missing backup metadata"
+        )
+
+    if not isinstance(schema_metadata, dict):
+        raise DeltaAegisError(
+            "backup manifest is missing schema metadata"
+        )
+
+    if not isinstance(sqlite_manifest, dict):
+        raise DeltaAegisError(
+            "backup manifest is missing SQLite metadata"
+        )
+
+    if str(backup_metadata.get("filename") or "") != (
+        resolved_backup.name
+    ):
+        raise DeltaAegisError(
+            "backup filename does not match the manifest"
+        )
+
+    try:
+        actual_size = resolved_backup.stat().st_size
+        expected_size = int(backup_metadata["size_bytes"])
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise DeltaAegisError(
+            f"backup manifest contains invalid size metadata: {exc}"
+        ) from exc
+
+    if actual_size <= 0:
+        raise DeltaAegisError(
+            f"backup database is empty: {resolved_backup}"
+        )
+
+    if actual_size != expected_size:
+        raise DeltaAegisError(
+            "backup size does not match the manifest: "
+            f"expected {expected_size}, found {actual_size}"
+        )
+
+    expected_sha256 = str(
+        backup_metadata.get("sha256") or ""
+    ).lower()
+
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise DeltaAegisError(
+            "backup manifest contains an invalid SHA-256 checksum"
+        )
+
+    actual_sha256 = _database_backup_sha256(
+        resolved_backup
+    )
+
+    if actual_sha256 != expected_sha256:
+        raise DeltaAegisError(
+            "backup SHA-256 checksum does not match the manifest"
+        )
+
+    integrity_rows = _sqlite_database_integrity_check(
+        resolved_backup
+    )
+
+    if integrity_rows != ["ok"]:
+        detail = "; ".join(integrity_rows) or "no result"
+        raise DeltaAegisError(
+            f"backup SQLite integrity check failed: {detail}"
+        )
+
+    sqlite_metadata, actual_schema_metadata = (
+        _sqlite_backup_metadata(resolved_backup)
+    )
+    expected_schema_fingerprint = str(
+        schema_metadata.get("fingerprint") or ""
+    ).lower()
+
+    if not re.fullmatch(
+        r"[0-9a-f]{64}",
+        expected_schema_fingerprint,
+    ):
+        raise DeltaAegisError(
+            "backup manifest contains an invalid schema fingerprint"
+        )
+
+    if (
+        actual_schema_metadata["fingerprint"]
+        != expected_schema_fingerprint
+    ):
+        raise DeltaAegisError(
+            "backup schema fingerprint does not match the manifest"
+        )
+
+    for key in (
+        "user_version",
+        "schema_version",
+        "application_id",
+        "page_size",
+        "page_count",
+    ):
+        try:
+            expected_value = int(sqlite_manifest[key])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DeltaAegisError(
+                f"backup manifest contains invalid SQLite "
+                f"metadata for {key}"
+            ) from exc
+
+        if int(sqlite_metadata[key]) != expected_value:
+            raise DeltaAegisError(
+                f"backup SQLite metadata does not match for {key}: "
+                f"expected {expected_value}, "
+                f"found {sqlite_metadata[key]}"
+            )
+
+    logical_fingerprint = (
+        _sqlite_database_logical_fingerprint(
+            resolved_backup
+        )
+    )
+
+    return {
+        "backup_path": str(resolved_backup),
+        "manifest_path": str(resolved_manifest),
+        "size_bytes": actual_size,
+        "backup_sha256": actual_sha256,
+        "schema_fingerprint": (
+            actual_schema_metadata["fingerprint"]
+        ),
+        "logical_fingerprint": logical_fingerprint,
+        "integrity_status": "ok",
+    }
+
+
+def _unlink_if_inode_matches(
+    path: Path,
+    expected_identity: tuple[int, int] | None,
+) -> None:
+    if expected_identity is None:
+        return
+
+    try:
+        path_stat = os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+
+    if (
+        path_stat.st_dev,
+        path_stat.st_ino,
+    ) != expected_identity:
+        return
+
+    try:
+        Path(path).unlink()
+    except OSError:
+        pass
+
+
+def create_database_restore_rehearsal(
+    active_database_path: Path,
+    backup_path: Path,
+    manifest_path: Path,
+    destination_path: Path,
+) -> dict[str, Any]:
+    resolved_active = Path(
+        active_database_path
+    ).expanduser().resolve(strict=False)
+    resolved_backup = _normalize_new_backup_path(
+        Path(backup_path)
+    )
+    resolved_manifest = _normalize_new_backup_path(
+        Path(manifest_path)
+    )
+    resolved_destination = _normalize_new_backup_path(
+        Path(destination_path)
+    )
+
+    if (
+        resolved_backup == resolved_active
+        or _existing_paths_share_file_identity(
+            resolved_backup,
+            resolved_active,
+        )
+    ):
+        raise DeltaAegisError(
+            "restore rehearsal backup must not be the active database"
+        )
+
+    if resolved_destination in {
+        resolved_active,
+        resolved_backup,
+        resolved_manifest,
+    }:
+        raise DeltaAegisError(
+            "restore rehearsal destination must be separate from "
+            "the active database, backup, and manifest"
+        )
+
+    destination_parent = resolved_destination.parent
+
+    if not destination_parent.exists():
+        raise DeltaAegisError(
+            "restore destination parent directory does not exist: "
+            f"{destination_parent}"
+        )
+
+    if not destination_parent.is_dir():
+        raise DeltaAegisError(
+            "restore destination parent is not a directory: "
+            f"{destination_parent}"
+        )
+
+    if os.path.lexists(resolved_destination):
+        raise DeltaAegisError(
+            f"restore rehearsal destination already exists: "
+            f"{resolved_destination}"
+        )
+
+    verification = verify_database_backup_bundle(
+        resolved_backup,
+        resolved_manifest,
+    )
+
+    temporary_path: Path | None = None
+    temporary_identity: tuple[int, int] | None = None
+    published_identity: tuple[int, int] | None = None
+
+    try:
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{resolved_destination.name}.",
+            suffix=".tmp",
+            dir=str(destination_parent),
+        )
+        os.close(file_descriptor)
+        temporary_path = Path(temporary_name)
+        temporary_stat = os.lstat(temporary_path)
+        temporary_identity = (
+            temporary_stat.st_dev,
+            temporary_stat.st_ino,
+        )
+
+        source_connection: sqlite3.Connection | None = None
+        restore_connection: sqlite3.Connection | None = None
+
+        try:
+            source_connection = sqlite3.connect(
+                resolved_backup.as_uri() + "?mode=ro",
+                uri=True,
+                timeout=30.0,
+            )
+            restore_connection = sqlite3.connect(
+                temporary_path,
+                timeout=30.0,
+            )
+            source_connection.backup(
+                restore_connection,
+                pages=256,
+                sleep=0.05,
+            )
+        finally:
+            if restore_connection is not None:
+                restore_connection.close()
+
+            if source_connection is not None:
+                source_connection.close()
+
+        restored_integrity = _sqlite_database_integrity_check(
+            temporary_path
+        )
+
+        if restored_integrity != ["ok"]:
+            detail = "; ".join(restored_integrity) or "no result"
+            raise DeltaAegisError(
+                f"restored database integrity check failed: {detail}"
+            )
+
+        restored_logical_fingerprint = (
+            _sqlite_database_logical_fingerprint(
+                temporary_path
+            )
+        )
+
+        if (
+            restored_logical_fingerprint
+            != verification["logical_fingerprint"]
+        ):
+            raise DeltaAegisError(
+                "restored database logical fingerprint does not "
+                "match the verified backup"
+            )
+
+        _, restored_schema_metadata = _sqlite_backup_metadata(
+            temporary_path
+        )
+
+        if (
+            restored_schema_metadata["fingerprint"]
+            != verification["schema_fingerprint"]
+        ):
+            raise DeltaAegisError(
+                "restored database schema fingerprint does not "
+                "match the verified backup"
+            )
+
+        try:
+            os.link(
+                temporary_path,
+                resolved_destination,
+            )
+        except FileExistsError as exc:
+            raise DeltaAegisError(
+                f"restore rehearsal destination already exists: "
+                f"{resolved_destination}"
+            ) from exc
+
+        destination_stat = os.lstat(resolved_destination)
+        published_identity = (
+            destination_stat.st_dev,
+            destination_stat.st_ino,
+        )
+
+        if published_identity != temporary_identity:
+            raise DeltaAegisError(
+                "restore rehearsal publication identity mismatch"
+            )
+
+        _unlink_if_inode_matches(
+            temporary_path,
+            temporary_identity,
+        )
+        temporary_path = None
+        temporary_identity = None
+
+        if not resolved_destination.is_file():
+            raise DeltaAegisError(
+                "restore rehearsal publication did not create a "
+                f"regular file: {resolved_destination}"
+            )
+
+        restored_size = resolved_destination.stat().st_size
+
+        if restored_size <= 0:
+            raise DeltaAegisError(
+                f"restored rehearsal database is empty: "
+                f"{resolved_destination}"
+            )
+
+        return {
+            **verification,
+            "active_database_path": str(resolved_active),
+            "restored_path": str(resolved_destination),
+            "restored_size_bytes": restored_size,
+            "restored_integrity_status": "ok",
+            "restored_logical_fingerprint": (
+                restored_logical_fingerprint
+            ),
+        }
+    except DeltaAegisError:
+        _unlink_if_inode_matches(
+            resolved_destination,
+            published_identity,
+        )
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        _unlink_if_inode_matches(
+            resolved_destination,
+            published_identity,
+        )
+        raise DeltaAegisError(
+            f"restore rehearsal failed: {exc}"
+        ) from exc
+    finally:
+        if temporary_path is not None:
+            _unlink_if_inode_matches(
+                temporary_path,
+                temporary_identity,
+            )
+
+
+def command_restore_rehearsal(args) -> int:
+    (
+        backup_path,
+        manifest_path,
+        destination_path,
+    ) = resolve_database_restore_rehearsal_paths(
+        args.db,
+        args.backup,
+        manifest_path=args.manifest,
+        destination=args.destination,
+        restore_dir=args.restore_dir,
+    )
+
+    result = create_database_restore_rehearsal(
+        args.db,
+        backup_path,
+        manifest_path,
+        destination_path,
+    )
+
+    print("DeltaAegis restore rehearsal completed.")
+    print(f"Active database: {result['active_database_path']}")
+    print(f"Backup: {result['backup_path']}")
+    print(f"Manifest: {result['manifest_path']}")
+    print(f"Restored copy: {result['restored_path']}")
+    print(
+        f"Restored size: "
+        f"{result['restored_size_bytes']} bytes"
+    )
+    print(
+        f"Backup SHA-256 verified: "
+        f"{result['backup_sha256']}"
+    )
+    print(
+        f"Schema fingerprint verified: "
+        f"{result['schema_fingerprint']}"
+    )
+    print(
+        f"Logical fingerprint verified: "
+        f"{result['restored_logical_fingerprint']}"
+    )
+    print(
+        f"Integrity: "
+        f"{result['restored_integrity_status']}"
+    )
+    print("Active database was not modified.")
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DeltaAegis v0.40.0 — Human-Readable Operator Actions, stable dashboard action receipts, progressive technical disclosure, compact mutation payloads, guarded NetSniper and TrueAegis orchestration, reporting, RBAC, and the current-state SIEM dashboard")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -30504,6 +31242,45 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Directory for a generated timestamped "
             "backup filename"
+        ),
+    )
+    p = sub.add_parser(
+        "restore-rehearsal",
+        help=(
+            "Verify a backup bundle and restore it to a separate "
+            "non-active database"
+        ),
+    )
+    p.add_argument(
+        "backup",
+        type=Path,
+        help="SQLite backup database to verify and rehearse",
+    )
+    p.add_argument(
+        "--manifest",
+        type=Path,
+        help=(
+            "Backup manifest path; defaults to "
+            "<backup>.manifest.json"
+        ),
+    )
+    restore_destination_group = (
+        p.add_mutually_exclusive_group()
+    )
+    restore_destination_group.add_argument(
+        "--destination",
+        type=Path,
+        help=(
+            "Exact new restore-rehearsal database path; its "
+            "parent directory must already exist"
+        ),
+    )
+    restore_destination_group.add_argument(
+        "--restore-dir",
+        type=Path,
+        help=(
+            "Directory for a generated restore-rehearsal "
+            "database filename"
         ),
     )
     p = sub.add_parser("user-create", help="Create a local DeltaAegis access user")
@@ -30742,6 +31519,7 @@ def main() -> int:
     try:
         if args.command in {None, "menu"}: return run_interactive_menu(args)
         if args.command == "backup": return command_backup(args)
+        if args.command == "restore-rehearsal": return command_restore_rehearsal(args)
         if args.command == "user-create": return command_user_create(args)
         if args.command == "users": return command_users(args)
         if args.command == "user-password": return command_user_password(args)
