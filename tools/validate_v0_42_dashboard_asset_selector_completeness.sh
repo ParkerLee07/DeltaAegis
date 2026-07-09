@@ -71,6 +71,95 @@ print("PASS: complete scoped asset inventory fetch")
 print("PASS: former 25-row selector limit removed")
 PY
 
+
+echo "[v0.42 asset completeness] numeric IP ordering"
+python3 - <<'PY'
+from pathlib import Path
+import importlib.util
+import sys
+
+source = Path("deltaaegis.py").read_text(encoding="utf-8")
+
+required = (
+    "# v0.42 numeric dashboard asset-selector ordering.",
+    "def dashboard_asset_numeric_ip_sort_key(",
+    "ipaddress.ip_address(raw_ip)",
+    "int(parsed_ip)",
+)
+
+for marker in required:
+    if marker not in source:
+        raise SystemExit(
+            f"missing numeric asset ordering marker: {marker}"
+        )
+
+spec = importlib.util.spec_from_file_location(
+    "deltaaegis_v042_numeric_asset_order",
+    Path("deltaaegis.py"),
+)
+
+if spec is None or spec.loader is None:
+    raise SystemExit("could not load deltaaegis.py")
+
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+rows = [
+    {
+        "network_scope": "192.168.4.0/24",
+        "current_ip": "192.168.4.100",
+        "mac_address": "00:00:00:00:00:03",
+        "asset_key": "asset-100",
+    },
+    {
+        "network_scope": "192.168.4.0/24",
+        "current_ip": "192.168.4.67",
+        "mac_address": "00:00:00:00:00:02",
+        "asset_key": "asset-67",
+    },
+    {
+        "network_scope": "192.168.4.0/24",
+        "current_ip": "192.168.4.9",
+        "mac_address": "ff:ff:ff:ff:ff:ff",
+        "asset_key": "asset-9",
+    },
+    {
+        "network_scope": "192.168.4.0/24",
+        "current_ip": "192.168.4.129",
+        "mac_address": "00:00:00:00:00:01",
+        "asset_key": "asset-129",
+    },
+]
+
+ordered = sorted(
+    rows,
+    key=module.dashboard_asset_numeric_ip_sort_key,
+)
+ordered_ips = [row["current_ip"] for row in ordered]
+
+expected = [
+    "192.168.4.9",
+    "192.168.4.67",
+    "192.168.4.100",
+    "192.168.4.129",
+]
+
+if ordered_ips != expected:
+    raise SystemExit(
+        f"asset selector is not in numeric IP order: {ordered_ips}"
+    )
+
+if ordered[0]["mac_address"] != "ff:ff:ff:ff:ff:ff":
+    raise SystemExit(
+        "MAC address still has precedence over numeric IP ordering"
+    )
+
+print("PASS: IPv4 addresses sort numerically")
+print("PASS: MAC address no longer controls primary ordering")
+print("PASS: 192.168.4.67 sorts before 192.168.4.100")
+PY
+
 echo "[v0.42 asset completeness] repository hygiene"
 git diff --check
 echo "PASS: repository hygiene"

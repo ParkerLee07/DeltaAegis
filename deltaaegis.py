@@ -41916,5 +41916,63 @@ def main() -> int:
         print(f"DeltaAegis error: {exc}", file=sys.stderr); return 1
 
 
+
+
+# v0.42 numeric dashboard asset-selector ordering.
+_deltaaegis_dashboard_assets_payload_v042_numeric_base = (
+    dashboard_assets_payload
+)
+
+
+def dashboard_asset_numeric_ip_sort_key(
+    row: dict[str, Any],
+) -> tuple[Any, ...]:
+    network_scope = str(row.get("network_scope") or "")
+    raw_ip = str(
+        row.get("current_ip")
+        or row.get("ip_address")
+        or ""
+    ).strip()
+
+    try:
+        parsed_ip = ipaddress.ip_address(raw_ip)
+        ip_key: tuple[Any, ...] = (
+            0,
+            parsed_ip.version,
+            int(parsed_ip),
+        )
+    except ValueError:
+        ip_key = (
+            1,
+            0,
+            raw_ip.casefold(),
+        )
+
+    return (
+        network_scope,
+        ip_key,
+        str(row.get("mac_address") or "").casefold(),
+        str(row.get("asset_key") or "").casefold(),
+    )
+
+
+def dashboard_assets_payload(
+    connection: sqlite3.Connection,
+    limit: int,
+    scope: str | None = None,
+    state: str | None = None,
+    identity: str | None = None,
+) -> list[dict[str, Any]]:
+    rows = _deltaaegis_dashboard_assets_payload_v042_numeric_base(
+        connection,
+        limit,
+        scope=scope,
+        state=state,
+        identity=identity,
+    )
+    return sorted(
+        rows,
+        key=dashboard_asset_numeric_ip_sort_key,
+    )
 if __name__ == "__main__":
     raise SystemExit(main())

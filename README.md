@@ -138,6 +138,8 @@ The established **blocked-schedule retry behavior** is preserved: when another a
 
 The Investigation asset selector loads the complete scoped asset lifecycle inventory instead of reusing the 25-row dashboard preview. Current identities referenced by Network Activity, Risk Analysis, Security Events, or Alarms are no longer omitted solely because they fall outside a display limit.
 
+Within each network scope, selector entries are ordered by the numeric IP value, with MAC address used only as a tie-breaker.
+
 ## Dashboard Evidence Freshness
 
 Every main dashboard tab now shares a persistent evidence-freshness strip. It distinguishes the accepted scan observation time, DeltaAegis import time, and browser refresh time rather than presenting a page refresh as proof that the evidence is current.
