@@ -169,6 +169,18 @@ Use only an approved test database or a deliberately prepared stale row.
 - [ ] Confirm a manifest outside the configured NetSniper runs directory is rejected.
 - [ ] Confirm existing cancellation and deleted-schedule history behavior remains intact.
 
+
+## 7E. Sites dashboard UX
+
+- [ ] Confirm Sites buttons, links, text inputs, textarea, and subnet selector use the dashboard visual language.
+- [ ] Confirm the site-name input is empty and contains no organization-specific example.
+- [ ] Confirm every unassigned observed subnet is listed with CIDR, snapshot count, accepted count, and latest scan time.
+- [ ] Confirm VIEWER and ANALYST roles can see the unassigned list but cannot select subnet checkboxes.
+- [ ] As ADMIN, create a site with two selected subnet checkboxes and confirm both memberships are created with one action receipt.
+- [ ] Confirm creating an empty site remains supported when no checkbox is selected.
+- [ ] Submit a create request containing one valid and one public CIDR and confirm neither the site nor either membership is committed.
+- [ ] Confirm assigned subnets disappear from the unassigned list after the successful refresh.
+
 ## 8. Guarded LAN binding
 
 Use a trusted test LAN and an authenticated temporary database.

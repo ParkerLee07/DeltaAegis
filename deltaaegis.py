@@ -16260,7 +16260,7 @@ def dashboard_site_action_allowed_fields(
     route: str,
 ) -> set[str]:
     fields = {
-        "/api/site-create": {"name", "description"},
+        "/api/site-create": {"name", "description", "network_scopes"},
         "/api/site-rename": {"site_id", "name"},
         "/api/site-description": {
             "site_id",
@@ -16347,6 +16347,49 @@ def dashboard_site_active_record(
     return site
 
 
+
+
+def dashboard_site_create_network_scopes(
+    payload: dict[str, Any],
+) -> list[str]:
+    raw_scopes = payload.get("network_scopes", [])
+
+    if raw_scopes is None:
+        raw_scopes = []
+
+    if not isinstance(raw_scopes, list):
+        raise DashboardAdminUserActionError(
+            "network_scopes must be a JSON array",
+            status_code=400,
+        )
+
+    if len(raw_scopes) > 256:
+        raise DashboardAdminUserActionError(
+            "network_scopes may contain at most 256 entries",
+            status_code=400,
+        )
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+
+    for value in raw_scopes:
+        if not isinstance(value, str):
+            raise DashboardAdminUserActionError(
+                "each network_scopes entry must be a CIDR string",
+                status_code=400,
+            )
+
+        safe_scope = validate_private_cidr(value)
+
+        if safe_scope in seen:
+            continue
+
+        seen.add(safe_scope)
+        normalized.append(safe_scope)
+
+    return normalized
+
+
 def dashboard_site_action_payload(
     connection: sqlite3.Connection,
     route: str,
@@ -16364,23 +16407,61 @@ def dashboard_site_action_payload(
 
     site: dict[str, Any] | None = None
     membership: dict[str, Any] | None = None
+    memberships: list[dict[str, Any]] = []
     changed = True
     audit_action = ""
     audit_details: dict[str, Any] = {}
 
     if clean_route == "/api/site-create":
+        requested_scopes = dashboard_site_create_network_scopes(
+            payload
+        )
         site = create_logical_site(
             connection,
             payload.get("name"),
             payload.get("description") or "",
         )
+
+        for safe_scope in requested_scopes:
+            assigned = assign_network_scope_to_logical_site(
+                connection,
+                site["site_id"],
+                safe_scope,
+            )
+            observed_row = connection.execute(
+                "SELECT COUNT(*) AS count "
+                "FROM snapshots WHERE network_scope = ?",
+                (safe_scope,),
+            ).fetchone()
+            assigned_item = dict(assigned)
+            assigned_item["observed"] = bool(
+                observed_row
+                and int(observed_row["count"] or 0) > 0
+            )
+            memberships.append(assigned_item)
+
+        site = get_logical_site(
+            connection,
+            site["site_id"],
+        )
+        assigned_count = len(memberships)
         action = "logical_site.create"
-        message = f"Created logical site {site['name']}."
+        message = (
+            f"Created logical site {site['name']} with "
+            f"{assigned_count} assigned subnet(s)."
+            if assigned_count
+            else f"Created logical site {site['name']}."
+        )
         audit_action = "LOGICAL_SITE_CREATE"
         audit_details = {
             "name": site["name"],
             "description": site["description"],
             "status": site["status"],
+            "network_scopes": [
+                item["network_scope"]
+                for item in memberships
+            ],
+            "assigned_scope_count": assigned_count,
             "source": "dashboard",
         }
 
@@ -16492,6 +16573,7 @@ def dashboard_site_action_payload(
         )
         membership = dict(membership)
         membership["observed"] = observed
+        memberships = [membership]
         site = get_logical_site(
             connection,
             site["site_id"],
@@ -16566,6 +16648,7 @@ def dashboard_site_action_payload(
                 if membership
                 else None
             ),
+            "assigned_scope_count": len(memberships),
         },
         identifiers={
             "site_id": site["site_id"],
@@ -16592,6 +16675,7 @@ def dashboard_site_action_payload(
         "changed": changed,
         "site": site,
         "membership": membership,
+        "memberships": memberships,
         "receipt": receipt,
     }
 
@@ -24865,6 +24949,182 @@ def dashboard_index_html_base_v025_operator_link():
 
 
 
+
+<style id="site-management-styles">
+  #site-management-panel button,
+  #site-management-panel .actions a,
+  #site-management-panel #site-management-open-view {
+    appearance: none;
+    align-items: center;
+    background: linear-gradient(180deg, #0891b2, #0e7490);
+    border: 1px solid #22d3ee;
+    border-radius: 10px;
+    box-shadow: 0 8px 18px rgba(8, 145, 178, 0.18);
+    color: #ecfeff;
+    cursor: pointer;
+    display: inline-flex;
+    font: inherit;
+    font-weight: 700;
+    gap: 0.4rem;
+    justify-content: center;
+    min-height: 38px;
+    padding: 0.58rem 0.9rem;
+    text-decoration: none;
+    transition:
+      border-color 120ms ease,
+      box-shadow 120ms ease,
+      transform 120ms ease,
+      background 120ms ease;
+  }
+
+  #site-management-panel button:hover,
+  #site-management-panel .actions a:hover,
+  #site-management-panel #site-management-open-view:hover {
+    background: linear-gradient(180deg, #06b6d4, #0891b2);
+    box-shadow: 0 10px 24px rgba(8, 145, 178, 0.28);
+    transform: translateY(-1px);
+  }
+
+  #site-management-panel button:focus-visible,
+  #site-management-panel input:focus-visible,
+  #site-management-panel textarea:focus-visible,
+  #site-management-panel select:focus-visible {
+    outline: 3px solid rgba(34, 211, 238, 0.35);
+    outline-offset: 2px;
+  }
+
+  #site-management-panel button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+    transform: none;
+  }
+
+  #site-management-panel .danger-button {
+    background: linear-gradient(180deg, #b91c1c, #991b1b);
+    border-color: #ef4444;
+    box-shadow: 0 8px 18px rgba(185, 28, 28, 0.18);
+  }
+
+  #site-management-panel .danger-button:hover {
+    background: linear-gradient(180deg, #dc2626, #b91c1c);
+  }
+
+  #site-management-panel input[type="text"],
+  #site-management-panel textarea,
+  #site-management-panel select {
+    background: #071126;
+    border: 1px solid #334155;
+    border-radius: 9px;
+    color: #e2e8f0;
+    font: inherit;
+    min-height: 40px;
+    padding: 0.6rem 0.72rem;
+    width: 100%;
+  }
+
+  #site-management-panel textarea {
+    min-height: 90px;
+    resize: vertical;
+  }
+
+  #site-management-panel .site-form-grid {
+    align-items: end;
+    display: grid;
+    gap: 0.9rem;
+    grid-template-columns:
+      minmax(220px, 0.8fr)
+      minmax(280px, 1.4fr)
+      auto;
+  }
+
+  #site-management-panel .site-form-grid label {
+    display: grid;
+    font-weight: 700;
+    gap: 0.42rem;
+  }
+
+  #site-management-panel .site-subnet-panel {
+    background: rgba(7, 17, 38, 0.55);
+    border: 1px solid #263852;
+    border-radius: 12px;
+    margin: 1rem 0;
+    padding: 1rem;
+  }
+
+  #site-management-panel .site-subnet-grid {
+    display: grid;
+    gap: 0.72rem;
+    grid-template-columns:
+      repeat(auto-fit, minmax(240px, 1fr));
+    margin-top: 0.75rem;
+  }
+
+  #site-management-panel .site-subnet-option {
+    align-items: flex-start;
+    background: #0a142b;
+    border: 1px solid #2c3f5b;
+    border-radius: 10px;
+    cursor: pointer;
+    display: flex;
+    gap: 0.72rem;
+    min-height: 86px;
+    padding: 0.82rem;
+    transition:
+      background 120ms ease,
+      border-color 120ms ease,
+      transform 120ms ease;
+  }
+
+  #site-management-panel .site-subnet-option:hover {
+    background: #0d1b37;
+    border-color: #0891b2;
+    transform: translateY(-1px);
+  }
+
+  #site-management-panel .site-subnet-option input {
+    accent-color: #06b6d4;
+    flex: 0 0 auto;
+    height: 1.1rem;
+    margin-top: 0.15rem;
+    width: 1.1rem;
+  }
+
+  #site-management-panel .site-subnet-option-body {
+    display: grid;
+    gap: 0.28rem;
+    min-width: 0;
+  }
+
+  #site-management-panel .site-subnet-option-body code {
+    color: #a5f3fc;
+    font-size: 0.96rem;
+    overflow-wrap: anywhere;
+  }
+
+  #site-management-panel .site-subnet-meta {
+    color: #94a3b8;
+    font-size: 0.84rem;
+  }
+
+  #site-management-panel .site-create-card {
+    background: rgba(10, 20, 43, 0.65);
+    border: 1px solid #263852;
+    border-radius: 12px;
+    margin: 1rem 0 1.4rem;
+    padding: 1rem;
+  }
+
+  @media (max-width: 900px) {
+    #site-management-panel .site-form-grid {
+      grid-template-columns: 1fr;
+    }
+
+    #site-management-panel .site-form-grid button {
+      width: 100%;
+    }
+  }
+</style>
+
 <section class="card" data-tab-panel="sites" id="site-management-panel">
   <div class="section-header">
     <div>
@@ -24876,7 +25136,7 @@ def dashboard_index_html_base_v025_operator_link():
         subnet as the technical scan and provenance boundary.
       </p>
     </div>
-    <button type="button" id="site-management-refresh-button">
+    <button type="button" id="site-management-refresh-button" class="site-secondary-button">
       Refresh sites
     </button>
   </div>
@@ -24909,16 +25169,41 @@ def dashboard_index_html_base_v025_operator_link():
     </div>
   </div>
 
-  <div id="site-create-controls" data-site-admin-control hidden>
+
+  <section class="site-subnet-panel" id="site-management-unassigned-panel">
+    <div class="section-header">
+      <div>
+        <h3>Unassigned Subnets</h3>
+        <p class="muted" id="site-management-unassigned-help">
+          Select any subnets that should become members of the new site.
+          Leaving all boxes unchecked creates an empty site.
+        </p>
+      </div>
+    </div>
+    <div
+      id="site-management-unassigned-list"
+      class="site-subnet-grid"
+    ></div>
+  </section>
+
+  <div
+    id="site-create-controls"
+    class="site-create-card"
+    data-site-admin-control
+    hidden
+  >
     <h3>Create Site</h3>
-    <div class="actions">
+    <p class="muted">
+      Enter a site name and optionally select unassigned subnets above.
+    </p>
+    <div class="site-form-grid">
       <label>
         Site name
         <input
           id="site-create-name"
           type="text"
           maxlength="160"
-          placeholder="Example: CLS Cyber Campus"
+          autocomplete="off"
         >
       </label>
       <label>
@@ -26082,6 +26367,89 @@ function siteManagementRenderMembers(detail) {
   `;
 }
 
+
+    function siteManagementSelectedCreateScopes() {
+      return Array.from(
+        document.querySelectorAll(
+          "[data-site-create-scope]:checked"
+        )
+      ).map(element => String(element.value || ""))
+        .filter(Boolean);
+    }
+
+    function siteManagementRenderUnassigned(payload) {
+      const target = document.getElementById(
+        "site-management-unassigned-list"
+      );
+      const help = document.getElementById(
+        "site-management-unassigned-help"
+      );
+      if (!target) return;
+
+      const previous = new Set(
+        siteManagementSelectedCreateScopes()
+      );
+      const unassigned = Array.isArray(
+        payload && payload.unassigned_scopes
+      )
+        ? payload.unassigned_scopes
+        : [];
+
+      if (!unassigned.length) {
+        target.innerHTML =
+          '<p class="muted">All observed private subnets are assigned to logical sites.</p>';
+        if (help) {
+          help.textContent =
+            "No unassigned observed subnet is currently available.";
+        }
+        return;
+      }
+
+      if (help) {
+        help.textContent = siteManagementState.isAdmin
+          ? (
+              "Select any subnets that should become members of the new "
+              + "site. Leaving all boxes unchecked creates an empty site."
+            )
+          : (
+              "These observed private subnets are not assigned to a "
+              + "logical site. ADMIN access is required to select them."
+            );
+      }
+
+      target.innerHTML = unassigned.map(item => {
+        const scope = String(item.network_scope || "");
+        const snapshots = Number(item.snapshots || 0);
+        const accepted = Number(item.accepted_snapshots || 0);
+        const latest = item.latest_scan_at || "No scan timestamp";
+        const checked = previous.has(scope) ? " checked" : "";
+        const disabled = siteManagementState.isAdmin
+          ? ""
+          : " disabled";
+
+        return `
+          <label class="site-subnet-option">
+            <input
+              type="checkbox"
+              data-site-create-scope
+              value="${esc(scope)}"
+              aria-label="Assign ${esc(scope)} to the new site"
+              ${checked}${disabled}
+            >
+            <span class="site-subnet-option-body">
+              <strong><code>${esc(scope || "-")}</code></strong>
+              <span class="site-subnet-meta">
+                ${esc(snapshots)} scans · ${esc(accepted)} accepted
+              </span>
+              <span class="site-subnet-meta">
+                Latest: ${esc(latest)}
+              </span>
+            </span>
+          </label>
+        `;
+      }).join("");
+    }
+
 function renderSiteManagement(session, payload) {
   siteManagementState.session = session || {};
   siteManagementState.payload = payload || {};
@@ -26138,6 +26506,8 @@ function renderSiteManagement(session, payload) {
       element.hidden = !siteManagementState.isAdmin;
     }
   );
+
+  siteManagementRenderUnassigned(payload);
 
   const activeTarget = document.getElementById(
     "site-management-active-sites"
@@ -26364,9 +26734,15 @@ function bindSiteManagementControls() {
       const description = (
         document.getElementById("site-create-description") || {}
       ).value || "";
+      const networkScopes =
+        siteManagementSelectedCreateScopes();
       siteManagementAction(
         "/api/site-create",
-        {name, description}
+        {
+          name,
+          description,
+          network_scopes: networkScopes
+        }
       );
       return;
     }

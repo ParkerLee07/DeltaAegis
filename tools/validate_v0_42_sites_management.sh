@@ -723,6 +723,233 @@ print("PASS: successful and failed access-audit evidence")
 print("PASS: rendered Sites tab and browser workflow markers")
 PY
 
+echo "[v0.42 hotfix E] Sites dashboard UX and atomic creation"
+python3 - <<'PYUX'
+from pathlib import Path
+import ast
+import importlib.util
+import sys
+import tempfile
+
+source = Path("deltaaegis.py").read_text(encoding="utf-8")
+ast.parse(source)
+
+required = (
+    'id="site-management-styles"',
+    '#site-management-panel button',
+    'id="site-management-unassigned-panel"',
+    'id="site-management-unassigned-list"',
+    'class="site-subnet-grid"',
+    'data-site-create-scope',
+    "function siteManagementSelectedCreateScopes(",
+    "function siteManagementRenderUnassigned(",
+    "network_scopes: networkScopes",
+    "def dashboard_site_create_network_scopes(",
+    '"/api/site-create": {"name", "description", "network_scopes"}',
+    '"assigned_scope_count": len(memberships)',
+    '"memberships": memberships',
+)
+
+for marker in required:
+    if marker not in source:
+        raise SystemExit(
+            f"missing Sites UX marker: {marker}"
+        )
+
+if 'placeholder="Example: CLS Cyber Campus"' in source:
+    raise SystemExit(
+        "organization-specific site-name placeholder remains"
+    )
+
+repo = Path.cwd()
+spec = importlib.util.spec_from_file_location(
+    "deltaaegis_v042_sites_ux_validator",
+    repo / "deltaaegis.py",
+)
+
+if spec is None or spec.loader is None:
+    raise SystemExit("could not load deltaaegis.py")
+
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+with tempfile.TemporaryDirectory(
+    prefix="deltaaegis-v042-sites-ux-"
+) as temp_name:
+    db = Path(temp_name) / "deltaaegis.db"
+    connection = module.connect(db)
+
+    actor = module.create_access_user(
+        connection,
+        username="validator.admin",
+        display_name="Validator Admin",
+        role="ADMIN",
+        password="ValidatorPass123!",
+        is_active=True,
+    )
+    actor["auth_type"] = "validator"
+    connection.commit()
+
+    result = module.dashboard_site_action_payload(
+        connection,
+        "/api/site-create",
+        {
+            "name": "North Campus",
+            "description": "Atomic checkbox fixture",
+            "network_scopes": [
+                "10.42.1.0/24",
+                "10.42.2.0/24",
+                "10.42.1.0/24",
+            ],
+        },
+        actor=actor,
+        source_ip="127.0.0.1",
+        user_agent="validator",
+    )
+    connection.commit()
+
+    site = result["site"]
+    memberships = result["memberships"]
+
+    if len(memberships) != 2:
+        raise SystemExit(
+            f"expected two deduplicated memberships: {memberships}"
+        )
+
+    member_scopes = module.logical_site_member_scopes(
+        connection,
+        site["site_id"],
+    )
+    if member_scopes != [
+        "10.42.1.0/24",
+        "10.42.2.0/24",
+    ]:
+        raise SystemExit(
+            f"unexpected membership set: {member_scopes}"
+        )
+
+    if site["member_count"] != 2:
+        raise SystemExit(
+            f"site member count was not refreshed: {site}"
+        )
+
+    if (
+        result["receipt"]["summary"]["assigned_scope_count"]
+        != 2
+    ):
+        raise SystemExit(
+            "action receipt omitted assigned subnet count"
+        )
+
+    before_count = connection.execute(
+        "SELECT COUNT(*) FROM logical_sites"
+    ).fetchone()[0]
+
+    try:
+        module.dashboard_site_action_payload(
+            connection,
+            "/api/site-create",
+            {
+                "name": "Invalid Campus",
+                "description": "",
+                "network_scopes": [
+                    "10.43.1.0/24",
+                    "8.8.8.0/24",
+                ],
+            },
+            actor=actor,
+            source_ip="127.0.0.1",
+            user_agent="validator",
+        )
+    except Exception:
+        connection.rollback()
+    else:
+        raise SystemExit(
+            "public CIDR was accepted in create-with-memberships"
+        )
+
+    after_count = connection.execute(
+        "SELECT COUNT(*) FROM logical_sites"
+    ).fetchone()[0]
+
+    if after_count != before_count:
+        raise SystemExit(
+            "invalid create request left a partial logical site"
+        )
+
+    empty = module.dashboard_site_action_payload(
+        connection,
+        "/api/site-create",
+        {
+            "name": "Empty Campus",
+            "description": "",
+            "network_scopes": [],
+        },
+        actor=actor,
+        source_ip="127.0.0.1",
+        user_agent="validator",
+    )
+    connection.commit()
+
+    if empty["site"]["member_count"] != 0:
+        raise SystemExit(
+            "empty site creation unexpectedly added memberships"
+        )
+
+    try:
+        module.dashboard_site_action_payload(
+            connection,
+            "/api/site-create",
+            {
+                "name": "Wrong Type",
+                "description": "",
+                "network_scopes": "10.44.0.0/24",
+            },
+            actor=actor,
+            source_ip="127.0.0.1",
+            user_agent="validator",
+        )
+    except module.DashboardAdminUserActionError:
+        connection.rollback()
+    else:
+        raise SystemExit(
+            "non-array network_scopes payload was accepted"
+        )
+
+    page = module.dashboard_index_html()
+
+    for marker in (
+        'id="site-management-styles"',
+        'id="site-management-unassigned-list"',
+        "function siteManagementRenderUnassigned(",
+        "data-site-create-scope",
+        "network_scopes: networkScopes",
+    ):
+        if marker not in page:
+            raise SystemExit(
+                f"rendered dashboard missing Sites UX marker: {marker}"
+            )
+
+    if "Example: CLS Cyber Campus" in page:
+        raise SystemExit(
+            "rendered dashboard still includes the old example"
+        )
+
+    connection.close()
+
+print("PASS: dashboard-scoped Sites styling")
+print("PASS: unassigned subnet context and checkboxes")
+print("PASS: site-name example removed")
+print("PASS: selected subnets normalized and deduplicated")
+print("PASS: site and memberships created atomically")
+print("PASS: invalid CIDR leaves no partial site")
+print("PASS: empty site creation preserved")
+print("PASS: non-array subnet payload rejected")
+print("PASS: rendered Sites UX contract")
+PYUX
+echo "PASS: Sites dashboard UX and atomic creation"
+
 echo "[v0.42 hotfix B] rendered JavaScript syntax"
 tools/validate_v0_40_dashboard_javascript_syntax.sh
 echo "PASS: rendered JavaScript syntax"

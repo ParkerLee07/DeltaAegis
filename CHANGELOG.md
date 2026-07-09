@@ -1,5 +1,9 @@
 ## DeltaAegis v0.42.0 — Logical Site Scopes
 
+- Styled the Sites dashboard controls and removed the organization-specific site-name example.
+- Listed all unassigned observed subnets with scan context and added checkbox-based membership selection during site creation.
+- Made create-with-memberships atomic so invalid assignments cannot leave a partial logical site.
+
 - Reconciled orphaned successful scheduled scans from trusted completed-manifest evidence, including idempotent ingest and terminal job history.
 - Advanced linked schedules for both completed and failed watchdog recovery so one overdue subnet cannot starve later schedules.
 - Made normal dashboard shutdown wait for active scheduled-scan finalization.

@@ -133,6 +133,20 @@ NetSniper schedules run NetSniper and optional auto-ingest only. TrueAegis valid
 The established **blocked-schedule retry behavior** is preserved: when another active scan legitimately holds the single-scan lock, the due schedule remains due, its cadence is not advanced, and the scheduler retries it after the blocker clears.
 
 
+
+## Sites Dashboard UX
+
+The Sites dashboard now uses dashboard-native styling for buttons, text
+inputs, selectors, and destructive actions. The site-name field no longer
+includes an organization-specific example.
+
+Every unassigned observed private subnet is listed with its CIDR, total
+snapshots, accepted snapshots, and latest observation time. ADMIN users
+can select one or more subnet checkboxes while creating a site. Site
+creation and the selected membership assignments are committed together,
+so a validation or assignment failure does not leave a partially created
+site.
+
 ## Scheduled Scan Finalization Recovery
 
 DeltaAegis now reconciles an active scan ledger row when its recorded

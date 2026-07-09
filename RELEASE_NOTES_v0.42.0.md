@@ -11,6 +11,16 @@ The watchdog uses the most recent heartbeat as the primary liveness timestamp an
 Recovery evidence is stored under `status_json.watchdog`, including the original PID, heartbeat, update time, stdout and stderr paths, classification, and recovery actor. After safe recovery, the same worker pass may start the oldest overdue schedule.
 
 
+
+## Sites dashboard UX
+
+Sites management now presents styled dashboard controls and an explicit
+unassigned-subnet catalog instead of requiring operators to infer which
+subnet scopes are available. ADMIN users may select subnet checkboxes
+during site creation, and the backend creates the site and memberships in
+one transaction. The site-name field no longer contains an
+organization-specific example.
+
 ## Scheduled scan finalization recovery
 
 A dashboard shutdown during a scheduled scan could terminate the daemon
