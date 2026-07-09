@@ -1,5 +1,9 @@
 ## DeltaAegis v0.42.0 — Logical Site Scopes
 
+- Added a persistent evidence-freshness strip across all main dashboard tabs.
+- Separated accepted evidence time, import time, and browser refresh time so page activity cannot make old evidence appear current.
+- Added newest/oldest scope timestamps and mixed-age warnings for logical-site and all-scopes views.
+
 - Styled the Sites dashboard controls and removed the organization-specific site-name example.
 - Listed all unassigned observed subnets with scan context and added checkbox-based membership selection during site creation.
 - Made create-with-memberships atomic so invalid assignments cannot leave a partial logical site.

@@ -63,7 +63,7 @@ tools/validate_v0_40_dashboard_javascript_syntax.sh
 echo "[v0.42 release] client-disconnect response handling"
 tools/validate_v0_40_broken_pipe_response.sh
 
-echo "[v0.42 release] flat logical-site, LAN, scan-watchdog, Sites-management, TrueAegis-containment, and schedule-finalization checkpoint suite"
+echo "[v0.42 release] flat logical-site, LAN, scan-watchdog, Sites-management, dashboard-freshness, TrueAegis-containment, and schedule-finalization checkpoint suite"
 tools/validate_v0_42_all.sh
 
 echo "[v0.42 compatibility] isolated v0.40 operator-action suite"

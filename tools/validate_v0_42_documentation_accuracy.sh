@@ -114,3 +114,20 @@ print("PASS: manual verification and publication hold")
 PY
 
 echo "PASS: DeltaAegis v0.42 documentation accuracy validator"
+
+# v0.42 checkpoint F: dashboard freshness documentation accuracy.
+for freshness_contract in \
+  "README.md|## Dashboard Evidence Freshness" \
+  "RELEASE_NOTES_v0.42.0.md|## Dashboard evidence freshness" \
+  "MANUAL_VERIFICATION_v0.42.0.md|## 7F. Dashboard evidence freshness"
+do
+  freshness_file="${freshness_contract%%|*}"
+  freshness_marker="${freshness_contract#*|}"
+
+  if ! grep -Fq -- "$freshness_marker" "$freshness_file"; then
+    echo "FAIL: missing freshness documentation marker: $freshness_marker in $freshness_file"
+    exit 1
+  fi
+done
+
+echo "PASS: dashboard evidence freshness documentation"

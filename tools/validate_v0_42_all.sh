@@ -11,6 +11,7 @@ validators=(
   tools/validate_v0_42_dashboard_lan_flag.sh
   tools/validate_v0_42_scan_watchdog.sh
   tools/validate_v0_42_sites_management.sh
+  tools/validate_v0_42_dashboard_freshness_foundation.sh
   tools/validate_v0_42_trueaegis_tab_containment.sh
   tools/validate_v0_42_schedule_finalization_recovery.sh
   tools/validate_v0_42_logical_site_cli.sh
@@ -23,4 +24,4 @@ for validator in "${validators[@]}"; do
   "$validator"
 done
 
-echo "PASS: all nine DeltaAegis v0.42 component validators"
+echo "PASS: all ten DeltaAegis v0.42 component validators"

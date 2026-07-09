@@ -134,6 +134,12 @@ The established **blocked-schedule retry behavior** is preserved: when another a
 
 
 
+## Dashboard Evidence Freshness
+
+Every main dashboard tab now shares a persistent evidence-freshness strip. It distinguishes the accepted scan observation time, DeltaAegis import time, and browser refresh time rather than presenting a page refresh as proof that the evidence is current.
+
+A selected logical site and the all-scopes view evaluate every member subnet independently. The strip shows the newest and oldest accepted evidence timestamps, follows the least-fresh scope for its overall state, and warns when the selected scopes contain mixed-age evidence. Missing timestamps render as `Unknown`; no timestamp is synthesized from the browser clock.
+
 ## Sites Dashboard UX
 
 The Sites dashboard now uses dashboard-native styling for buttons, text

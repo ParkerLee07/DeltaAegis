@@ -133,6 +133,7 @@ component_validators = (
     "tools/validate_v0_42_dashboard_lan_flag.sh",
     "tools/validate_v0_42_scan_watchdog.sh",
     "tools/validate_v0_42_sites_management.sh",
+    "tools/validate_v0_42_dashboard_freshness_foundation.sh",
     "tools/validate_v0_42_trueaegis_tab_containment.sh",
     "tools/validate_v0_42_schedule_finalization_recovery.sh",
     "tools/validate_v0_42_logical_site_cli.sh",
@@ -191,7 +192,7 @@ if "Site-wide SIEM aggregation is not enabled" in source:
 
 print("PASS: stable v0.42.0 source and CLI metadata")
 print("PASS: README, CHANGELOG, release notes, and manual metadata")
-print("PASS: flat nine-validator all-in composition")
+print("PASS: flat ten-validator all-in composition")
 print("PASS: feature-branch and main release paths")
 print("PASS: release gate dependencies and stale-gate exclusion")
 PY

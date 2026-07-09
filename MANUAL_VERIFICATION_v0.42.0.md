@@ -181,6 +181,18 @@ Use only an approved test database or a deliberately prepared stale row.
 - [ ] Submit a create request containing one valid and one public CIDR and confirm neither the site nor either membership is committed.
 - [ ] Confirm assigned subnets disappear from the unassigned list after the successful refresh.
 
+## 7F. Dashboard evidence freshness
+
+- [ ] Confirm the freshness strip remains visible while switching among every main dashboard tab.
+- [ ] Confirm a selected subnet shows accepted evidence time, import time, evidence age, and browser refresh time separately.
+- [ ] Confirm all timestamps render in the browser's local timezone and retain the original timestamp in hover/title text.
+- [ ] Confirm missing timestamps render as `Unknown`, not as the current time.
+- [ ] Select a logical site containing scopes scanned at different times and confirm newest and oldest member evidence are both visible.
+- [ ] Confirm mixed-age site evidence produces an explicit warning and the site state follows its least-fresh member.
+- [ ] Confirm the all-scopes view evaluates every observed scope rather than only the globally newest snapshot.
+- [ ] Confirm a browser refresh changes only the dashboard-refreshed clock, not evidence or import timestamps.
+- [ ] Confirm historical evidence remains visible and neither risk scoring nor stored state changes.
+
 ## 8. Guarded LAN binding
 
 Use a trusted test LAN and an authenticated temporary database.

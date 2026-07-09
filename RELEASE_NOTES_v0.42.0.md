@@ -12,6 +12,12 @@ Recovery evidence is stored under `status_json.watchdog`, including the original
 
 
 
+## Dashboard evidence freshness
+
+A shared freshness strip now remains visible across every main dashboard tab. It exposes accepted evidence time, import time, evidence age, and the browser's last refresh as separate clocks. Site and all-scopes views show their newest and oldest scope timestamps and warn when evidence ages are mixed or any selected scope is stale or lacks an accepted scan.
+
+This checkpoint is presentation-only: it does not delete historical evidence, alter risk scores, or silently downgrade stored findings.
+
 ## Sites dashboard UX
 
 Sites management now presents styled dashboard controls and an explicit

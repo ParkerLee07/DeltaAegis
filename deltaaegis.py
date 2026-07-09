@@ -30064,6 +30064,852 @@ def dashboard_index_html() -> str:
 
     return html_text
 
+# v0.42 checkpoint F: shared dashboard evidence freshness strip.
+_deltaaegis_dashboard_index_html_v042_freshness_base = dashboard_index_html
+
+
+def dashboard_index_html() -> str:
+    html_text = (
+        _deltaaegis_dashboard_index_html_v042_freshness_base()
+    )
+
+    if 'id="dashboard-freshness-strip"' in html_text:
+        return html_text
+
+    styles = """
+  <style id="deltaaegis-v042-dashboard-freshness-styles">
+    #dashboard-freshness-strip {
+      background:
+        linear-gradient(
+          135deg,
+          rgba(8, 145, 178, 0.13),
+          rgba(15, 23, 42, 0.92) 52%
+        );
+      border: 1px solid #27435f;
+      border-left: 4px solid #22d3ee;
+      border-radius: 0 0 14px 14px;
+      box-shadow: 0 12px 30px rgba(2, 6, 23, 0.24);
+      margin: -1px 0 1rem;
+      padding: 0.86rem 1rem;
+    }
+
+    #dashboard-freshness-strip[data-state="FRESH"] {
+      border-left-color: #34d399;
+    }
+
+    #dashboard-freshness-strip[data-state="AGING"] {
+      border-left-color: #fbbf24;
+    }
+
+    #dashboard-freshness-strip[data-state="STALE"],
+    #dashboard-freshness-strip[data-state="NO_ACCEPTED_SCAN"],
+    #dashboard-freshness-strip[data-state="ERROR"] {
+      border-left-color: #fb7185;
+    }
+
+    .dashboard-freshness-header {
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.65rem;
+      justify-content: space-between;
+      margin-bottom: 0.7rem;
+    }
+
+    .dashboard-freshness-heading {
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.55rem;
+    }
+
+    .dashboard-freshness-heading strong {
+      color: #e0f2fe;
+      font-size: 0.95rem;
+    }
+
+    .dashboard-freshness-badge {
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid #334155;
+      border-radius: 999px;
+      color: #cbd5e1;
+      font-size: 0.76rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      padding: 0.28rem 0.58rem;
+    }
+
+    .dashboard-freshness-badge[data-state="FRESH"] {
+      border-color: #10b981;
+      color: #a7f3d0;
+    }
+
+    .dashboard-freshness-badge[data-state="AGING"] {
+      border-color: #d97706;
+      color: #fde68a;
+    }
+
+    .dashboard-freshness-badge[data-state="STALE"],
+    .dashboard-freshness-badge[data-state="NO_ACCEPTED_SCAN"],
+    .dashboard-freshness-badge[data-state="ERROR"] {
+      border-color: #e11d48;
+      color: #fecdd3;
+    }
+
+    .dashboard-freshness-grid {
+      display: grid;
+      gap: 0.72rem;
+      grid-template-columns:
+        repeat(auto-fit, minmax(205px, 1fr));
+    }
+
+    .dashboard-freshness-item {
+      background: rgba(7, 17, 38, 0.54);
+      border: 1px solid #263852;
+      border-radius: 10px;
+      min-width: 0;
+      padding: 0.62rem 0.72rem;
+    }
+
+    .dashboard-freshness-label {
+      color: #8fa8c8;
+      display: block;
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.07em;
+      margin-bottom: 0.28rem;
+      text-transform: uppercase;
+    }
+
+    .dashboard-freshness-value {
+      color: #e2e8f0;
+      display: block;
+      font-size: 0.88rem;
+      overflow-wrap: anywhere;
+    }
+
+    #dashboard-freshness-warning {
+      background: rgba(120, 53, 15, 0.2);
+      border: 1px solid rgba(245, 158, 11, 0.55);
+      border-radius: 9px;
+      color: #fde68a;
+      margin-top: 0.72rem;
+      padding: 0.58rem 0.72rem;
+    }
+
+    #dashboard-freshness-warning[hidden] {
+      display: none;
+    }
+
+    #dashboard-freshness-message {
+      color: #9fb5d2;
+      font-size: 0.8rem;
+      margin-top: 0.62rem;
+    }
+  </style>
+"""
+
+    strip = """
+  <section
+    id="dashboard-freshness-strip"
+    data-state="LOADING"
+    aria-live="polite"
+    aria-label="Dashboard evidence freshness"
+  >
+    <div class="dashboard-freshness-header">
+      <div class="dashboard-freshness-heading">
+        <strong>Evidence Freshness</strong>
+        <span
+          id="dashboard-freshness-state"
+          class="dashboard-freshness-badge"
+          data-state="LOADING"
+        >LOADING</span>
+      </div>
+      <span
+        id="dashboard-freshness-context"
+        class="muted"
+      >Loading selected dashboard context…</span>
+    </div>
+
+    <div class="dashboard-freshness-grid">
+      <div class="dashboard-freshness-item">
+        <span
+          id="dashboard-freshness-newest-label"
+          class="dashboard-freshness-label"
+        >Evidence through</span>
+        <time
+          id="dashboard-freshness-newest"
+          class="dashboard-freshness-value"
+        >Unknown</time>
+      </div>
+
+      <div
+        id="dashboard-freshness-oldest-item"
+        class="dashboard-freshness-item"
+      >
+        <span
+          id="dashboard-freshness-oldest-label"
+          class="dashboard-freshness-label"
+        >Oldest evidence</span>
+        <time
+          id="dashboard-freshness-oldest"
+          class="dashboard-freshness-value"
+        >Unknown</time>
+      </div>
+
+      <div class="dashboard-freshness-item">
+        <span class="dashboard-freshness-label">Imported</span>
+        <time
+          id="dashboard-freshness-imported"
+          class="dashboard-freshness-value"
+        >Unknown</time>
+      </div>
+
+      <div class="dashboard-freshness-item">
+        <span class="dashboard-freshness-label">Evidence age</span>
+        <span
+          id="dashboard-freshness-age"
+          class="dashboard-freshness-value"
+        >Unknown</span>
+      </div>
+
+      <div class="dashboard-freshness-item">
+        <span class="dashboard-freshness-label">
+          Dashboard refreshed
+        </span>
+        <time
+          id="dashboard-freshness-refreshed"
+          class="dashboard-freshness-value"
+        >Unknown</time>
+      </div>
+    </div>
+
+    <div id="dashboard-freshness-warning" hidden></div>
+    <div id="dashboard-freshness-message">
+      Loading accepted-scan freshness…
+    </div>
+  </section>
+"""
+
+    script = r"""
+  <script id="deltaaegis-v042-dashboard-freshness-script">
+    (() => {
+      "use strict";
+
+      const STATE_RANK = {
+        FRESH: 0,
+        AGING: 1,
+        STALE: 2,
+        NO_ACCEPTED_SCAN: 3,
+        ERROR: 4
+      };
+
+      function freshnessElement(id) {
+        return document.getElementById(id);
+      }
+
+      function freshnessParseTime(value) {
+        if (!value) return null;
+        const parsed = new Date(value);
+        return Number.isNaN(parsed.getTime()) ? null : parsed;
+      }
+
+      function freshnessTimeValue(record) {
+        const snapshot = record && record.latest_snapshot
+          ? record.latest_snapshot
+          : {};
+
+        return (
+          (record && record.timestamp)
+          || snapshot.scan_completed_at
+          || snapshot.created_at
+          || snapshot.imported_at
+          || null
+        );
+      }
+
+      function freshnessImportedValue(record) {
+        const snapshot = record && record.latest_snapshot
+          ? record.latest_snapshot
+          : {};
+
+        return snapshot.imported_at || null;
+      }
+
+      function freshnessLocalLabel(value) {
+        const parsed = freshnessParseTime(value);
+
+        if (!parsed) return "Unknown";
+
+        return parsed.toLocaleString(
+          undefined,
+          {
+            dateStyle: "medium",
+            timeStyle: "medium"
+          }
+        );
+      }
+
+      function freshnessSetTime(id, value) {
+        const element = freshnessElement(id);
+        if (!element) return;
+
+        const parsed = freshnessParseTime(value);
+
+        if (!parsed) {
+          element.textContent = "Unknown";
+          element.removeAttribute("datetime");
+          element.title = "No timestamp is available";
+          return;
+        }
+
+        element.textContent = freshnessLocalLabel(value);
+        element.dateTime = parsed.toISOString();
+        element.title = String(value);
+      }
+
+      function freshnessAgeLabel(ageHours) {
+        if (
+          ageHours === null
+          || ageHours === undefined
+          || !Number.isFinite(Number(ageHours))
+        ) {
+          return "Unknown";
+        }
+
+        const value = Number(ageHours);
+
+        if (value < 1) {
+          return `${Math.max(0, Math.round(value * 60))} minutes`;
+        }
+
+        if (value < 48) {
+          return `${value.toFixed(1)} hours`;
+        }
+
+        return `${(value / 24).toFixed(1)} days`;
+      }
+
+      function freshnessWorstState(records) {
+        let result = "FRESH";
+        let rank = -1;
+
+        for (const record of records) {
+          const state = String(
+            (record && record.state) || "NO_ACCEPTED_SCAN"
+          ).toUpperCase();
+          const nextRank = Object.prototype.hasOwnProperty.call(
+            STATE_RANK,
+            state
+          )
+            ? STATE_RANK[state]
+            : STATE_RANK.ERROR;
+
+          if (nextRank > rank) {
+            rank = nextRank;
+            result = state;
+          }
+        }
+
+        return result;
+      }
+
+      function freshnessAggregate(records, mode, contextLabel) {
+        const safeRecords = Array.isArray(records)
+          ? records
+          : [];
+        const evidence = [];
+        const imports = [];
+
+        for (const record of safeRecords) {
+          const evidenceValue = freshnessTimeValue(record);
+          const evidenceTime = freshnessParseTime(evidenceValue);
+
+          if (evidenceTime) {
+            evidence.push({
+              value: evidenceValue,
+              milliseconds: evidenceTime.getTime()
+            });
+          }
+
+          const importedValue = freshnessImportedValue(record);
+          const importedTime = freshnessParseTime(importedValue);
+
+          if (importedTime) {
+            imports.push({
+              value: importedValue,
+              milliseconds: importedTime.getTime()
+            });
+          }
+        }
+
+        evidence.sort(
+          (left, right) => left.milliseconds - right.milliseconds
+        );
+        imports.sort(
+          (left, right) => left.milliseconds - right.milliseconds
+        );
+
+        const oldest = evidence.length ? evidence[0] : null;
+        const newest = evidence.length
+          ? evidence[evidence.length - 1]
+          : null;
+        const newestImport = imports.length
+          ? imports[imports.length - 1]
+          : null;
+        const spreadSeconds = (
+          oldest && newest
+            ? Math.max(
+                0,
+                (newest.milliseconds - oldest.milliseconds) / 1000
+              )
+            : 0
+        );
+        const uniqueStates = new Set(
+          safeRecords.map(
+            record => String(
+              (record && record.state) || "NO_ACCEPTED_SCAN"
+            ).toUpperCase()
+          )
+        );
+        const mixed = (
+          safeRecords.length > 1
+          && (
+            spreadSeconds > 3600
+            || uniqueStates.size > 1
+          )
+        );
+        const state = safeRecords.length
+          ? freshnessWorstState(safeRecords)
+          : "NO_ACCEPTED_SCAN";
+        const worstAge = safeRecords.reduce(
+          (current, record) => {
+            const value = Number(record && record.age_hours);
+            if (!Number.isFinite(value)) return current;
+            return current === null
+              ? value
+              : Math.max(current, value);
+          },
+          null
+        );
+
+        return {
+          mode,
+          contextLabel,
+          state,
+          newest: newest ? newest.value : null,
+          oldest: oldest ? oldest.value : null,
+          imported: newestImport ? newestImport.value : null,
+          ageHours: worstAge,
+          mixed,
+          memberCount: safeRecords.length,
+          missingCount: safeRecords.filter(
+            record => !freshnessParseTime(
+              freshnessTimeValue(record)
+            )
+          ).length
+        };
+      }
+
+      async function freshnessFetch(path) {
+        const response = await fetch(
+          path,
+          {
+            credentials: "same-origin",
+            cache: "no-store"
+          }
+        );
+
+        if (
+          response.status === 401
+          || response.status === 403
+        ) {
+          window.location.href = "/login";
+          throw new Error("Authentication required");
+        }
+
+        const payload = await response.json();
+
+        if (!response.ok || payload.ok === false) {
+          throw new Error(
+            payload.message
+            || payload.error
+            || `Freshness request failed (${response.status})`
+          );
+        }
+
+        return payload;
+      }
+
+      function freshnessSelectedSiteId() {
+        return new URLSearchParams(
+          window.location.search
+        ).get("site_id") || "";
+      }
+
+      function freshnessSelectedScope() {
+        if (freshnessSelectedSiteId()) return "";
+
+        return new URLSearchParams(
+          window.location.search
+        ).get("scope") || "";
+      }
+
+      function freshnessScopedPath(path) {
+        if (typeof scopedPath === "function") {
+          return scopedPath(path);
+        }
+
+        const siteId = freshnessSelectedSiteId();
+        const scope = freshnessSelectedScope();
+        const separator = path.includes("?") ? "&" : "?";
+
+        if (siteId) {
+          return (
+            path
+            + separator
+            + "site_id="
+            + encodeURIComponent(siteId)
+          );
+        }
+
+        if (scope) {
+          return (
+            path
+            + separator
+            + "scope="
+            + encodeURIComponent(scope)
+          );
+        }
+
+        return path;
+      }
+
+      async function freshnessLoadRecords() {
+        const siteId = freshnessSelectedSiteId();
+        const scope = freshnessSelectedScope();
+
+        if (siteId) {
+          const payload = await freshnessFetch(
+            freshnessScopedPath("/api/scan-freshness")
+          );
+          const records = Array.isArray(payload.member_freshness)
+            ? payload.member_freshness
+            : [];
+
+          return freshnessAggregate(
+            records,
+            "site",
+            (
+              payload.site_name
+              || payload.name
+              || `Logical site ${siteId}`
+            )
+          );
+        }
+
+        if (scope) {
+          const payload = await freshnessFetch(
+            freshnessScopedPath("/api/scan-freshness")
+          );
+
+          return freshnessAggregate(
+            [payload],
+            "scope",
+            scope
+          );
+        }
+
+        const scopesPayload = await freshnessFetch("/api/scopes");
+        const scopes = Array.isArray(scopesPayload)
+          ? scopesPayload
+          : (
+              Array.isArray(scopesPayload.scopes)
+                ? scopesPayload.scopes
+                : []
+            );
+        const scopeNames = scopes.map(
+          item => String(item.network_scope || "")
+        ).filter(Boolean);
+
+        const records = await Promise.all(
+          scopeNames.map(
+            async networkScope => {
+              const payload = await freshnessFetch(
+                "/api/scan-freshness?scope="
+                + encodeURIComponent(networkScope)
+              );
+              payload.network_scope = networkScope;
+              return payload;
+            }
+          )
+        );
+
+        return freshnessAggregate(
+          records,
+          "all-scopes",
+          "All network scopes"
+        );
+      }
+
+      function freshnessRender(model) {
+        const strip = freshnessElement(
+          "dashboard-freshness-strip"
+        );
+        const badge = freshnessElement(
+          "dashboard-freshness-state"
+        );
+        const warning = freshnessElement(
+          "dashboard-freshness-warning"
+        );
+        const context = freshnessElement(
+          "dashboard-freshness-context"
+        );
+        const message = freshnessElement(
+          "dashboard-freshness-message"
+        );
+        const newestLabel = freshnessElement(
+          "dashboard-freshness-newest-label"
+        );
+        const oldestLabel = freshnessElement(
+          "dashboard-freshness-oldest-label"
+        );
+        const oldestItem = freshnessElement(
+          "dashboard-freshness-oldest-item"
+        );
+        const state = String(
+          model.state || "NO_ACCEPTED_SCAN"
+        ).toUpperCase();
+
+        if (strip) strip.dataset.state = state;
+
+        if (badge) {
+          badge.dataset.state = state;
+          badge.textContent = state;
+        }
+
+        if (context) {
+          context.textContent = model.contextLabel || "Unknown context";
+        }
+
+        if (model.mode === "site") {
+          if (newestLabel) {
+            newestLabel.textContent = "Newest member evidence";
+          }
+          if (oldestLabel) {
+            oldestLabel.textContent = "Oldest member evidence";
+          }
+        } else if (model.mode === "all-scopes") {
+          if (newestLabel) {
+            newestLabel.textContent = "Newest scope evidence";
+          }
+          if (oldestLabel) {
+            oldestLabel.textContent = "Oldest scope evidence";
+          }
+        } else {
+          if (newestLabel) {
+            newestLabel.textContent = "Evidence through";
+          }
+          if (oldestLabel) {
+            oldestLabel.textContent = "Oldest evidence";
+          }
+        }
+
+        if (oldestItem) {
+          oldestItem.hidden = model.mode === "scope";
+        }
+
+        freshnessSetTime(
+          "dashboard-freshness-newest",
+          model.newest
+        );
+        freshnessSetTime(
+          "dashboard-freshness-oldest",
+          model.oldest
+        );
+        freshnessSetTime(
+          "dashboard-freshness-imported",
+          model.imported
+        );
+        freshnessSetTime(
+          "dashboard-freshness-refreshed",
+          new Date().toISOString()
+        );
+
+        const age = freshnessElement(
+          "dashboard-freshness-age"
+        );
+        if (age) {
+          age.textContent = freshnessAgeLabel(
+            model.ageHours
+          );
+          age.title = (
+            model.ageHours === null
+            || model.ageHours === undefined
+              ? "No accepted evidence timestamp is available"
+              : `${model.ageHours} hours since the oldest accepted evidence`
+          );
+        }
+
+        const warningMessages = [];
+
+        if (model.mixed) {
+          warningMessages.push(
+            model.mode === "site"
+              ? (
+                  "Member subnets are supported by evidence from "
+                  + "different times. Review the oldest member "
+                  + "timestamp before acting."
+                )
+              : (
+                  "Network scopes are supported by evidence from "
+                  + "different times. Review the oldest scope "
+                  + "timestamp before acting."
+                )
+          );
+        }
+
+        if (state === "STALE") {
+          warningMessages.push(
+            "At least one selected scope is supported only by stale evidence."
+          );
+        } else if (state === "NO_ACCEPTED_SCAN") {
+          warningMessages.push(
+            "At least one selected scope has no accepted scan."
+          );
+        }
+
+        if (model.missingCount) {
+          warningMessages.push(
+            `${model.missingCount} selected scope(s) have no usable evidence timestamp.`
+          );
+        }
+
+        if (warning) {
+          warning.hidden = warningMessages.length === 0;
+          warning.textContent = warningMessages.join(" ");
+        }
+
+        if (message) {
+          message.textContent = (
+            `${model.memberCount} scope(s) evaluated. `
+            + "Evidence and import times are separate from "
+            + "the browser refresh time."
+          );
+        }
+      }
+
+      function freshnessRenderError(error) {
+        const strip = freshnessElement(
+          "dashboard-freshness-strip"
+        );
+        const badge = freshnessElement(
+          "dashboard-freshness-state"
+        );
+        const warning = freshnessElement(
+          "dashboard-freshness-warning"
+        );
+        const message = freshnessElement(
+          "dashboard-freshness-message"
+        );
+
+        if (strip) strip.dataset.state = "ERROR";
+
+        if (badge) {
+          badge.dataset.state = "ERROR";
+          badge.textContent = "ERROR";
+        }
+
+        if (warning) {
+          warning.hidden = false;
+          warning.textContent = (
+            "Freshness could not be established. "
+            + "Do not assume the visible evidence is current."
+          );
+        }
+
+        if (message) {
+          message.textContent = (
+            "Freshness lookup failed: "
+            + String(
+                (error && error.message) || error || "Unknown error"
+              )
+          );
+        }
+
+        freshnessSetTime(
+          "dashboard-freshness-refreshed",
+          new Date().toISOString()
+        );
+      }
+
+      async function dashboardFreshnessLoad() {
+        try {
+          const model = await freshnessLoadRecords();
+          freshnessRender(model);
+        } catch (error) {
+          freshnessRenderError(error);
+        }
+      }
+
+      window.deltaAegisDashboardFreshness = {
+        aggregate: freshnessAggregate,
+        formatLocalTime: freshnessLocalLabel,
+        load: dashboardFreshnessLoad
+      };
+
+      dashboardFreshnessLoad();
+
+      window.setInterval(
+        dashboardFreshnessLoad,
+        60000
+      );
+
+      document.addEventListener(
+        "visibilitychange",
+        () => {
+          if (!document.hidden) {
+            dashboardFreshnessLoad();
+          }
+        }
+      );
+    })();
+  </script>
+"""
+
+    if "</head>" not in html_text:
+        raise DeltaAegisError(
+            "dashboard freshness could not locate </head>"
+        )
+
+    if "</nav>" not in html_text:
+        raise DeltaAegisError(
+            "dashboard freshness could not locate the main navigation"
+        )
+
+    if "</body>" not in html_text:
+        raise DeltaAegisError(
+            "dashboard freshness could not locate </body>"
+        )
+
+    html_text = html_text.replace(
+        "</head>",
+        styles + "\n</head>",
+        1,
+    )
+    html_text = html_text.replace(
+        "</nav>",
+        "</nav>\n" + strip,
+        1,
+    )
+    html_text = html_text.replace(
+        "</body>",
+        script + "\n</body>",
+        1,
+    )
+
+    return html_text
+
 
 def dashboard_operator_users_shell_html() -> str:
     return '<!doctype html>\n<html lang="en">\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-width,initial-scale=1">\n  <title>DeltaAegis User Management</title>\n  <style>\n    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #020617; color: #e2e8f0; }\n    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, rgba(34,211,238,.13), transparent 34rem), #020617; }\n    main { width: min(1180px, calc(100vw - 32px)); margin: 0 auto; padding: 44px 0; }\n    .panel { border: 1px solid rgba(148,163,184,.22); border-radius: 24px; background: rgba(15,23,42,.92); box-shadow: 0 24px 80px rgba(0,0,0,.34); padding: 28px; }\n    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: .16em; text-transform: uppercase; }\n    h1 { margin: 8px 0 8px; font-size: 32px; letter-spacing: -.04em; }\n    h2 { margin: 26px 0 12px; font-size: 18px; }\n    p { margin: 0 0 20px; color: #94a3b8; line-height: 1.55; }\n    .actions, .form-grid, .row-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }\n    a, button { border: 1px solid rgba(34,211,238,.28); border-radius: 999px; background: rgba(8,145,178,.14); color: #67e8f9; cursor: pointer; padding: 9px 13px; text-decoration: none; font-size: 13px; font-weight: 900; }\n    button:hover, a:hover { background: rgba(8,145,178,.26); }\n    button.danger { border-color: rgba(248,113,113,.35); background: rgba(220,38,38,.12); color: #fecaca; }\n    button.safe { border-color: rgba(34,197,94,.35); background: rgba(22,163,74,.12); color: #bbf7d0; }\n    input, select { border: 1px solid rgba(148,163,184,.22); border-radius: 12px; background: rgba(2,6,23,.48); color: #e2e8f0; padding: 10px 12px; font-weight: 800; }\n    input::placeholder { color: #64748b; }\n    label { color: #94a3b8; display: grid; gap: 6px; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }\n    .status { border: 1px solid rgba(148,163,184,.18); border-radius: 16px; background: rgba(2,6,23,.38); color: #cbd5e1; margin: 18px 0; padding: 12px 14px; font-weight: 700; white-space: pre-wrap; }\n    .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 18px 0 22px; }\n    .card { border: 1px solid rgba(148,163,184,.18); border-radius: 18px; background: rgba(2,6,23,.34); padding: 14px; }\n    .card-label { color: #94a3b8; font-size: 11px; font-weight: 900; letter-spacing: .11em; text-transform: uppercase; }\n    .card-value { color: #f8fafc; font-size: 24px; font-weight: 950; margin-top: 4px; }\n    .table-wrap { overflow-x: auto; border: 1px solid rgba(148,163,184,.18); border-radius: 18px; }\n    table { width: 100%; border-collapse: collapse; min-width: 1020px; }\n    th, td { border-bottom: 1px solid rgba(148,163,184,.14); padding: 12px 14px; text-align: left; vertical-align: top; }\n    th { color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }\n    td { color: #e2e8f0; font-size: 13px; font-weight: 700; }\n    .pill { display: inline-flex; border: 1px solid rgba(148,163,184,.22); border-radius: 999px; padding: 4px 8px; font-size: 11px; font-weight: 950; text-transform: uppercase; letter-spacing: .06em; }\n    .enabled { color: #bbf7d0; border-color: rgba(34,197,94,.35); background: rgba(22,163,74,.12); }\n    .disabled { color: #fecaca; border-color: rgba(248,113,113,.35); background: rgba(220,38,38,.12); }\n    .muted { color: #94a3b8; font-weight: 600; }\n  </style>\n</head>\n<body>\n  <main>\n    <section class="panel">\n      <div class="eyebrow">DeltaAegis Admin</div>\n      <h1>User Management</h1>\n      <p>ADMIN-only v0.26 control surface for local dashboard users. State-changing user actions require ADMIN access and are sent to audited backend APIs. Passwords are never displayed after submission.</p>\n\n      <div class="actions">\n        <a href="/operator">Back to operator session</a>\n        <a href="/">Back to dashboard</a>\n        <a href="/api/admin/users">View raw /api/admin/users JSON</a>\n        <button type="button" id="operator-users-refresh">Refresh users</button>\n      </div>\n\n      <h2>Create user</h2>\n      <form id="operator-create-user-form" class="form-grid">\n        <label>Username\n          <input id="operator-create-username" name="username" autocomplete="off" required placeholder="analyst.one">\n        </label>\n        <label>Display name\n          <input id="operator-create-display-name" name="display_name" autocomplete="off" placeholder="Analyst One">\n        </label>\n        <label>Role\n          <select id="operator-create-role" name="role">\n            <option value="VIEWER">VIEWER</option>\n            <option value="ANALYST">ANALYST</option>\n            <option value="ADMIN">ADMIN</option>\n          </select>\n        </label>\n        <label>Temporary password\n          <input id="operator-create-password" name="password" type="password" autocomplete="new-password" required placeholder="Minimum 8 characters">\n        </label>\n        <button type="submit" class="safe">Create user</button>\n      </form>\n\n      <div class="status" id="operator-users-status">Loading users…</div>\n\n      <div class="summary" id="operator-users-summary" hidden>\n        <div class="card"><div class="card-label">Users</div><div class="card-value" id="operator-users-count">0</div></div>\n        <div class="card"><div class="card-label">Enabled</div><div class="card-value" id="operator-users-enabled-count">0</div></div>\n        <div class="card"><div class="card-label">Admins</div><div class="card-value" id="operator-users-admin-count">0</div></div>\n        <div class="card"><div class="card-label">Analysts</div><div class="card-value" id="operator-users-analyst-count">0</div></div>\n        <div class="card"><div class="card-label">Viewers</div><div class="card-value" id="operator-users-viewer-count">0</div></div>\n      </div>\n\n      <div class="table-wrap" id="operator-users-table-wrap" hidden>\n        <table>\n          <thead>\n            <tr>\n              <th>Username</th><th>Display name</th><th>Role</th><th>Status</th>\n              <th>Password</th><th>Active tokens</th><th>Last token used</th><th>Updated</th><th>Actions</th>\n            </tr>\n          </thead>\n          <tbody id="operator-users-body"></tbody>\n        </table>\n      </div>\n\n      <h2>Recent user-management audit events</h2>\n      <p class="muted">Shows recent audited dashboard user-management actions. Secrets, password hashes, token hashes, raw tokens, and submitted password values are not displayed.</p>\n      <div class="actions">\n        <button type="button" id="operator-users-audit-refresh">Refresh audit trail</button>\n        <a href="/api/access-audit?limit=50">View raw /api/access-audit JSON</a>\n      </div>\n      <div class="status" id="operator-users-audit-status">Loading user-management audit events…</div>\n      <div class="table-wrap" id="operator-users-audit-table-wrap" hidden>\n        <table>\n          <thead>\n            <tr>\n              <th>Timestamp</th><th>Action</th><th>Target</th><th>Actor</th><th>Details</th>\n            </tr>\n          </thead>\n          <tbody id="operator-users-audit-body"></tbody>\n        </table>\n      </div>\n\n    </section>\n  </main>\n\n  <script>\n    function text(value) {\n      if (value === null || value === undefined || value === "") { return "—"; }\n      return String(value);\n    }\n\n    function setText(id, value) {\n      const element = document.getElementById(id);\n      if (element) { element.textContent = text(value); }\n    }\n\n    function adminReceiptLabel(value) {\n      return String(value || "")\n        .replaceAll("_", " ")\n        .replaceAll("-", " ")\n        .split(" ")\n        .filter(function (part) { return Boolean(part); })\n        .map(function (part) {\n          return part.charAt(0).toUpperCase() + part.slice(1);\n        })\n        .join(" ");\n    }\n\n    function adminReceiptValue(value) {\n      if (value === true) { return "Yes"; }\n      if (value === false) { return "No"; }\n      if (value === null || value === undefined || value === "") { return "—"; }\n      return String(value);\n    }\n\n    function adminActionReceiptText(receipt, fallbackMessage) {\n      const safeReceipt = receipt && typeof receipt === "object"\n        ? receipt\n        : {};\n      const lines = [\n        String(safeReceipt.message || fallbackMessage || "Action completed.")\n      ];\n      const summary = safeReceipt.summary && typeof safeReceipt.summary === "object"\n        ? safeReceipt.summary\n        : {};\n      const identifiers = safeReceipt.identifiers && typeof safeReceipt.identifiers === "object"\n        ? safeReceipt.identifiers\n        : {};\n\n      Object.entries(summary).forEach(function (entry) {\n        if (entry[1] === null || entry[1] === undefined || entry[1] === "") {\n          return;\n        }\n        lines.push(\n          `${adminReceiptLabel(entry[0])}: ${adminReceiptValue(entry[1])}`\n        );\n      });\n\n      Object.entries(identifiers).forEach(function (entry) {\n        if (entry[1] === null || entry[1] === undefined || entry[1] === "") {\n          return;\n        }\n        lines.push(\n          `${adminReceiptLabel(entry[0])}: ${adminReceiptValue(entry[1])}`\n        );\n      });\n\n      return lines.join("\\n");\n    }\n\n    function renderAdminActionReceipt(status, receipt, fallbackMessage) {\n      if (!status) { return; }\n      status.textContent = adminActionReceiptText(\n        receipt,\n        fallbackMessage\n      );\n      status.dataset.receiptSeverity = String(\n        (receipt || {}).severity || "info"\n      ).toLowerCase();\n      status.dataset.receiptAction = String(\n        (receipt || {}).action || ""\n      );\n    }\n\n    function escapeHtml(value) {\n      return text(value)\n        .replaceAll("&", "&amp;")\n        .replaceAll("<", "&lt;")\n        .replaceAll(">", "&gt;")\n        .replaceAll(\'"\', "&quot;")\n        .replaceAll("\'", "&#039;");\n    }\n\n    function roleOptions(currentRole) {\n      return ["ADMIN", "ANALYST", "VIEWER"].map(function (role) {\n        const selected = role === currentRole ? " selected" : "";\n        return `<option value="${role}"${selected}>${role}</option>`;\n      }).join("");\n    }\n\n    async function adminPost(path, payload) {\n      const response = await fetch(path, {\n        method: "POST",\n        credentials: "same-origin",\n        cache: "no-store",\n        headers: { "Content-Type": "application/json" },\n        body: JSON.stringify(payload || {})\n      });\n\n      let data = {};\n      try { data = await response.json(); } catch (error) { data = {}; }\n\n      if (response.status === 401) {\n        window.location.href = "/login";\n        return null;\n      }\n\n      if (!response.ok) {\n        throw new Error(data.error || data.message || `Request failed with HTTP ${response.status}`);\n      }\n\n      return data;\n    }\n\n    async function loadOperatorUsers() {\n      const status = document.getElementById("operator-users-status");\n      const summary = document.getElementById("operator-users-summary");\n      const tableWrap = document.getElementById("operator-users-table-wrap");\n      const body = document.getElementById("operator-users-body");\n\n      try {\n        const response = await fetch("/api/admin/users", {\n          credentials: "same-origin",\n          cache: "no-store"\n        });\n\n        if (response.status === 401) {\n          window.location.href = "/login";\n          return;\n        }\n\n        if (response.status === 403) {\n          status.textContent = "Admin role required.";\n          return;\n        }\n\n        if (!response.ok) {\n          status.textContent = "User lookup failed.";\n          return;\n        }\n\n        const payload = await response.json();\n        const roleCounts = payload.role_counts || {};\n        const users = payload.users || [];\n\n        setText("operator-users-count", payload.count || users.length || 0);\n        setText("operator-users-enabled-count", payload.enabled_count || 0);\n        setText("operator-users-admin-count", roleCounts.ADMIN || 0);\n        setText("operator-users-analyst-count", roleCounts.ANALYST || 0);\n        setText("operator-users-viewer-count", roleCounts.VIEWER || 0);\n\n        body.innerHTML = users.length\n          ? users.map(function (user) {\n              const enabledClass = user.enabled ? "enabled" : "disabled";\n              const enabledText = user.enabled ? "Enabled" : "Disabled";\n              const toggleAction = user.enabled ? "disable" : "enable";\n              const toggleLabel = user.enabled ? "Disable" : "Enable";\n              const toggleClass = user.enabled ? "danger" : "safe";\n\n              return `\n                <tr data-username="${escapeHtml(user.username)}">\n                  <td>${escapeHtml(user.username)}</td>\n                  <td>${escapeHtml(user.display_name)}</td>\n                  <td>\n                    <select data-role-select="${escapeHtml(user.username)}">\n                      ${roleOptions(user.role)}\n                    </select>\n                  </td>\n                  <td><span class="pill ${enabledClass}">${enabledText}</span></td>\n                  <td>${user.password_configured ? "Configured" : \'<span class="muted">Not set</span>\'}</td>\n                  <td>${escapeHtml(user.active_token_count)}</td>\n                  <td>${escapeHtml(user.last_token_used_at)}</td>\n                  <td>${escapeHtml(user.updated_at)}</td>\n                  <td>\n                    <div class="row-actions">\n                      <button type="button" data-action="role" data-username="${escapeHtml(user.username)}">Change role</button>\n                      <button type="button" data-action="password" data-username="${escapeHtml(user.username)}">Rotate password</button>\n                      <button type="button" class="${toggleClass}" data-action="${toggleAction}" data-username="${escapeHtml(user.username)}">${toggleLabel}</button>\n                    </div>\n                  </td>\n                </tr>\n              `;\n            }).join("")\n          : \'<tr><td colspan="9" class="muted">No users found.</td></tr>\';\n\n        status.textContent = "Users loaded.";\n        summary.hidden = false;\n        tableWrap.hidden = false;\n      } catch (error) {\n        status.textContent = `User lookup failed: ${error.message || error}`;\n      }\n    }\n\n    document.getElementById("operator-users-refresh").addEventListener("click", loadOperatorUsers);\n\n    document.getElementById("operator-create-user-form").addEventListener("submit", async function (event) {\n      event.preventDefault();\n      const status = document.getElementById("operator-users-status");\n      const form = event.currentTarget;\n\n      const payload = {\n        username: document.getElementById("operator-create-username").value,\n        display_name: document.getElementById("operator-create-display-name").value,\n        role: document.getElementById("operator-create-role").value,\n        password: document.getElementById("operator-create-password").value\n      };\n\n      try {\n        const result = await adminPost("/api/admin/users", payload);\n        form.reset();\n        await loadOperatorUsers();\n        renderAdminActionReceipt(\n          status,\n          result && result.receipt,\n          `Created user ${payload.username}.`\n        );\n      } catch (error) {\n        status.textContent = `Create user failed: ${error.message || error}`;\n      }\n    });\n\n    document.getElementById("operator-users-body").addEventListener("click", async function (event) {\n      const button = event.target.closest("button[data-action]");\n      if (!button) { return; }\n\n      const username = button.dataset.username;\n      const action = button.dataset.action;\n      const status = document.getElementById("operator-users-status");\n\n      try {\n        let result = null;\n        let fallbackMessage = `Updated user ${username}.`;\n\n        if (action === "role") {\n          const roleSelect = document.querySelector(`[data-role-select="${CSS.escape(username)}"]`);\n          result = await adminPost(`/api/admin/users/${encodeURIComponent(username)}/role`, {\n            role: roleSelect ? roleSelect.value : "VIEWER"\n          });\n          fallbackMessage = `Changed role for ${username}.`;\n        } else if (action === "password") {\n          const password = window.prompt(`Enter a new temporary password for ${username}. It will not be displayed after submission.`);\n          if (!password) {\n            status.textContent = "Password rotation cancelled.";\n            return;\n          }\n          result = await adminPost(`/api/admin/users/${encodeURIComponent(username)}/password`, {\n            password: password\n          });\n          fallbackMessage = `Rotated password for ${username}.`;\n        } else if (action === "disable" || action === "enable") {\n          result = await adminPost(`/api/admin/users/${encodeURIComponent(username)}/${action}`, {});\n          fallbackMessage = `${action === "disable" ? "Disabled" : "Enabled"} ${username}.`;\n        }\n\n        await loadOperatorUsers();\n        renderAdminActionReceipt(\n          status,\n          result && result.receipt,\n          fallbackMessage\n        );\n      } catch (error) {\n        status.textContent = `Action failed: ${error.message || error}`;\n      }\n    });\n\n\n    function auditEventsFromPayload(payload) {\n      if (!payload) { return []; }\n      if (Array.isArray(payload.events)) { return payload.events; }\n      if (Array.isArray(payload.audit_events)) { return payload.audit_events; }\n      if (Array.isArray(payload.rows)) { return payload.rows; }\n      if (Array.isArray(payload.items)) { return payload.items; }\n      return [];\n    }\n\n    function actorText(event) {\n      const details = event.details || {};\n      const actor = details.actor || {};\n      return text(\n        event.actor_username ||\n        event.username ||\n        actor.username ||\n        actor.token_name ||\n        actor.user_id ||\n        "—"\n      );\n    }\n\n    function targetText(event) {\n      return text(\n        event.target_key ||\n        event.target_username ||\n        event.target ||\n        event.resource ||\n        "—"\n      );\n    }\n\n    function safeAuditDetails(event) {\n      const details = Object.assign({}, event.details || {});\n      if (details.actor) {\n        details.actor = {\n          username: details.actor.username || details.actor.token_name || "—",\n          role: details.actor.role || "—",\n          auth_type: details.actor.auth_type || "—"\n        };\n      }\n\n      for (const key of Object.keys(details)) {\n        const lower = key.toLowerCase();\n        if (\n          lower.includes("password") ||\n          lower.includes("token") ||\n          lower.includes("secret") ||\n          lower.includes("hash")\n        ) {\n          details[key] = "[redacted]";\n        }\n      }\n\n      return JSON.stringify(details, null, 2);\n    }\n\n    async function loadOperatorUserAuditEvents() {\n      const status = document.getElementById("operator-users-audit-status");\n      const tableWrap = document.getElementById("operator-users-audit-table-wrap");\n      const body = document.getElementById("operator-users-audit-body");\n\n      try {\n        const response = await fetch("/api/access-audit?limit=50", {\n          credentials: "same-origin",\n          cache: "no-store"\n        });\n\n        if (response.status === 401) {\n          window.location.href = "/login";\n          return;\n        }\n\n        if (response.status === 403) {\n          status.textContent = "Admin role required for audit visibility.";\n          return;\n        }\n\n        if (!response.ok) {\n          status.textContent = "Audit lookup failed.";\n          return;\n        }\n\n        const payload = await response.json();\n        const events = auditEventsFromPayload(payload)\n          .filter(function (event) {\n            return String(event.action || "").startsWith("ACCESS_USER_DASHBOARD_");\n          })\n          .slice(0, 20);\n\n        body.innerHTML = events.length\n          ? events.map(function (event) {\n              return `\n                <tr>\n                  <td>${escapeHtml(event.created_at || event.timestamp || event.event_time)}</td>\n                  <td><span class="pill">${escapeHtml(event.action)}</span></td>\n                  <td>${escapeHtml(targetText(event))}</td>\n                  <td>${escapeHtml(actorText(event))}</td>\n                  <td><details><summary>View details</summary><pre class="muted">${escapeHtml(safeAuditDetails(event))}</pre></details></td>\n                </tr>\n              `;\n            }).join("")\n          : \'<tr><td colspan="5" class="muted">No user-management audit events found.</td></tr>\';\n\n        status.textContent = `Loaded ${events.length} user-management audit event(s).`;\n        tableWrap.hidden = false;\n      } catch (error) {\n        status.textContent = `Audit lookup failed: ${error.message || error}`;\n      }\n    }\n\n    document.getElementById("operator-users-audit-refresh").addEventListener("click", loadOperatorUserAuditEvents);\n\n    loadOperatorUsers();\n    loadOperatorUserAuditEvents();\n  </script>\n</body>\n</html>'
