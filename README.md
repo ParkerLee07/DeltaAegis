@@ -515,6 +515,12 @@ Preview uninstall actions without deleting anything:
 
 ## Validator Troubleshooter
 
+Open the guided human-readable menu:
+
+    python3 tools/deltaaegis_troubleshooter.py --menu
+
+Running the tool without arguments also opens the menu when stdin and stdout are interactive terminals. The menu provides concise health checks, targeted validator execution, retained reports, and stable `DAE-TRB-NNNN` diagnostic codes. See [the troubleshooter and error-code reference](docs/TROUBLESHOOTER.md).
+
 DeltaAegis includes one standalone troubleshooting tool containing
 251 validator files from the fetched public
 `origin/main` history and the current local `HEAD`. When a path exists in both

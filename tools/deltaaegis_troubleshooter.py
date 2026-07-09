@@ -3202,6 +3202,985 @@ def main() -> int:
     return 1 if failed else 0
 
 
+
+
+# v0.42 human operator menu and stable troubleshooting error codes.
+_deltaaegis_troubleshooter_cli_main = main
+
+
+ERROR_CODES: dict[str, dict[str, str]] = {
+    "DAE-TRB-1001": {
+        "severity": "ERROR",
+        "title": "Repository not found",
+        "meaning": "The selected path is not a DeltaAegis Git repository.",
+        "action": "Run the troubleshooter from the DeltaAegis checkout or pass --repo.",
+    },
+    "DAE-TRB-1002": {
+        "severity": "ERROR",
+        "title": "DeltaAegis source missing",
+        "meaning": "The repository does not contain deltaaegis.py.",
+        "action": "Restore the checkout or select the correct repository.",
+    },
+    "DAE-TRB-1101": {
+        "severity": "ERROR",
+        "title": "Git state unavailable",
+        "meaning": "The troubleshooter could not read the branch, HEAD, or status.",
+        "action": "Verify Git is installed and the repository metadata is readable.",
+    },
+    "DAE-TRB-1102": {
+        "severity": "WARN",
+        "title": "Working tree has changes",
+        "meaning": "Uncommitted files can change validator results.",
+        "action": "Review git status and commit, stash, or intentionally preserve the changes.",
+    },
+    "DAE-TRB-1103": {
+        "severity": "WARN",
+        "title": "Required command unavailable",
+        "meaning": "A command used by one or more validators is missing.",
+        "action": "Install the named command before running the affected validator.",
+    },
+    "DAE-TRB-2101": {
+        "severity": "ERROR",
+        "title": "Embedded validator hash mismatch",
+        "meaning": "An embedded validator payload does not match its sealed SHA-256 hash.",
+        "action": "Regenerate the troubleshooter from a trusted repository state.",
+    },
+    "DAE-TRB-2102": {
+        "severity": "ERROR",
+        "title": "Embedded Bash syntax failure",
+        "meaning": "An embedded validator does not pass bash -n.",
+        "action": "Repair the validator source and regenerate the troubleshooter.",
+    },
+    "DAE-TRB-3101": {
+        "severity": "WARN",
+        "title": "Historical validator reference missing",
+        "meaning": "A historical validator names a validator that is not embedded.",
+        "action": "Use strict graph mode during architecture cleanup; normal diagnostics may continue.",
+    },
+    "DAE-TRB-3102": {
+        "severity": "WARN",
+        "title": "Static validator dependency cycle",
+        "meaning": "Filename-reference analysis found a cycle between validators.",
+        "action": "Inspect whether the references execute files or only document them, then flatten true recursion.",
+    },
+    "DAE-TRB-4001": {
+        "severity": "ERROR",
+        "title": "Validator failed",
+        "meaning": "A validator completed with a nonzero return code.",
+        "action": "Open the validator log and resolve the first concrete failing assertion.",
+    },
+    "DAE-TRB-4002": {
+        "severity": "ERROR",
+        "title": "Validator timed out",
+        "meaning": "A validator exceeded the configured per-validator timeout.",
+        "action": "Inspect its log and candidate, then rerun with a larger --timeout if appropriate.",
+    },
+    "DAE-TRB-4003": {
+        "severity": "ERROR",
+        "title": "Validator execution error",
+        "meaning": "The isolated candidate or validator could not be executed normally.",
+        "action": "Inspect the log for clone, filesystem, command, or environment errors.",
+    },
+    "DAE-TRB-4101": {
+        "severity": "ERROR",
+        "title": "Validator branch mismatch",
+        "meaning": "A validator rejected the candidate branch.",
+        "action": "Use the matching release branch or update the validator's supported release paths.",
+    },
+    "DAE-TRB-4102": {
+        "severity": "ERROR",
+        "title": "Expected source file missing",
+        "meaning": "A validator expected a source, fixture, or tool that is absent.",
+        "action": "Restore the required file or correct the validator's path assumption.",
+    },
+    "DAE-TRB-4103": {
+        "severity": "ERROR",
+        "title": "Source syntax validation failed",
+        "meaning": "A validator reported invalid Python, JavaScript, Bash, or generated source syntax.",
+        "action": "Fix the first syntax error before investigating downstream failures.",
+    },
+    "DAE-TRB-5101": {
+        "severity": "INFO",
+        "title": "Database not present",
+        "meaning": "An optional DeltaAegis database path does not exist.",
+        "action": "No action is required unless that database is expected for this deployment.",
+    },
+    "DAE-TRB-5102": {
+        "severity": "ERROR",
+        "title": "SQLite integrity failure",
+        "meaning": "PRAGMA integrity_check did not return ok.",
+        "action": "Stop writers, preserve a copy, and recover from a known-good backup before further mutation.",
+    },
+    "DAE-TRB-5103": {
+        "severity": "ERROR",
+        "title": "SQLite foreign-key violation",
+        "meaning": "PRAGMA foreign_key_check returned one or more violations.",
+        "action": "Preserve the database and investigate the reported tables and row identifiers.",
+    },
+    "DAE-TRB-5104": {
+        "severity": "ERROR",
+        "title": "Database locked",
+        "meaning": "A database operation could not proceed because another writer holds a lock.",
+        "action": "Allow the active operation to finish and rerun; do not delete lock files manually.",
+    },
+    "DAE-TRB-5201": {
+        "severity": "CRITICAL",
+        "title": "Protected database changed",
+        "meaning": "A read-only troubleshooting run changed a protected database hash.",
+        "action": "Stop immediately, preserve evidence, and compare the database with a backup.",
+    },
+    "DAE-TRB-6101": {
+        "severity": "ERROR",
+        "title": "Permission denied",
+        "meaning": "The operating system denied access to a file or executable.",
+        "action": "Check ownership, mode bits, parent-directory permissions, and mount policy.",
+    },
+    "DAE-TRB-6102": {
+        "severity": "ERROR",
+        "title": "Address or port already in use",
+        "meaning": "A validator could not bind its requested local address or port.",
+        "action": "Identify the listener, stop it cleanly, or use a nonconflicting test port.",
+    },
+    "DAE-TRB-6103": {
+        "severity": "WARN",
+        "title": "Related process is active",
+        "meaning": "A dashboard, NetSniper, nmap, or TrueAegis process is active.",
+        "action": "Let legitimate work finish or stop it cleanly before intrusive diagnostics.",
+    },
+    "DAE-TRB-7001": {
+        "severity": "ERROR",
+        "title": "Report creation failed",
+        "meaning": "The troubleshooter could not create or write its report directory.",
+        "action": "Check free space, permissions, and the selected --report-dir.",
+    },
+    "DAE-TRB-8001": {
+        "severity": "INFO",
+        "title": "Run interrupted by operator",
+        "meaning": "The user interrupted the menu or an active diagnostic run.",
+        "action": "Review any completed logs and rerun when ready.",
+    },
+}
+
+
+def error_code_record(code: str) -> dict[str, str]:
+    normalized = code.strip().upper()
+    return ERROR_CODES.get(
+        normalized,
+        {
+            "severity": "UNKNOWN",
+            "title": "Unknown error code",
+            "meaning": "This code is not present in the installed troubleshooter.",
+            "action": "Run --codes and verify the code was copied exactly.",
+        },
+    )
+
+
+def print_error_code(code: str) -> None:
+    normalized = code.strip().upper()
+    record = error_code_record(normalized)
+    print(f"{normalized}: {record['title']}")
+    print(f"Severity: {record['severity']}")
+    print(f"Meaning:  {record['meaning']}")
+    print(f"Action:   {record['action']}")
+
+
+def print_error_catalog() -> None:
+    print("DeltaAegis Troubleshooter Error Codes")
+    print("=" * 72)
+    print("Code          Severity  Description")
+    print("-" * 72)
+    for code, record in sorted(ERROR_CODES.items()):
+        print(
+            f"{code:<13} {record['severity']:<9} "
+            f"{record['title']}"
+        )
+    print()
+    print("Use --explain-code CODE for meaning and remediation.")
+
+
+def result_error_codes(result: Result) -> list[str]:
+    if result.status == "PASS":
+        return []
+
+    text = "\n".join(result.tail).casefold()
+    codes: list[str] = []
+
+    if result.status == "TIMEOUT":
+        codes.append("DAE-TRB-4002")
+    elif result.status == "ERROR":
+        codes.append("DAE-TRB-4003")
+    elif result.status == "FAIL":
+        codes.append("DAE-TRB-4001")
+
+    pattern_codes = (
+        (
+            (
+                "unexpected branch",
+                "unsupported branch",
+                "supported release branch",
+                "branch mismatch",
+            ),
+            "DAE-TRB-4101",
+        ),
+        (
+            (
+                "missing source file",
+                "no such file or directory",
+                "not found in repository",
+                "required file is missing",
+                "required file missing",
+            ),
+            "DAE-TRB-4102",
+        ),
+        (
+            (
+                "syntaxerror",
+                "syntax error",
+                "source syntax",
+                "javascript syntax",
+                "bash syntax",
+            ),
+            "DAE-TRB-4103",
+        ),
+        (("permission denied",), "DAE-TRB-6101"),
+        (
+            (
+                "address already in use",
+                "port already in use",
+                "errno 98",
+            ),
+            "DAE-TRB-6102",
+        ),
+        (
+            (
+                "database is locked",
+                "database table is locked",
+            ),
+            "DAE-TRB-5104",
+        ),
+        (
+            (
+                "working tree is not clean",
+                "working tree not clean",
+                "dirty working tree",
+            ),
+            "DAE-TRB-1102",
+        ),
+        (
+            (
+                "active process",
+                "netsniper process is active",
+                "nmap process is active",
+            ),
+            "DAE-TRB-6103",
+        ),
+    )
+
+    for patterns, code in pattern_codes:
+        if any(pattern in text for pattern in patterns):
+            codes.append(code)
+
+    return list(dict.fromkeys(codes))
+
+
+def self_check_error_codes(check: dict[str, Any]) -> list[str]:
+    codes: list[str] = []
+
+    if check.get("hash_failures"):
+        codes.append("DAE-TRB-2101")
+    if check.get("shell_syntax_failures"):
+        codes.append("DAE-TRB-2102")
+    if check.get("missing_validator_references"):
+        codes.append("DAE-TRB-3101")
+    if check.get("dependency_cycles"):
+        codes.append("DAE-TRB-3102")
+
+    return codes
+
+
+def environment_error_codes(environment: dict[str, Any]) -> list[str]:
+    codes: list[str] = []
+
+    if not environment.get("working_tree_clean", False):
+        codes.append("DAE-TRB-1102")
+
+    commands = environment.get("commands", {})
+    for item in commands.values():
+        value = str(item or "")
+        if value == "MISSING" or value.startswith("ERROR:"):
+            codes.append("DAE-TRB-1103")
+            break
+
+    if environment.get("active_processes"):
+        codes.append("DAE-TRB-6103")
+
+    for database in environment.get("databases", {}).values():
+        if not database.get("exists", False):
+            codes.append("DAE-TRB-5101")
+            continue
+
+        if database.get("error"):
+            error = str(database["error"]).casefold()
+            if "locked" in error:
+                codes.append("DAE-TRB-5104")
+            else:
+                codes.append("DAE-TRB-5102")
+            continue
+
+        if database.get("integrity_check") != ["ok"]:
+            codes.append("DAE-TRB-5102")
+        if database.get("foreign_key_check"):
+            codes.append("DAE-TRB-5103")
+
+    return list(dict.fromkeys(codes))
+
+
+def concise_self_check(
+    check: dict[str, Any],
+    *,
+    show_codes: bool = True,
+) -> None:
+    integrity = "PASS" if check.get("integrity_ok") else "FAIL"
+    graph = "PASS" if check.get("graph_ok") else "WARN"
+
+    print("Embedded validator bundle")
+    print("-" * 40)
+    print(f"Integrity:          {integrity}")
+    print(f"Validators:         {check.get('validator_count', 0)}")
+    print(f"Static leaves:      {check.get('leaf_count', 0)}")
+    print(f"Orchestrators:      {check.get('orchestrator_count', 0)}")
+    print(f"Reference graph:    {graph}")
+    print(
+        "Graph warnings:    "
+        f"{check.get('graph_warning_count', 0)}"
+    )
+
+    if show_codes:
+        codes = self_check_error_codes(check)
+        if codes:
+            print("Codes:             " + ", ".join(codes))
+
+
+def quick_health_check(repo: Path, *, as_json: bool = False) -> int:
+    try:
+        environment = environment_report(repo)
+    except Exception as exc:
+        if as_json:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "codes": ["DAE-TRB-1101"],
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print_error_code("DAE-TRB-1101")
+            print(f"Detail: {type(exc).__name__}: {exc}")
+        return 1
+
+    check = self_check()
+    codes = list(
+        dict.fromkeys(
+            self_check_error_codes(check)
+            + environment_error_codes(environment)
+        )
+    )
+    blocking = [
+        code
+        for code in codes
+        if error_code_record(code)["severity"]
+        in {"ERROR", "CRITICAL"}
+    ]
+    overall = "FAIL" if blocking else ("WARN" if codes else "PASS")
+
+    payload = {
+        "overall": overall,
+        "codes": codes,
+        "environment": environment,
+        "self_check": check,
+    }
+
+    if as_json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 1 if blocking else 0
+
+    print("DeltaAegis Quick Health Check")
+    print("=" * 40)
+    print(f"Overall:            {overall}")
+    print(f"Repository:         {environment['repo']}")
+    print(f"Branch:             {environment['branch']}")
+    print(f"HEAD:               {environment['head'][:12]}")
+    print(
+        "Working tree:       "
+        + (
+            "CLEAN"
+            if environment["working_tree_clean"]
+            else "CHANGED"
+        )
+    )
+    print(
+        "Related processes:  "
+        f"{len(environment.get('active_processes', []))}"
+    )
+    print()
+    concise_self_check(check)
+
+    print()
+    print("Databases")
+    print("-" * 40)
+    for path, item in environment.get("databases", {}).items():
+        if not item.get("exists"):
+            status = "NOT PRESENT"
+        elif item.get("ok"):
+            status = "PASS"
+        else:
+            status = "FAIL"
+        print(f"{path:<28} {status}")
+
+    if codes:
+        print()
+        print("Diagnostic codes")
+        print("-" * 40)
+        for code in codes:
+            record = error_code_record(code)
+            print(
+                f"{code} [{record['severity']}] "
+                f"{record['title']}"
+            )
+
+    return 1 if blocking else 0
+
+
+def latest_report_path() -> Path | None:
+    base = (
+        Path(tempfile.gettempdir())
+        / "deltaaegis-troubleshooter-reports"
+    )
+
+    if not base.is_dir():
+        return None
+
+    reports = sorted(
+        base.glob("*/summary.md"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    return reports[0] if reports else None
+
+
+def show_latest_report() -> int:
+    report = latest_report_path()
+
+    if report is None:
+        print("No retained troubleshooter report was found.")
+        return 1
+
+    print(f"Latest report: {report}")
+    print("=" * 72)
+    text = report.read_text(
+        encoding="utf-8",
+        errors="replace",
+    )
+    lines = text.splitlines()
+
+    for line in lines[:160]:
+        print(line)
+
+    if len(lines) > 160:
+        print()
+        print(
+            f"... {len(lines) - 160} additional lines remain in "
+            f"{report}"
+        )
+
+    return 0
+
+
+def append_diagnostic_codes(
+    report_dir: Path,
+    environment: dict[str, Any],
+    check: dict[str, Any],
+    results: list[Result],
+) -> list[str]:
+    result_items = []
+    all_codes = (
+        environment_error_codes(environment)
+        + self_check_error_codes(check)
+    )
+
+    for result in results:
+        codes = result_error_codes(result)
+        all_codes.extend(codes)
+        result_items.append(
+            {
+                "validator": result.validator,
+                "status": result.status,
+                "codes": codes,
+            }
+        )
+
+    all_codes = list(dict.fromkeys(all_codes))
+    payload = {
+        "codes": all_codes,
+        "results": result_items,
+        "catalog": {
+            code: ERROR_CODES[code]
+            for code in all_codes
+            if code in ERROR_CODES
+        },
+    }
+
+    (report_dir / "diagnostic_codes.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    summary = report_dir / "summary.md"
+    lines = ["", "## Diagnostic codes", ""]
+
+    if not all_codes:
+        lines.append("- No diagnostic error codes were raised.")
+    else:
+        for code in all_codes:
+            record = error_code_record(code)
+            lines.append(
+                f"- `{code}` **{record['severity']} — "
+                f"{record['title']}**: {record['action']}"
+            )
+
+    with summary.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+
+    return all_codes
+
+
+def run_selected_diagnostics(
+    repo: Path,
+    selected: list[str],
+    *,
+    timeout_seconds: int = 900,
+    keep_candidates: bool = False,
+    report_dir_value: Path | None = None,
+) -> int:
+    graph, missing = dependency_inventory()
+    check = self_check()
+
+    if not check.get("integrity_ok"):
+        concise_self_check(check)
+        print()
+        code = (
+            "DAE-TRB-2101"
+            if check.get("hash_failures")
+            else "DAE-TRB-2102"
+        )
+        print_error_code(code)
+        return 1
+
+    environment = environment_report(repo)
+    report_dir = create_report_dir(report_dir_value)
+    logs_dir = report_dir / "logs"
+    logs_dir.mkdir()
+    workspace_root = report_dir / "candidates"
+    workspace_root.mkdir()
+
+    protected_hashes = {
+        relative: sha256_file(repo / relative)
+        for relative in (
+            Path("data/deltaaegis.db"),
+            Path("deltaaegis.db"),
+        )
+    }
+
+    results: list[Result] = []
+    print()
+    print(
+        f"Running {len(selected)} isolated validator"
+        f"{'s' if len(selected) != 1 else ''}."
+    )
+
+    for index, validator in enumerate(selected, start=1):
+        print(
+            f"[{index}/{len(selected)}] "
+            f"{Path(validator).name}",
+            flush=True,
+        )
+        result = execute_validator(
+            repo,
+            workspace_root,
+            validator,
+            index,
+            logs_dir,
+            timeout_seconds,
+            keep_candidates,
+        )
+        results.append(result)
+        codes = result_error_codes(result)
+        suffix = (
+            " | " + ", ".join(codes)
+            if codes
+            else ""
+        )
+        print(
+            f"  {result.status} "
+            f"({result.duration_seconds:.3f}s){suffix}",
+            flush=True,
+        )
+
+    write_summary(
+        report_dir,
+        environment,
+        check,
+        graph,
+        missing,
+        selected,
+        results,
+    )
+    codes = append_diagnostic_codes(
+        report_dir,
+        environment,
+        check,
+        results,
+    )
+
+    for relative, before in protected_hashes.items():
+        after = sha256_file(repo / relative)
+        if before != after:
+            print_error_code("DAE-TRB-5201")
+            raise TroubleshooterError(
+                "Protected database changed during troubleshooting: "
+                f"{relative}"
+            )
+
+    failed = [
+        result
+        for result in results
+        if result.status != "PASS"
+    ]
+
+    print()
+    print("Troubleshooting summary")
+    print("-" * 40)
+    print(f"Passed:             {len(results) - len(failed)}")
+    print(f"Failed/timed out:   {len(failed)}")
+    print(
+        "Diagnostic codes:   "
+        + (", ".join(codes) if codes else "none")
+    )
+    print(f"Report:             {report_dir / 'summary.md'}")
+
+    if not keep_candidates:
+        shutil.rmtree(workspace_root, ignore_errors=True)
+
+    return 1 if failed else 0
+
+
+def v042_component_validators() -> list[str]:
+    suite = "tools/validate_v0_42_all.sh"
+
+    if suite not in VALIDATORS:
+        return []
+
+    references = validator_references(
+        decode_validator(suite).decode(
+            "utf-8",
+            errors="replace",
+        )
+    )
+    return [
+        path
+        for path in references
+        if path in VALIDATORS
+        and path != suite
+    ]
+
+
+def prompt_specific_validator(repo: Path) -> int:
+    query = input(
+        "Enter part of a validator name or version: "
+    ).strip().casefold()
+
+    if not query:
+        print("No search term entered.")
+        return 0
+
+    matches = [
+        path
+        for path in sorted(VALIDATORS)
+        if query in path.casefold()
+    ]
+
+    if not matches:
+        print("No matching validator was found.")
+        return 0
+
+    visible = matches[:30]
+    print()
+    for index, path in enumerate(visible, start=1):
+        print(f"{index:>2}. {path}")
+
+    if len(matches) > len(visible):
+        print(
+            f"... {len(matches) - len(visible)} additional matches "
+            "were omitted. Use a narrower search."
+        )
+
+    choice = input(
+        "Choose a validator number, or press Enter to cancel: "
+    ).strip()
+
+    if not choice:
+        return 0
+
+    try:
+        index = int(choice)
+    except ValueError:
+        print("Invalid selection.")
+        return 0
+
+    if index < 1 or index > len(visible):
+        print("Selection is outside the displayed range.")
+        return 0
+
+    return run_selected_diagnostics(
+        repo,
+        [visible[index - 1]],
+    )
+
+
+def pause_menu() -> None:
+    try:
+        input("\nPress Enter to return to the menu...")
+    except EOFError:
+        pass
+
+
+def advanced_menu(repo: Path) -> int:
+    while True:
+        print()
+        print("Advanced diagnostics")
+        print("=" * 40)
+        print("1. Run all static-reference-free validators")
+        print("2. Run every historical validator")
+        print("3. Run strict dependency-graph audit")
+        print("0. Return")
+        choice = input("Selection: ").strip()
+
+        if choice == "0":
+            return 0
+        if choice == "1":
+            graph, _ = dependency_inventory()
+            selected = select_validators(
+                "all-leaves",
+                None,
+                graph,
+            )
+            return run_selected_diagnostics(repo, selected)
+        if choice == "2":
+            confirm = input(
+                "This can take a long time. Type RUN ALL to continue: "
+            ).strip()
+            if confirm != "RUN ALL":
+                print("Cancelled.")
+                continue
+            graph, _ = dependency_inventory()
+            selected = select_validators("all", None, graph)
+            return run_selected_diagnostics(repo, selected)
+        if choice == "3":
+            check = self_check()
+            concise_self_check(check)
+            return 0 if check.get("graph_ok") else 1
+
+        print("Invalid selection.")
+
+
+def print_human_help() -> None:
+    print(
+        """DeltaAegis standalone troubleshooter
+
+Human interface:
+  --menu                    Open the interactive troubleshooting menu.
+  --quick-check             Run concise environment, database, and bundle checks.
+  --codes                   List stable diagnostic error codes.
+  --explain-code CODE       Explain one code and its remediation.
+  --latest-report           Display the newest retained report.
+  --json                    Use JSON for quick-check or self-check output.
+
+Validator interface:
+  --mode current            Run the newest embedded release gate.
+  --mode all-leaves         Run static-reference-free validators.
+  --mode all                Run every embedded validator individually.
+  --match REGEX             Select validator paths by regular expression.
+  --timeout SECONDS         Set the per-validator timeout.
+  --report-dir PATH         Choose a new report directory.
+  --keep-candidates         Retain isolated candidates.
+  --list                    List embedded validators.
+  --self-check              Verify hashes and Bash syntax.
+  --strict-graph            Make historical graph warnings fatal.
+  --repo PATH               Select the DeltaAegis repository.
+
+With no arguments, a terminal receives the menu. Noninteractive use keeps
+the existing default of running the current release gate.
+"""
+    )
+
+
+def interactive_menu(repo_value: Path | None = None) -> int:
+    try:
+        repo = resolve_repo(repo_value)
+    except TroubleshooterError as exc:
+        print_error_code("DAE-TRB-1001")
+        print(f"Detail: {exc}")
+        return 1
+
+    while True:
+        print()
+        print("=" * 62)
+        print("DeltaAegis Troubleshooter")
+        print(f"Repository: {repo}")
+        print("=" * 62)
+        print("1. Quick health check")
+        print("2. Run current release diagnostics (recommended)")
+        print("3. Run v0.42 component diagnostics")
+        print("4. Find and run a specific validator")
+        print("5. Verify embedded validator bundle")
+        print("6. Show latest report")
+        print("7. List diagnostic error codes")
+        print("8. Explain an error code")
+        print("9. Advanced diagnostics")
+        print("0. Exit")
+
+        try:
+            choice = input("Selection: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print_error_code("DAE-TRB-8001")
+            return 0
+
+        try:
+            if choice == "0":
+                return 0
+            if choice == "1":
+                quick_health_check(repo)
+            elif choice == "2":
+                graph, _ = dependency_inventory()
+                selected = select_validators(
+                    "current",
+                    None,
+                    graph,
+                )
+                run_selected_diagnostics(repo, selected)
+            elif choice == "3":
+                selected = v042_component_validators()
+                if not selected:
+                    print("No v0.42 component suite was found.")
+                else:
+                    run_selected_diagnostics(repo, selected)
+            elif choice == "4":
+                prompt_specific_validator(repo)
+            elif choice == "5":
+                check = self_check()
+                concise_self_check(check)
+            elif choice == "6":
+                show_latest_report()
+            elif choice == "7":
+                print_error_catalog()
+            elif choice == "8":
+                code = input("Error code: ").strip()
+                print_error_code(code)
+            elif choice == "9":
+                advanced_menu(repo)
+            else:
+                print("Invalid selection.")
+        except KeyboardInterrupt:
+            print()
+            print_error_code("DAE-TRB-8001")
+        except TroubleshooterError as exc:
+            print_error_code("DAE-TRB-4003")
+            print(f"Detail: {exc}")
+        except Exception as exc:
+            print_error_code("DAE-TRB-4003")
+            print(f"Detail: {type(exc).__name__}: {exc}")
+
+        if choice != "0":
+            pause_menu()
+
+
+def option_value(
+    argv: list[str],
+    name: str,
+) -> str | None:
+    try:
+        index = argv.index(name)
+    except ValueError:
+        return None
+
+    if index + 1 >= len(argv):
+        raise TroubleshooterError(
+            f"{name} requires a value"
+        )
+
+    return argv[index + 1]
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+
+    if "--help" in argv or "-h" in argv:
+        print_human_help()
+        return 0
+
+    repo_value_text = option_value(argv, "--repo")
+    repo_value = (
+        Path(repo_value_text)
+        if repo_value_text
+        else None
+    )
+
+    if "--menu" in argv:
+        return interactive_menu(repo_value)
+
+    if not argv and sys.stdin.isatty() and sys.stdout.isatty():
+        return interactive_menu(repo_value)
+
+    if "--codes" in argv:
+        print_error_catalog()
+        return 0
+
+    if "--explain-code" in argv:
+        code = option_value(argv, "--explain-code")
+        assert code is not None
+        print_error_code(code)
+        return 0
+
+    if "--latest-report" in argv:
+        return show_latest_report()
+
+    if "--quick-check" in argv:
+        repo = resolve_repo(repo_value)
+        return quick_health_check(
+            repo,
+            as_json="--json" in argv,
+        )
+
+    if "--self-check" in argv:
+        check = self_check()
+
+        if "--json" in argv:
+            print(json.dumps(check, indent=2, sort_keys=True))
+        else:
+            concise_self_check(check)
+
+        if not check.get("integrity_ok"):
+            return 1
+        if "--strict-graph" in argv and not check.get("graph_ok"):
+            return 1
+        return 0
+
+    return _deltaaegis_troubleshooter_cli_main()
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
