@@ -10,6 +10,14 @@ The watchdog uses the most recent heartbeat as the primary liveness timestamp an
 
 Recovery evidence is stored under `status_json.watchdog`, including the original PID, heartbeat, update time, stdout and stderr paths, classification, and recovery actor. After safe recovery, the same worker pass may start the oldest overdue schedule.
 
+## TrueAegis tab containment
+
+A delayed TrueAegis orchestration render previously created a new top-level tab panel after the dashboard had already applied the active-tab visibility state. That panel could therefore remain visible while Executive was selected.
+
+The orchestration renderer now mounts its full controls and job table inside the existing static TrueAegis foundation panel. Its parent tab controls visibility from the beginning of the page lifecycle. Executive receives a separate compact readiness card with no run controls, paths, receipts, job table, imports, observations, or correlations.
+
+No TrueAegis execution, RBAC, safety, ingestion, polling, API, receipt, or subnet-boundary semantics changed.
+
 ## Sites dashboard management
 
 A dedicated **Sites** tab now exposes the logical-site model as an operator workflow instead of requiring CLI-only administration. VIEWER and ANALYST accounts receive read-only site, membership, coverage, archive, and unassigned-scope visibility. ADMIN accounts can create, rename, describe, archive, assign, and remove through fixed JSON routes.

@@ -143,6 +143,19 @@ Use only an approved test database or a deliberately prepared stale row.
 - [ ] Confirm access-audit records identify the authenticated operator for all mutations.
 - [ ] Confirm no raw JSON payload is displayed by default.
 
+## 7C. TrueAegis tab containment
+
+- [ ] Load the dashboard with Executive selected and wait at least 20 seconds for the TrueAegis polling cycle.
+- [ ] Confirm Executive shows only the compact TrueAegis readiness card.
+- [ ] Confirm Executive does not show run controls, blocker lists, paths, command previews, receipts, job tables, import controls, observations, or correlations.
+- [ ] Open the Sites tab and confirm no full TrueAegis content is visible.
+- [ ] Open the TrueAegis tab and confirm orchestration, jobs, validation import, observations, and correlations are all visible there.
+- [ ] Use the Executive **Open TrueAegis** control and confirm it activates the TrueAegis tab.
+- [ ] Refresh while Executive is active and confirm delayed hydration does not leak the orchestration panel.
+- [ ] Refresh while TrueAegis is active and confirm controls remain usable.
+- [ ] Inspect the browser console and server log for errors.
+- [ ] Confirm no duplicate TrueAegis or validation element IDs exist.
+
 ## 8. Guarded LAN binding
 
 Use a trusted test LAN and an authenticated temporary database.

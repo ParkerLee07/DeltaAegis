@@ -132,6 +132,14 @@ NetSniper schedules run NetSniper and optional auto-ingest only. TrueAegis valid
 
 The established **blocked-schedule retry behavior** is preserved: when another active scan legitimately holds the single-scan lock, the due schedule remains due, its cadence is not advanced, and the scheduler retries it after the blocker clears.
 
+## TrueAegis Tab Containment
+
+The Executive tab now shows only a compact TrueAegis readiness summary: readiness state, latest accepted scan, active-job count, and one navigation control. Full orchestration is contained inside the **TrueAegis** tab.
+
+The TrueAegis tab owns the guarded run action, blocker detail, technical paths, command preview, action receipt, job history, validation import controls, observations, and service correlations. The orchestration panel mounts inside the static TrueAegis foundation instead of being inserted as a top-level sibling after initial tab selection.
+
+This containment changes presentation only. Existing fixed-argument execution, RBAC, subnet-specific operational boundaries, validation ingestion, correlation behavior, action receipts, scheduler follow-up, polling cadence, and APIs remain unchanged.
+
 ## Sites Dashboard Management
 
 The main dashboard now includes a dedicated **Sites** tab. All authenticated roles can review active and archived logical sites, member-subnet coverage, accepted-snapshot counts, and unassigned observed private subnets.
@@ -461,7 +469,7 @@ Run the complete v0.42 automated release gate from a clean checkout:
 ./tools/validate_v0_42_release_gate.sh
 ```
 
-The release gate validates release metadata and documentation, rendered dashboard JavaScript, client-disconnect handling, all seven flat v0.42 logical-site, LAN, watchdog, and Sites-management validators, the isolated v0.40 operator-action compatibility suite, and the v0.39 functional compatibility suite. The v0.42 all-in validator invokes every component validator exactly once.
+The release gate validates release metadata and documentation, rendered dashboard JavaScript, client-disconnect handling, all eight flat v0.42 logical-site, LAN, watchdog, Sites-management, and TrueAegis-containment validators, the isolated v0.40 operator-action compatibility suite, and the v0.39 functional compatibility suite. The v0.42 all-in validator invokes every component validator exactly once.
 
 Complete the manual backup and restore checklist before merge, tag, or publication:
 

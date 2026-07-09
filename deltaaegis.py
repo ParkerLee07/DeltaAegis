@@ -24550,7 +24550,47 @@ def dashboard_index_html_base_v025_operator_link():
   <div id="site-management-archived-sites" class="grid"></div>
 </section>
 
+
+<section
+  class="card"
+  data-tab-panel="overview"
+  id="trueaegis-executive-readiness-panel"
+>
+  <div class="section-header">
+    <div>
+      <div class="eyebrow">Validation Readiness</div>
+      <h2>TrueAegis Readiness</h2>
+      <p class="muted">
+        Compact operational status only. Open the TrueAegis tab for
+        blockers, paths, run controls, receipts, jobs, observations,
+        and correlations.
+      </p>
+    </div>
+    <button type="button" id="trueaegis-executive-open-tab">
+      Open TrueAegis
+    </button>
+  </div>
+  <div class="summary">
+    <div class="card">
+      <div class="card-label">Readiness</div>
+      <div class="card-value" id="trueaegis-executive-readiness">Loading</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Latest Accepted Scan</div>
+      <div class="card-value" id="trueaegis-executive-scan">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Active Jobs</div>
+      <div class="card-value" id="trueaegis-executive-active-jobs">0</div>
+    </div>
+  </div>
+  <div class="callout" id="trueaegis-executive-message">
+    Loading TrueAegis readiness.
+  </div>
+</section>
+
     <section class="card" data-tab-panel="trueaegis" id="trueaegis-validation-foundation-panel">
+      <div id="trueaegis-orchestration-mount"></div>
       <div class="section-header">
         <div>
           <div class="eyebrow">TrueAegis Foundation</div>
@@ -28113,6 +28153,86 @@ function bindSiteManagementControls() {
 
     let deltaAegisTrueAegisLastRunReceipt = null;
 
+
+    function deltaAegisTrueAegisRenderExecutiveReadiness(
+      context,
+      jobsPayload,
+      errorMessage = ""
+    ) {
+      const jobs = Array.isArray(jobsPayload)
+        ? jobsPayload
+        : ((jobsPayload && jobsPayload.jobs) || []);
+      const blockers = (
+        context && Array.isArray(context.blockers)
+      ) ? context.blockers : [];
+      const latestScan = (context && context.latest_scan) || {};
+      const activeJobs = jobs.filter(job => {
+        const status = String(
+          (job && job.status) || ""
+        ).toUpperCase();
+        return status === "QUEUED" || status === "RUNNING";
+      });
+      const ready = !!(
+        context
+        && (
+          context.ready_to_start === true
+          || context.ready === true
+        )
+      );
+      const readiness = errorMessage
+        ? "Unavailable"
+        : (ready ? "Ready" : "Blocked");
+      const scanId = (
+        latestScan.scan_id
+        || (context && context.scan_id)
+        || "—"
+      );
+      const message = errorMessage
+        || (context && context.message)
+        || (
+          blockers.length
+            ? blockers[0]
+            : (
+                ready
+                  ? "TrueAegis can start against the latest accepted subnet scan."
+                  : "TrueAegis readiness requires operator review."
+              )
+        );
+
+      const setText = (id, value) => {
+        const element = document.getElementById(id);
+        if (element) {
+          element.textContent = String(
+            value === null || value === undefined
+              ? "—"
+              : value
+          );
+        }
+      };
+
+      setText("trueaegis-executive-readiness", readiness);
+      setText("trueaegis-executive-scan", scanId);
+      setText(
+        "trueaegis-executive-active-jobs",
+        activeJobs.length
+      );
+      setText("trueaegis-executive-message", message);
+
+      const openButton = document.getElementById(
+        "trueaegis-executive-open-tab"
+      );
+
+      if (
+        openButton
+        && openButton.dataset.boundTrueAegisTab !== "1"
+      ) {
+        openButton.dataset.boundTrueAegisTab = "1";
+        openButton.addEventListener("click", () => {
+          activateDashboardTab("trueaegis");
+        });
+      }
+    }
+
     function deltaAegisTrueAegisOrchestrationEnsurePanel() {
       let panel = document.getElementById("trueaegis-orchestration-panel");
 
@@ -28120,21 +28240,42 @@ function bindSiteManagementControls() {
         return panel;
       }
 
+      const foundation = (
+        document.getElementById("trueaegis-validation-foundation-panel")
+        || (
+          typeof ensureTrueAegisValidationPanel === "function"
+            ? ensureTrueAegisValidationPanel()
+            : null
+        )
+      );
+
+      if (!foundation) {
+        throw new Error(
+          "TrueAegis tab foundation is unavailable; "
+          + "orchestration was not rendered outside its tab."
+        );
+      }
+
+      let mount = document.getElementById(
+        "trueaegis-orchestration-mount"
+      );
+
+      if (!mount) {
+        mount = document.createElement("div");
+        mount.id = "trueaegis-orchestration-mount";
+        foundation.prepend(mount);
+      }
+
+      if (!foundation.contains(mount)) {
+        throw new Error(
+          "TrueAegis orchestration mount is outside the TrueAegis tab."
+        );
+      }
+
       panel = document.createElement("section");
       panel.id = "trueaegis-orchestration-panel";
-      panel.dataset.tabPanel = "trueaegis";
-
-      const correlationBody = document.getElementById("trueaegis-validation-correlations-body");
-      const correlationSection = correlationBody ? correlationBody.closest("section") : null;
-      const validationBody = document.getElementById("trueaegis-validation-observations-body");
-      const validationSection = validationBody ? validationBody.closest("section") : null;
-      const anchor = correlationSection || validationSection;
-
-      if (anchor && anchor.parentNode) {
-        anchor.parentNode.insertBefore(panel, anchor);
-      } else {
-        document.body.appendChild(panel);
-      }
+      panel.className = "detail-box trueaegis-orchestration";
+      mount.appendChild(panel);
 
       return panel;
     }
@@ -28179,6 +28320,11 @@ function bindSiteManagementControls() {
     }
 
     function deltaAegisTrueAegisOrchestrationRender(context, jobsPayload, errorMessage = "") {
+      deltaAegisTrueAegisRenderExecutiveReadiness(
+        context,
+        jobsPayload,
+        errorMessage
+      );
       const panel = deltaAegisTrueAegisOrchestrationEnsurePanel();
       const jobs = Array.isArray(jobsPayload) ? jobsPayload : ((jobsPayload && jobsPayload.jobs) || []);
       const blockers = (context && Array.isArray(context.blockers)) ? context.blockers : [];
