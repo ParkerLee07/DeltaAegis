@@ -47,7 +47,7 @@ required = (
     'element.title = String(value)',
     'return "Unknown"',
     'spreadSeconds > 3600',
-    'selected scope has no accepted scan',
+    'The affected subnet and supporting scan are listed below.',
 )
 
 for marker in required:
@@ -68,7 +68,7 @@ for forbidden in (
 
 print("PASS: four-clock separation markers")
 print("PASS: local-time display preserves source timestamp")
-print("PASS: mixed-age scope warning contract")
+print("PASS: 24-hour warning threshold contract")
 print("PASS: unknown timestamps do not use browser time")
 print("PASS: leaf behavior is limited to freshness feature checks")
 PY
@@ -108,7 +108,7 @@ required = (
     'Newest scope evidence',
     'Evidence through',
     'Dashboard refreshed',
-    'different times',
+    'The affected subnet and supporting scan are listed below.',
     'Do not assume the visible evidence is current',
 )
 
@@ -144,7 +144,7 @@ if len(matches) != 1:
 
 print("PASS: persistent strip is outside individual tab panels")
 print("PASS: site, all-scopes, and subnet labels are rendered")
-print("PASS: mixed-age and lookup-failure warnings are rendered")
+print("PASS: thresholded attribution and lookup-failure warnings are rendered")
 print("PASS: rendered freshness script is present exactly once")
 PY
 
@@ -218,6 +218,73 @@ if payload["age_hours"] != 1.0:
 
 print("PASS: accepted evidence and import clocks remain separate")
 print("PASS: existing policy-driven freshness bands are reused")
+PY
+
+
+echo "[v0.42 checkpoint F] 24-hour warning attribution"
+python3 - <<'PY'
+from pathlib import Path
+import importlib.util
+import sys
+
+source = Path("deltaaegis.py").read_text(encoding="utf-8")
+
+required = (
+    "const FRESHNESS_WARNING_HOURS = 24",
+    "function freshnessScopeDetail(",
+    "ageHours > FRESHNESS_WARNING_HOURS",
+    "outOfDateScopes",
+    'id="dashboard-freshness-warning-summary"',
+    'id="dashboard-freshness-outdated-scopes"',
+    'identity.append("Subnet ", scopeCode);',
+    'scanLabel.append("Scan ", scanCode);',
+    "The affected subnet and supporting scan are listed below.",
+    "warning.hidden = outOfDateScopes.length === 0",
+)
+
+for item in required:
+    if item not in source:
+        raise SystemExit(
+            f"missing freshness warning-detail marker: {item}"
+        )
+
+for removed in (
+    "warning.hidden = warningMessages.length === 0",
+    "At least one selected scope is supported only by stale evidence.",
+):
+    if removed in source:
+        raise SystemExit(
+            f"legacy generic warning behavior remains: {removed}"
+        )
+
+spec = importlib.util.spec_from_file_location(
+    "deltaaegis_v042_freshness_warning_render",
+    Path("deltaaegis.py"),
+)
+
+if spec is None or spec.loader is None:
+    raise SystemExit("could not load deltaaegis.py")
+
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+page = module.dashboard_index_html()
+
+for item in (
+    'id="dashboard-freshness-warning-summary"',
+    'id="dashboard-freshness-outdated-scopes"',
+    "The affected subnet and supporting scan are listed below.",
+):
+    if item not in page:
+        raise SystemExit(
+            f"rendered dashboard missing freshness detail: {item}"
+        )
+
+print("PASS: warning threshold is strictly greater than 24 hours")
+print("PASS: mixed ages alone do not open the warning panel")
+print("PASS: affected subnet and supporting scan are rendered")
+print("PASS: evidence timestamp and age remain visible per stale subnet")
 PY
 
 echo "[v0.42 checkpoint F] repository hygiene"

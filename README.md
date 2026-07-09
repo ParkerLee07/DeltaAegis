@@ -140,6 +140,12 @@ Every main dashboard tab now shares a persistent evidence-freshness strip. It di
 
 A selected logical site and the all-scopes view evaluate every member subnet independently. The strip shows the newest and oldest accepted evidence timestamps, follows the least-fresh scope for its overall state, and warns when the selected scopes contain mixed-age evidence. Missing timestamps render as `Unknown`; no timestamp is synthesized from the browser clock.
 
+Freshness warnings are intentionally actionable rather than merely
+informational. The warning panel remains hidden unless a selected subnet has
+accepted evidence more than 24 hours old or has no accepted scan. When shown,
+it lists each affected private subnet, the supporting scan ID, the evidence
+timestamp, and its age.
+
 ## Sites Dashboard UX
 
 The Sites dashboard now uses dashboard-native styling for buttons, text

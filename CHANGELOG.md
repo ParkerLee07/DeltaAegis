@@ -1,5 +1,8 @@
 ## DeltaAegis v0.42.0 — Logical Site Scopes
 
+- Limited freshness warnings to subnets with accepted evidence more than 24 hours old or no accepted scan.
+- Added affected subnet, supporting scan ID, evidence time, and age to the freshness warning panel.
+
 - Added a persistent evidence-freshness strip across all main dashboard tabs.
 - Separated accepted evidence time, import time, and browser refresh time so page activity cannot make old evidence appear current.
 - Added newest/oldest scope timestamps and mixed-age warnings for logical-site and all-scopes views.

@@ -30201,6 +30201,37 @@ def dashboard_index_html() -> str:
       display: none;
     }
 
+    #dashboard-freshness-warning-summary {
+      font-weight: 800;
+    }
+
+    #dashboard-freshness-outdated-scopes {
+      display: grid;
+      gap: 0.5rem;
+      list-style: none;
+      margin: 0.65rem 0 0;
+      padding: 0;
+    }
+
+    #dashboard-freshness-outdated-scopes li {
+      background: rgba(15, 23, 42, 0.68);
+      border: 1px solid rgba(245, 158, 11, 0.35);
+      border-radius: 8px;
+      display: grid;
+      gap: 0.25rem;
+      padding: 0.58rem 0.68rem;
+    }
+
+    #dashboard-freshness-outdated-scopes code {
+      color: #a5f3fc;
+      overflow-wrap: anywhere;
+    }
+
+    .dashboard-freshness-stale-detail {
+      color: #fef3c7;
+      font-size: 0.82rem;
+    }
+
     #dashboard-freshness-message {
       color: #9fb5d2;
       font-size: 0.8rem;
@@ -30284,7 +30315,10 @@ def dashboard_index_html() -> str:
       </div>
     </div>
 
-    <div id="dashboard-freshness-warning" hidden></div>
+    <div id="dashboard-freshness-warning" hidden>
+      <div id="dashboard-freshness-warning-summary"></div>
+      <ul id="dashboard-freshness-outdated-scopes"></ul>
+    </div>
     <div id="dashboard-freshness-message">
       Loading accepted-scan freshness…
     </div>
@@ -30295,6 +30329,8 @@ def dashboard_index_html() -> str:
   <script id="deltaaegis-v042-dashboard-freshness-script">
     (() => {
       "use strict";
+
+      const FRESHNESS_WARNING_HOURS = 24;
 
       const STATE_RANK = {
         FRESH: 0,
@@ -30414,6 +30450,47 @@ def dashboard_index_html() -> str:
         return result;
       }
 
+      function freshnessScopeDetail(record) {
+        const snapshot = record && record.latest_snapshot
+          ? record.latest_snapshot
+          : {};
+        const state = String(
+          (record && record.state) || "NO_ACCEPTED_SCAN"
+        ).toUpperCase();
+        const rawAge = Number(record && record.age_hours);
+        const ageHours = Number.isFinite(rawAge) ? rawAge : null;
+        const evidenceAt = freshnessTimeValue(record);
+        const networkScope = String(
+          (record && record.network_scope)
+          || snapshot.network_scope
+          || "Unknown subnet"
+        );
+        const scanId = String(
+          snapshot.scan_id
+          || (record && record.scan_id)
+          || "No accepted scan"
+        );
+        const noAcceptedScan = (
+          state === "NO_ACCEPTED_SCAN"
+          || !snapshot.scan_id
+        );
+        const overThreshold = (
+          ageHours !== null
+          && ageHours > FRESHNESS_WARNING_HOURS
+        );
+
+        return {
+          networkScope,
+          scanId,
+          state,
+          evidenceAt,
+          ageHours,
+          noAcceptedScan,
+          overThreshold,
+          outOfDate: noAcceptedScan || overThreshold
+        };
+      }
+
       function freshnessAggregate(records, mode, contextLabel) {
         const safeRecords = Array.isArray(records)
           ? records
@@ -30482,6 +30559,18 @@ def dashboard_index_html() -> str:
         const state = safeRecords.length
           ? freshnessWorstState(safeRecords)
           : "NO_ACCEPTED_SCAN";
+        const scopeDetails = safeRecords.map(freshnessScopeDetail);
+        const outOfDateScopes = scopeDetails.filter(
+          item => item.outOfDate
+        ).sort(
+          (left, right) => {
+            if (left.noAcceptedScan !== right.noAcceptedScan) {
+              return left.noAcceptedScan ? -1 : 1;
+            }
+            return Number(right.ageHours || 0)
+              - Number(left.ageHours || 0);
+          }
+        );
         const worstAge = safeRecords.reduce(
           (current, record) => {
             const value = Number(record && record.age_hours);
@@ -30502,6 +30591,9 @@ def dashboard_index_html() -> str:
           imported: newestImport ? newestImport.value : null,
           ageHours: worstAge,
           mixed,
+          warningThresholdHours: FRESHNESS_WARNING_HOURS,
+          scopeDetails,
+          outOfDateScopes,
           memberCount: safeRecords.length,
           missingCount: safeRecords.filter(
             record => !freshnessParseTime(
@@ -30612,6 +30704,7 @@ def dashboard_index_html() -> str:
           const payload = await freshnessFetch(
             freshnessScopedPath("/api/scan-freshness")
           );
+          payload.network_scope = scope;
 
           return freshnessAggregate(
             [payload],
@@ -30652,6 +30745,48 @@ def dashboard_index_html() -> str:
         );
       }
 
+      function freshnessRenderOutdatedScopes(items) {
+        const list = freshnessElement(
+          "dashboard-freshness-outdated-scopes"
+        );
+        if (!list) return;
+
+        list.replaceChildren();
+
+        for (const item of items) {
+          const row = document.createElement("li");
+          const identity = document.createElement("strong");
+          const scopeCode = document.createElement("code");
+          const scanLabel = document.createElement("span");
+          const scanCode = document.createElement("code");
+          const timing = document.createElement("span");
+
+          scopeCode.textContent = item.networkScope;
+          identity.append("Subnet ", scopeCode);
+
+          scanCode.textContent = item.scanId;
+          scanLabel.className = "dashboard-freshness-stale-detail";
+          scanLabel.append("Scan ", scanCode);
+
+          timing.className = "dashboard-freshness-stale-detail";
+          if (item.noAcceptedScan) {
+            timing.textContent = "No accepted scan is available.";
+          } else {
+            timing.textContent = (
+              "Evidence through "
+              + freshnessLocalLabel(item.evidenceAt)
+              + " · "
+              + freshnessAgeLabel(item.ageHours)
+              + " old"
+            );
+            timing.title = String(item.evidenceAt || "");
+          }
+
+          row.append(identity, scanLabel, timing);
+          list.append(row);
+        }
+      }
+
       function freshnessRender(model) {
         const strip = freshnessElement(
           "dashboard-freshness-strip"
@@ -30661,6 +30796,9 @@ def dashboard_index_html() -> str:
         );
         const warning = freshnessElement(
           "dashboard-freshness-warning"
+        );
+        const warningSummary = freshnessElement(
+          "dashboard-freshness-warning-summary"
         );
         const context = freshnessElement(
           "dashboard-freshness-context"
@@ -30751,44 +30889,44 @@ def dashboard_index_html() -> str:
           );
         }
 
-        const warningMessages = [];
-
-        if (model.mixed) {
-          warningMessages.push(
-            model.mode === "site"
-              ? (
-                  "Member subnets are supported by evidence from "
-                  + "different times. Review the oldest member "
-                  + "timestamp before acting."
-                )
-              : (
-                  "Network scopes are supported by evidence from "
-                  + "different times. Review the oldest scope "
-                  + "timestamp before acting."
-                )
-          );
-        }
-
-        if (state === "STALE") {
-          warningMessages.push(
-            "At least one selected scope is supported only by stale evidence."
-          );
-        } else if (state === "NO_ACCEPTED_SCAN") {
-          warningMessages.push(
-            "At least one selected scope has no accepted scan."
-          );
-        }
-
-        if (model.missingCount) {
-          warningMessages.push(
-            `${model.missingCount} selected scope(s) have no usable evidence timestamp.`
-          );
-        }
+        const outOfDateScopes = Array.isArray(
+          model.outOfDateScopes
+        ) ? model.outOfDateScopes : [];
+        const olderThanThreshold = outOfDateScopes.filter(
+          item => item.overThreshold
+        ).length;
+        const withoutAcceptedScan = outOfDateScopes.filter(
+          item => item.noAcceptedScan
+        ).length;
 
         if (warning) {
-          warning.hidden = warningMessages.length === 0;
-          warning.textContent = warningMessages.join(" ");
+          warning.hidden = outOfDateScopes.length === 0;
         }
+
+        if (warningSummary) {
+          if (!outOfDateScopes.length) {
+            warningSummary.textContent = "";
+          } else {
+            const parts = [];
+            if (olderThanThreshold) {
+              parts.push(
+                `${olderThanThreshold} subnet(s) have evidence older than `
+                + `${model.warningThresholdHours} hours`
+              );
+            }
+            if (withoutAcceptedScan) {
+              parts.push(
+                `${withoutAcceptedScan} subnet(s) have no accepted scan`
+              );
+            }
+            warningSummary.textContent = (
+              parts.join("; ")
+              + ". The affected subnet and supporting scan are listed below."
+            );
+          }
+        }
+
+        freshnessRenderOutdatedScopes(outOfDateScopes);
 
         if (message) {
           message.textContent = (
@@ -30809,6 +30947,12 @@ def dashboard_index_html() -> str:
         const warning = freshnessElement(
           "dashboard-freshness-warning"
         );
+        const warningSummary = freshnessElement(
+          "dashboard-freshness-warning-summary"
+        );
+        const outdatedList = freshnessElement(
+          "dashboard-freshness-outdated-scopes"
+        );
         const message = freshnessElement(
           "dashboard-freshness-message"
         );
@@ -30822,10 +30966,15 @@ def dashboard_index_html() -> str:
 
         if (warning) {
           warning.hidden = false;
-          warning.textContent = (
+        }
+        if (warningSummary) {
+          warningSummary.textContent = (
             "Freshness could not be established. "
             + "Do not assume the visible evidence is current."
           );
+        }
+        if (outdatedList) {
+          outdatedList.replaceChildren();
         }
 
         if (message) {

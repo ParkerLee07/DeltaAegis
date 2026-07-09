@@ -18,6 +18,12 @@ A shared freshness strip now remains visible across every main dashboard tab. It
 
 This checkpoint is presentation-only: it does not delete historical evidence, alter risk scores, or silently downgrade stored findings.
 
+The mixed-age warning no longer appears solely because selected
+subnets were scanned at different times. It appears only when at least one
+subnet is backed by evidence more than 24 hours old or has no accepted scan.
+Every affected subnet is identified with its supporting scan ID and evidence
+age.
+
 ## Sites dashboard UX
 
 Sites management now presents styled dashboard controls and an explicit

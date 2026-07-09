@@ -193,6 +193,12 @@ Use only an approved test database or a deliberately prepared stale row.
 - [ ] Confirm a browser refresh changes only the dashboard-refreshed clock, not evidence or import timestamps.
 - [ ] Confirm historical evidence remains visible and neither risk scoring nor stored state changes.
 
+- [ ] Confirm that subnets with evidence no more than 24 hours old do not trigger the warning panel solely because their timestamps differ.
+- [ ] Confirm that evidence strictly older than 24 hours triggers the warning panel.
+- [ ] Confirm every warning row identifies the affected subnet and supporting scan ID.
+- [ ] Confirm warning rows show the evidence timestamp and age.
+- [ ] Confirm a subnet with no accepted scan is listed explicitly.
+
 ## 8. Guarded LAN binding
 
 Use a trusted test LAN and an authenticated temporary database.
