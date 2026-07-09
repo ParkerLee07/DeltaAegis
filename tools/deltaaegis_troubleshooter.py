@@ -4181,6 +4181,597 @@ def main() -> int:
         return 0
 
     return _deltaaegis_troubleshooter_cli_main()
+
+
+# v0.42 effective database discovery and safety reporting.
+_deltaaegis_static_environment_report = environment_report
+
+
+ERROR_CODES.update(
+    {
+        "DAE-TRB-1003": {
+            "severity": "ERROR",
+            "title": "Active database path unresolved",
+            "meaning": (
+                "The troubleshooter could not obtain the effective database "
+                "path from DeltaAegis itself."
+            ),
+            "action": (
+                "Run `python3 deltaaegis.py paths`, inspect its error output, "
+                "and correct the DeltaAegis configuration."
+            ),
+        },
+        "DAE-TRB-5105": {
+            "severity": "ERROR",
+            "title": "Active database missing",
+            "meaning": (
+                "DeltaAegis resolved an active database path, but no database "
+                "file exists at that path."
+            ),
+            "action": (
+                "Confirm the intended configuration and initialize or restore "
+                "the active database before running operational commands."
+            ),
+        },
+        "DAE-TRB-5106": {
+            "severity": "INFO",
+            "title": "Additional database candidate found",
+            "meaning": (
+                "The troubleshooter found another non-backup database file "
+                "besides the path reported by DeltaAegis."
+            ),
+            "action": (
+                "Treat the path reported by `deltaaegis.py paths` as active; "
+                "review other candidates before archiving or deleting them."
+            ),
+        },
+    }
+)
+
+
+def parse_database_path_output(
+    output_text: str,
+    repo: Path,
+) -> Path | None:
+    for raw_line in output_text.splitlines():
+        line = raw_line.strip()
+        if not line.casefold().startswith("database:"):
+            continue
+
+        value = line.split(":", 1)[1].strip()
+        if not value:
+            return None
+
+        expanded = os.path.expandvars(value)
+        path = Path(expanded).expanduser()
+
+        if not path.is_absolute():
+            path = repo / path
+
+        return path.resolve(strict=False)
+
+    return None
+
+
+def inspect_database_path(
+    path: Path,
+    *,
+    role: str,
+    source: str,
+) -> dict[str, Any]:
+    import sqlite3
+
+    item: dict[str, Any] = {
+        "path": str(path),
+        "role": role,
+        "source": source,
+        "exists": path.is_file(),
+        "ok": False,
+    }
+
+    if not item["exists"]:
+        return item
+
+    item["size_bytes"] = path.stat().st_size
+    item["sha256"] = sha256_file(path)
+
+    try:
+        connection = sqlite3.connect(
+            path.as_uri() + "?mode=ro",
+            uri=True,
+            timeout=3.0,
+        )
+        try:
+            connection.execute("PRAGMA query_only = ON")
+            integrity = [
+                str(row[0])
+                for row in connection.execute(
+                    "PRAGMA integrity_check"
+                ).fetchall()
+            ]
+            foreign_keys = [
+                list(row)
+                for row in connection.execute(
+                    "PRAGMA foreign_key_check"
+                ).fetchmany(100)
+            ]
+        finally:
+            connection.close()
+
+        item["integrity_check"] = integrity
+        item["foreign_key_check"] = foreign_keys
+        item["ok"] = (
+            integrity == ["ok"]
+            and not foreign_keys
+        )
+    except Exception as exc:
+        item["error"] = f"{type(exc).__name__}: {exc}"
+
+    return item
+
+
+def discover_nonbackup_databases(
+    repo: Path,
+    active_path: Path | None,
+) -> list[Path]:
+    excluded_directories = {
+        ".git",
+        ".pytest_cache",
+        "__pycache__",
+        "backups",
+        "scan-logs",
+        "trueaegis-logs",
+        "troubleshooter-reports",
+    }
+    discovered: set[Path] = set()
+
+    for root_text, directories, files in os.walk(repo):
+        root = Path(root_text)
+        relative = root.relative_to(repo)
+
+        directories[:] = [
+            name
+            for name in directories
+            if name not in excluded_directories
+            and len(relative.parts) < 3
+        ]
+
+        for filename in files:
+            if not filename.endswith(".db"):
+                continue
+
+            candidate = (root / filename).resolve(strict=False)
+            if active_path is not None and candidate == active_path:
+                continue
+            discovered.add(candidate)
+
+    return sorted(discovered, key=lambda path: str(path))
+
+
+def resolve_database_inventory(
+    repo: Path,
+) -> dict[str, Any]:
+    source_file = repo / "deltaaegis.py"
+    inventory: dict[str, Any] = {
+        "resolved": False,
+        "source": "deltaaegis.py paths",
+        "command": [
+            sys.executable,
+            str(source_file),
+            "paths",
+        ],
+        "active": None,
+        "other_candidates": [],
+    }
+
+    if not source_file.is_file():
+        inventory["error"] = (
+            f"DeltaAegis source is missing: {source_file}"
+        )
+        return inventory
+
+    try:
+        completed = subprocess.run(
+            inventory["command"],
+            cwd=str(repo),
+            text=True,
+            capture_output=True,
+            timeout=20,
+            check=False,
+            env=os.environ.copy(),
+        )
+    except Exception as exc:
+        inventory["error"] = f"{type(exc).__name__}: {exc}"
+        return inventory
+
+    inventory["return_code"] = completed.returncode
+    inventory["stdout"] = completed.stdout.strip()
+    inventory["stderr"] = completed.stderr.strip()
+
+    if completed.returncode != 0:
+        inventory["error"] = (
+            "DeltaAegis paths command returned "
+            f"{completed.returncode}: "
+            f"{completed.stderr.strip() or completed.stdout.strip()}"
+        )
+        return inventory
+
+    active_path = parse_database_path_output(
+        completed.stdout,
+        repo,
+    )
+    if active_path is None:
+        inventory["error"] = (
+            "DeltaAegis paths output did not contain a Database line"
+        )
+        return inventory
+
+    inventory["resolved"] = True
+    inventory["active_path"] = str(active_path)
+    inventory["active"] = inspect_database_path(
+        active_path,
+        role="active",
+        source="deltaaegis.py paths",
+    )
+
+    for candidate in discover_nonbackup_databases(
+        repo,
+        active_path,
+    ):
+        inventory["other_candidates"].append(
+            inspect_database_path(
+                candidate,
+                role="additional_candidate",
+                source="repository discovery",
+            )
+        )
+
+    return inventory
+
+
+def environment_report(repo: Path) -> dict[str, Any]:
+    environment = _deltaaegis_static_environment_report(repo)
+    inventory = resolve_database_inventory(repo)
+
+    environment["database_resolution"] = inventory
+    environment["databases"] = {}
+
+    active = inventory.get("active")
+    if isinstance(active, dict):
+        environment["databases"][active["path"]] = active
+
+    for candidate in inventory.get("other_candidates", []):
+        environment["databases"][candidate["path"]] = candidate
+
+    return environment
+
+
+def environment_error_codes(
+    environment: dict[str, Any],
+) -> list[str]:
+    codes: list[str] = []
+
+    if not environment.get("working_tree_clean", False):
+        codes.append("DAE-TRB-1102")
+
+    commands = environment.get("commands", {})
+    for item in commands.values():
+        value = str(item or "")
+        if value == "MISSING" or value.startswith("ERROR:"):
+            codes.append("DAE-TRB-1103")
+            break
+
+    if environment.get("active_processes"):
+        codes.append("DAE-TRB-6103")
+
+    inventory = environment.get("database_resolution", {})
+
+    if not inventory.get("resolved"):
+        codes.append("DAE-TRB-1003")
+        return list(dict.fromkeys(codes))
+
+    active = inventory.get("active") or {}
+
+    if not active.get("exists", False):
+        codes.append("DAE-TRB-5105")
+    elif active.get("error"):
+        error = str(active["error"]).casefold()
+        if "locked" in error:
+            codes.append("DAE-TRB-5104")
+        else:
+            codes.append("DAE-TRB-5102")
+    else:
+        if active.get("integrity_check") != ["ok"]:
+            codes.append("DAE-TRB-5102")
+        if active.get("foreign_key_check"):
+            codes.append("DAE-TRB-5103")
+
+    if inventory.get("other_candidates"):
+        codes.append("DAE-TRB-5106")
+
+    return list(dict.fromkeys(codes))
+
+
+def quick_health_check(
+    repo: Path,
+    *,
+    as_json: bool = False,
+) -> int:
+    try:
+        environment = environment_report(repo)
+    except Exception as exc:
+        if as_json:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "codes": ["DAE-TRB-1101"],
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print_error_code("DAE-TRB-1101")
+            print(f"Detail: {type(exc).__name__}: {exc}")
+        return 1
+
+    check = self_check()
+    codes = list(
+        dict.fromkeys(
+            self_check_error_codes(check)
+            + environment_error_codes(environment)
+        )
+    )
+    blocking = [
+        code
+        for code in codes
+        if error_code_record(code)["severity"]
+        in {"ERROR", "CRITICAL"}
+    ]
+    overall = "FAIL" if blocking else ("WARN" if codes else "PASS")
+
+    payload = {
+        "overall": overall,
+        "codes": codes,
+        "environment": environment,
+        "self_check": check,
+    }
+
+    if as_json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 1 if blocking else 0
+
+    print("DeltaAegis Quick Health Check")
+    print("=" * 40)
+    print(f"Overall:            {overall}")
+    print(f"Repository:         {environment['repo']}")
+    print(f"Branch:             {environment['branch']}")
+    print(f"HEAD:               {environment['head'][:12]}")
+    print(
+        "Working tree:       "
+        + (
+            "CLEAN"
+            if environment["working_tree_clean"]
+            else "CHANGED"
+        )
+    )
+    print(
+        "Related processes:  "
+        f"{len(environment.get('active_processes', []))}"
+    )
+    print()
+    concise_self_check(check)
+
+    inventory = environment.get("database_resolution", {})
+    print()
+    print("Database resolution")
+    print("-" * 40)
+
+    if not inventory.get("resolved"):
+        print("Status:             FAILED")
+        print("Resolved by:        deltaaegis.py paths")
+        print(
+            "Detail:             "
+            f"{inventory.get('error', 'unknown error')}"
+        )
+    else:
+        active = inventory.get("active") or {}
+        if not active.get("exists"):
+            status = "MISSING"
+        elif active.get("ok"):
+            status = "PASS"
+        else:
+            status = "FAIL"
+
+        print("Resolved by:        deltaaegis.py paths")
+        print(
+            "Active database:    "
+            f"{inventory.get('active_path')}"
+        )
+        print(f"Active DB status:   {status}")
+        print(
+            "Other candidates:   "
+            f"{len(inventory.get('other_candidates', []))}"
+        )
+
+        for candidate in inventory.get(
+            "other_candidates",
+            [],
+        ):
+            print(
+                "  Additional:       "
+                f"{candidate['path']}"
+            )
+
+    if codes:
+        print()
+        print("Diagnostic codes")
+        print("-" * 40)
+        for code in codes:
+            record = error_code_record(code)
+            print(
+                f"{code} [{record['severity']}] "
+                f"{record['title']}"
+            )
+
+    return 1 if blocking else 0
+
+
+def database_paths_to_protect(
+    environment: dict[str, Any],
+) -> list[Path]:
+    inventory = environment.get("database_resolution", {})
+    paths: list[Path] = []
+
+    active = inventory.get("active")
+    if isinstance(active, dict) and active.get("exists"):
+        paths.append(Path(active["path"]))
+
+    for candidate in inventory.get("other_candidates", []):
+        if candidate.get("exists"):
+            paths.append(Path(candidate["path"]))
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+
+    for path in paths:
+        normalized = str(path.resolve(strict=False))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(path)
+
+    return unique
+
+
+def run_selected_diagnostics(
+    repo: Path,
+    selected: list[str],
+    *,
+    timeout_seconds: int = 900,
+    keep_candidates: bool = False,
+    report_dir_value: Path | None = None,
+) -> int:
+    graph, missing = dependency_inventory()
+    check = self_check()
+
+    if not check.get("integrity_ok"):
+        concise_self_check(check)
+        print()
+        code = (
+            "DAE-TRB-2101"
+            if check.get("hash_failures")
+            else "DAE-TRB-2102"
+        )
+        print_error_code(code)
+        return 1
+
+    environment = environment_report(repo)
+    database_codes = environment_error_codes(environment)
+
+    if "DAE-TRB-1003" in database_codes:
+        print_error_code("DAE-TRB-1003")
+        return 1
+
+    if "DAE-TRB-5105" in database_codes:
+        print_error_code("DAE-TRB-5105")
+        return 1
+
+    report_dir = create_report_dir(report_dir_value)
+    logs_dir = report_dir / "logs"
+    logs_dir.mkdir()
+    workspace_root = report_dir / "candidates"
+    workspace_root.mkdir()
+
+    protected_hashes = {
+        str(path): sha256_file(path)
+        for path in database_paths_to_protect(environment)
+    }
+
+    results: list[Result] = []
+    print()
+    print(
+        f"Running {len(selected)} isolated validator"
+        f"{'s' if len(selected) != 1 else ''}."
+    )
+
+    for index, validator in enumerate(selected, start=1):
+        print(
+            f"[{index}/{len(selected)}] "
+            f"{Path(validator).name}",
+            flush=True,
+        )
+        result = execute_validator(
+            repo,
+            workspace_root,
+            validator,
+            index,
+            logs_dir,
+            timeout_seconds,
+            keep_candidates,
+        )
+        results.append(result)
+        codes = result_error_codes(result)
+        suffix = (
+            " | " + ", ".join(codes)
+            if codes
+            else ""
+        )
+        print(
+            f"  {result.status} "
+            f"({result.duration_seconds:.3f}s){suffix}",
+            flush=True,
+        )
+
+    write_summary(
+        report_dir,
+        environment,
+        check,
+        graph,
+        missing,
+        selected,
+        results,
+    )
+    codes = append_diagnostic_codes(
+        report_dir,
+        environment,
+        check,
+        results,
+    )
+
+    for path_text, before in protected_hashes.items():
+        path = Path(path_text)
+        after = sha256_file(path)
+        if before != after:
+            print_error_code("DAE-TRB-5201")
+            raise TroubleshooterError(
+                "Protected database changed during troubleshooting: "
+                f"{path}"
+            )
+
+    failed = [
+        result
+        for result in results
+        if result.status != "PASS"
+    ]
+
+    print()
+    print("Troubleshooting summary")
+    print("-" * 40)
+    print(f"Passed:             {len(results) - len(failed)}")
+    print(f"Failed/timed out:   {len(failed)}")
+    print(
+        "Diagnostic codes:   "
+        + (", ".join(codes) if codes else "none")
+    )
+    print(f"Report:             {report_dir / 'summary.md'}")
+
+    if not keep_candidates:
+        shutil.rmtree(workspace_root, ignore_errors=True)
+
+    return 1 if failed else 0
 if __name__ == "__main__":
     try:
         raise SystemExit(main())

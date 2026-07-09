@@ -515,6 +515,8 @@ Preview uninstall actions without deleting anything:
 
 ## Validator Troubleshooter
 
+The health check resolves the effective database by running `python3 deltaaegis.py paths`; it does not infer the active database from hard-coded filenames. Missing legacy database files are not treated as faults.
+
 Open the guided human-readable menu:
 
     python3 tools/deltaaegis_troubleshooter.py --menu

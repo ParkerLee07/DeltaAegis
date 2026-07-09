@@ -100,3 +100,36 @@ python3 tools/deltaaegis_troubleshooter.py --match 'v0_42'
 Use `--json` with `--quick-check` or `--self-check` for machine-readable
 output. Every menu-driven validator run writes `diagnostic_codes.json` beside
 the normal Markdown and JSON reports.
+## Effective database discovery
+
+The troubleshooter does not assume that the active database is located at one
+of a fixed set of filenames. It asks DeltaAegis directly:
+
+```bash
+python3 deltaaegis.py paths
+```
+
+The `Database:` value returned by that command is the active database used for
+health checks and before/after safety hashes. This preserves configuration
+overrides that DeltaAegis itself recognizes.
+
+The quick health check now reports:
+
+- the command used to resolve the path;
+- the absolute active database path;
+- whether that file exists;
+- SQLite integrity and foreign-key status;
+- other non-backup `.db` files found near the repository.
+
+An absent legacy root-level `deltaaegis.db` is normal and does not produce
+`DAE-TRB-5101`. Additional database files are reported with
+`DAE-TRB-5106` so an operator can review them without confusing them with the
+active database.
+
+New codes:
+
+| Code | Severity | Meaning |
+|---|---|---|
+| `DAE-TRB-1003` | ERROR | The active database path could not be resolved from DeltaAegis. |
+| `DAE-TRB-5105` | ERROR | DeltaAegis resolved a path, but the active database file is missing. |
+| `DAE-TRB-5106` | INFO | Another non-backup database file was discovered. |
