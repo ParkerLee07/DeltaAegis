@@ -371,11 +371,6 @@ echo "[v0.42 checkpoint 3] rendered JavaScript syntax"
 ./tools/validate_v0_40_dashboard_javascript_syntax.sh
 echo "PASS: rendered JavaScript syntax"
 
-echo "[v0.42 checkpoint 3] prior checkpoint compatibility"
-./tools/validate_v0_42_logical_site_foundation.sh
-./tools/validate_v0_42_dashboard_lan_flag.sh
-./tools/validate_v0_42_logical_site_cli.sh
-echo "PASS: prior checkpoint compatibility"
 
 echo "[v0.42 checkpoint 3] repository hygiene"
 git diff --check

@@ -4,15 +4,22 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.41.0
+## Current Release — v0.42.0
 
-**DeltaAegis v0.41.0 — Data Durability & Recovery**
+**DeltaAegis v0.42.0 — Logical Site Scopes**
 
-DeltaAegis v0.41.0 adds a guarded lifecycle for the local SQLite evidence store. Operators can create SQLite-consistent backups, publish checksum and schema manifests, catalog and verify backup bundles, rehearse restores into a non-active database, preview retention decisions, and delete only freshly verified retention-eligible bundles.
+DeltaAegis v0.42.0 adds additive operator-facing logical sites above the existing CIDR network scopes. Operators can group related private subnet scopes into a building or site, manage those relationships from the CLI, browse them through authenticated dashboard APIs, and aggregate core SIEM views across the latest accepted state of each member subnet.
 
-Active restore is deliberately split into planning and execution. The preview verifies the selected backup, detects running DeltaAegis dashboard processes, blocks on SQLite WAL/SHM/journal files, checks active and backup file identities, and requires an existing writable safety-backup directory. Execution requires the exact preview digest and confirmation phrase, creates a fresh verified pre-restore safety backup, restores into a temporary database, atomically replaces the active database, verifies the result, and automatically rolls back when post-cutover verification fails.
+Highlights:
 
-The default active database remains `data/deltaaegis.db`. An ignored root-level `deltaaegis.db` is treated as legacy local state and is never selected automatically. Use `--db` explicitly when operating on any non-default database.
+- Stable logical-site identities with case-insensitive unique names, descriptions, active/archive state, and retained membership history.
+- A one-site-per-subnet invariant while allowing each logical site to contain many private CIDR scopes.
+- Human-readable and JSON CLI commands for site creation, listing, inspection, rename, description updates, archive, assignment, and removal.
+- Viewer-authenticated `/api/sites` and `/api/site-detail` endpoints plus site-aware dashboard navigation.
+- Site-wide aggregation for summary metrics, latest accepted current state, assets, events, alerts, annotations, risk, scan context, Investigation Center, latest changes, and scan freshness.
+- Collision-safe subnet provenance so identical MAC or IP identities in different scopes are not silently merged.
+- Fail-closed handling for ambiguous `scope` plus `site_id` requests and for endpoints that remain subnet-specific.
+- A guarded `dashboard --lan` option that binds to `0.0.0.0` only when password or token authentication is available.
 
 ## What DeltaAegis Does
 
@@ -106,6 +113,52 @@ python3 tools/reset_dashboard_admin.py \
   --db data/deltaaegis.db \
   --username admin
 ```
+
+## Logical Site Scopes
+
+Logical sites are additive parents for the technical CIDR scopes already used throughout DeltaAegis. NetSniper scan targets, snapshot identity, asset lifecycle identity, events, alerts, and evidence continue to use canonical subnet CIDRs. A building or site name never replaces `network_scope`.
+
+The relationship is intentionally constrained:
+
+```text
+one logical site -> many private CIDR subnet scopes
+one subnet scope -> zero or one logical site
+```
+
+Create and inspect a site:
+
+```bash
+python3 deltaaegis.py site-create   "CLS Health - Admin Building"   --description "Administrative building network scopes."
+
+python3 deltaaegis.py site-list
+python3 deltaaegis.py site-show SITE_ID
+```
+
+Assign private subnet scopes:
+
+```bash
+python3 deltaaegis.py site-assign-scope SITE_ID 192.168.4.0/24
+python3 deltaaegis.py site-assign-scope SITE_ID 192.168.5.0/24
+python3 deltaaegis.py scopes --unassigned
+```
+
+Use `--json` on the logical-site commands for structured receipts and payloads. For rehearsal without changing the configured evidence database, pass a temporary database explicitly:
+
+```bash
+python3 deltaaegis.py --db /tmp/deltaaegis-site-rehearsal.db   site-create "Rehearsal Site"
+```
+
+The dashboard site selector aggregates core read-only SIEM views across member subnets. Each row retains its `network_scope`, and collision-prone identities receive a scope-qualified key. Asset detail and ticket evidence fail closed when the same identifier exists in more than one member subnet.
+
+NetSniper scans remain CIDR-targeted, and TrueAegis execution remains subnet-specific. Select a member subnet before starting those operational workflows.
+
+To expose the authenticated dashboard on the local network:
+
+```bash
+python3 deltaaegis.py dashboard --lan --port 8090
+```
+
+`--lan` requires at least one active password user or an explicit API token. DeltaAegis continues to serve HTTP directly, so use a trusted LAN or place it behind an HTTPS reverse proxy for broader deployment.
 
 ## Dashboard
 
@@ -241,7 +294,7 @@ The safety backup is retained after success or rollback. DeltaAegis does not del
 
 ## Security Boundary
 
-DeltaAegis v0.41.0 does not expose arbitrary shell command execution from the dashboard.
+DeltaAegis v0.42.0 does not expose arbitrary shell command execution from the dashboard.
 
 Dashboard NetSniper execution uses guarded job records, validated private IPv4 CIDRs, and fixed argument-vector process creation. Live job-detail reads are bounded and confined to the configured scan-log root.
 
@@ -376,18 +429,18 @@ Preview uninstall actions without deleting anything:
 
 ## Validation
 
-Run the complete v0.41 automated release gate from a clean checkout:
+Run the complete v0.42 automated release gate from a clean checkout:
 
 ```bash
-./tools/validate_v0_41_release_gate.sh
+./tools/validate_v0_42_release_gate.sh
 ```
 
-The release gate validates release metadata and documentation, rendered dashboard JavaScript, client-disconnect handling, all eight v0.41 durability and recovery checkpoints, the v0.40 operator-action suite, and the v0.39 compatibility suite. Every v0.41 checkpoint validator is invoked directly and exactly once.
+The release gate validates release metadata and documentation, rendered dashboard JavaScript, client-disconnect handling, all five flat v0.42 logical-site and LAN validators, the isolated v0.40 operator-action compatibility suite, and the v0.39 functional compatibility suite. The v0.42 all-in validator invokes every component validator exactly once.
 
 Complete the manual backup and restore checklist before merge, tag, or publication:
 
 ```text
-MANUAL_VERIFICATION_v0.41.0.md
+MANUAL_VERIFICATION_v0.42.0.md
 ```
 
 Basic syntax check:

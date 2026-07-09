@@ -68,7 +68,6 @@ print("PASS: parser, binding, and authentication guard")
 PY
 
 python3 deltaaegis.py dashboard --help | grep -F -- "--lan" >/dev/null
-./tools/validate_v0_42_logical_site_foundation.sh
 git diff --check
 
 echo "PASS: DeltaAegis v0.42 dashboard LAN flag validator"

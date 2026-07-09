@@ -468,10 +468,6 @@ grep -F "Human Output Site" <<<"$human_list" >/dev/null
 
 echo "PASS: human-readable site command output"
 
-echo "[v0.42 checkpoint 2] prior checkpoint compatibility"
-./tools/validate_v0_42_logical_site_foundation.sh
-./tools/validate_v0_42_dashboard_lan_flag.sh
-echo "PASS: prior checkpoint compatibility"
 
 echo "[v0.42 checkpoint 2] repository hygiene"
 git diff --check

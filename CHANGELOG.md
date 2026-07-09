@@ -1,3 +1,15 @@
+## DeltaAegis v0.42.0 — Logical Site Scopes
+
+- Added additive logical-site storage with stable site IDs, case-insensitive unique names, descriptions, archive state, and retained subnet memberships.
+- Preserved canonical CIDR `network_scope` values as technical scan, snapshot, asset-lifecycle, event, alert, and evidence boundaries.
+- Enforced one logical site per subnet while allowing one site to contain many private CIDR scopes.
+- Added logical-site CLI management with human-readable output, JSON receipts, access-audit events, private-CIDR validation, and safe archive/removal behavior.
+- Added viewer-authenticated site catalog and detail APIs plus site-aware dashboard navigation.
+- Added core site-wide SIEM aggregation across member subnets while preserving network-scope provenance and collision-safe identity keys.
+- Added fail-closed handling for ambiguous selectors, unknown sites, unsupported site endpoints, and cross-subnet asset or ticket ambiguity.
+- Added guarded LAN dashboard binding through `dashboard --lan`, requiring password or token authentication.
+- Added five focused v0.42 validators, flattened validator composition, documentation and metadata checks, release notes, manual verification, and the complete v0.42 release gate.
+
 ## DeltaAegis v0.41.0 — Data Durability & Recovery
 
 - Added SQLite-consistent database backup creation using the SQLite backup API, read-only source access, integrity checks, secure temporary files, and no-overwrite publication.
