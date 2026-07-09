@@ -70,7 +70,7 @@ for forbidden in (
 
 print("PASS: read-only site API contract")
 print("PASS: site-aware selector contract")
-print("PASS: no site dashboard mutation endpoint")
+print("PASS: original read-only site routes remain preserved")
 PY
 
 echo "[v0.42 checkpoint 3] payload behavior"

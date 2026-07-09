@@ -129,6 +129,20 @@ Use only an approved test database or a deliberately prepared stale row.
 - [ ] Confirm scan-job detail includes the watchdog classification.
 - [ ] Confirm dashboard startup runs the watchdog even when the recurring scheduler is disabled.
 
+## 7B. Sites dashboard management
+
+- [ ] Confirm the top navigation includes a **Sites** tab.
+- [ ] Confirm VIEWER and ANALYST accounts can inspect active and archived sites but cannot see mutation controls or call mutation routes.
+- [ ] As ADMIN, create a site and confirm a human-readable receipt appears.
+- [ ] Rename the site and update its description.
+- [ ] Assign one observed private CIDR and confirm coverage and member detail refresh.
+- [ ] Remove the member and confirm no snapshot, asset, event, alert, or risk evidence is deleted.
+- [ ] Reassign the subnet, archive the site using the exact confirmation, and confirm memberships remain.
+- [ ] Confirm the archived site is visible and read-only and rejects new assignment.
+- [ ] Confirm the Executive selector exposes the active site and site-wide aggregation.
+- [ ] Confirm access-audit records identify the authenticated operator for all mutations.
+- [ ] Confirm no raw JSON payload is displayed by default.
+
 ## 8. Guarded LAN binding
 
 Use a trusted test LAN and an authenticated temporary database.

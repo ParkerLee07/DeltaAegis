@@ -79,6 +79,7 @@ ACCESS_RBAC_PERMISSIONS = {
     "admin.telemetry.cleanup": "ADMIN",
     "workflow.write": "ANALYST",
     "scan.start": "ADMIN",
+    "sites.write": "ADMIN",
 }
 
 ACCESS_RBAC_ROUTE_POLICIES = (
@@ -89,6 +90,13 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("GET", "/netsniper", "dashboard.read"),
     ("GET", "/api/sites", "dashboard.read"),
     ("GET", "/api/site-detail", "dashboard.read"),
+    ("GET", "/api/site-management", "dashboard.read"),
+    ("POST", "/api/site-create", "sites.write"),
+    ("POST", "/api/site-rename", "sites.write"),
+    ("POST", "/api/site-description", "sites.write"),
+    ("POST", "/api/site-archive", "sites.write"),
+    ("POST", "/api/site-assign-scope", "sites.write"),
+    ("POST", "/api/site-remove-scope", "sites.write"),
     ("GET", "/api/netsniper/status", "dashboard.read"),
     ("GET", "/api/netsniper/job-detail", "dashboard.read"),
     ("GET", "/api/validation-summary", "dashboard.read"),
@@ -15710,6 +15718,419 @@ def dashboard_site_route_payload(
     return None
 
 
+
+# v0.42 hotfix checkpoint B: dashboard logical-site management.
+
+DASHBOARD_SITE_ACTION_ROUTES = {
+    "/api/site-create",
+    "/api/site-rename",
+    "/api/site-description",
+    "/api/site-archive",
+    "/api/site-assign-scope",
+    "/api/site-remove-scope",
+}
+
+DASHBOARD_SITE_UNSAFE_PAYLOAD_FIELDS = {
+    "actor",
+    "role",
+    "database",
+    "db",
+    "db_path",
+    "sql",
+    "query",
+    "command",
+    "shell",
+    "path",
+}
+
+
+def dashboard_site_management_payload(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    active: list[dict[str, Any]] = []
+    archived: list[dict[str, Any]] = []
+
+    for site in list_logical_sites(
+        connection,
+        include_archived=True,
+    ):
+        detail = logical_site_detail_payload(
+            connection,
+            site["site_id"],
+        )
+
+        if site["status"] == LOGICAL_SITE_ACTIVE:
+            active.append(detail)
+        else:
+            archived.append(detail)
+
+    unassigned = query_network_scope_catalog(
+        connection,
+        unassigned_only=True,
+    )
+
+    return {
+        "ok": True,
+        "generated_at": utc_now_text(),
+        "active_sites": active,
+        "archived_sites": archived,
+        "unassigned_scopes": unassigned,
+        "summary": {
+            "active_site_count": len(active),
+            "archived_site_count": len(archived),
+            "unassigned_scope_count": len(unassigned),
+            "member_scope_count": sum(
+                int(item["coverage"]["member_scope_count"])
+                for item in active + archived
+            ),
+            "observed_member_scope_count": sum(
+                int(item["coverage"]["observed_scope_count"])
+                for item in active + archived
+            ),
+        },
+    }
+
+
+def dashboard_site_action_allowed_fields(
+    route: str,
+) -> set[str]:
+    fields = {
+        "/api/site-create": {"name", "description"},
+        "/api/site-rename": {"site_id", "name"},
+        "/api/site-description": {
+            "site_id",
+            "description",
+        },
+        "/api/site-archive": {
+            "site_id",
+            "confirmation",
+        },
+        "/api/site-assign-scope": {
+            "site_id",
+            "network_scope",
+        },
+        "/api/site-remove-scope": {
+            "site_id",
+            "network_scope",
+        },
+    }
+
+    if route not in fields:
+        raise DashboardAdminUserActionError(
+            "unsupported logical-site action route",
+            status_code=404,
+        )
+
+    return fields[route]
+
+
+def dashboard_site_action_validate_payload(
+    route: str,
+    payload: dict[str, Any],
+) -> None:
+    if not isinstance(payload, dict):
+        raise DashboardAdminUserActionError(
+            "logical-site action payload must be a JSON object",
+            status_code=400,
+        )
+
+    keys = {str(key) for key in payload}
+    unsafe = sorted(
+        key
+        for key in keys
+        if key.lower() in DASHBOARD_SITE_UNSAFE_PAYLOAD_FIELDS
+    )
+
+    if unsafe:
+        raise DashboardAdminUserActionError(
+            "unsafe logical-site payload field(s): "
+            + ", ".join(unsafe),
+            status_code=400,
+        )
+
+    unexpected = sorted(
+        keys - dashboard_site_action_allowed_fields(route)
+    )
+
+    if unexpected:
+        raise DashboardAdminUserActionError(
+            "unexpected logical-site payload field(s): "
+            + ", ".join(unexpected),
+            status_code=400,
+        )
+
+
+def dashboard_site_active_record(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    safe_site_id = normalize_logical_site_id(site_id)
+    site = get_logical_site(connection, safe_site_id)
+
+    if site is None:
+        raise DashboardAdminUserActionError(
+            f"logical site not found: {safe_site_id}",
+            status_code=404,
+        )
+
+    if site["status"] != LOGICAL_SITE_ACTIVE:
+        raise DashboardAdminUserActionError(
+            f"logical site is archived and read-only: {safe_site_id}",
+            status_code=400,
+        )
+
+    return site
+
+
+def dashboard_site_action_payload(
+    connection: sqlite3.Connection,
+    route: str,
+    payload: dict[str, Any],
+    *,
+    actor: dict[str, Any] | None,
+    source_ip: str | None = None,
+    user_agent: str | None = None,
+) -> dict[str, Any]:
+    clean_route = str(route or "").strip()
+    dashboard_site_action_validate_payload(
+        clean_route,
+        payload,
+    )
+
+    site: dict[str, Any] | None = None
+    membership: dict[str, Any] | None = None
+    changed = True
+    audit_action = ""
+    audit_details: dict[str, Any] = {}
+
+    if clean_route == "/api/site-create":
+        site = create_logical_site(
+            connection,
+            payload.get("name"),
+            payload.get("description") or "",
+        )
+        action = "logical_site.create"
+        message = f"Created logical site {site['name']}."
+        audit_action = "LOGICAL_SITE_CREATE"
+        audit_details = {
+            "name": site["name"],
+            "description": site["description"],
+            "status": site["status"],
+            "source": "dashboard",
+        }
+
+    elif clean_route == "/api/site-rename":
+        previous = dashboard_site_active_record(
+            connection,
+            payload.get("site_id"),
+        )
+        site = rename_logical_site(
+            connection,
+            previous["site_id"],
+            payload.get("name"),
+        )
+        changed = previous["name"] != site["name"]
+        action = "logical_site.rename"
+        message = (
+            f"Renamed logical site to {site['name']}."
+            if changed
+            else f"Logical site already has name {site['name']}."
+        )
+        audit_action = "LOGICAL_SITE_RENAME"
+        audit_details = {
+            "previous_name": previous["name"],
+            "current_name": site["name"],
+            "changed": changed,
+            "source": "dashboard",
+        }
+
+    elif clean_route == "/api/site-description":
+        previous = dashboard_site_active_record(
+            connection,
+            payload.get("site_id"),
+        )
+        site = update_logical_site_description(
+            connection,
+            previous["site_id"],
+            payload.get("description") or "",
+        )
+        changed = (
+            previous["description"]
+            != site["description"]
+        )
+        action = "logical_site.description.update"
+        message = (
+            f"Updated description for logical site {site['name']}."
+            if changed
+            else "Logical site description is unchanged."
+        )
+        audit_action = "LOGICAL_SITE_DESCRIPTION_UPDATE"
+        audit_details = {
+            "description_changed": changed,
+            "source": "dashboard",
+        }
+
+    elif clean_route == "/api/site-archive":
+        previous = dashboard_site_active_record(
+            connection,
+            payload.get("site_id"),
+        )
+        required = f"ARCHIVE {previous['site_id']}"
+
+        if str(payload.get("confirmation") or "") != required:
+            raise DashboardAdminUserActionError(
+                "site archive confirmation must exactly match: "
+                + required,
+                status_code=400,
+            )
+
+        site = archive_logical_site(
+            connection,
+            previous["site_id"],
+        )
+        changed = previous["status"] != site["status"]
+        action = "logical_site.archive"
+        message = (
+            f"Archived logical site {site['name']}. "
+            f"Retained {site['member_count']} member subnet(s)."
+        )
+        audit_action = "LOGICAL_SITE_ARCHIVE"
+        audit_details = {
+            "previous_status": previous["status"],
+            "current_status": site["status"],
+            "member_count": site["member_count"],
+            "members_retained": True,
+            "source": "dashboard",
+        }
+
+    elif clean_route == "/api/site-assign-scope":
+        site = dashboard_site_active_record(
+            connection,
+            payload.get("site_id"),
+        )
+        safe_scope = validate_private_cidr(
+            payload.get("network_scope")
+        )
+        membership = assign_network_scope_to_logical_site(
+            connection,
+            site["site_id"],
+            safe_scope,
+        )
+        observed_row = connection.execute(
+            "SELECT COUNT(*) AS count "
+            "FROM snapshots WHERE network_scope = ?",
+            (safe_scope,),
+        ).fetchone()
+        observed = bool(
+            observed_row
+            and int(observed_row["count"] or 0) > 0
+        )
+        membership = dict(membership)
+        membership["observed"] = observed
+        site = get_logical_site(
+            connection,
+            site["site_id"],
+        )
+        action = "logical_site.scope.assign"
+        message = (
+            f"Assigned network scope {safe_scope} "
+            f"to logical site {site['name']}."
+        )
+        audit_action = "LOGICAL_SITE_SCOPE_ASSIGN"
+        audit_details = {
+            "network_scope": safe_scope,
+            "observed": observed,
+            "source": "dashboard",
+        }
+
+    elif clean_route == "/api/site-remove-scope":
+        site = dashboard_site_active_record(
+            connection,
+            payload.get("site_id"),
+        )
+        safe_scope = validate_private_cidr(
+            payload.get("network_scope")
+        )
+        membership = remove_network_scope_from_logical_site(
+            connection,
+            site["site_id"],
+            safe_scope,
+        )
+        site = get_logical_site(
+            connection,
+            site["site_id"],
+        )
+        action = "logical_site.scope.remove"
+        message = (
+            f"Removed network scope {safe_scope} "
+            f"from logical site {site['name']}."
+        )
+        audit_action = "LOGICAL_SITE_SCOPE_REMOVE"
+        audit_details = {
+            "network_scope": safe_scope,
+            "telemetry_deleted": False,
+            "source": "dashboard",
+        }
+
+    else:
+        raise DashboardAdminUserActionError(
+            "unsupported logical-site action route",
+            status_code=404,
+        )
+
+    if site is None:
+        raise DeltaAegisError(
+            "logical-site action did not return a site"
+        )
+
+    receipt = dashboard_action_receipt(
+        action,
+        message,
+        severity=(
+            "warning"
+            if action == "logical_site.archive"
+            else "success"
+        ),
+        summary={
+            "changed": changed,
+            "site_name": site["name"],
+            "site_status": site["status"],
+            "member_count": site["member_count"],
+            "network_scope": (
+                membership.get("network_scope")
+                if membership
+                else None
+            ),
+        },
+        identifiers={
+            "site_id": site["site_id"],
+        },
+        diagnostic_detail={
+            "available": False,
+        },
+    )
+
+    record_access_audit_event(
+        connection,
+        action=audit_action,
+        actor=actor,
+        target_type="logical_site",
+        target_key=site["site_id"],
+        source_ip=source_ip,
+        user_agent=user_agent,
+        details=audit_details,
+    )
+
+    return {
+        "ok": True,
+        "action": action,
+        "changed": changed,
+        "site": site,
+        "membership": membership,
+        "receipt": receipt,
+    }
+
+
 def dashboard_sites_payload(
     connection: sqlite3.Connection,
 ) -> dict[str, Any]:
@@ -23814,6 +24235,7 @@ def dashboard_index_html_base_v025_operator_link():
       <button type="button" class="tab-button" data-tab-target="intelligence">Intelligence</button>
       <button type="button" class="tab-button" data-tab-target="events">Security Events</button>
       <button type="button" class="tab-button" data-tab-target="alerts">Alarms</button>
+      <button type="button" class="tab-button" data-tab-target="sites">Sites</button>
       <button type="button" class="tab-button" data-tab-target="trueaegis">TrueAegis</button>
       <button type="button" class="tab-button" data-tab-target="scan-jobs">Data Sources</button>
     </nav>
@@ -23956,7 +24378,7 @@ def dashboard_index_html_base_v025_operator_link():
 
     <section class="card" data-tab-panel="overview">
       <h2>Sites &amp; Network Scopes</h2>
-      <p class="muted">Logical sites group related subnet scopes. Site selection shows membership and coverage in this checkpoint; choose a member subnet for filtered SIEM data until site aggregation is enabled.</p>
+      <p class="muted">Logical sites group related subnet scopes. Select a site for site-wide SIEM aggregation or choose a member subnet for subnet-specific drilldown.</p>
       <div id="selected-scope" class="callout">Viewing all network scopes.</div>
       <div id="site-links" class="scope-links"></div>
       <div id="scope-links-label" class="muted">Subnet scopes</div>
@@ -23976,6 +24398,157 @@ def dashboard_index_html_base_v025_operator_link():
       <div class="scan-grid" id="scan-context"></div>
     </section>
 
+
+
+<section class="card" data-tab-panel="sites" id="site-management-panel">
+  <div class="section-header">
+    <div>
+      <div class="eyebrow">Logical Site Operations</div>
+      <h2>Sites</h2>
+      <p class="muted">
+        Group related private subnet scopes into operator-facing sites.
+        Site-wide views aggregate SIEM evidence while preserving each
+        subnet as the technical scan and provenance boundary.
+      </p>
+    </div>
+    <button type="button" id="site-management-refresh-button">
+      Refresh sites
+    </button>
+  </div>
+
+  <div id="site-management-readonly-note" class="callout" hidden>
+    Your role has read-only access to logical sites. ADMIN access is
+    required to create, edit, archive, assign, or remove subnet scopes.
+  </div>
+
+  <div id="site-management-receipt" class="callout">
+    No logical-site action has been performed in this dashboard session.
+  </div>
+
+  <div class="summary" id="site-management-summary">
+    <div class="card">
+      <div class="card-label">Active Sites</div>
+      <div class="card-value" id="site-management-active-count">0</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Archived Sites</div>
+      <div class="card-value" id="site-management-archived-count">0</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Member Subnets</div>
+      <div class="card-value" id="site-management-member-count">0</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Unassigned Subnets</div>
+      <div class="card-value" id="site-management-unassigned-count">0</div>
+    </div>
+  </div>
+
+  <div id="site-create-controls" data-site-admin-control hidden>
+    <h3>Create Site</h3>
+    <div class="actions">
+      <label>
+        Site name
+        <input
+          id="site-create-name"
+          type="text"
+          maxlength="160"
+          placeholder="Example: CLS Cyber Campus"
+        >
+      </label>
+      <label>
+        Description
+        <input
+          id="site-create-description"
+          type="text"
+          maxlength="2000"
+          placeholder="Optional operator context"
+        >
+      </label>
+      <button type="button" id="site-create-button">
+        Create site
+      </button>
+    </div>
+  </div>
+
+  <h3>Active Sites</h3>
+  <div id="site-management-active-sites" class="grid"></div>
+
+  <section id="site-management-selected" class="detail-box" hidden>
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">Selected Site</div>
+        <h3 id="site-management-selected-name">—</h3>
+        <p class="muted" id="site-management-selected-description">—</p>
+      </div>
+      <a id="site-management-open-view" href="/">Open site-wide view</a>
+    </div>
+
+    <div id="site-management-selected-coverage" class="callout"></div>
+
+    <div data-site-admin-control hidden>
+      <h4>Edit Site</h4>
+      <div class="actions">
+        <label>
+          Name
+          <input
+            id="site-rename-name"
+            type="text"
+            maxlength="160"
+          >
+        </label>
+        <button type="button" id="site-rename-button">
+          Save name
+        </button>
+      </div>
+      <div class="actions">
+        <label>
+          Description
+          <textarea
+            id="site-description-value"
+            maxlength="2000"
+            rows="3"
+          ></textarea>
+        </label>
+        <button type="button" id="site-description-button">
+          Save description
+        </button>
+      </div>
+    </div>
+
+    <h4>Member Subnet Scopes</h4>
+    <div id="site-management-members"></div>
+
+    <div data-site-admin-control hidden>
+      <div class="actions">
+        <label>
+          Unassigned private subnet
+          <select id="site-assign-scope-select"></select>
+        </label>
+        <button type="button" id="site-assign-scope-button">
+          Assign subnet
+        </button>
+      </div>
+
+      <div class="actions">
+        <button
+          type="button"
+          id="site-archive-button"
+          class="danger-button"
+        >
+          Archive selected site
+        </button>
+      </div>
+      <p class="muted">
+        Archiving retains memberships and historical evidence. Archived
+        sites are read-only and reject new assignments.
+      </p>
+    </div>
+  </section>
+
+  <h3>Archived Sites</h3>
+  <div id="site-management-archived-sites" class="grid"></div>
+</section>
 
     <section class="card" data-tab-panel="trueaegis" id="trueaegis-validation-foundation-panel">
       <div class="section-header">
@@ -24241,7 +24814,7 @@ def dashboard_index_html_base_v025_operator_link():
       "intelligence",
       "events",
       "alerts",
-      "scan-jobs", "trueaegis"
+      "scan-jobs", "sites", "trueaegis"
 ];
 
     let activeDashboardTab = null;
@@ -24862,6 +25435,503 @@ def dashboard_index_html_base_v025_operator_link():
         }
       }
     }
+
+
+
+const siteManagementState = {
+  payload: null,
+  session: null,
+  selectedSiteId: "",
+  isAdmin: false,
+  lastReceipt: null
+};
+
+function siteManagementRole(session) {
+  const user = (session && session.user) || {};
+  return String(user.role || (session && session.role) || "").toUpperCase();
+}
+
+function siteManagementDetails(payload, status) {
+  const key = status === "ARCHIVED"
+    ? "archived_sites"
+    : "active_sites";
+  return Array.isArray(payload && payload[key])
+    ? payload[key]
+    : [];
+}
+
+function siteManagementSelectedDetail() {
+  const payload = siteManagementState.payload || {};
+  const all = [
+    ...siteManagementDetails(payload, "ACTIVE"),
+    ...siteManagementDetails(payload, "ARCHIVED")
+  ];
+  return all.find(item =>
+    item
+    && item.site
+    && item.site.site_id === siteManagementState.selectedSiteId
+  ) || null;
+}
+
+function siteManagementSetText(id, value) {
+  const element = document.getElementById(id);
+  if (element) {
+    element.textContent = value === null || value === undefined
+      ? "—"
+      : String(value);
+  }
+}
+
+function siteManagementRenderReceipt() {
+  const target = document.getElementById("site-management-receipt");
+  if (!target) return;
+
+  if (
+    siteManagementState.lastReceipt
+    && typeof renderDashboardActionReceipt === "function"
+  ) {
+    renderDashboardActionReceipt(
+      target,
+      siteManagementState.lastReceipt,
+      siteManagementState.lastReceipt.message
+    );
+    return;
+  }
+
+  target.textContent =
+    "No logical-site action has been performed in this dashboard session.";
+}
+
+function siteManagementSiteCard(detail, archived) {
+  const site = detail.site || {};
+  const coverage = detail.coverage || {};
+  const siteId = site.site_id || "";
+  const manageLabel = archived ? "View details" : "Manage";
+
+  return `
+    <div class="card">
+      <div class="label">${archived ? "Archived Site" : "Active Site"}</div>
+      <h4>${esc(site.name || siteId)}</h4>
+      <p class="muted">${esc(site.description || "No description recorded.")}</p>
+      <div class="detail-box">
+        <div><span>Members</span><span>${esc(coverage.member_scope_count || 0)}</span></div>
+        <div><span>Observed</span><span>${esc(coverage.observed_scope_count || 0)}</span></div>
+        <div><span>Accepted scans</span><span>${esc(coverage.accepted_snapshot_count || 0)}</span></div>
+        <div><span>Status</span><span>${esc(site.status || "-")}</span></div>
+      </div>
+      <div class="actions">
+        <button
+          type="button"
+          data-site-manage="${esc(siteId)}"
+        >${manageLabel}</button>
+        ${archived ? "" : `<a href="/?site_id=${encodeURIComponent(siteId)}">Open site-wide view</a>`}
+      </div>
+    </div>
+  `;
+}
+
+function siteManagementRenderMembers(detail) {
+  const target = document.getElementById("site-management-members");
+  if (!target) return;
+
+  const site = (detail && detail.site) || {};
+  const members = Array.isArray(detail && detail.members)
+    ? detail.members
+    : [];
+
+  if (!members.length) {
+    target.innerHTML =
+      '<p class="muted">No subnet scopes are assigned to this site.</p>';
+    return;
+  }
+
+  target.innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th>Subnet</th>
+          <th>Observed</th>
+          <th>Snapshots</th>
+          <th>Accepted</th>
+          <th>Latest Scan</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${members.map(member => `
+          <tr>
+            <td><code>${esc(member.network_scope || "-")}</code></td>
+            <td>${member.observed ? "yes" : "no"}</td>
+            <td>${esc(member.snapshots || 0)}</td>
+            <td>${esc(member.accepted_snapshots || 0)}</td>
+            <td>${esc(member.latest_scan_at || "-")}</td>
+            <td>
+              ${siteManagementState.isAdmin && site.status === "ACTIVE"
+                ? `<button type="button" data-site-remove="${esc(member.network_scope || "")}">Remove</button>`
+                : '<span class="muted">Read only</span>'}
+            </td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderSiteManagement(session, payload) {
+  siteManagementState.session = session || {};
+  siteManagementState.payload = payload || {};
+  siteManagementState.isAdmin =
+    siteManagementRole(session) === "ADMIN";
+
+  const active = siteManagementDetails(payload, "ACTIVE");
+  const archived = siteManagementDetails(payload, "ARCHIVED");
+  const requested = siteManagementState.selectedSiteId || selectedSiteId();
+  const requestedExists = active.concat(archived).some(
+    item => item && item.site && item.site.site_id === requested
+  );
+
+  if (!requestedExists) {
+    siteManagementState.selectedSiteId =
+      active.length && active[0].site
+        ? active[0].site.site_id
+        : (
+            archived.length && archived[0].site
+              ? archived[0].site.site_id
+              : ""
+          );
+  } else {
+    siteManagementState.selectedSiteId = requested;
+  }
+
+  const summary = (payload && payload.summary) || {};
+  siteManagementSetText(
+    "site-management-active-count",
+    summary.active_site_count || 0
+  );
+  siteManagementSetText(
+    "site-management-archived-count",
+    summary.archived_site_count || 0
+  );
+  siteManagementSetText(
+    "site-management-member-count",
+    summary.member_scope_count || 0
+  );
+  siteManagementSetText(
+    "site-management-unassigned-count",
+    summary.unassigned_scope_count || 0
+  );
+
+  const readOnly = document.getElementById(
+    "site-management-readonly-note"
+  );
+  if (readOnly) {
+    readOnly.hidden = siteManagementState.isAdmin;
+  }
+
+  document.querySelectorAll("[data-site-admin-control]").forEach(
+    element => {
+      element.hidden = !siteManagementState.isAdmin;
+    }
+  );
+
+  const activeTarget = document.getElementById(
+    "site-management-active-sites"
+  );
+  const archivedTarget = document.getElementById(
+    "site-management-archived-sites"
+  );
+
+  if (activeTarget) {
+    activeTarget.innerHTML = active.length
+      ? active.map(item => siteManagementSiteCard(item, false)).join("")
+      : '<p class="muted">No active logical sites exist yet.</p>';
+  }
+
+  if (archivedTarget) {
+    archivedTarget.innerHTML = archived.length
+      ? archived.map(item => siteManagementSiteCard(item, true)).join("")
+      : '<p class="muted">No archived logical sites.</p>';
+  }
+
+  const detail = siteManagementSelectedDetail();
+  const selectedPanel = document.getElementById(
+    "site-management-selected"
+  );
+
+  if (!selectedPanel || !detail || !detail.site) {
+    if (selectedPanel) selectedPanel.hidden = true;
+    siteManagementRenderReceipt();
+    bindSiteManagementControls();
+    return;
+  }
+
+  selectedPanel.hidden = false;
+  const site = detail.site;
+  const coverage = detail.coverage || {};
+  siteManagementSetText(
+    "site-management-selected-name",
+    site.name || site.site_id
+  );
+  siteManagementSetText(
+    "site-management-selected-description",
+    site.description || "No description recorded."
+  );
+
+  const openView = document.getElementById(
+    "site-management-open-view"
+  );
+  if (openView) {
+    openView.hidden = site.status !== "ACTIVE";
+    openView.href =
+      "/?site_id=" + encodeURIComponent(site.site_id || "");
+  }
+
+  const coverageBox = document.getElementById(
+    "site-management-selected-coverage"
+  );
+  if (coverageBox) {
+    coverageBox.innerHTML = `
+      <strong>${esc(coverage.observed_scope_count || 0)} of
+      ${esc(coverage.member_scope_count || 0)} member subnets observed.</strong>
+      ${esc(coverage.accepted_snapshot_count || 0)} accepted snapshots are
+      available across this site. Status: ${esc(site.status || "-")}.
+    `;
+  }
+
+  const renameInput = document.getElementById("site-rename-name");
+  const descriptionInput = document.getElementById(
+    "site-description-value"
+  );
+
+  if (renameInput) renameInput.value = site.name || "";
+  if (descriptionInput) {
+    descriptionInput.value = site.description || "";
+  }
+
+  const assignSelect = document.getElementById(
+    "site-assign-scope-select"
+  );
+  const unassigned = Array.isArray(
+    payload && payload.unassigned_scopes
+  )
+    ? payload.unassigned_scopes
+    : [];
+
+  if (assignSelect) {
+    assignSelect.innerHTML = unassigned.length
+      ? unassigned.map(item => `
+          <option value="${esc(item.network_scope || "")}">
+            ${esc(item.network_scope || "-")} ·
+            ${esc(item.snapshots || 0)} scans
+          </option>
+        `).join("")
+      : '<option value="">No unassigned observed subnets</option>';
+    assignSelect.disabled = !unassigned.length;
+  }
+
+  const activeAndAdmin = (
+    siteManagementState.isAdmin
+    && site.status === "ACTIVE"
+  );
+
+  selectedPanel.querySelectorAll(
+    "[data-site-admin-control]"
+  ).forEach(element => {
+    element.hidden = !activeAndAdmin;
+  });
+
+  siteManagementRenderMembers(detail);
+  siteManagementRenderReceipt();
+  bindSiteManagementControls();
+}
+
+async function siteManagementPost(route, payload) {
+  const response = await fetch(route, {
+    method: "POST",
+    credentials: "same-origin",
+    cache: "no-store",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload || {})
+  });
+
+  let result = {};
+  try {
+    result = await response.json();
+  } catch (error) {
+    result = {};
+  }
+
+  if (response.status === 401) {
+    window.location.href = "/login";
+    throw new Error("Authentication is required.");
+  }
+
+  if (!response.ok || result.ok === false) {
+    throw new Error(
+      result.message
+      || result.error
+      || `Logical-site action returned HTTP ${response.status}`
+    );
+  }
+
+  siteManagementState.lastReceipt = result.receipt || {
+    action: result.action || "logical_site.action",
+    severity: "success",
+    message: "Logical-site action completed."
+  };
+
+  if (result.site && result.site.site_id) {
+    siteManagementState.selectedSiteId = result.site.site_id;
+  }
+
+  await load();
+  return result;
+}
+
+async function siteManagementAction(route, payload) {
+  try {
+    await siteManagementPost(route, payload);
+  } catch (error) {
+    siteManagementState.lastReceipt = {
+      action: "logical_site.action",
+      severity: "error",
+      message: error && error.message
+        ? error.message
+        : String(error)
+    };
+    siteManagementRenderReceipt();
+  }
+}
+
+function bindSiteManagementControls() {
+  const panel = document.getElementById("site-management-panel");
+  if (!panel || panel.dataset.boundSiteManagement === "1") return;
+
+  panel.dataset.boundSiteManagement = "1";
+
+  panel.addEventListener("click", event => {
+    const button = event.target.closest("button");
+    if (!button) return;
+
+    const manageId = button.dataset.siteManage;
+    if (manageId) {
+      siteManagementState.selectedSiteId = manageId;
+      renderSiteManagement(
+        siteManagementState.session,
+        siteManagementState.payload
+      );
+      return;
+    }
+
+    const removeScope = button.dataset.siteRemove;
+    if (removeScope) {
+      const detail = siteManagementSelectedDetail();
+      const site = detail && detail.site;
+      if (!site) return;
+
+      if (!window.confirm(
+        `Remove ${removeScope} from ${site.name}? Historical telemetry will not be deleted.`
+      )) {
+        return;
+      }
+
+      siteManagementAction(
+        "/api/site-remove-scope",
+        {
+          site_id: site.site_id,
+          network_scope: removeScope
+        }
+      );
+      return;
+    }
+
+    if (button.id === "site-management-refresh-button") {
+      load();
+      return;
+    }
+
+    if (button.id === "site-create-button") {
+      const name = (
+        document.getElementById("site-create-name") || {}
+      ).value || "";
+      const description = (
+        document.getElementById("site-create-description") || {}
+      ).value || "";
+      siteManagementAction(
+        "/api/site-create",
+        {name, description}
+      );
+      return;
+    }
+
+    const detail = siteManagementSelectedDetail();
+    const site = detail && detail.site;
+    if (!site) return;
+
+    if (button.id === "site-rename-button") {
+      const name = (
+        document.getElementById("site-rename-name") || {}
+      ).value || "";
+      siteManagementAction(
+        "/api/site-rename",
+        {site_id: site.site_id, name}
+      );
+      return;
+    }
+
+    if (button.id === "site-description-button") {
+      const description = (
+        document.getElementById(
+          "site-description-value"
+        ) || {}
+      ).value || "";
+      siteManagementAction(
+        "/api/site-description",
+        {
+          site_id: site.site_id,
+          description
+        }
+      );
+      return;
+    }
+
+    if (button.id === "site-assign-scope-button") {
+      const networkScope = (
+        document.getElementById(
+          "site-assign-scope-select"
+        ) || {}
+      ).value || "";
+      siteManagementAction(
+        "/api/site-assign-scope",
+        {
+          site_id: site.site_id,
+          network_scope: networkScope
+        }
+      );
+      return;
+    }
+
+    if (button.id === "site-archive-button") {
+      const required = `ARCHIVE ${site.site_id}`;
+      const confirmation = window.prompt(
+        `Archiving retains memberships but makes the site read-only.\nType exactly: ${required}`
+      );
+
+      if (confirmation === null) return;
+
+      siteManagementAction(
+        "/api/site-archive",
+        {
+          site_id: site.site_id,
+          confirmation
+        }
+      );
+    }
+  });
+}
+
 
 
     function scanCard(title, scan) {
@@ -27647,10 +28717,12 @@ def dashboard_index_html_base_v025_operator_link():
         setupDashboardTabs();
 
         const siteDetailPath = selectedSiteDetailPath();
-        const [scopes, siteCatalog, siteDetail, summary, scanContext, currentState, investigationCenter, scanJobs, assets, currentRisk, historicalRisk, portBehavior, events, alerts, annotations] = await Promise.all([
+        const [scopes, siteCatalog, siteDetail, session, siteManagement, summary, scanContext, currentState, investigationCenter, scanJobs, assets, currentRisk, historicalRisk, portBehavior, events, alerts, annotations] = await Promise.all([
           api("/api/scopes"),
           api("/api/sites"),
           siteDetailPath ? api(siteDetailPath) : Promise.resolve(null),
+          api("/api/session"),
+          api("/api/site-management"),
           api(scopedPath("/api/summary")),
           api(scopedPath("/api/scan-context")),
           api(scopedPath("/api/current-state")),
@@ -27666,6 +28738,7 @@ def dashboard_index_html_base_v025_operator_link():
         ]);
 
         renderScopeNavigation(scopes, siteCatalog, siteDetail);
+        renderSiteManagement(session, siteManagement);
         renderMetrics(summary);
         renderCurrentState(currentState);
         renderInvestigationCenter(investigationCenter);
@@ -31367,6 +32440,11 @@ def command_dashboard(args):
                         self,
                         dashboard_sites_payload(connection),
                     )
+                elif route == "/api/site-management":
+                    dashboard_json_response(
+                        self,
+                        dashboard_site_management_payload(connection),
+                    )
                 elif route == "/api/site-detail":
                     site_id = query.get("site_id", [""])[0].strip()
 
@@ -31774,6 +32852,96 @@ def command_dashboard(args):
                         connection.close()
 
                 self.dashboard_logout_redirect()
+                return
+
+            if route in DASHBOARD_SITE_ACTION_ROUTES:
+                if not self.require_permission("sites.write"):
+                    return
+
+                connection = self.open_connection()
+                payload: dict[str, Any] = {}
+
+                try:
+                    payload = dashboard_read_request_payload(
+                        self
+                    )
+                    result = dashboard_site_action_payload(
+                        connection,
+                        route,
+                        payload,
+                        actor=getattr(
+                            self,
+                            "current_actor",
+                            None,
+                        ),
+                        source_ip=(
+                            self.client_address[0]
+                            if self.client_address
+                            else None
+                        ),
+                        user_agent=self.headers.get(
+                            "User-Agent",
+                            "",
+                        ),
+                    )
+                    connection.commit()
+                except (
+                    DashboardAdminUserActionError,
+                    DeltaAegisError,
+                    ValueError,
+                ) as exc:
+                    connection.rollback()
+
+                    try:
+                        record_access_audit_event(
+                            connection,
+                            action="LOGICAL_SITE_DASHBOARD_ACTION_FAILED",
+                            actor=getattr(
+                                self,
+                                "current_actor",
+                                None,
+                            ),
+                            target_type="logical_site",
+                            target_key=str(
+                                payload.get("site_id")
+                                or route
+                            ),
+                            source_ip=(
+                                self.client_address[0]
+                                if self.client_address
+                                else None
+                            ),
+                            user_agent=self.headers.get(
+                                "User-Agent",
+                                "",
+                            ),
+                            details={
+                                "route": route,
+                                "error": str(exc),
+                                "payload_fields": sorted(
+                                    str(key)
+                                    for key in payload
+                                ),
+                            },
+                        )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+
+                    dashboard_admin_json_error_response(
+                        self,
+                        str(exc),
+                        status_code=getattr(
+                            exc,
+                            "status_code",
+                            400,
+                        ),
+                    )
+                    return
+                finally:
+                    connection.close()
+
+                dashboard_json_response(self, result)
                 return
 
             if route == "/api/admin/users" or route.startswith("/api/admin/users/"):

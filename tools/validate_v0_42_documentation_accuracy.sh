@@ -20,6 +20,7 @@ required_readme = (
     "## Current Release — v0.42.0",
     "**DeltaAegis v0.42.0 — Logical Site Scopes**",
     "## Scan Watchdog and Scheduler Recovery",
+    "## Sites Dashboard Management",
     "## Logical Site Scopes",
     "one logical site -> many private CIDR subnet scopes",
     "one subnet scope -> zero or one logical site",
@@ -56,6 +57,7 @@ if not changelog.startswith(
 required_notes = (
     "# DeltaAegis v0.42.0 — Logical Site Scopes",
     "## Dead-scan watchdog and scheduler self-healing",
+    "## Sites dashboard management",
     "Canonical CIDR `network_scope` values remain authoritative.",
     "one subnet scope -> zero or one logical site",
     "NetSniper scan creation remains CIDR-targeted.",
@@ -84,6 +86,7 @@ required_manual = (
     "# DeltaAegis v0.42.0 Manual Verification",
     "Use a temporary database.",
     "## 7. Dead-scan watchdog and scheduler recovery",
+    "## 7B. Sites dashboard management",
     "--db \"$tmp_db\"",
     "scope` and `site_id",
     "0.0.0.0:8092",

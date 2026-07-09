@@ -9,9 +9,11 @@
 - Added fail-closed handling for ambiguous selectors, unknown sites, unsupported site endpoints, and cross-subnet asset or ticket ambiguity.
 - Added guarded LAN dashboard binding through `dashboard --lan`, requiring password or token authentication.
 - Added an automatic dead-scan watchdog that uses heartbeat age and PID command identity for stale active NetSniper scan-job recovery before dead ledger rows can indefinitely block due schedules.
+- Added a dedicated Sites dashboard tab with read-only visibility for all authenticated roles and ADMIN-only create, rename, description, archive, subnet assignment, and subnet removal workflows.
+- Added fixed logical-site mutation routes with session-derived actors, strict payload allowlists, human-readable receipts, and access-audit evidence for successful and failed actions.
 - Preserved the existing guarded workflow in which TrueAegis validation is configured and launched separately from the base NetSniper schedule runner.
 - Preserved the scheduler rule that a due schedule blocked by another active scan remains due without cadence, status, skip-count, or message mutation, and is retried after the blocker clears.
-- Added six focused v0.42 validators, flattened validator composition, documentation and metadata checks, release notes, manual verification, and the complete v0.42 release gate.
+- Added seven focused v0.42 validators, flattened validator composition, documentation and metadata checks, release notes, manual verification, and the complete v0.42 release gate.
 
 ## DeltaAegis v0.41.0 — Data Durability & Recovery
 

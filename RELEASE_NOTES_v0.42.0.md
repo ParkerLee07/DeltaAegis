@@ -10,6 +10,14 @@ The watchdog uses the most recent heartbeat as the primary liveness timestamp an
 
 Recovery evidence is stored under `status_json.watchdog`, including the original PID, heartbeat, update time, stdout and stderr paths, classification, and recovery actor. After safe recovery, the same worker pass may start the oldest overdue schedule.
 
+## Sites dashboard management
+
+A dedicated **Sites** tab now exposes the logical-site model as an operator workflow instead of requiring CLI-only administration. VIEWER and ANALYST accounts receive read-only site, membership, coverage, archive, and unassigned-scope visibility. ADMIN accounts can create, rename, describe, archive, assign, and remove through fixed JSON routes.
+
+The browser never accepts caller-selected actors, database paths, shell commands, SQL, or arbitrary route names. The authenticated session supplies the audit actor. Existing private-CIDR validation, case-insensitive site-name uniqueness, one-site-per-subnet membership, archived-site assignment rejection, and historical-evidence retention remain authoritative.
+
+The Executive selector remains a compact navigation surface for site-wide aggregation and member-subnet drilldown.
+
 ## Logical-site model
 
 A logical site is an additive parent object:

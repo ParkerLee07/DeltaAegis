@@ -132,6 +132,14 @@ NetSniper schedules run NetSniper and optional auto-ingest only. TrueAegis valid
 
 The established **blocked-schedule retry behavior** is preserved: when another active scan legitimately holds the single-scan lock, the due schedule remains due, its cadence is not advanced, and the scheduler retries it after the blocker clears.
 
+## Sites Dashboard Management
+
+The main dashboard now includes a dedicated **Sites** tab. All authenticated roles can review active and archived logical sites, member-subnet coverage, accepted-snapshot counts, and unassigned observed private subnets.
+
+ADMIN operators can create sites, rename them, update descriptions, assign or remove private CIDR members, and archive sites without leaving the dashboard. Every mutation reuses the same normalization and one-site-per-subnet invariants as the CLI, returns a human-readable action receipt, derives the actor from the authenticated session, and records access-audit evidence.
+
+Archived sites retain memberships and historical evidence, remain visible in the Sites tab, reject new assignments, and are read-only in the browser. The Executive tab keeps a compact site/scope selector for site-wide SIEM aggregation and subnet drilldown.
+
 ## Logical Site Scopes
 
 Logical sites are additive parents for the technical CIDR scopes already used throughout DeltaAegis. NetSniper scan targets, snapshot identity, asset lifecycle identity, events, alerts, and evidence continue to use canonical subnet CIDRs. A building or site name never replaces `network_scope`.
@@ -453,7 +461,7 @@ Run the complete v0.42 automated release gate from a clean checkout:
 ./tools/validate_v0_42_release_gate.sh
 ```
 
-The release gate validates release metadata and documentation, rendered dashboard JavaScript, client-disconnect handling, all six flat v0.42 logical-site, LAN, and watchdog validators, the isolated v0.40 operator-action compatibility suite, and the v0.39 functional compatibility suite. The v0.42 all-in validator invokes every component validator exactly once.
+The release gate validates release metadata and documentation, rendered dashboard JavaScript, client-disconnect handling, all seven flat v0.42 logical-site, LAN, watchdog, and Sites-management validators, the isolated v0.40 operator-action compatibility suite, and the v0.39 functional compatibility suite. The v0.42 all-in validator invokes every component validator exactly once.
 
 Complete the manual backup and restore checklist before merge, tag, or publication:
 
