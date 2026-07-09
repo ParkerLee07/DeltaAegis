@@ -513,6 +513,42 @@ Preview uninstall actions without deleting anything:
 ./uninstall.sh --dry-run
 ```
 
+## Validator Troubleshooter
+
+DeltaAegis includes one standalone troubleshooting tool containing
+251 validator files from the fetched public
+`origin/main` history and the current local `HEAD`. When a path exists in both
+sources, the current `HEAD` copy takes precedence so the v0.42 release line is
+represented exactly.
+
+Run the current release gate in a fresh isolated `$HOME/DeltaAegis` clone:
+
+    python3 tools/deltaaegis_troubleshooter.py
+
+Strictly verify embedded hashes and Bash syntax while reporting historical
+reference and cycle warnings:
+
+    python3 tools/deltaaegis_troubleshooter.py --self-check
+
+Treat the advisory historical graph as a strict architecture check:
+
+    python3 tools/deltaaegis_troubleshooter.py --self-check --strict-graph
+
+Run every static-reference-free validator once, with a fresh clone per
+validator:
+
+    python3 tools/deltaaegis_troubleshooter.py --mode all-leaves
+
+Inspect or select a validator group:
+
+    python3 tools/deltaaegis_troubleshooter.py --match 'v0_42'
+    python3 tools/deltaaegis_troubleshooter.py --list
+
+Reports include environment details, read-only SQLite integrity checks,
+validator provenance, dependency warnings, individual logs, likely failure
+causes, and a Markdown summary. Historical validator failures are reported
+individually rather than treated as current-release regressions.
+
 ## Validation
 
 Run the complete v0.42 automated release gate from a clean checkout:
