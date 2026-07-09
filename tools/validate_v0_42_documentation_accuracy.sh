@@ -20,6 +20,7 @@ required_readme = (
     "## Current Release — v0.42.0",
     "**DeltaAegis v0.42.0 — Logical Site Scopes**",
     "## Scan Watchdog and Scheduler Recovery",
+    "## Scheduled Scan Finalization Recovery",
     "## TrueAegis Tab Containment",
     "## Sites Dashboard Management",
     "## Logical Site Scopes",
@@ -58,6 +59,7 @@ if not changelog.startswith(
 required_notes = (
     "# DeltaAegis v0.42.0 — Logical Site Scopes",
     "## Dead-scan watchdog and scheduler self-healing",
+    "## Scheduled scan finalization recovery",
     "## TrueAegis tab containment",
     "## Sites dashboard management",
     "Canonical CIDR `network_scope` values remain authoritative.",
@@ -90,6 +92,7 @@ required_manual = (
     "## 7. Dead-scan watchdog and scheduler recovery",
     "## 7B. Sites dashboard management",
     "## 7C. TrueAegis tab containment",
+    "## 7D. Scheduled scan finalization recovery",
     "--db \"$tmp_db\"",
     "scope` and `site_id",
     "0.0.0.0:8092",

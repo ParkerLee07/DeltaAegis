@@ -7470,12 +7470,421 @@ def scan_job_watchdog_evaluation(
     }
 
 
+
+SCAN_JOB_COMPLETION_RECONCILIATION_SCHEMA_VERSION = (
+    "deltaaegis-scan-completion-reconciliation-v1"
+)
+SCAN_JOB_COMPLETION_RECONCILIATION_GRACE_MINUTES = 1
+
+
+def scan_job_recovery_manifest_evidence(
+    job: dict[str, Any] | sqlite3.Row,
+) -> tuple[Path | None, dict[str, Any]]:
+    item = scan_job_to_dict(job)
+    safe_target = validate_private_cidr(item.get("target"))
+    safe_profile = validate_netsniper_scan_profile(
+        item.get("scan_profile")
+    )
+    runs_root = Path(
+        item.get("runs_dir") or DEFAULT_RUNS
+    ).expanduser()
+
+    try:
+        runs_root = runs_root.resolve(strict=True)
+    except OSError:
+        return None, {}
+
+    status_json: dict[str, Any] = {}
+    stdout_path = Path(
+        str(item.get("stdout_log") or "")
+    ).expanduser()
+    expected_stdout_name = (
+        f"{item.get('job_id')}.stdout.log"
+    )
+
+    if (
+        stdout_path.name == expected_stdout_name
+        and stdout_path.is_file()
+    ):
+        status_json = extract_netsniper_status_json(
+            stdout_path.read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+        )
+
+    return_code = status_json.get("return_code")
+    if return_code not in (None, ""):
+        try:
+            if int(return_code) != 0:
+                return None, status_json
+        except (TypeError, ValueError):
+            return None, status_json
+
+    reported_status = str(
+        status_json.get("status") or ""
+    ).strip().lower()
+    if reported_status and reported_status not in {
+        "complete",
+        "completed",
+        "success",
+        "succeeded",
+    }:
+        return None, status_json
+
+    candidates: list[Path] = []
+    raw_manifest = str(
+        status_json.get("manifest_path") or ""
+    ).strip()
+    if raw_manifest:
+        candidates.append(Path(raw_manifest).expanduser())
+
+    raw_run_dir = str(
+        status_json.get("run_dir")
+        or status_json.get("run_directory")
+        or ""
+    ).strip()
+    if raw_run_dir:
+        candidates.append(
+            Path(raw_run_dir).expanduser() / "manifest.json"
+        )
+
+    fallback = find_completed_netsniper_manifest_for_scan(
+        runs_root,
+        safe_target,
+        safe_profile,
+        str(
+            item.get("started_at")
+            or item.get("created_at")
+            or ""
+        ),
+    )
+    if fallback is not None:
+        candidates.append(fallback)
+
+    started = scan_job_parse_datetime(
+        item.get("started_at") or item.get("created_at")
+    )
+    earliest_mtime = (
+        started.timestamp() - 300.0
+        if started is not None
+        else None
+    )
+    seen: set[str] = set()
+
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(runs_root)
+            modified_at = resolved.stat().st_mtime
+        except (OSError, ValueError):
+            continue
+
+        if resolved.name != "manifest.json":
+            continue
+
+        if (
+            earliest_mtime is not None
+            and modified_at < earliest_mtime
+        ):
+            continue
+
+        identity = str(resolved)
+        if identity in seen:
+            continue
+        seen.add(identity)
+
+        manifest = load_json_file(resolved, {})
+        if not isinstance(manifest, dict):
+            continue
+
+        if not netsniper_manifest_matches_scan_job(
+            manifest,
+            safe_target,
+            safe_profile,
+        ):
+            continue
+
+        enriched = enrich_netsniper_status_from_manifest(
+            status_json,
+            resolved,
+        )
+        enriched["completion_reconciliation"] = {
+            "schema_version": (
+                SCAN_JOB_COMPLETION_RECONCILIATION_SCHEMA_VERSION
+            ),
+            "evidence_source": (
+                "persisted_stdout_or_configured_runs_root"
+            ),
+            "manifest_path": str(resolved),
+            "target": safe_target,
+            "scan_profile": safe_profile,
+        }
+        return resolved, enriched
+
+    return None, status_json
+
+
+def scan_job_schedule_recovery_context(
+    connection: sqlite3.Connection,
+    schedule_id: str,
+) -> tuple[dict[str, Any] | None, int]:
+    safe_schedule_id = str(schedule_id or "").strip()
+    if not safe_schedule_id:
+        return None, 1
+
+    row = connection.execute(
+        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
+        (safe_schedule_id,),
+    ).fetchone()
+
+    if row is None:
+        return None, 1
+
+    schedule = scan_schedule_to_dict(row)
+    return schedule, int(schedule.get("cadence_minutes") or 1)
+
+
+def scan_job_reconcile_completed_orphan(
+    connection: sqlite3.Connection,
+    job: dict[str, Any] | sqlite3.Row,
+    evaluation: dict[str, Any],
+    events_path: Path | str = DEFAULT_EVENTS,
+    actor: str = SCAN_JOB_WATCHDOG_ACTOR,
+    trueaegis_execution_mode: str = "asynchronous",
+) -> dict[str, Any] | None:
+    item = scan_job_to_dict(job)
+    process = dict(evaluation.get("process") or {})
+
+    if process.get("state") == "LIVE_EXPECTED_PROCESS":
+        return None
+
+    age_minutes = evaluation.get("active_age_minutes")
+    if age_minutes is None:
+        return None
+
+    if (
+        int(age_minutes)
+        < SCAN_JOB_COMPLETION_RECONCILIATION_GRACE_MINUTES
+    ):
+        return None
+
+    manifest_path, status_json = (
+        scan_job_recovery_manifest_evidence(item)
+    )
+    if manifest_path is None:
+        return None
+
+    auto_ingest_evidence = {
+        "schema_version": "deltaaegis-scan-auto-ingest-evidence-v1",
+        "requested": bool(item.get("auto_ingest")),
+        "attempted": False,
+        "performed": False,
+        "accepted": False,
+        "quality_status": None,
+        "scan_id": str(status_json.get("scan_id") or ""),
+        "manifest_path": str(manifest_path),
+        "network_scope": None,
+        "result": None,
+    }
+    final_status = "COMPLETED"
+    message_parts = [
+        "Recovered completed orphaned NetSniper scan",
+        f"profile={item.get('scan_profile') or 'balanced'}",
+        f"bundle={manifest_path.parent}",
+    ]
+
+    if item.get("auto_ingest"):
+        auto_ingest_evidence["attempted"] = True
+        try:
+            ingest_result = ingest_manifest(
+                connection,
+                manifest_path,
+                Path(events_path).expanduser(),
+            )
+            auto_ingest_evidence = scan_job_auto_ingest_evidence(
+                connection,
+                manifest_path,
+                ingest_result,
+                status_json=status_json,
+            )
+            message_parts.append(
+                f"auto-ingest={ingest_result}"
+            )
+            message_parts.append(
+                "auto-ingest-quality="
+                f"{auto_ingest_evidence.get('quality_status') or 'UNKNOWN'}"
+            )
+        except Exception as exc:
+            connection.rollback()
+            final_status = "FAILED"
+            auto_ingest_evidence.update(
+                {
+                    "attempted": True,
+                    "performed": False,
+                    "accepted": False,
+                    "result": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            message_parts.append(
+                "auto-ingest failed during orphan recovery: "
+                f"{exc}"
+            )
+
+    finished_at = utc_now_text()
+    recovery_evidence = dict(evaluation)
+    recovery_evidence.update(
+        {
+            "schema_version": (
+                SCAN_JOB_COMPLETION_RECONCILIATION_SCHEMA_VERSION
+            ),
+            "actor": str(actor or SCAN_JOB_WATCHDOG_ACTOR),
+            "result": (
+                "RECOVERED_COMPLETED"
+                if final_status == "COMPLETED"
+                else "RECOVERED_IMPORT_FAILED"
+            ),
+            "manifest_path": str(manifest_path),
+            "bundle_path": str(manifest_path.parent),
+        }
+    )
+    status_json = dict(status_json or {})
+    status_json["auto_ingest"] = auto_ingest_evidence
+    status_json["watchdog"] = recovery_evidence
+    schedule, cadence_minutes = (
+        scan_job_schedule_recovery_context(
+            connection,
+            str(item.get("schedule_id") or ""),
+        )
+    )
+
+    connection.execute(
+        "SAVEPOINT scan_job_completed_orphan"
+    )
+
+    try:
+        cursor = connection.execute(
+            '''
+            UPDATE scan_jobs
+            SET
+                status = ?,
+                heartbeat_at = ?,
+                updated_at = ?,
+                finished_at = ?,
+                bundle_path = ?,
+                exit_code = ?,
+                status_json = ?,
+                message = ?
+            WHERE job_id = ?
+              AND status = ?
+              AND process_pid IS ?
+              AND heartbeat_at IS ?
+            ''',
+            (
+                final_status,
+                finished_at,
+                finished_at,
+                finished_at,
+                str(manifest_path.parent),
+                0 if final_status == "COMPLETED" else 1,
+                json.dumps(status_json, sort_keys=True),
+                "; ".join(message_parts),
+                item.get("job_id"),
+                item.get("status"),
+                item.get("process_pid"),
+                item.get("heartbeat_at"),
+            ),
+        )
+
+        if cursor.rowcount != 1:
+            connection.execute(
+                "ROLLBACK TO SAVEPOINT scan_job_completed_orphan"
+            )
+            connection.execute(
+                "RELEASE SAVEPOINT scan_job_completed_orphan"
+            )
+            return None
+
+        recovered_row = connection.execute(
+            "SELECT * FROM scan_jobs WHERE job_id = ?",
+            (item.get("job_id"),),
+        ).fetchone()
+        if recovered_row is None:
+            raise DeltaAegisError(
+                "reconciled scan job disappeared unexpectedly"
+            )
+
+        recovered = scan_job_to_dict(recovered_row)
+        updated_schedule = None
+        schedule_id = str(
+            recovered.get("schedule_id") or ""
+        )
+        if schedule_id:
+            updated_schedule = update_scan_schedule_after_job(
+                connection,
+                schedule_id,
+                cadence_minutes,
+                recovered,
+            )
+
+        connection.execute(
+            "RELEASE SAVEPOINT scan_job_completed_orphan"
+        )
+        connection.commit()
+    except Exception:
+        connection.execute(
+            "ROLLBACK TO SAVEPOINT scan_job_completed_orphan"
+        )
+        connection.execute(
+            "RELEASE SAVEPOINT scan_job_completed_orphan"
+        )
+        raise
+
+    followup = None
+    if final_status == "COMPLETED" and schedule is not None:
+        try:
+            plan = trueaegis_followup_plan_for_schedule(
+                connection,
+                schedule,
+                recovered,
+            )
+            queue = trueaegis_queue_followup_for_schedule(
+                connection,
+                schedule,
+                recovered,
+                plan,
+            )
+            execution = trueaegis_start_queued_followup_for_schedule(
+                connection,
+                queue,
+                execution_mode=trueaegis_execution_mode,
+            )
+            followup = {
+                "plan": plan,
+                "queue": queue,
+                "execution": execution,
+            }
+        except Exception as exc:
+            followup = {
+                "outcome": "ERROR",
+                "message": f"{type(exc).__name__}: {exc}",
+            }
+
+    return {
+        "job": recovered,
+        "schedule": updated_schedule,
+        "trueaegis_followup": followup,
+    }
+
+
 def scan_job_watchdog_recover_dead_jobs(
     connection: sqlite3.Connection,
     now: datetime | None = None,
     stale_minutes: int = SCAN_JOB_WATCHDOG_STALE_MINUTES,
     proc_root: Path | str | None = None,
     actor: str = SCAN_JOB_WATCHDOG_ACTOR,
+    events_path: Path | str = DEFAULT_EVENTS,
+    trueaegis_execution_mode: str = "asynchronous",
 ) -> dict[str, Any]:
     # Fail only stale rows whose NetSniper process is dead or PID-reused.
     now_value = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -7498,6 +7907,36 @@ def scan_job_watchdog_recover_dead_jobs(
         for row in rows
     ]
     recovered_jobs: list[dict[str, Any]] = []
+    completed_recoveries: list[dict[str, Any]] = []
+
+    for evaluation in evaluations:
+        current_row = connection.execute(
+            "SELECT * FROM scan_jobs WHERE job_id = ?",
+            (str(evaluation.get("job_id") or ""),),
+        ).fetchone()
+        if current_row is None:
+            continue
+
+        current_evaluation = scan_job_watchdog_evaluation(
+            current_row,
+            now=now_value,
+            stale_minutes=safe_minutes,
+            proc_root=proc_root,
+        )
+        completion = scan_job_reconcile_completed_orphan(
+            connection,
+            current_row,
+            current_evaluation,
+            events_path=events_path,
+            actor=actor,
+            trueaegis_execution_mode=(
+                trueaegis_execution_mode
+            ),
+        )
+        if completion is not None:
+            completed_recoveries.append(completion)
+            recovered_jobs.append(completion["job"])
+
     review_jobs = [
         item
         for item in evaluations
@@ -7599,9 +8038,28 @@ def scan_job_watchdog_recover_dead_jobs(
             ).fetchone()
 
             if recovered_row is not None:
-                recovered_jobs.append(scan_job_to_dict(recovered_row))
+                recovered = scan_job_to_dict(recovered_row)
+                schedule_id = str(
+                    recovered.get("schedule_id") or ""
+                )
+                if schedule_id:
+                    _, cadence_minutes = (
+                        scan_job_schedule_recovery_context(
+                            connection,
+                            schedule_id,
+                        )
+                    )
+                    update_scan_schedule_after_job(
+                        connection,
+                        schedule_id,
+                        cadence_minutes,
+                        recovered,
+                    )
+
+                recovered_jobs.append(recovered)
 
         connection.execute("RELEASE SAVEPOINT scan_job_watchdog")
+        connection.commit()
     except Exception:
         connection.execute("ROLLBACK TO SAVEPOINT scan_job_watchdog")
         connection.execute("RELEASE SAVEPOINT scan_job_watchdog")
@@ -7613,7 +8071,12 @@ def scan_job_watchdog_recover_dead_jobs(
         "stale_threshold_minutes": safe_minutes,
         "checked_count": len(evaluations),
         "recovered_count": len(recovered_jobs),
+        "completed_recovery_count": len(completed_recoveries),
+        "failed_recovery_count": (
+            len(recovered_jobs) - len(completed_recoveries)
+        ),
         "review_count": len(review_jobs),
+        "completed_recoveries": completed_recoveries,
         "recovered_job_ids": [
             str(job.get("job_id") or "")
             for job in recovered_jobs
@@ -7901,6 +8364,8 @@ def run_due_scan_schedules(
     scan_job_watchdog_recover_dead_jobs(
         connection,
         actor="schedule_runner",
+        events_path=events_path,
+        trueaegis_execution_mode=trueaegis_execution_mode,
     )
 
     for row in query_due_scan_schedules(connection, limit=max_runs):
@@ -33755,6 +34220,8 @@ def command_dashboard(args):
         startup_watchdog = scan_job_watchdog_recover_dead_jobs(
             startup_watchdog_connection,
             actor="dashboard_startup",
+            events_path=args.events,
+            trueaegis_execution_mode="asynchronous",
         )
     finally:
         startup_watchdog_connection.close()
@@ -33831,6 +34298,13 @@ def command_dashboard(args):
             dashboard_schedule_worker_stop.set()
         if dashboard_schedule_worker_thread is not None:
             dashboard_schedule_worker_thread.join(timeout=2.0)
+            if dashboard_schedule_worker_thread.is_alive():
+                print(
+                    "[DeltaAegis] waiting for the active scheduled "
+                    "scan to finalize before dashboard shutdown",
+                    flush=True,
+                )
+                dashboard_schedule_worker_thread.join()
         server.server_close()
 
     return 0

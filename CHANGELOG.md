@@ -1,5 +1,9 @@
 ## DeltaAegis v0.42.0 — Logical Site Scopes
 
+- Reconciled orphaned successful scheduled scans from trusted completed-manifest evidence, including idempotent ingest and terminal job history.
+- Advanced linked schedules for both completed and failed watchdog recovery so one overdue subnet cannot starve later schedules.
+- Made normal dashboard shutdown wait for active scheduled-scan finalization.
+
 - Added additive logical-site storage with stable site IDs, case-insensitive unique names, descriptions, archive state, and retained subnet memberships.
 - Preserved canonical CIDR `network_scope` values as technical scan, snapshot, asset-lifecycle, event, alert, and evidence boundaries.
 - Enforced one logical site per subnet while allowing one site to contain many private CIDR scopes.
@@ -15,7 +19,7 @@
 - Added fixed logical-site mutation routes with session-derived actors, strict payload allowlists, human-readable receipts, and access-audit evidence for successful and failed actions.
 - Preserved the existing guarded workflow in which TrueAegis validation is configured and launched separately from the base NetSniper schedule runner.
 - Preserved the scheduler rule that a due schedule blocked by another active scan remains due without cadence, status, skip-count, or message mutation, and is retried after the blocker clears.
-- Added eight focused v0.42 validators, flattened validator composition, documentation and metadata checks, release notes, manual verification, and the complete v0.42 release gate.
+- Added nine focused v0.42 validators, flattened validator composition, documentation and metadata checks, release notes, manual verification, and the complete v0.42 release gate.
 
 ## DeltaAegis v0.41.0 — Data Durability & Recovery
 

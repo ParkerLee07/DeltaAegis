@@ -10,6 +10,21 @@ The watchdog uses the most recent heartbeat as the primary liveness timestamp an
 
 Recovery evidence is stored under `status_json.watchdog`, including the original PID, heartbeat, update time, stdout and stderr paths, classification, and recovery actor. After safe recovery, the same worker pass may start the oldest overdue schedule.
 
+
+## Scheduled scan finalization recovery
+
+A dashboard shutdown during a scheduled scan could terminate the daemon
+worker while the independent NetSniper process continued. NetSniper could
+then finish successfully while DeltaAegis retained a stale `RUNNING` row,
+omitted the bundle from schedule history, and repeatedly restarted the
+same oldest-overdue subnet.
+
+The recovery path now validates trusted completion evidence, reconciles
+the original job, performs idempotent auto-ingest, advances the linked
+schedule, and permits the next overdue subnet to run. Failed dead-job
+recovery also advances schedule history. A normal dashboard shutdown waits
+for an active scheduled scan to finish finalization.
+
 ## TrueAegis tab containment
 
 A delayed TrueAegis orchestration render previously created a new top-level tab panel after the dashboard had already applied the active-tab visibility state. That panel could therefore remain visible while Executive was selected.

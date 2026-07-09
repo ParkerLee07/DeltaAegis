@@ -132,6 +132,26 @@ NetSniper schedules run NetSniper and optional auto-ingest only. TrueAegis valid
 
 The established **blocked-schedule retry behavior** is preserved: when another active scan legitimately holds the single-scan lock, the due schedule remains due, its cadence is not advanced, and the scheduler retries it after the blocker clears.
 
+
+## Scheduled Scan Finalization Recovery
+
+DeltaAegis now reconciles an active scan ledger row when its recorded
+NetSniper process has exited but its persisted stdout and configured runs
+directory prove that a matching finalized bundle completed successfully.
+Recovery validates the manifest target, profile, completion state, run
+timestamp, and configured runs-root confinement before finalizing the
+original job.
+
+Successful orphan recovery performs idempotent auto-ingest, records the
+terminal job in schedule history, advances the linked schedule, and allows
+the next oldest overdue subnet to run. A stale dead job without valid
+completion evidence is marked failed and its linked schedule is also
+advanced so one subnet cannot indefinitely starve later schedules.
+
+Normal dashboard shutdown now waits for an active scheduled scan worker to
+finish its job, ingestion, and schedule finalization instead of abandoning
+the ledger row after a two-second timeout.
+
 ## TrueAegis Tab Containment
 
 The Executive tab now shows only a compact TrueAegis readiness summary: readiness state, latest accepted scan, active-job count, and one navigation control. Full orchestration is contained inside the **TrueAegis** tab.

@@ -156,6 +156,19 @@ Use only an approved test database or a deliberately prepared stale row.
 - [ ] Inspect the browser console and server log for errors.
 - [ ] Confirm no duplicate TrueAegis or validation element IDs exist.
 
+
+## 7D. Scheduled scan finalization recovery
+
+- [ ] Confirm two overdue schedules run one at a time and the older due schedule runs first.
+- [ ] Confirm a normally completed scheduled scan updates its original job, bundle path, ingest evidence, schedule history, and future `next_run_at`.
+- [ ] During a scheduled scan, press `Ctrl+C` in the dashboard terminal and confirm shutdown waits for scan finalization instead of abandoning the job.
+- [ ] Reproduce a dead recorded PID with matching completed stdout and manifest evidence; confirm startup recovery marks the original job `COMPLETED` rather than `FAILED`.
+- [ ] Confirm recovered auto-ingest is idempotent and does not duplicate a snapshot.
+- [ ] Confirm the recovered schedule advances and the next oldest overdue subnet runs next.
+- [ ] Reproduce a stale dead job without valid completion evidence; confirm it becomes `FAILED` and its linked schedule advances.
+- [ ] Confirm a manifest outside the configured NetSniper runs directory is rejected.
+- [ ] Confirm existing cancellation and deleted-schedule history behavior remains intact.
+
 ## 8. Guarded LAN binding
 
 Use a trusted test LAN and an authenticated temporary database.
