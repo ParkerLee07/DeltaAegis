@@ -2,6 +2,14 @@
 
 DeltaAegis v0.42.0 introduces operator-facing logical sites above the existing CIDR network scopes. The release lets an operator group related private subnets into a building or site without weakening the technical boundaries used for scanning, snapshot history, asset identity, events, alerts, risk, and evidence.
 
+## Dead-scan watchdog and scheduler self-healing
+
+The dashboard scheduler now checks active NetSniper ledger rows before applying the one-active-scan lock. The check runs at dashboard startup, on every schedule-worker pass, and before manual or CLI due-schedule execution.
+
+The watchdog uses the most recent heartbeat as the primary liveness timestamp and verifies the recorded PID against `/proc/<pid>/cmdline`. It automatically fails only stale rows whose process is missing or whose PID now belongs to an unrelated command. It does not kill or fail a still-live expected NetSniper process.
+
+Recovery evidence is stored under `status_json.watchdog`, including the original PID, heartbeat, update time, stdout and stderr paths, classification, and recovery actor. After safe recovery, the same worker pass may start the oldest overdue schedule.
+
 ## Logical-site model
 
 A logical site is an additive parent object:

@@ -19,6 +19,7 @@ manual = Path("MANUAL_VERIFICATION_v0.42.0.md").read_text(
 required_readme = (
     "## Current Release — v0.42.0",
     "**DeltaAegis v0.42.0 — Logical Site Scopes**",
+    "## Scan Watchdog and Scheduler Recovery",
     "## Logical Site Scopes",
     "one logical site -> many private CIDR subnet scopes",
     "one subnet scope -> zero or one logical site",
@@ -54,6 +55,7 @@ if not changelog.startswith(
 
 required_notes = (
     "# DeltaAegis v0.42.0 — Logical Site Scopes",
+    "## Dead-scan watchdog and scheduler self-healing",
     "Canonical CIDR `network_scope` values remain authoritative.",
     "one subnet scope -> zero or one logical site",
     "NetSniper scan creation remains CIDR-targeted.",
@@ -81,6 +83,7 @@ for marker in required_notes:
 required_manual = (
     "# DeltaAegis v0.42.0 Manual Verification",
     "Use a temporary database.",
+    "## 7. Dead-scan watchdog and scheduler recovery",
     "--db \"$tmp_db\"",
     "scope` and `site_id",
     "0.0.0.0:8092",

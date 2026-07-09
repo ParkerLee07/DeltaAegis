@@ -116,7 +116,20 @@ Using temporary fixtures or an approved non-production database:
 - [ ] Confirm asset detail becomes ambiguous when one identifier matches multiple member scopes.
 - [ ] Confirm scan freshness reflects the least healthy member subnet.
 
-## 7. Guarded LAN binding
+## 7. Dead-scan watchdog and scheduler recovery
+
+Use only an approved test database or a deliberately prepared stale row.
+
+- [ ] Confirm a fresh active row is not changed.
+- [ ] Confirm a stale row with a missing process is marked `FAILED`.
+- [ ] Confirm the original PID, heartbeat, logs, schedule ID, and recovery evidence remain available.
+- [ ] Confirm a stale PID reused by an unrelated command is recovered.
+- [ ] Confirm a live expected NetSniper process with a stale heartbeat is not automatically killed or failed.
+- [ ] Confirm an overdue schedule starts in the same worker pass after a dead blocker is recovered.
+- [ ] Confirm scan-job detail includes the watchdog classification.
+- [ ] Confirm dashboard startup runs the watchdog even when the recurring scheduler is disabled.
+
+## 8. Guarded LAN binding
 
 Use a trusted test LAN and an authenticated temporary database.
 
@@ -137,14 +150,14 @@ python3 deltaaegis.py --db "$tmp_db" dashboard \
 ss -ltnp | grep ':8092'
 ```
 
-## 8. Active database protection
+## 9. Active database protection
 
 - [ ] Hash `data/deltaaegis.db` before and after the release gate.
 - [ ] Hash the ignored root `deltaaegis.db` before and after the release gate if present.
 - [ ] Confirm both hashes are unchanged.
 - [ ] Confirm all manual mutation rehearsals used `--db "$tmp_db"`.
 
-## 9. Merge and merged-main gate
+## 10. Merge and merged-main gate
 
 Only after the feature-branch gate and manual checks pass:
 
@@ -154,7 +167,7 @@ Only after the feature-branch gate and manual checks pass:
 - [ ] Confirm the release gate accepts `main`.
 - [ ] Confirm `main` and `origin/main` are synchronized only after explicit push approval.
 
-## 10. Tag and publication hold
+## 11. Tag and publication hold
 
 Only after the merged-main gate passes and Parker explicitly approves publication:
 

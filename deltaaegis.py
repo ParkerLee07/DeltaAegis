@@ -5764,15 +5764,22 @@ def dashboard_scan_jobs_payload(
     scope: str | None = None,
     status: str | None = None,
 ) -> list[dict[str, Any]]:
-    return [
-        scan_job_to_dict(row)
-        for row in query_scan_jobs(
-            connection,
-            limit=limit,
-            status=status,
-            scope=scope,
-        )
-    ]
+    jobs: list[dict[str, Any]] = []
+
+    for row in query_scan_jobs(
+        connection,
+        limit=limit,
+        status=status,
+        scope=scope,
+    ):
+        job = scan_job_to_dict(row)
+
+        if str(job.get("status") or "").upper() in {"QUEUED", "RUNNING"}:
+            job["watchdog"] = scan_job_watchdog_evaluation(job)
+
+        jobs.append(job)
+
+    return jobs
 
 
 
@@ -6021,6 +6028,7 @@ def dashboard_scan_job_detail_payload(
         }
 
     job = scan_job_to_dict(row)
+    job["watchdog"] = scan_job_watchdog_evaluation(job)
     safe_logs_root = Path(
         logs_root if logs_root is not None else DEFAULT_SCAN_LOGS
     ).expanduser()
@@ -7175,6 +7183,12 @@ STALE_SCAN_JOB_MINIMUM_MINUTES = 60
 STALE_SCAN_JOB_DEFAULT_MINUTES = 360
 STALE_SCAN_JOB_MAXIMUM_MINUTES = 10080
 
+# v0.42 hotfix checkpoint A: dead-scan watchdog and scheduler self-healing.
+SCAN_JOB_WATCHDOG_SCHEMA_VERSION = "deltaaegis-scan-watchdog-v1"
+SCAN_JOB_WATCHDOG_STALE_MINUTES = 10
+SCAN_JOB_WATCHDOG_PROC_ROOT = Path("/proc")
+SCAN_JOB_WATCHDOG_ACTOR = "automatic_scan_watchdog"
+
 
 def scan_job_parse_datetime(value: Any) -> datetime | None:
     if not value:
@@ -7202,7 +7216,14 @@ def scan_job_parse_datetime(value: Any) -> datetime | None:
 def scan_job_active_reference_time(job: dict[str, Any] | sqlite3.Row) -> datetime | None:
     item = dict(job)
 
-    for key in ("started_at", "updated_at", "created_at"):
+    # Heartbeats are authoritative for running-job liveness. The remaining
+    # timestamps preserve recovery for queued jobs that never launched.
+    for key in (
+        "heartbeat_at",
+        "updated_at",
+        "started_at",
+        "created_at",
+    ):
         parsed = scan_job_parse_datetime(item.get(key))
         if parsed is not None:
             return parsed
@@ -7286,6 +7307,318 @@ def query_stale_active_scan_jobs(
     return stale_jobs
 
 
+
+def scan_job_process_liveness(
+    job: dict[str, Any] | sqlite3.Row,
+    proc_root: Path | str | None = None,
+) -> dict[str, Any]:
+    # Inspect the recorded process without signaling or mutating it.
+    item = dict(job)
+    root = Path(
+        proc_root
+        if proc_root is not None
+        else SCAN_JOB_WATCHDOG_PROC_ROOT
+    )
+    expected_path = str(
+        Path(str(item.get("netsniper_path") or "")).expanduser()
+    )
+    pid_value = item.get("process_pid")
+
+    try:
+        pid = int(pid_value)
+    except (TypeError, ValueError):
+        pid = None
+
+    result: dict[str, Any] = {
+        "pid": pid,
+        "proc_root": str(root),
+        "expected_netsniper_path": expected_path,
+        "process_exists": False,
+        "identity_readable": False,
+        "matches_expected_netsniper": False,
+        "state": "PROCESS_NOT_RECORDED",
+        "cmdline": "",
+    }
+
+    if pid is None or pid <= 0:
+        return result
+
+    process_root = root / str(pid)
+
+    if not process_root.exists():
+        result["state"] = "PROCESS_MISSING"
+        return result
+
+    result["process_exists"] = True
+
+    try:
+        raw_cmdline = (process_root / "cmdline").read_bytes()
+    except OSError as exc:
+        result["state"] = "PROCESS_IDENTITY_UNVERIFIABLE"
+        result["identity_error"] = exc.__class__.__name__
+        return result
+
+    arguments = [
+        value.decode("utf-8", errors="replace")
+        for value in raw_cmdline.split(b"\x00")
+        if value
+    ]
+    result["identity_readable"] = True
+    result["cmdline"] = " ".join(arguments)[:1024]
+    matches = bool(
+        expected_path
+        and any(argument == expected_path for argument in arguments)
+    )
+    result["matches_expected_netsniper"] = matches
+    result["state"] = (
+        "LIVE_EXPECTED_PROCESS"
+        if matches
+        else "PID_REUSE_OR_UNEXPECTED_PROCESS"
+    )
+    return result
+
+
+def scan_job_watchdog_evaluation(
+    job: dict[str, Any] | sqlite3.Row,
+    now: datetime | None = None,
+    stale_minutes: int = SCAN_JOB_WATCHDOG_STALE_MINUTES,
+    proc_root: Path | str | None = None,
+) -> dict[str, Any]:
+    item = scan_job_to_dict(job)
+    status = str(item.get("status") or "").upper()
+    safe_minutes = max(1, int(stale_minutes or 1))
+    now_value = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    reference = scan_job_active_reference_time(item)
+    age_minutes = None
+
+    if reference is not None:
+        age_minutes = max(
+            0,
+            int(
+                (now_value - reference.astimezone(timezone.utc)).total_seconds()
+                // 60
+            ),
+        )
+
+    stale = bool(
+        status in {"QUEUED", "RUNNING"}
+        and age_minutes is not None
+        and age_minutes >= safe_minutes
+    )
+    process = scan_job_process_liveness(item, proc_root=proc_root)
+    process_state = str(process.get("state") or "UNKNOWN")
+    classification = "NOT_ACTIVE"
+    action = "NONE"
+    recoverable = False
+
+    if status in {"QUEUED", "RUNNING"} and not stale:
+        classification = "FRESH_ACTIVE_ROW"
+    elif status == "QUEUED" and process_state in {
+        "PROCESS_NOT_RECORDED",
+        "PROCESS_MISSING",
+        "PID_REUSE_OR_UNEXPECTED_PROCESS",
+    }:
+        classification = "DEAD_QUEUED_JOB"
+        action = "MARK_FAILED"
+        recoverable = True
+    elif status == "RUNNING" and process_state in {
+        "PROCESS_NOT_RECORDED",
+        "PROCESS_MISSING",
+    }:
+        classification = "DEAD_PROCESS_STALE_ROW"
+        action = "MARK_FAILED"
+        recoverable = True
+    elif status == "RUNNING" and process_state == "PID_REUSE_OR_UNEXPECTED_PROCESS":
+        classification = "PID_REUSE_OR_UNEXPECTED_PROCESS"
+        action = "MARK_FAILED"
+        recoverable = True
+    elif status in {"QUEUED", "RUNNING"} and process_state == "LIVE_EXPECTED_PROCESS":
+        classification = "LIVE_PROCESS_STALE_HEARTBEAT"
+        action = "OPERATOR_REVIEW"
+    elif status in {"QUEUED", "RUNNING"} and process_state == "PROCESS_IDENTITY_UNVERIFIABLE":
+        classification = "PROCESS_IDENTITY_UNVERIFIABLE"
+        action = "OPERATOR_REVIEW"
+    elif status in {"QUEUED", "RUNNING"}:
+        classification = "STALE_ACTIVE_ROW_REVIEW"
+        action = "OPERATOR_REVIEW"
+
+    return {
+        "schema_version": SCAN_JOB_WATCHDOG_SCHEMA_VERSION,
+        "checked_at": utc_datetime_to_text(now_value),
+        "job_id": str(item.get("job_id") or ""),
+        "status": status,
+        "classification": classification,
+        "action": action,
+        "recoverable": recoverable,
+        "stale": stale,
+        "stale_threshold_minutes": safe_minutes,
+        "active_reference_at": (
+            utc_datetime_to_text(reference)
+            if reference is not None
+            else None
+        ),
+        "active_age_minutes": age_minutes,
+        "process": process,
+    }
+
+
+def scan_job_watchdog_recover_dead_jobs(
+    connection: sqlite3.Connection,
+    now: datetime | None = None,
+    stale_minutes: int = SCAN_JOB_WATCHDOG_STALE_MINUTES,
+    proc_root: Path | str | None = None,
+    actor: str = SCAN_JOB_WATCHDOG_ACTOR,
+) -> dict[str, Any]:
+    # Fail only stale rows whose NetSniper process is dead or PID-reused.
+    now_value = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    safe_minutes = max(1, int(stale_minutes or 1))
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM scan_jobs
+        WHERE status IN ('QUEUED', 'RUNNING')
+        ORDER BY created_at ASC, updated_at ASC
+        """
+    ).fetchall()
+    evaluations = [
+        scan_job_watchdog_evaluation(
+            row,
+            now=now_value,
+            stale_minutes=safe_minutes,
+            proc_root=proc_root,
+        )
+        for row in rows
+    ]
+    recovered_jobs: list[dict[str, Any]] = []
+    review_jobs = [
+        item
+        for item in evaluations
+        if item.get("action") == "OPERATOR_REVIEW"
+    ]
+
+    connection.execute("SAVEPOINT scan_job_watchdog")
+
+    try:
+        for evaluation in evaluations:
+            if not evaluation.get("recoverable"):
+                continue
+
+            job_id = str(evaluation.get("job_id") or "")
+            current_row = connection.execute(
+                "SELECT * FROM scan_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+
+            if current_row is None:
+                continue
+
+            current = scan_job_to_dict(current_row)
+            current_evaluation = scan_job_watchdog_evaluation(
+                current,
+                now=now_value,
+                stale_minutes=safe_minutes,
+                proc_root=proc_root,
+            )
+
+            if not current_evaluation.get("recoverable"):
+                continue
+
+            status_json = dict(current.get("status_json") or {})
+            evidence = dict(current_evaluation)
+            evidence.update(
+                {
+                    "actor": str(actor or SCAN_JOB_WATCHDOG_ACTOR),
+                    "original_status": current.get("status"),
+                    "original_process_pid": current.get("process_pid"),
+                    "original_heartbeat_at": current.get("heartbeat_at"),
+                    "original_updated_at": current.get("updated_at"),
+                    "original_stdout_log": current.get("stdout_log"),
+                    "original_stderr_log": current.get("stderr_log"),
+                    "original_message": current.get("message"),
+                    "result": "MARKED_FAILED",
+                }
+            )
+            status_json["watchdog"] = evidence
+            classification = str(
+                current_evaluation.get("classification")
+                or "DEAD_SCAN_JOB"
+            )
+            message_prefix = (
+                "Marked failed by operator recovery"
+                if str(actor) == "operator_recovery"
+                else "Marked failed by automatic scan watchdog"
+            )
+            message = (
+                f"{message_prefix}: {classification}; "
+                f"stale heartbeat exceeded {safe_minutes} minutes; "
+                "recorded NetSniper process was absent or did not match "
+                "and was blocking scheduled scans"
+            )
+            finished_at = utc_datetime_to_text(now_value)
+
+            cursor = connection.execute(
+                """
+                UPDATE scan_jobs
+                SET status = 'FAILED',
+                    updated_at = ?,
+                    finished_at = COALESCE(finished_at, ?),
+                    exit_code = COALESCE(exit_code, 130),
+                    status_json = ?,
+                    message = ?
+                WHERE job_id = ?
+                  AND status = ?
+                  AND process_pid IS ?
+                  AND heartbeat_at IS ?
+                """,
+                (
+                    finished_at,
+                    finished_at,
+                    json.dumps(status_json, sort_keys=True),
+                    message,
+                    job_id,
+                    current.get("status"),
+                    current.get("process_pid"),
+                    current.get("heartbeat_at"),
+                ),
+            )
+
+            if cursor.rowcount != 1:
+                continue
+
+            recovered_row = connection.execute(
+                "SELECT * FROM scan_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+
+            if recovered_row is not None:
+                recovered_jobs.append(scan_job_to_dict(recovered_row))
+
+        connection.execute("RELEASE SAVEPOINT scan_job_watchdog")
+    except Exception:
+        connection.execute("ROLLBACK TO SAVEPOINT scan_job_watchdog")
+        connection.execute("RELEASE SAVEPOINT scan_job_watchdog")
+        raise
+
+    return {
+        "schema_version": SCAN_JOB_WATCHDOG_SCHEMA_VERSION,
+        "checked_at": utc_datetime_to_text(now_value),
+        "stale_threshold_minutes": safe_minutes,
+        "checked_count": len(evaluations),
+        "recovered_count": len(recovered_jobs),
+        "review_count": len(review_jobs),
+        "recovered_job_ids": [
+            str(job.get("job_id") or "")
+            for job in recovered_jobs
+        ],
+        "review_job_ids": [
+            str(item.get("job_id") or "")
+            for item in review_jobs
+        ],
+        "recovered_jobs": recovered_jobs,
+        "review_jobs": review_jobs,
+        "evaluations": evaluations,
+    }
+
 def mark_stale_active_scan_jobs_failed(
     connection: sqlite3.Connection,
     confirmation: str,
@@ -7293,65 +7626,18 @@ def mark_stale_active_scan_jobs_failed(
 ) -> list[dict[str, Any]]:
     if str(confirmation or "").strip() != STALE_SCAN_JOB_RECOVERY_CONFIRMATION:
         raise DashboardAdminUserActionError(
-            f"type {STALE_SCAN_JOB_RECOVERY_CONFIRMATION!r} to mark stale active scan jobs failed",
+            "type "
+            f"{STALE_SCAN_JOB_RECOVERY_CONFIRMATION!r} "
+            "to mark stale active scan jobs failed",
             status_code=400,
         )
 
-    safe_minutes = normalize_stale_scan_job_minutes(stale_minutes)
-    stale_jobs = query_stale_active_scan_jobs(
+    report = scan_job_watchdog_recover_dead_jobs(
         connection,
-        stale_minutes=safe_minutes,
-        limit=100,
+        stale_minutes=normalize_stale_scan_job_minutes(stale_minutes),
+        actor="operator_recovery",
     )
-
-    if not stale_jobs:
-        return []
-
-    now = utc_now_text()
-    recovered: list[dict[str, Any]] = []
-
-    for job in stale_jobs:
-        job_id = str(job.get("job_id") or "").strip()
-
-        if not job_id:
-            continue
-
-        message = (
-            "Marked failed by operator recovery: stale active scan job exceeded "
-            f"{safe_minutes} minutes and was blocking scheduled scans"
-        )
-
-        connection.execute(
-            """
-            UPDATE scan_jobs
-            SET status = ?,
-                updated_at = ?,
-                finished_at = COALESCE(finished_at, ?),
-                exit_code = COALESCE(exit_code, ?),
-                message = ?
-            WHERE job_id = ?
-              AND status IN ('QUEUED', 'RUNNING')
-            """,
-            (
-                "FAILED",
-                now,
-                now,
-                130,
-                message,
-                job_id,
-            ),
-        )
-
-        row = connection.execute(
-            "SELECT * FROM scan_jobs WHERE job_id = ?",
-            (job_id,),
-        ).fetchone()
-
-        if row is not None:
-            recovered.append(scan_job_to_dict(row))
-
-    return recovered
-
+    return list(report.get("recovered_jobs") or [])
 
 def dashboard_netsniper_stale_scan_recovery_payload(
     connection: sqlite3.Connection,
@@ -7601,6 +7887,13 @@ def run_due_scan_schedules(
 ) -> list[dict[str, Any]]:
     max_runs = max(1, int(max_runs or 1))
     results: list[dict[str, Any]] = []
+
+    # Reconcile dead rows before applying the one-active-scan lock. This path
+    # is shared by the worker, dashboard Run due scans, and the CLI runner.
+    scan_job_watchdog_recover_dead_jobs(
+        connection,
+        actor="schedule_runner",
+    )
 
     for row in query_due_scan_schedules(connection, limit=max_runs):
         schedule = scan_schedule_to_dict(row)
@@ -32140,8 +32433,30 @@ def command_dashboard(args):
                     status=400,
                 )
 
+    # Reconcile dead rows at every dashboard start, even when the recurring
+    # schedule worker is disabled.
+    startup_watchdog_connection = connect(db_path)
+
+    try:
+        startup_watchdog = scan_job_watchdog_recover_dead_jobs(
+            startup_watchdog_connection,
+            actor="dashboard_startup",
+        )
+    finally:
+        startup_watchdog_connection.close()
+
+    if startup_watchdog.get("recovered_count") and not args.quiet:
+        print(
+            "[DeltaAegis] scan watchdog recovered "
+            f"{startup_watchdog['recovered_count']} dead scan job(s)",
+            flush=True,
+        )
+
     server_address = (bind_host, args.port)
-    server = ThreadingHTTPServer(server_address, DeltaAegisDashboardHandler)
+    server = ThreadingHTTPServer(
+        server_address,
+        DeltaAegisDashboardHandler,
+    )
 
     dashboard_schedule_worker_thread = None
     dashboard_schedule_worker_stop = None

@@ -19,6 +19,7 @@ Highlights:
 - Site-wide aggregation for summary metrics, latest accepted current state, assets, events, alerts, annotations, risk, scan context, Investigation Center, latest changes, and scan freshness.
 - Collision-safe subnet provenance so identical MAC or IP identities in different scopes are not silently merged.
 - Fail-closed handling for ambiguous `scope` plus `site_id` requests and for endpoints that remain subnet-specific.
+- An automatic dead-scan watchdog that checks active scan rows at dashboard startup and every scheduler pass, preserves forensic evidence, recovers only missing or PID-reused processes, and retries overdue schedules without postponing them.
 - A guarded `dashboard --lan` option that binds to `0.0.0.0` only when password or token authentication is available.
 
 ## What DeltaAegis Does
@@ -113,6 +114,23 @@ python3 tools/reset_dashboard_admin.py \
   --db data/deltaaegis.db \
   --username admin
 ```
+
+## Scan Watchdog and Scheduler Recovery
+
+DeltaAegis checks active NetSniper scan-job rows at dashboard startup and on every scheduled-scan worker pass. A running scan heartbeat is expected to advance every few seconds.
+
+The automatic watchdog waits ten minutes before treating an active row as stale. It then verifies the recorded PID through `/proc/<pid>/cmdline`:
+
+- A missing process or a PID that belongs to an unrelated command is marked `FAILED`, with the original PID, heartbeat, log paths, schedule ID, and recovery reason preserved in `status_json.watchdog`.
+- A live process whose command still matches the expected NetSniper executable is not terminated or failed automatically. It remains blocked for operator review.
+- A fresh active row is left unchanged.
+- After a dead row is recovered, the same scheduler pass can start the oldest overdue schedule.
+
+The existing **Mark stale active scans failed** action remains an explicit ADMIN recovery tool. This preserves the established **ADMIN-only stale scan-job recovery** workflow while adding safe automatic recovery for clearly dead processes. Automatic recovery never signals or kills a live process.
+
+NetSniper schedules run NetSniper and optional auto-ingest only. TrueAegis validation remains a separate guarded workflow unless an existing schedule explicitly enables the separately validated follow-up option.
+
+The established **blocked-schedule retry behavior** is preserved: when another active scan legitimately holds the single-scan lock, the due schedule remains due, its cadence is not advanced, and the scheduler retries it after the blocker clears.
 
 ## Logical Site Scopes
 
@@ -435,7 +453,7 @@ Run the complete v0.42 automated release gate from a clean checkout:
 ./tools/validate_v0_42_release_gate.sh
 ```
 
-The release gate validates release metadata and documentation, rendered dashboard JavaScript, client-disconnect handling, all five flat v0.42 logical-site and LAN validators, the isolated v0.40 operator-action compatibility suite, and the v0.39 functional compatibility suite. The v0.42 all-in validator invokes every component validator exactly once.
+The release gate validates release metadata and documentation, rendered dashboard JavaScript, client-disconnect handling, all six flat v0.42 logical-site, LAN, and watchdog validators, the isolated v0.40 operator-action compatibility suite, and the v0.39 functional compatibility suite. The v0.42 all-in validator invokes every component validator exactly once.
 
 Complete the manual backup and restore checklist before merge, tag, or publication:
 

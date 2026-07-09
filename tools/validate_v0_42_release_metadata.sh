@@ -131,6 +131,7 @@ if not manual.startswith(
 component_validators = (
     "tools/validate_v0_42_logical_site_foundation.sh",
     "tools/validate_v0_42_dashboard_lan_flag.sh",
+    "tools/validate_v0_42_scan_watchdog.sh",
     "tools/validate_v0_42_logical_site_cli.sh",
     "tools/validate_v0_42_logical_site_dashboard_foundation.sh",
     "tools/validate_v0_42_logical_site_aggregation.sh",
@@ -187,7 +188,7 @@ if "Site-wide SIEM aggregation is not enabled" in source:
 
 print("PASS: stable v0.42.0 source and CLI metadata")
 print("PASS: README, CHANGELOG, release notes, and manual metadata")
-print("PASS: flat five-validator all-in composition")
+print("PASS: flat six-validator all-in composition")
 print("PASS: feature-branch and main release paths")
 print("PASS: release gate dependencies and stale-gate exclusion")
 PY
