@@ -78,4 +78,4 @@ tools/validate_v0_40_v0_39_compatibility.sh
 
 echo
 echo "PASS: DeltaAegis v0.42 automated release gate"
-echo "HOLD: complete RELEASE_CHECKLIST.md and obtain Parker's explicit approval before merge, tag, push, or publication"
+echo "HOLD: obtain Parker's explicit approval before merge, tag, push, or publication"

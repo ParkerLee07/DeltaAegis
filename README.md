@@ -571,7 +571,7 @@ The release gate validates release metadata and documentation, rendered dashboar
 Complete the manual backup and restore checklist before merge, tag, or publication:
 
 ```text
-RELEASE_CHECKLIST.md
+operator-managed release verification
 ```
 
 Basic syntax check:

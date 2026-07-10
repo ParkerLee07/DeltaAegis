@@ -10,14 +10,15 @@ python3 - <<'PY'
 from pathlib import Path
 import hashlib
 
-expected_license_sha256 = "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0"
+expected_license_sha256 = (
+    "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0"
+)
 
 license_bytes = Path("LICENSE").read_bytes()
 license_text = license_bytes.decode("utf-8")
 readme = Path("README.md").read_text(encoding="utf-8")
 licensing = Path("LICENSING.md").read_text(encoding="utf-8")
 changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
-checklist = Path("RELEASE_CHECKLIST.md").read_text(encoding="utf-8")
 source = Path("deltaaegis.py").read_text(encoding="utf-8")
 
 actual_hash = hashlib.sha256(license_bytes).hexdigest()
@@ -36,19 +37,17 @@ for marker in (
     if marker not in license_text:
         raise SystemExit(f"LICENSE missing required AGPL marker: {marker}")
 
-required_readme = (
+for marker in (
     "GNU Affero General Public License, version 3 only",
     "`AGPL-3.0-only`",
     "`LICENSING.md`",
     "Alternative commercial licensing",
     "Corresponding Source",
-)
-
-for marker in required_readme:
+):
     if marker not in readme:
         raise SystemExit(f"README missing license marker: {marker}")
 
-required_policy = (
+for marker in (
     "# DeltaAegis Licensing",
     "Copyright (C) 2026 Parker Lee.",
     "AGPL-3.0-only",
@@ -59,36 +58,25 @@ required_policy = (
     "does not purport to revoke permissions already granted",
     "Third-party material",
     "No trademark rights",
-)
-
-for marker in required_policy:
+):
     if marker not in licensing:
         raise SystemExit(
             f"LICENSING.md missing required policy marker: {marker}"
         )
 
-for filename, content in (
-    ("CHANGELOG.md", changelog),
-    ("RELEASE_CHECKLIST.md", checklist),
-):
-    for marker in (
-        "AGPL-3.0-only",
-        "commercial licensing",
-    ):
-        if marker.casefold() not in content.casefold():
-            raise SystemExit(
-                f"{filename} missing license transition marker: {marker}"
-            )
+for marker in ("AGPL-3.0-only", "commercial licensing"):
+    if marker.casefold() not in changelog.casefold():
+        raise SystemExit(
+            f"CHANGELOG missing license transition marker: {marker}"
+        )
 
-required_source = (
+for marker in (
     "SPDX-License-Identifier: AGPL-3.0-only",
     "Copyright (C) 2026 Parker Lee",
     'data-deltaaegis-license="AGPL-3.0-only"',
     "https://github.com/ParkerLee07/DeltaAegis",
     "View Corresponding Source",
-)
-
-for marker in required_source:
+):
     if marker not in source:
         raise SystemExit(
             f"deltaaegis.py missing license/source marker: {marker}"
@@ -106,12 +94,19 @@ offer_count = sum(
 )
 
 if body_count < 1:
-    raise SystemExit("deltaaegis.py does not contain a standalone HTML body closer")
+    raise SystemExit(
+        "deltaaegis.py does not contain a standalone HTML body closer"
+    )
 
 if offer_count != body_count:
     raise SystemExit(
         "every rendered HTML body must include the source offer: "
         f"bodies={body_count}, offers={offer_count}"
+    )
+
+if Path("RELEASE_CHECKLIST.md").exists():
+    raise SystemExit(
+        "manual release verification must not be tracked as a repository file"
     )
 
 if "MIT License. See `LICENSE`." in readme:
@@ -121,5 +116,6 @@ print("PASS: verbatim AGPL-3.0 license text")
 print("PASS: v0.42 license and commercial-licensing policy")
 print("PASS: prior MIT-copy boundary is documented")
 print("PASS: source and dashboard corresponding-source notices")
+print("PASS: manual verification remains operator-managed")
 print("PASS: DeltaAegis v0.42 license policy validator")
 PY

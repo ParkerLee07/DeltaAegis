@@ -2,7 +2,7 @@
 
 - Relicensed DeltaAegis v0.42.0 under `AGPL-3.0-only`, added a visible Corresponding Source link to rendered dashboard pages, and documented the boundary for earlier MIT-licensed copies.
 - Documented that alternative commercial licensing may be available only through a separate written agreement.
-- Consolidated release documentation into `README.md`, `CHANGELOG.md`, and one rolling `RELEASE_CHECKLIST.md`; the GitHub Release body is the canonical detailed release narrative and version-specific release-note/manual files are no longer tracked.
+- Consolidated release documentation into `README.md`, `CHANGELOG.md`, and operator-managed release verification outside the repository; the GitHub Release body is the canonical detailed release narrative and version-specific release-note/manual files are no longer tracked.
 
 - Limited freshness warnings to subnets with accepted evidence more than 24 hours old or no accepted scan.
 - Added affected subnet, supporting scan ID, evidence time, and age to the freshness warning panel.
@@ -34,7 +34,7 @@
 - Added fixed logical-site mutation routes with session-derived actors, strict payload allowlists, human-readable receipts, and access-audit evidence for successful and failed actions.
 - Preserved the existing guarded workflow in which TrueAegis validation is configured and launched separately from the base NetSniper schedule runner.
 - Preserved the scheduler rule that a due schedule blocked by another active scan remains due without cadence, status, skip-count, or message mutation, and is retried after the blocker clears.
-- Added thirteen focused v0.42 component validators, flattened validator composition, strict execution-graph checks, license-policy validation, documentation and metadata validation, a rolling release checklist, and the complete v0.42 release gate.
+- Added thirteen focused v0.42 component validators, flattened validator composition, strict execution-graph checks, license-policy validation, documentation and metadata validation, operator-managed release verification, and the complete v0.42 release gate.
 
 ## DeltaAegis v0.41.0 — Data Durability & Recovery
 
