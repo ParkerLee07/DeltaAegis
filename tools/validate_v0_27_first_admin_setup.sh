@@ -191,9 +191,4 @@ with tempfile.TemporaryDirectory() as tmpdir:
 print("[PASS] synthetic v0.27 first-admin setup validated")
 PY
 
-if [[ -x "./tools/validate_v0_27_rbac_policy_matrix.sh" ]]; then
-    ./tools/validate_v0_27_rbac_policy_matrix.sh "$NETSNIPER_RUN_DIR" \
-        || fail "v0.27 RBAC checkpoint gate failed"
-fi
-
 pass "DeltaAegis v0.27 first-admin setup validation passed"

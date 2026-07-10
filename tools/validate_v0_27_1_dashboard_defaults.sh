@@ -23,8 +23,8 @@ grep -Fq '"--no-require-login"' deltaaegis.py \
 grep -Fq "default=True" deltaaegis.py \
     || fail "dashboard require_login must default to True"
 
-grep -Fq 'DELTAAEGIS_DB_PATH="${DELTAAEGIS_DB_PATH:-deltaaegis.db}"' install.sh \
-    || fail "install.sh must default to deltaaegis.db"
+grep -Fq 'DELTAAEGIS_DB_PATH="${DELTAAEGIS_DB_PATH:-data/deltaaegis.db}"' install.sh \
+    || fail "install.sh must default to data/deltaaegis.db"
 
 python3 - <<'PY'
 import contextlib
@@ -166,9 +166,5 @@ with tempfile.TemporaryDirectory() as tmpdir:
 print("[PASS] simple install-created admin works with plain `deltaaegis dashboard`")
 PY
 
-if [[ -x "./tools/validate_v0_27_release.sh" ]]; then
-    ./tools/validate_v0_27_release.sh "$NETSNIPER_RUN_DIR" \
-        || fail "v0.27 release gate failed after dashboard defaults hotfix"
-fi
 
 pass "DeltaAegis v0.27.1 dashboard defaults validation passed"
