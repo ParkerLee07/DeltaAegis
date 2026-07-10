@@ -225,7 +225,7 @@ PY
 for inherited_validator in \
     tools/validate_v0_25_operator_session_page.sh \
     tools/validate_v0_25_operator_session_actions.sh \
-    tools/validate_v0_25_backward_compatibility_markers.sh
+    tools/validate_v0_25_backward_compatibility.sh
 do
     if [[ -x "$inherited_validator" ]]; then
         "$inherited_validator" "$NETSNIPER_RUN_DIR" \

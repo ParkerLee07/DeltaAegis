@@ -51,6 +51,10 @@ git diff --check
 echo "[v0.42 release] source syntax check"
 python3 -W error::SyntaxWarning -m py_compile deltaaegis.py
 
+echo "[v0.42 release] validator execution graph"
+python3 tools/deltaaegis_troubleshooter.py --self-check --strict-graph >/dev/null
+echo "PASS: validator execution graph"
+
 echo "[v0.42 release] documentation accuracy"
 tools/validate_v0_42_documentation_accuracy.sh
 
@@ -63,7 +67,7 @@ tools/validate_v0_40_dashboard_javascript_syntax.sh
 echo "[v0.42 release] client-disconnect response handling"
 tools/validate_v0_40_broken_pipe_response.sh
 
-echo "[v0.42 release] flat logical-site, LAN, scan-watchdog, Sites-management, dashboard-freshness, asset-selector-completeness, TrueAegis-containment, and schedule-finalization checkpoint suite"
+echo "[v0.42 release] flat logical-site, LAN, scan-watchdog, Sites-management, dashboard-freshness, asset-selector-completeness, TrueAegis-containment, schedule-finalization, and install-lifecycle checkpoint suite"
 tools/validate_v0_42_all.sh
 
 echo "[v0.42 compatibility] isolated v0.40 operator-action suite"

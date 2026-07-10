@@ -18,6 +18,7 @@ validators=(
   tools/validate_v0_42_logical_site_cli.sh
   tools/validate_v0_42_logical_site_dashboard_foundation.sh
   tools/validate_v0_42_logical_site_aggregation.sh
+  tools/validate_v0_42_install_uninstall_lifecycle.sh
 )
 
 for validator in "${validators[@]}"; do
@@ -25,4 +26,4 @@ for validator in "${validators[@]}"; do
   "$validator"
 done
 
-echo "PASS: all eleven DeltaAegis v0.42 component validators"
+echo "PASS: all twelve DeltaAegis v0.42 component validators"

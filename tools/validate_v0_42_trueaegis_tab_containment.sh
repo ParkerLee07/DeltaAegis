@@ -451,13 +451,10 @@ print("PASS: Executive readiness fields reuse orchestration data")
 print("PASS: Executive navigation activates the TrueAegis tab")
 PY
 
-echo "[v0.42 hotfix C] rendered JavaScript syntax"
-tools/validate_v0_40_dashboard_javascript_syntax.sh
-echo "PASS: rendered JavaScript syntax"
-
 echo "[v0.42 hotfix C] compatibility boundary"
+echo "PASS: rendered JavaScript syntax is owned by the release gate"
 echo "PASS: focused containment validator remains on the v0.42 branch"
-echo "PASS: v0.40 TrueAegis receipt compatibility is delegated to the isolated release gate"
+echo "PASS: inherited TrueAegis receipt compatibility is owned by the release gate"
 
 echo "[v0.42 hotfix C] repository hygiene"
 git diff --check

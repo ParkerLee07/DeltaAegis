@@ -418,8 +418,8 @@ print("PASS: outside-runs manifest rejected")
 PY
 
 echo "[v0.42 hotfix D] flat-suite compatibility boundary"
-echo "PASS: prior v0.42 components run independently through validate_v0_42_all.sh"
-echo "PASS: v0.40 and v0.39 compatibility remain delegated to the isolated release gate"
+echo "PASS: prior components are composed independently by the suite layer"
+echo "PASS: inherited compatibility remains delegated to the release gate"
 
 echo "[v0.42 hotfix D] repository hygiene"
 git diff --check

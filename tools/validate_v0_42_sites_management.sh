@@ -950,12 +950,9 @@ print("PASS: rendered Sites UX contract")
 PYUX
 echo "PASS: Sites dashboard UX and atomic creation"
 
-echo "[v0.42 hotfix B] rendered JavaScript syntax"
-tools/validate_v0_40_dashboard_javascript_syntax.sh
-echo "PASS: rendered JavaScript syntax"
-
-echo "[v0.42 hotfix B] release-gate compatibility boundary"
-echo "PASS: prior v0.42 component validators are executed by validate_v0_42_all.sh"
+echo "[v0.42 hotfix B] compatibility boundary"
+echo "PASS: rendered JavaScript syntax is owned by the release gate"
+echo "PASS: prior components are composed by the suite layer"
 echo "PASS: focused Sites validator remains flat"
 
 echo "[v0.42 hotfix B] repository hygiene"
