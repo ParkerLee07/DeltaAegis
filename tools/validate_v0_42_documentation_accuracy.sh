@@ -8,13 +8,12 @@ echo "==================================================="
 
 python3 - <<'PY'
 from pathlib import Path
+import subprocess
 
 readme = Path("README.md").read_text(encoding="utf-8")
 changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
-notes = Path("RELEASE_NOTES_v0.42.0.md").read_text(encoding="utf-8")
-manual = Path("MANUAL_VERIFICATION_v0.42.0.md").read_text(
-    encoding="utf-8"
-)
+checklist = Path("RELEASE_CHECKLIST.md").read_text(encoding="utf-8")
+licensing = Path("LICENSING.md").read_text(encoding="utf-8")
 
 required_readme = (
     "## Current Release — v0.42.0",
@@ -31,7 +30,9 @@ required_readme = (
     "dashboard --lan --port 8090",
     "--db /tmp/deltaaegis-site-rehearsal.db",
     "tools/validate_v0_42_release_gate.sh",
-    "MANUAL_VERIFICATION_v0.42.0.md",
+    "RELEASE_CHECKLIST.md",
+    "AGPL-3.0-only",
+    "LICENSING.md",
 )
 
 for marker in required_readme:
@@ -56,78 +57,116 @@ if not changelog.startswith(
 ):
     raise SystemExit("CHANGELOG does not begin with v0.42.0")
 
-required_notes = (
-    "# DeltaAegis v0.42.0 — Logical Site Scopes",
-    "## Dead-scan watchdog and scheduler self-healing",
-    "## Scheduled scan finalization recovery",
-    "## TrueAegis tab containment",
-    "## Sites dashboard management",
-    "Canonical CIDR `network_scope` values remain authoritative.",
-    "one subnet scope -> zero or one logical site",
-    "NetSniper scan creation remains CIDR-targeted.",
-    "TrueAegis execution also remains subnet-specific.",
-    "No logical-site dashboard mutation endpoint is included",
-    "Unathenticated LAN exposure is rejected.",
-    "tools/validate_v0_42_release_gate.sh",
-    "Parker's explicit approval",
+required_changelog = (
+    "dead-scan watchdog",
+    "Reconciled orphaned successful scheduled scans",
+    "Sites dashboard",
+    "TrueAegis",
+    "one logical site per subnet",
+    "NetSniper",
+    "guarded LAN dashboard binding",
+    "evidence-freshness strip",
+    "thirteen focused v0.42 component validators",
+    "rolling release checklist",
+    "AGPL-3.0-only",
 )
 
-# Keep the source wording grammatical while accepting the intended exact claim.
-if "Unauthenticated LAN exposure is rejected." not in notes:
-    raise SystemExit(
-        "release notes do not document unauthenticated LAN rejection"
-    )
-
-for marker in required_notes:
-    if marker == "Unathenticated LAN exposure is rejected.":
-        continue
-    if marker not in notes:
+for marker in required_changelog:
+    if marker.casefold() not in changelog.casefold():
         raise SystemExit(
-            f"release notes missing required claim: {marker}"
+            f"CHANGELOG missing consolidated v0.42 claim: {marker}"
         )
 
-required_manual = (
-    "# DeltaAegis v0.42.0 Manual Verification",
+required_checklist = (
+    "# DeltaAegis Release Checklist",
+    "Current candidate: **DeltaAegis v0.42.0 — Logical Site Scopes**",
+    "## Release documentation policy",
+    "## License transition checks",
     "Use a temporary database.",
     "## 7. Dead-scan watchdog and scheduler recovery",
     "## 7B. Sites dashboard management",
     "## 7C. TrueAegis tab containment",
     "## 7D. Scheduled scan finalization recovery",
-    "--db \"$tmp_db\"",
+    "## 7F. Dashboard evidence freshness",
+    '--db "$tmp_db"',
     "scope` and `site_id",
     "0.0.0.0:8092",
     "Run the clean release gate again on merged `main`.",
+    "GitHub Release body",
+    "canonical detailed release narrative",
     "Parker's explicit approval",
     "DeltaAegis v0.42.0 — Logical Site Scopes",
+    "AGPL-3.0-only",
+    "LICENSING.md",
 )
 
-for marker in required_manual:
-    if marker not in manual:
+for marker in required_checklist:
+    if marker not in checklist:
         raise SystemExit(
-            f"manual verification missing required item: {marker}"
+            f"release checklist missing required item: {marker}"
         )
 
+for marker in (
+    "# DeltaAegis Licensing",
+    "AGPL-3.0-only",
+    "Alternative commercial licensing",
+    "already distributed under the MIT License",
+):
+    if marker not in licensing:
+        raise SystemExit(
+            f"LICENSING.md missing required documentation: {marker}"
+        )
+
+versioned_patterns = (
+    "RELEASE_NOTES_v*.md",
+    "MANUAL_VERIFICATION_v*.md",
+)
+
+tracked = subprocess.run(
+    ["git", "ls-files", "--", *versioned_patterns],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.splitlines()
+
+if tracked:
+    raise SystemExit(
+        "version-specific release documents remain tracked: "
+        + ", ".join(tracked)
+    )
+
+present = sorted(
+    str(path)
+    for pattern in versioned_patterns
+    for path in Path(".").glob(pattern)
+)
+
+if present:
+    raise SystemExit(
+        "version-specific release documents remain in the tree: "
+        + ", ".join(present)
+    )
+
+for filename, content in (
+    ("README.md", readme),
+    ("RELEASE_CHECKLIST.md", checklist),
+):
+    for stale_prefix in (
+        "RELEASE_NOTES_v",
+        "MANUAL_VERIFICATION_v",
+    ):
+        if stale_prefix in content:
+            raise SystemExit(
+                f"{filename} still points to a version-specific "
+                f"release document: {stale_prefix}"
+            )
+
 print("PASS: README current release and logical-site documentation")
-print("PASS: CHANGELOG v0.42 release entry")
-print("PASS: release-note scope and safety boundaries")
-print("PASS: manual verification and publication hold")
+print("PASS: CHANGELOG is the cumulative tracked release history")
+print("PASS: rolling release checklist and publication hold")
+print("PASS: v0.42 AGPL and commercial-licensing documentation")
+print("PASS: version-specific release documents are not tracked")
 PY
 
 echo "PASS: DeltaAegis v0.42 documentation accuracy validator"
-
-# v0.42 checkpoint F: dashboard freshness documentation accuracy.
-for freshness_contract in \
-  "README.md|## Dashboard Evidence Freshness" \
-  "RELEASE_NOTES_v0.42.0.md|## Dashboard evidence freshness" \
-  "MANUAL_VERIFICATION_v0.42.0.md|## 7F. Dashboard evidence freshness"
-do
-  freshness_file="${freshness_contract%%|*}"
-  freshness_marker="${freshness_contract#*|}"
-
-  if ! grep -Fq -- "$freshness_marker" "$freshness_file"; then
-    echo "FAIL: missing freshness documentation marker: $freshness_marker in $freshness_file"
-    exit 1
-  fi
-done
-
 echo "PASS: dashboard evidence freshness documentation"

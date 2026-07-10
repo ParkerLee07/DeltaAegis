@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Parker Lee
 """DeltaAegis v0.42.0: Logical Site Scopes.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
@@ -29756,6 +29758,10 @@ function bindSiteManagementControls() {
     load();
     setInterval(load, 30000);
   </script>
+<footer data-deltaaegis-license="AGPL-3.0-only" style="margin:2rem 0 0;padding:1rem;border-top:1px solid currentColor;opacity:.78;text-align:center;font-size:.85rem">
+  DeltaAegis is licensed under AGPL-3.0-only.
+  <a href="https://github.com/ParkerLee07/DeltaAegis" target="_blank" rel="noopener noreferrer">View Corresponding Source</a>.
+</footer>
 </body>
 </html>
 """
@@ -31179,6 +31185,10 @@ def dashboard_first_admin_setup_html(error: str = "") -> str:
     </form>
     <div class="setup-note">This setup page is disabled automatically after the first local dashboard account exists.</div>
   </main>
+<footer data-deltaaegis-license="AGPL-3.0-only" style="margin:2rem 0 0;padding:1rem;border-top:1px solid currentColor;opacity:.78;text-align:center;font-size:.85rem">
+  DeltaAegis is licensed under AGPL-3.0-only.
+  <a href="https://github.com/ParkerLee07/DeltaAegis" target="_blank" rel="noopener noreferrer">View Corresponding Source</a>.
+</footer>
 </body>
 </html>"""
     return html.replace("{{ERROR_HTML}}", error_html)
@@ -31696,6 +31706,10 @@ def dashboard_operator_reset_shell_html() -> str:
     loadTelemetryCleanupPreview();
     loadTelemetryResetAuditEvents();
   </script>
+<footer data-deltaaegis-license="AGPL-3.0-only" style="margin:2rem 0 0;padding:1rem;border-top:1px solid currentColor;opacity:.78;text-align:center;font-size:.85rem">
+  DeltaAegis is licensed under AGPL-3.0-only.
+  <a href="https://github.com/ParkerLee07/DeltaAegis" target="_blank" rel="noopener noreferrer">View Corresponding Source</a>.
+</footer>
 </body>
 </html>"""
 
@@ -33792,6 +33806,10 @@ def render_netsniper_page() -> str:
     window.setInterval(loadNetSniperSchedules, 15000);
     window.setInterval(loadNetSniperScheduleHistory, 15000);
   </script>
+<footer data-deltaaegis-license="AGPL-3.0-only" style="margin:2rem 0 0;padding:1rem;border-top:1px solid currentColor;opacity:.78;text-align:center;font-size:.85rem">
+  DeltaAegis is licensed under AGPL-3.0-only.
+  <a href="https://github.com/ParkerLee07/DeltaAegis" target="_blank" rel="noopener noreferrer">View Corresponding Source</a>.
+</footer>
 </body>
 </html>"""
 

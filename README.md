@@ -12,6 +12,7 @@ DeltaAegis v0.42.0 adds additive operator-facing logical sites above the existin
 
 Highlights:
 
+- DeltaAegis v0.42.0 is licensed under `AGPL-3.0-only`; alternative commercial licensing may be available by separate written agreement.
 - Stable logical-site identities with case-insensitive unique names, descriptions, active/archive state, and retained membership history.
 - A one-site-per-subnet invariant while allowing each logical site to contain many private CIDR scopes.
 - Human-readable and JSON CLI commands for site creation, listing, inspection, rename, description updates, archive, assignment, and removal.
@@ -570,7 +571,7 @@ The release gate validates release metadata and documentation, rendered dashboar
 Complete the manual backup and restore checklist before merge, tag, or publication:
 
 ```text
-MANUAL_VERIFICATION_v0.42.0.md
+RELEASE_CHECKLIST.md
 ```
 
 Basic syntax check:
@@ -622,4 +623,8 @@ three-project defensive workflow:
 
 ## License
 
-MIT License. See `LICENSE`.
+DeltaAegis v0.42.0 is licensed under the **GNU Affero General Public License, version 3 only** (`AGPL-3.0-only`). See `LICENSE` and `LICENSING.md`.
+
+Alternative commercial licensing may be available from Parker Lee through a separate written agreement. Earlier copies already distributed under the MIT License retain the permissions that accompanied those copies.
+
+The dashboard provides a visible **Corresponding Source** link to the official repository.

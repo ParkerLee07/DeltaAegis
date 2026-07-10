@@ -1,6 +1,24 @@
-# DeltaAegis v0.42.0 Manual Verification
+# DeltaAegis Release Checklist
 
-Use this checklist after the release-candidate commit and before merge, tag, or publication.
+Current candidate: **DeltaAegis v0.42.0 — Logical Site Scopes**
+
+Use this rolling checklist after the release-candidate commit and before merge, tag, or publication. Update this file for each new candidate instead of adding a version-specific manual.
+
+## Release documentation policy
+
+- `README.md` documents the current product and operator workflow.
+- `CHANGELOG.md` is the cumulative tracked release history.
+- This file is the single rolling manual verification gate.
+- The GitHub Release body is the canonical detailed release narrative.
+- Do not add version-specific release-note or manual-verification files.
+
+## License transition checks
+
+- [ ] Confirm `LICENSE` is the verbatim AGPL version 3 text.
+- [ ] Confirm `README.md` and `LICENSING.md` identify `AGPL-3.0-only` as the v0.42.0 code license.
+- [ ] Confirm the dashboard exposes a visible Corresponding Source link.
+- [ ] Confirm alternative commercial licensing is described only as available through a separate written agreement.
+- [ ] Review the authorship audit and confirm Parker owns or has permission to relicense all copyrightable material.
 
 ## 1. Repository state
 
@@ -34,7 +52,7 @@ tools/validate_v0_42_release_gate.sh
 - [ ] Confirm `deltaaegis.py --help` identifies `DeltaAegis v0.42.0 — Logical Site Scopes`.
 - [ ] Review `README.md`.
 - [ ] Review `CHANGELOG.md`.
-- [ ] Review `RELEASE_NOTES_v0.42.0.md`.
+- [ ] Draft and review the GitHub Release body from `README.md` and the v0.42 entry in `CHANGELOG.md`.
 - [ ] Confirm the README Current Release section does not still advertise v0.41.0.
 - [ ] Confirm the docs state that CIDR `network_scope` remains authoritative.
 - [ ] Confirm the docs state the one-site-per-subnet invariant.
@@ -246,6 +264,6 @@ Only after the merged-main gate passes and Parker explicitly approves publicatio
 - [ ] Push the tag only with explicit approval.
 - [ ] Create the GitHub Release only with explicit approval.
 - [ ] Use the title `DeltaAegis v0.42.0 — Logical Site Scopes`.
-- [ ] Use `RELEASE_NOTES_v0.42.0.md` as the release body.
+- [ ] Use the reviewed GitHub Release draft as the canonical detailed release narrative.
 
 Passing this checklist does not itself authorize merge, push, tagging, or publication.

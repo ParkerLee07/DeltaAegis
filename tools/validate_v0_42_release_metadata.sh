@@ -20,6 +20,7 @@ esac
 python3 - <<'PY'
 from pathlib import Path
 import ast
+import hashlib
 import re
 import subprocess
 import sys
@@ -60,6 +61,8 @@ required_source_metadata = (
     "v0.42 Logical Site Scopes",
     'server_version = "DeltaAegisDashboard/0.42.0"',
     "DeltaAegis v0.42.0 — Logical Site Scopes",
+    "SPDX-License-Identifier: AGPL-3.0-only",
+    'data-deltaaegis-license="AGPL-3.0-only"',
 )
 
 for marker in required_source_metadata:
@@ -91,12 +94,9 @@ if "DeltaAegis v0.42.0 — Logical Site Scopes" not in help_text:
 
 readme = Path("README.md").read_text(encoding="utf-8")
 changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
-notes = Path("RELEASE_NOTES_v0.42.0.md").read_text(
-    encoding="utf-8"
-)
-manual = Path("MANUAL_VERIFICATION_v0.42.0.md").read_text(
-    encoding="utf-8"
-)
+checklist = Path("RELEASE_CHECKLIST.md").read_text(encoding="utf-8")
+licensing = Path("LICENSING.md").read_text(encoding="utf-8")
+license_bytes = Path("LICENSE").read_bytes()
 all_in = Path("tools/validate_v0_42_all.sh").read_text(
     encoding="utf-8"
 )
@@ -108,7 +108,9 @@ for marker in (
     "## Current Release — v0.42.0",
     "**DeltaAegis v0.42.0 — Logical Site Scopes**",
     "tools/validate_v0_42_release_gate.sh",
-    "MANUAL_VERIFICATION_v0.42.0.md",
+    "RELEASE_CHECKLIST.md",
+    "AGPL-3.0-only",
+    "LICENSING.md",
 ):
     if marker not in readme:
         raise SystemExit(f"README missing release marker: {marker}")
@@ -118,15 +120,25 @@ if not changelog.startswith(
 ):
     raise SystemExit("CHANGELOG top release is not v0.42.0")
 
-if not notes.startswith(
-    "# DeltaAegis v0.42.0 — Logical Site Scopes"
-):
-    raise SystemExit("release notes title is incorrect")
+if not checklist.startswith("# DeltaAegis Release Checklist"):
+    raise SystemExit("rolling release checklist title is incorrect")
 
-if not manual.startswith(
-    "# DeltaAegis v0.42.0 Manual Verification"
+if (
+    "Current candidate: **DeltaAegis v0.42.0 — Logical Site Scopes**"
+    not in checklist
 ):
-    raise SystemExit("manual verification title is incorrect")
+    raise SystemExit("release checklist current candidate is incorrect")
+
+if hashlib.sha256(license_bytes).hexdigest() != "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0":
+    raise SystemExit("LICENSE is not the approved AGPL-3.0 text")
+
+for marker in (
+    "# DeltaAegis Licensing",
+    "AGPL-3.0-only",
+    "Alternative commercial licensing",
+):
+    if marker not in licensing:
+        raise SystemExit(f"LICENSING.md missing marker: {marker}")
 
 component_validators = (
     "tools/validate_v0_42_logical_site_foundation.sh",
@@ -141,6 +153,7 @@ component_validators = (
     "tools/validate_v0_42_logical_site_dashboard_foundation.sh",
     "tools/validate_v0_42_logical_site_aggregation.sh",
     "tools/validate_v0_42_install_uninstall_lifecycle.sh",
+    "tools/validate_v0_42_license_policy.sh",
 )
 
 for validator in component_validators:
@@ -161,7 +174,7 @@ for required in (
     "tools/validate_v0_40_broken_pipe_response.sh",
     "tools/validate_v0_41_v0_40_compatibility.sh",
     "tools/validate_v0_40_v0_39_compatibility.sh",
-    "MANUAL_VERIFICATION_v0.42.0.md",
+    "RELEASE_CHECKLIST.md",
 ):
     if required not in release_gate:
         raise SystemExit(
@@ -189,14 +202,34 @@ for validator in component_validators:
             f"component validator is not flat: {validator}: {nested}"
         )
 
+tracked_version_docs = subprocess.run(
+    [
+        "git",
+        "ls-files",
+        "--",
+        "RELEASE_NOTES_v*.md",
+        "MANUAL_VERIFICATION_v*.md",
+    ],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.splitlines()
+
+if tracked_version_docs:
+    raise SystemExit(
+        "version-specific release documents remain tracked: "
+        + ", ".join(tracked_version_docs)
+    )
+
 if "Site-wide SIEM aggregation is not enabled" in source:
     raise SystemExit("stale pre-aggregation dashboard warning remains")
 
 print("PASS: stable v0.42.0 source and CLI metadata")
-print("PASS: README, CHANGELOG, release notes, and manual metadata")
-print("PASS: flat twelve-validator all-in composition")
+print("PASS: README, CHANGELOG, rolling checklist, and licensing metadata")
+print("PASS: flat thirteen-validator all-in composition")
 print("PASS: feature-branch and main release paths")
 print("PASS: release gate dependencies and stale-gate exclusion")
+print("PASS: consolidated release-document and AGPL policy")
 PY
 
 echo "PASS: DeltaAegis v0.42 release metadata validator"

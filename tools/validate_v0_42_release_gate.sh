@@ -67,7 +67,7 @@ tools/validate_v0_40_dashboard_javascript_syntax.sh
 echo "[v0.42 release] client-disconnect response handling"
 tools/validate_v0_40_broken_pipe_response.sh
 
-echo "[v0.42 release] flat logical-site, LAN, scan-watchdog, Sites-management, dashboard-freshness, asset-selector-completeness, TrueAegis-containment, schedule-finalization, and install-lifecycle checkpoint suite"
+echo "[v0.42 release] flat logical-site, LAN, scan-watchdog, Sites-management, dashboard-freshness, asset-selector-completeness, TrueAegis-containment, schedule-finalization, install-lifecycle, and license-policy checkpoint suite"
 tools/validate_v0_42_all.sh
 
 echo "[v0.42 compatibility] isolated v0.40 operator-action suite"
@@ -78,4 +78,4 @@ tools/validate_v0_40_v0_39_compatibility.sh
 
 echo
 echo "PASS: DeltaAegis v0.42 automated release gate"
-echo "HOLD: complete MANUAL_VERIFICATION_v0.42.0.md and obtain Parker's explicit approval before merge, tag, push, or publication"
+echo "HOLD: complete RELEASE_CHECKLIST.md and obtain Parker's explicit approval before merge, tag, push, or publication"

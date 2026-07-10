@@ -1,5 +1,9 @@
 ## DeltaAegis v0.42.0 — Logical Site Scopes
 
+- Relicensed DeltaAegis v0.42.0 under `AGPL-3.0-only`, added a visible Corresponding Source link to rendered dashboard pages, and documented the boundary for earlier MIT-licensed copies.
+- Documented that alternative commercial licensing may be available only through a separate written agreement.
+- Consolidated release documentation into `README.md`, `CHANGELOG.md`, and one rolling `RELEASE_CHECKLIST.md`; the GitHub Release body is the canonical detailed release narrative and version-specific release-note/manual files are no longer tracked.
+
 - Limited freshness warnings to subnets with accepted evidence more than 24 hours old or no accepted scan.
 - Added affected subnet, supporting scan ID, evidence time, and age to the freshness warning panel.
 
@@ -30,7 +34,7 @@
 - Added fixed logical-site mutation routes with session-derived actors, strict payload allowlists, human-readable receipts, and access-audit evidence for successful and failed actions.
 - Preserved the existing guarded workflow in which TrueAegis validation is configured and launched separately from the base NetSniper schedule runner.
 - Preserved the scheduler rule that a due schedule blocked by another active scan remains due without cadence, status, skip-count, or message mutation, and is retried after the blocker clears.
-- Added nine focused v0.42 validators, flattened validator composition, documentation and metadata checks, release notes, manual verification, and the complete v0.42 release gate.
+- Added thirteen focused v0.42 component validators, flattened validator composition, strict execution-graph checks, license-policy validation, documentation and metadata validation, a rolling release checklist, and the complete v0.42 release gate.
 
 ## DeltaAegis v0.41.0 — Data Durability & Recovery
 
@@ -44,7 +48,7 @@
 - Added guarded active restore execution requiring the exact preview digest and `RESTORE ACTIVE DELTAAEGIS DATABASE` confirmation.
 - Added fresh verified pre-restore safety backups, temporary restore verification, atomic active-database replacement, post-cutover verification, and automatic rollback.
 - Preserved the default active database at `data/deltaaegis.db`; ignored root-level database files remain legacy local state and are never selected, deleted, or migrated automatically.
-- Added eight focused checkpoint validators, release metadata and documentation validators, release notes, manual verification, and the complete v0.41 release gate.
+- Added eight focused checkpoint validators, release metadata and documentation validation, and the complete v0.41 release gate.
 - Preserved v0.40 human-readable operator actions, dashboard JavaScript checks, client-disconnect handling, and v0.39 functional compatibility.
 
 ## DeltaAegis v0.40.0 — Human-Readable Operator Actions
@@ -59,7 +63,7 @@
 - Added a flat seven-checkpoint validator suite with compatibility delegation.
 - Added rendered dashboard JavaScript syntax validation to prevent Python string escaping from producing invalid browser scripts.
 - Suppressed expected `BrokenPipeError` and `ConnectionResetError` failures when a browser refreshes, closes, or abandons an in-flight JSON response, while preserving normal response behavior and unrelated exceptions.
-- Added `validate_v0_40_release_gate.sh`, v0.39 functional compatibility coverage, release metadata validation, release notes, and a mandatory manual-verification hold.
+- Added `validate_v0_40_release_gate.sh`, v0.39 functional compatibility coverage, release metadata validation, and a mandatory publication hold.
 - Preserved fixed argument-vector execution, RBAC, confirmation gates, audit logging, non-destructive schedule deletion, and existing risk/event policy.
 
 ## DeltaAegis v0.39.0 — Scan Job Lifecycle Observability
