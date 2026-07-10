@@ -24,8 +24,8 @@ python3 -m py_compile tools/reset_dashboard_admin.py \
 grep -Fq 'DELTAAEGIS_DB_PATH="${DELTAAEGIS_DB_PATH:-data/deltaaegis.db}"' install.sh \
     || fail "install.sh does not default to data/deltaaegis.db"
 
-grep -Fq 'mkdir -p "$(dirname "$DELTAAEGIS_DB_PATH")"' install.sh \
-    || fail "install.sh does not create the dashboard DB parent directory"
+grep -Fq 'mkdir -p -- "$(dirname "$RESOLVED_DB_PATH")"' install.sh \
+    || fail "install.sh does not create the resolved dashboard DB parent directory"
 
 grep -Fq 'default=str(REPO_ROOT / "data" / "deltaaegis.db")' tools/bootstrap_first_admin.py \
     || fail "bootstrap_first_admin.py does not default to repo data/deltaaegis.db"

@@ -40,11 +40,21 @@ if grep -Fq "password=\"admin123\"" tools/bootstrap_first_admin.py; then
 fi
 
 python3 - <<'PY'
+from hashlib import sha256
 from pathlib import Path
 import sqlite3
 import subprocess
 import sys
 import tempfile
+
+
+def file_sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
 
 with tempfile.TemporaryDirectory() as tmpdir:
     db_path = Path(tmpdir) / "install-bootstrap.db"
@@ -66,8 +76,13 @@ with tempfile.TemporaryDirectory() as tmpdir:
         text=True,
         capture_output=True,
         check=False,
+        timeout=10,
     )
-    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+    assert result.returncode == 0, (
+        result.returncode,
+        result.stdout,
+        result.stderr,
+    )
 
     connection = sqlite3.connect(db_path)
     connection.row_factory = sqlite3.Row
@@ -75,8 +90,41 @@ with tempfile.TemporaryDirectory() as tmpdir:
         "SELECT username, role FROM access_users WHERE username = ?",
         ("install.admin",),
     ).fetchone()
+    connection.close()
+
     assert row is not None, "install.admin was not created"
     assert row["role"] == "ADMIN", dict(row)
+
+    before = file_sha256(db_path)
+
+    existing = subprocess.run(
+        [
+            sys.executable,
+            "tools/bootstrap_first_admin.py",
+            "--db",
+            str(db_path),
+        ],
+        input="",
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    assert existing.returncode == 0, (
+        existing.returncode,
+        existing.stdout,
+        existing.stderr,
+    )
+    assert "[SKIP]" in existing.stdout, existing.stdout
+    assert "Existing local dashboard accounts: 1" in existing.stdout, (
+        existing.stdout
+    )
+    combined = existing.stdout + existing.stderr
+    assert "Create DeltaAegis admin username" not in combined, combined
+    assert "Create DeltaAegis admin password" not in combined, combined
+
+    after = file_sha256(db_path)
+    assert before == after, (before, after)
 
     result2 = subprocess.run(
         [
@@ -93,13 +141,27 @@ with tempfile.TemporaryDirectory() as tmpdir:
         text=True,
         capture_output=True,
         check=False,
+        timeout=10,
     )
-    assert result2.returncode == 0, (result2.returncode, result2.stdout, result2.stderr)
-    count = connection.execute("SELECT COUNT(*) AS count FROM access_users").fetchone()["count"]
-    assert count == 1, count
-    connection.close()
+    assert result2.returncode == 0, (
+        result2.returncode,
+        result2.stdout,
+        result2.stderr,
+    )
+    assert "[SKIP]" in result2.stdout, result2.stdout
 
-print("[PASS] synthetic install first-admin bootstrap validated")
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    count = connection.execute(
+        "SELECT COUNT(*) AS count FROM access_users"
+    ).fetchone()["count"]
+    connection.close()
+    assert count == 1, count
+
+print(
+    "[PASS] synthetic install first-admin bootstrap and "
+    "initialized-database prompt skip validated"
+)
 PY
 
 pass "DeltaAegis installer first-admin bootstrap validation passed"

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""DeltaAegis v0.41.0: Data Durability & Recovery.
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Parker Lee
+"""DeltaAegis v0.42.0: Logical Site Scopes.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -35,7 +37,7 @@ import tempfile
 
 DEFAULT_DB = Path.home() / "DeltaAegis" / "data" / "deltaaegis.db"
 DEFAULT_BACKUPS = Path.home() / "DeltaAegis" / "backups"
-DELTAAEGIS_VERSION = "0.41.0"
+DELTAAEGIS_VERSION = "0.42.0"
 DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION = "deltaaegis-backup-manifest-v1"
 DEFAULT_RESTORE_REHEARSALS = (
     Path.home() / "DeltaAegis" / "restore-rehearsals"
@@ -79,6 +81,7 @@ ACCESS_RBAC_PERMISSIONS = {
     "admin.telemetry.cleanup": "ADMIN",
     "workflow.write": "ANALYST",
     "scan.start": "ADMIN",
+    "sites.write": "ADMIN",
 }
 
 ACCESS_RBAC_ROUTE_POLICIES = (
@@ -87,6 +90,15 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("GET", "/operator/users", "admin.users.read"),
     ("GET", "/operator/reset", "admin.telemetry.cleanup"),
     ("GET", "/netsniper", "dashboard.read"),
+    ("GET", "/api/sites", "dashboard.read"),
+    ("GET", "/api/site-detail", "dashboard.read"),
+    ("GET", "/api/site-management", "dashboard.read"),
+    ("POST", "/api/site-create", "sites.write"),
+    ("POST", "/api/site-rename", "sites.write"),
+    ("POST", "/api/site-description", "sites.write"),
+    ("POST", "/api/site-archive", "sites.write"),
+    ("POST", "/api/site-assign-scope", "sites.write"),
+    ("POST", "/api/site-remove-scope", "sites.write"),
     ("GET", "/api/netsniper/status", "dashboard.read"),
     ("GET", "/api/netsniper/job-detail", "dashboard.read"),
     ("GET", "/api/validation-summary", "dashboard.read"),
@@ -642,6 +654,35 @@ CREATE INDEX IF NOT EXISTS idx_scan_schedule_deletions_scope
     ON scan_schedule_deletions(network_scope);
 
 
+
+
+-- v0.42 checkpoint 1: logical site scope foundation
+CREATE TABLE IF NOT EXISTS logical_sites (
+    site_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'ACTIVE'
+        CHECK (status IN ('ACTIVE', 'ARCHIVED')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    archived_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_logical_sites_status_name
+    ON logical_sites(status, name);
+
+CREATE TABLE IF NOT EXISTS logical_site_memberships (
+    network_scope TEXT PRIMARY KEY,
+    site_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (site_id)
+        REFERENCES logical_sites(site_id)
+        ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_logical_site_memberships_site
+    ON logical_site_memberships(site_id, network_scope);
 """
 
 
@@ -1682,6 +1723,453 @@ def optional_network_scope(value: str | None) -> str | None:
         return None
 
     return canonical_network_scope(value)
+
+
+
+# v0.42 checkpoint 1: logical site scope foundation
+LOGICAL_SITE_ACTIVE = "ACTIVE"
+LOGICAL_SITE_ARCHIVED = "ARCHIVED"
+LOGICAL_SITE_STATUSES = {
+    LOGICAL_SITE_ACTIVE,
+    LOGICAL_SITE_ARCHIVED,
+}
+
+
+def normalize_logical_site_id(value: Any) -> str:
+    site_id = str(value or "").strip()
+
+    if (
+        not site_id
+        or len(site_id) > 96
+        or re.fullmatch(r"[A-Za-z0-9._:-]+", site_id) is None
+    ):
+        raise DeltaAegisError(
+            "logical site id must be 1-96 characters using "
+            "letters, numbers, dot, underscore, colon, or hyphen"
+        )
+
+    return site_id
+
+
+def normalize_logical_site_name(value: Any) -> str:
+    name = " ".join(str(value or "").split())
+
+    if not name:
+        raise DeltaAegisError("logical site name is required")
+
+    if len(name) > 160:
+        raise DeltaAegisError(
+            "logical site name must not exceed 160 characters"
+        )
+
+    if any(ord(character) < 32 for character in name):
+        raise DeltaAegisError(
+            "logical site name contains unsupported control characters"
+        )
+
+    return name
+
+
+def normalize_logical_site_description(value: Any) -> str:
+    description = str(value or "").strip()
+
+    if len(description) > 2000:
+        raise DeltaAegisError(
+            "logical site description must not exceed 2000 characters"
+        )
+
+    if any(
+        ord(character) < 32
+        and character not in {"\n", "\r", "\t"}
+        for character in description
+    ):
+        raise DeltaAegisError(
+            "logical site description contains unsupported "
+            "control characters"
+        )
+
+    return description
+
+
+def logical_site_row_to_dict(
+    row: sqlite3.Row | dict[str, Any],
+) -> dict[str, Any]:
+    item = dict(row)
+
+    return {
+        "site_id": str(item.get("site_id") or ""),
+        "name": str(item.get("name") or ""),
+        "description": str(item.get("description") or ""),
+        "status": str(item.get("status") or LOGICAL_SITE_ACTIVE),
+        "created_at": item.get("created_at"),
+        "updated_at": item.get("updated_at"),
+        "archived_at": item.get("archived_at"),
+        "member_count": int(item.get("member_count") or 0),
+    }
+
+
+def get_logical_site(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any] | None:
+    safe_site_id = normalize_logical_site_id(site_id)
+    row = connection.execute(
+        """
+        SELECT
+            s.site_id,
+            s.name,
+            s.description,
+            s.status,
+            s.created_at,
+            s.updated_at,
+            s.archived_at,
+            COUNT(m.network_scope) AS member_count
+        FROM logical_sites s
+        LEFT JOIN logical_site_memberships m
+            ON m.site_id = s.site_id
+        WHERE s.site_id = ?
+        GROUP BY s.site_id
+        """,
+        (safe_site_id,),
+    ).fetchone()
+
+    return logical_site_row_to_dict(row) if row is not None else None
+
+
+def list_logical_sites(
+    connection: sqlite3.Connection,
+    include_archived: bool = False,
+) -> list[dict[str, Any]]:
+    where = "" if include_archived else "WHERE s.status = 'ACTIVE'"
+    rows = connection.execute(
+        f"""
+        SELECT
+            s.site_id,
+            s.name,
+            s.description,
+            s.status,
+            s.created_at,
+            s.updated_at,
+            s.archived_at,
+            COUNT(m.network_scope) AS member_count
+        FROM logical_sites s
+        LEFT JOIN logical_site_memberships m
+            ON m.site_id = s.site_id
+        {where}
+        GROUP BY s.site_id
+        ORDER BY
+            CASE s.status
+                WHEN 'ACTIVE' THEN 0
+                ELSE 1
+            END,
+            s.name COLLATE NOCASE,
+            s.site_id
+        """
+    ).fetchall()
+
+    return [logical_site_row_to_dict(row) for row in rows]
+
+
+def create_logical_site(
+    connection: sqlite3.Connection,
+    name: Any,
+    description: Any = "",
+) -> dict[str, Any]:
+    safe_name = normalize_logical_site_name(name)
+    safe_description = normalize_logical_site_description(description)
+    site_id = "site-" + uuid.uuid4().hex[:16]
+    now = utc_now()
+
+    try:
+        connection.execute(
+            """
+            INSERT INTO logical_sites (
+                site_id,
+                name,
+                description,
+                status,
+                created_at,
+                updated_at,
+                archived_at
+            )
+            VALUES (?, ?, ?, 'ACTIVE', ?, ?, NULL)
+            """,
+            (
+                site_id,
+                safe_name,
+                safe_description,
+                now,
+                now,
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise DeltaAegisError(
+            f"logical site name already exists: {safe_name}"
+        ) from exc
+
+    site = get_logical_site(connection, site_id)
+    if site is None:
+        raise DeltaAegisError(
+            f"logical site disappeared after creation: {site_id}"
+        )
+
+    return site
+
+
+def rename_logical_site(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    name: Any,
+) -> dict[str, Any]:
+    safe_site_id = normalize_logical_site_id(site_id)
+    safe_name = normalize_logical_site_name(name)
+
+    if get_logical_site(connection, safe_site_id) is None:
+        raise DeltaAegisError(
+            f"logical site not found: {safe_site_id}"
+        )
+
+    try:
+        connection.execute(
+            """
+            UPDATE logical_sites
+            SET name = ?, updated_at = ?
+            WHERE site_id = ?
+            """,
+            (safe_name, utc_now(), safe_site_id),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise DeltaAegisError(
+            f"logical site name already exists: {safe_name}"
+        ) from exc
+
+    site = get_logical_site(connection, safe_site_id)
+    if site is None:
+        raise DeltaAegisError(
+            f"logical site disappeared after rename: {safe_site_id}"
+        )
+
+    return site
+
+
+def update_logical_site_description(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    description: Any,
+) -> dict[str, Any]:
+    safe_site_id = normalize_logical_site_id(site_id)
+    safe_description = normalize_logical_site_description(
+        description
+    )
+
+    cursor = connection.execute(
+        """
+        UPDATE logical_sites
+        SET description = ?, updated_at = ?
+        WHERE site_id = ?
+        """,
+        (safe_description, utc_now(), safe_site_id),
+    )
+
+    if cursor.rowcount == 0:
+        raise DeltaAegisError(
+            f"logical site not found: {safe_site_id}"
+        )
+
+    site = get_logical_site(connection, safe_site_id)
+    if site is None:
+        raise DeltaAegisError(
+            "logical site disappeared after description update: "
+            f"{safe_site_id}"
+        )
+
+    return site
+
+
+def archive_logical_site(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    safe_site_id = normalize_logical_site_id(site_id)
+    site = get_logical_site(connection, safe_site_id)
+
+    if site is None:
+        raise DeltaAegisError(
+            f"logical site not found: {safe_site_id}"
+        )
+
+    if site["status"] == LOGICAL_SITE_ARCHIVED:
+        return site
+
+    now = utc_now()
+    connection.execute(
+        """
+        UPDATE logical_sites
+        SET
+            status = 'ARCHIVED',
+            archived_at = ?,
+            updated_at = ?
+        WHERE site_id = ?
+        """,
+        (now, now, safe_site_id),
+    )
+
+    archived = get_logical_site(connection, safe_site_id)
+    if archived is None:
+        raise DeltaAegisError(
+            f"logical site disappeared after archive: {safe_site_id}"
+        )
+
+    return archived
+
+
+def logical_site_member_scopes(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> list[str]:
+    safe_site_id = normalize_logical_site_id(site_id)
+
+    if get_logical_site(connection, safe_site_id) is None:
+        raise DeltaAegisError(
+            f"logical site not found: {safe_site_id}"
+        )
+
+    return [
+        str(row["network_scope"])
+        for row in connection.execute(
+            """
+            SELECT network_scope
+            FROM logical_site_memberships
+            WHERE site_id = ?
+            ORDER BY network_scope
+            """,
+            (safe_site_id,),
+        ).fetchall()
+    ]
+
+
+def logical_site_for_network_scope(
+    connection: sqlite3.Connection,
+    network_scope: Any,
+) -> dict[str, Any] | None:
+    safe_scope = canonical_network_scope(str(network_scope or ""))
+    row = connection.execute(
+        """
+        SELECT
+            s.site_id,
+            s.name,
+            s.description,
+            s.status,
+            s.created_at,
+            s.updated_at,
+            s.archived_at,
+            (
+                SELECT COUNT(*)
+                FROM logical_site_memberships members
+                WHERE members.site_id = s.site_id
+            ) AS member_count
+        FROM logical_site_memberships m
+        JOIN logical_sites s
+            ON s.site_id = m.site_id
+        WHERE m.network_scope = ?
+        """,
+        (safe_scope,),
+    ).fetchone()
+
+    return logical_site_row_to_dict(row) if row is not None else None
+
+
+def assign_network_scope_to_logical_site(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    network_scope: Any,
+) -> dict[str, Any]:
+    safe_site_id = normalize_logical_site_id(site_id)
+    safe_scope = canonical_network_scope(str(network_scope or ""))
+    site = get_logical_site(connection, safe_site_id)
+
+    if site is None:
+        raise DeltaAegisError(
+            f"logical site not found: {safe_site_id}"
+        )
+
+    if site["status"] != LOGICAL_SITE_ACTIVE:
+        raise DeltaAegisError(
+            f"logical site is archived: {safe_site_id}"
+        )
+
+    existing = connection.execute(
+        """
+        SELECT site_id
+        FROM logical_site_memberships
+        WHERE network_scope = ?
+        """,
+        (safe_scope,),
+    ).fetchone()
+
+    if existing is not None:
+        existing_site_id = str(existing["site_id"])
+
+        if existing_site_id == safe_site_id:
+            raise DeltaAegisError(
+                f"network scope is already assigned to logical site "
+                f"{safe_site_id}: {safe_scope}"
+            )
+
+        raise DeltaAegisError(
+            f"network scope {safe_scope} is already assigned to "
+            f"logical site {existing_site_id}"
+        )
+
+    now = utc_now()
+    connection.execute(
+        """
+        INSERT INTO logical_site_memberships (
+            network_scope,
+            site_id,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        (safe_scope, safe_site_id, now, now),
+    )
+
+    return {
+        "site_id": safe_site_id,
+        "network_scope": safe_scope,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def remove_network_scope_from_logical_site(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    network_scope: Any,
+) -> dict[str, Any]:
+    safe_site_id = normalize_logical_site_id(site_id)
+    safe_scope = canonical_network_scope(str(network_scope or ""))
+
+    cursor = connection.execute(
+        """
+        DELETE FROM logical_site_memberships
+        WHERE site_id = ? AND network_scope = ?
+        """,
+        (safe_site_id, safe_scope),
+    )
+
+    if cursor.rowcount == 0:
+        raise DeltaAegisError(
+            f"logical site membership not found: "
+            f"{safe_site_id} -> {safe_scope}"
+        )
+
+    return {
+        "site_id": safe_site_id,
+        "network_scope": safe_scope,
+        "removed": True,
+    }
 
 
 def snapshot_network_scope(snapshot_or_target) -> str:
@@ -5286,15 +5774,22 @@ def dashboard_scan_jobs_payload(
     scope: str | None = None,
     status: str | None = None,
 ) -> list[dict[str, Any]]:
-    return [
-        scan_job_to_dict(row)
-        for row in query_scan_jobs(
-            connection,
-            limit=limit,
-            status=status,
-            scope=scope,
-        )
-    ]
+    jobs: list[dict[str, Any]] = []
+
+    for row in query_scan_jobs(
+        connection,
+        limit=limit,
+        status=status,
+        scope=scope,
+    ):
+        job = scan_job_to_dict(row)
+
+        if str(job.get("status") or "").upper() in {"QUEUED", "RUNNING"}:
+            job["watchdog"] = scan_job_watchdog_evaluation(job)
+
+        jobs.append(job)
+
+    return jobs
 
 
 
@@ -5543,6 +6038,7 @@ def dashboard_scan_job_detail_payload(
         }
 
     job = scan_job_to_dict(row)
+    job["watchdog"] = scan_job_watchdog_evaluation(job)
     safe_logs_root = Path(
         logs_root if logs_root is not None else DEFAULT_SCAN_LOGS
     ).expanduser()
@@ -6697,6 +7193,12 @@ STALE_SCAN_JOB_MINIMUM_MINUTES = 60
 STALE_SCAN_JOB_DEFAULT_MINUTES = 360
 STALE_SCAN_JOB_MAXIMUM_MINUTES = 10080
 
+# v0.42 hotfix checkpoint A: dead-scan watchdog and scheduler self-healing.
+SCAN_JOB_WATCHDOG_SCHEMA_VERSION = "deltaaegis-scan-watchdog-v1"
+SCAN_JOB_WATCHDOG_STALE_MINUTES = 10
+SCAN_JOB_WATCHDOG_PROC_ROOT = Path("/proc")
+SCAN_JOB_WATCHDOG_ACTOR = "automatic_scan_watchdog"
+
 
 def scan_job_parse_datetime(value: Any) -> datetime | None:
     if not value:
@@ -6724,7 +7226,14 @@ def scan_job_parse_datetime(value: Any) -> datetime | None:
 def scan_job_active_reference_time(job: dict[str, Any] | sqlite3.Row) -> datetime | None:
     item = dict(job)
 
-    for key in ("started_at", "updated_at", "created_at"):
+    # Heartbeats are authoritative for running-job liveness. The remaining
+    # timestamps preserve recovery for queued jobs that never launched.
+    for key in (
+        "heartbeat_at",
+        "updated_at",
+        "started_at",
+        "created_at",
+    ):
         parsed = scan_job_parse_datetime(item.get(key))
         if parsed is not None:
             return parsed
@@ -6808,6 +7317,781 @@ def query_stale_active_scan_jobs(
     return stale_jobs
 
 
+
+def scan_job_process_liveness(
+    job: dict[str, Any] | sqlite3.Row,
+    proc_root: Path | str | None = None,
+) -> dict[str, Any]:
+    # Inspect the recorded process without signaling or mutating it.
+    item = dict(job)
+    root = Path(
+        proc_root
+        if proc_root is not None
+        else SCAN_JOB_WATCHDOG_PROC_ROOT
+    )
+    expected_path = str(
+        Path(str(item.get("netsniper_path") or "")).expanduser()
+    )
+    pid_value = item.get("process_pid")
+
+    try:
+        pid = int(pid_value)
+    except (TypeError, ValueError):
+        pid = None
+
+    result: dict[str, Any] = {
+        "pid": pid,
+        "proc_root": str(root),
+        "expected_netsniper_path": expected_path,
+        "process_exists": False,
+        "identity_readable": False,
+        "matches_expected_netsniper": False,
+        "state": "PROCESS_NOT_RECORDED",
+        "cmdline": "",
+    }
+
+    if pid is None or pid <= 0:
+        return result
+
+    process_root = root / str(pid)
+
+    if not process_root.exists():
+        result["state"] = "PROCESS_MISSING"
+        return result
+
+    result["process_exists"] = True
+
+    try:
+        raw_cmdline = (process_root / "cmdline").read_bytes()
+    except OSError as exc:
+        result["state"] = "PROCESS_IDENTITY_UNVERIFIABLE"
+        result["identity_error"] = exc.__class__.__name__
+        return result
+
+    arguments = [
+        value.decode("utf-8", errors="replace")
+        for value in raw_cmdline.split(b"\x00")
+        if value
+    ]
+    result["identity_readable"] = True
+    result["cmdline"] = " ".join(arguments)[:1024]
+    matches = bool(
+        expected_path
+        and any(argument == expected_path for argument in arguments)
+    )
+    result["matches_expected_netsniper"] = matches
+    result["state"] = (
+        "LIVE_EXPECTED_PROCESS"
+        if matches
+        else "PID_REUSE_OR_UNEXPECTED_PROCESS"
+    )
+    return result
+
+
+def scan_job_watchdog_evaluation(
+    job: dict[str, Any] | sqlite3.Row,
+    now: datetime | None = None,
+    stale_minutes: int = SCAN_JOB_WATCHDOG_STALE_MINUTES,
+    proc_root: Path | str | None = None,
+) -> dict[str, Any]:
+    item = scan_job_to_dict(job)
+    status = str(item.get("status") or "").upper()
+    safe_minutes = max(1, int(stale_minutes or 1))
+    now_value = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    reference = scan_job_active_reference_time(item)
+    age_minutes = None
+
+    if reference is not None:
+        age_minutes = max(
+            0,
+            int(
+                (now_value - reference.astimezone(timezone.utc)).total_seconds()
+                // 60
+            ),
+        )
+
+    stale = bool(
+        status in {"QUEUED", "RUNNING"}
+        and age_minutes is not None
+        and age_minutes >= safe_minutes
+    )
+    process = scan_job_process_liveness(item, proc_root=proc_root)
+    process_state = str(process.get("state") or "UNKNOWN")
+    classification = "NOT_ACTIVE"
+    action = "NONE"
+    recoverable = False
+
+    if status in {"QUEUED", "RUNNING"} and not stale:
+        classification = "FRESH_ACTIVE_ROW"
+    elif status == "QUEUED" and process_state in {
+        "PROCESS_NOT_RECORDED",
+        "PROCESS_MISSING",
+        "PID_REUSE_OR_UNEXPECTED_PROCESS",
+    }:
+        classification = "DEAD_QUEUED_JOB"
+        action = "MARK_FAILED"
+        recoverable = True
+    elif status == "RUNNING" and process_state in {
+        "PROCESS_NOT_RECORDED",
+        "PROCESS_MISSING",
+    }:
+        classification = "DEAD_PROCESS_STALE_ROW"
+        action = "MARK_FAILED"
+        recoverable = True
+    elif status == "RUNNING" and process_state == "PID_REUSE_OR_UNEXPECTED_PROCESS":
+        classification = "PID_REUSE_OR_UNEXPECTED_PROCESS"
+        action = "MARK_FAILED"
+        recoverable = True
+    elif status in {"QUEUED", "RUNNING"} and process_state == "LIVE_EXPECTED_PROCESS":
+        classification = "LIVE_PROCESS_STALE_HEARTBEAT"
+        action = "OPERATOR_REVIEW"
+    elif status in {"QUEUED", "RUNNING"} and process_state == "PROCESS_IDENTITY_UNVERIFIABLE":
+        classification = "PROCESS_IDENTITY_UNVERIFIABLE"
+        action = "OPERATOR_REVIEW"
+    elif status in {"QUEUED", "RUNNING"}:
+        classification = "STALE_ACTIVE_ROW_REVIEW"
+        action = "OPERATOR_REVIEW"
+
+    return {
+        "schema_version": SCAN_JOB_WATCHDOG_SCHEMA_VERSION,
+        "checked_at": utc_datetime_to_text(now_value),
+        "job_id": str(item.get("job_id") or ""),
+        "status": status,
+        "classification": classification,
+        "action": action,
+        "recoverable": recoverable,
+        "stale": stale,
+        "stale_threshold_minutes": safe_minutes,
+        "active_reference_at": (
+            utc_datetime_to_text(reference)
+            if reference is not None
+            else None
+        ),
+        "active_age_minutes": age_minutes,
+        "process": process,
+    }
+
+
+
+SCAN_JOB_COMPLETION_RECONCILIATION_SCHEMA_VERSION = (
+    "deltaaegis-scan-completion-reconciliation-v1"
+)
+SCAN_JOB_COMPLETION_RECONCILIATION_GRACE_MINUTES = 1
+
+
+def scan_job_recovery_manifest_evidence(
+    job: dict[str, Any] | sqlite3.Row,
+) -> tuple[Path | None, dict[str, Any]]:
+    item = scan_job_to_dict(job)
+    safe_target = validate_private_cidr(item.get("target"))
+    safe_profile = validate_netsniper_scan_profile(
+        item.get("scan_profile")
+    )
+    runs_root = Path(
+        item.get("runs_dir") or DEFAULT_RUNS
+    ).expanduser()
+
+    try:
+        runs_root = runs_root.resolve(strict=True)
+    except OSError:
+        return None, {}
+
+    status_json: dict[str, Any] = {}
+    stdout_path = Path(
+        str(item.get("stdout_log") or "")
+    ).expanduser()
+    expected_stdout_name = (
+        f"{item.get('job_id')}.stdout.log"
+    )
+
+    if (
+        stdout_path.name == expected_stdout_name
+        and stdout_path.is_file()
+    ):
+        status_json = extract_netsniper_status_json(
+            stdout_path.read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+        )
+
+    return_code = status_json.get("return_code")
+    if return_code not in (None, ""):
+        try:
+            if int(return_code) != 0:
+                return None, status_json
+        except (TypeError, ValueError):
+            return None, status_json
+
+    reported_status = str(
+        status_json.get("status") or ""
+    ).strip().lower()
+    if reported_status and reported_status not in {
+        "complete",
+        "completed",
+        "success",
+        "succeeded",
+    }:
+        return None, status_json
+
+    candidates: list[Path] = []
+    raw_manifest = str(
+        status_json.get("manifest_path") or ""
+    ).strip()
+    if raw_manifest:
+        candidates.append(Path(raw_manifest).expanduser())
+
+    raw_run_dir = str(
+        status_json.get("run_dir")
+        or status_json.get("run_directory")
+        or ""
+    ).strip()
+    if raw_run_dir:
+        candidates.append(
+            Path(raw_run_dir).expanduser() / "manifest.json"
+        )
+
+    fallback = find_completed_netsniper_manifest_for_scan(
+        runs_root,
+        safe_target,
+        safe_profile,
+        str(
+            item.get("started_at")
+            or item.get("created_at")
+            or ""
+        ),
+    )
+    if fallback is not None:
+        candidates.append(fallback)
+
+    started = scan_job_parse_datetime(
+        item.get("started_at") or item.get("created_at")
+    )
+    earliest_mtime = (
+        started.timestamp() - 300.0
+        if started is not None
+        else None
+    )
+    seen: set[str] = set()
+
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(runs_root)
+            modified_at = resolved.stat().st_mtime
+        except (OSError, ValueError):
+            continue
+
+        if resolved.name != "manifest.json":
+            continue
+
+        if (
+            earliest_mtime is not None
+            and modified_at < earliest_mtime
+        ):
+            continue
+
+        identity = str(resolved)
+        if identity in seen:
+            continue
+        seen.add(identity)
+
+        manifest = load_json_file(resolved, {})
+        if not isinstance(manifest, dict):
+            continue
+
+        if not netsniper_manifest_matches_scan_job(
+            manifest,
+            safe_target,
+            safe_profile,
+        ):
+            continue
+
+        enriched = enrich_netsniper_status_from_manifest(
+            status_json,
+            resolved,
+        )
+        enriched["completion_reconciliation"] = {
+            "schema_version": (
+                SCAN_JOB_COMPLETION_RECONCILIATION_SCHEMA_VERSION
+            ),
+            "evidence_source": (
+                "persisted_stdout_or_configured_runs_root"
+            ),
+            "manifest_path": str(resolved),
+            "target": safe_target,
+            "scan_profile": safe_profile,
+        }
+        return resolved, enriched
+
+    return None, status_json
+
+
+def scan_job_schedule_recovery_context(
+    connection: sqlite3.Connection,
+    schedule_id: str,
+) -> tuple[dict[str, Any] | None, int]:
+    safe_schedule_id = str(schedule_id or "").strip()
+    if not safe_schedule_id:
+        return None, 1
+
+    row = connection.execute(
+        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
+        (safe_schedule_id,),
+    ).fetchone()
+
+    if row is None:
+        return None, 1
+
+    schedule = scan_schedule_to_dict(row)
+    return schedule, int(schedule.get("cadence_minutes") or 1)
+
+
+def scan_job_reconcile_completed_orphan(
+    connection: sqlite3.Connection,
+    job: dict[str, Any] | sqlite3.Row,
+    evaluation: dict[str, Any],
+    events_path: Path | str = DEFAULT_EVENTS,
+    actor: str = SCAN_JOB_WATCHDOG_ACTOR,
+    trueaegis_execution_mode: str = "asynchronous",
+) -> dict[str, Any] | None:
+    item = scan_job_to_dict(job)
+    process = dict(evaluation.get("process") or {})
+
+    if process.get("state") == "LIVE_EXPECTED_PROCESS":
+        return None
+
+    age_minutes = evaluation.get("active_age_minutes")
+    if age_minutes is None:
+        return None
+
+    if (
+        int(age_minutes)
+        < SCAN_JOB_COMPLETION_RECONCILIATION_GRACE_MINUTES
+    ):
+        return None
+
+    manifest_path, status_json = (
+        scan_job_recovery_manifest_evidence(item)
+    )
+    if manifest_path is None:
+        return None
+
+    auto_ingest_evidence = {
+        "schema_version": "deltaaegis-scan-auto-ingest-evidence-v1",
+        "requested": bool(item.get("auto_ingest")),
+        "attempted": False,
+        "performed": False,
+        "accepted": False,
+        "quality_status": None,
+        "scan_id": str(status_json.get("scan_id") or ""),
+        "manifest_path": str(manifest_path),
+        "network_scope": None,
+        "result": None,
+    }
+    final_status = "COMPLETED"
+    message_parts = [
+        "Recovered completed orphaned NetSniper scan",
+        f"profile={item.get('scan_profile') or 'balanced'}",
+        f"bundle={manifest_path.parent}",
+    ]
+
+    if item.get("auto_ingest"):
+        auto_ingest_evidence["attempted"] = True
+        try:
+            ingest_result = ingest_manifest(
+                connection,
+                manifest_path,
+                Path(events_path).expanduser(),
+            )
+            auto_ingest_evidence = scan_job_auto_ingest_evidence(
+                connection,
+                manifest_path,
+                ingest_result,
+                status_json=status_json,
+            )
+            message_parts.append(
+                f"auto-ingest={ingest_result}"
+            )
+            message_parts.append(
+                "auto-ingest-quality="
+                f"{auto_ingest_evidence.get('quality_status') or 'UNKNOWN'}"
+            )
+        except Exception as exc:
+            connection.rollback()
+            final_status = "FAILED"
+            auto_ingest_evidence.update(
+                {
+                    "attempted": True,
+                    "performed": False,
+                    "accepted": False,
+                    "result": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            message_parts.append(
+                "auto-ingest failed during orphan recovery: "
+                f"{exc}"
+            )
+
+    finished_at = utc_now_text()
+    recovery_evidence = dict(evaluation)
+    recovery_evidence.update(
+        {
+            "schema_version": (
+                SCAN_JOB_COMPLETION_RECONCILIATION_SCHEMA_VERSION
+            ),
+            "actor": str(actor or SCAN_JOB_WATCHDOG_ACTOR),
+            "result": (
+                "RECOVERED_COMPLETED"
+                if final_status == "COMPLETED"
+                else "RECOVERED_IMPORT_FAILED"
+            ),
+            "manifest_path": str(manifest_path),
+            "bundle_path": str(manifest_path.parent),
+        }
+    )
+    status_json = dict(status_json or {})
+    status_json["auto_ingest"] = auto_ingest_evidence
+    status_json["watchdog"] = recovery_evidence
+    schedule, cadence_minutes = (
+        scan_job_schedule_recovery_context(
+            connection,
+            str(item.get("schedule_id") or ""),
+        )
+    )
+
+    connection.execute(
+        "SAVEPOINT scan_job_completed_orphan"
+    )
+
+    try:
+        cursor = connection.execute(
+            '''
+            UPDATE scan_jobs
+            SET
+                status = ?,
+                heartbeat_at = ?,
+                updated_at = ?,
+                finished_at = ?,
+                bundle_path = ?,
+                exit_code = ?,
+                status_json = ?,
+                message = ?
+            WHERE job_id = ?
+              AND status = ?
+              AND process_pid IS ?
+              AND heartbeat_at IS ?
+            ''',
+            (
+                final_status,
+                finished_at,
+                finished_at,
+                finished_at,
+                str(manifest_path.parent),
+                0 if final_status == "COMPLETED" else 1,
+                json.dumps(status_json, sort_keys=True),
+                "; ".join(message_parts),
+                item.get("job_id"),
+                item.get("status"),
+                item.get("process_pid"),
+                item.get("heartbeat_at"),
+            ),
+        )
+
+        if cursor.rowcount != 1:
+            connection.execute(
+                "ROLLBACK TO SAVEPOINT scan_job_completed_orphan"
+            )
+            connection.execute(
+                "RELEASE SAVEPOINT scan_job_completed_orphan"
+            )
+            return None
+
+        recovered_row = connection.execute(
+            "SELECT * FROM scan_jobs WHERE job_id = ?",
+            (item.get("job_id"),),
+        ).fetchone()
+        if recovered_row is None:
+            raise DeltaAegisError(
+                "reconciled scan job disappeared unexpectedly"
+            )
+
+        recovered = scan_job_to_dict(recovered_row)
+        updated_schedule = None
+        schedule_id = str(
+            recovered.get("schedule_id") or ""
+        )
+        if schedule_id:
+            updated_schedule = update_scan_schedule_after_job(
+                connection,
+                schedule_id,
+                cadence_minutes,
+                recovered,
+            )
+
+        connection.execute(
+            "RELEASE SAVEPOINT scan_job_completed_orphan"
+        )
+        connection.commit()
+    except Exception:
+        connection.execute(
+            "ROLLBACK TO SAVEPOINT scan_job_completed_orphan"
+        )
+        connection.execute(
+            "RELEASE SAVEPOINT scan_job_completed_orphan"
+        )
+        raise
+
+    followup = None
+    if final_status == "COMPLETED" and schedule is not None:
+        try:
+            plan = trueaegis_followup_plan_for_schedule(
+                connection,
+                schedule,
+                recovered,
+            )
+            queue = trueaegis_queue_followup_for_schedule(
+                connection,
+                schedule,
+                recovered,
+                plan,
+            )
+            execution = trueaegis_start_queued_followup_for_schedule(
+                connection,
+                queue,
+                execution_mode=trueaegis_execution_mode,
+            )
+            followup = {
+                "plan": plan,
+                "queue": queue,
+                "execution": execution,
+            }
+        except Exception as exc:
+            followup = {
+                "outcome": "ERROR",
+                "message": f"{type(exc).__name__}: {exc}",
+            }
+
+    return {
+        "job": recovered,
+        "schedule": updated_schedule,
+        "trueaegis_followup": followup,
+    }
+
+
+def scan_job_watchdog_recover_dead_jobs(
+    connection: sqlite3.Connection,
+    now: datetime | None = None,
+    stale_minutes: int = SCAN_JOB_WATCHDOG_STALE_MINUTES,
+    proc_root: Path | str | None = None,
+    actor: str = SCAN_JOB_WATCHDOG_ACTOR,
+    events_path: Path | str = DEFAULT_EVENTS,
+    trueaegis_execution_mode: str = "asynchronous",
+) -> dict[str, Any]:
+    # Fail only stale rows whose NetSniper process is dead or PID-reused.
+    now_value = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    safe_minutes = max(1, int(stale_minutes or 1))
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM scan_jobs
+        WHERE status IN ('QUEUED', 'RUNNING')
+        ORDER BY created_at ASC, updated_at ASC
+        """
+    ).fetchall()
+    evaluations = [
+        scan_job_watchdog_evaluation(
+            row,
+            now=now_value,
+            stale_minutes=safe_minutes,
+            proc_root=proc_root,
+        )
+        for row in rows
+    ]
+    recovered_jobs: list[dict[str, Any]] = []
+    completed_recoveries: list[dict[str, Any]] = []
+
+    for evaluation in evaluations:
+        current_row = connection.execute(
+            "SELECT * FROM scan_jobs WHERE job_id = ?",
+            (str(evaluation.get("job_id") or ""),),
+        ).fetchone()
+        if current_row is None:
+            continue
+
+        current_evaluation = scan_job_watchdog_evaluation(
+            current_row,
+            now=now_value,
+            stale_minutes=safe_minutes,
+            proc_root=proc_root,
+        )
+        completion = scan_job_reconcile_completed_orphan(
+            connection,
+            current_row,
+            current_evaluation,
+            events_path=events_path,
+            actor=actor,
+            trueaegis_execution_mode=(
+                trueaegis_execution_mode
+            ),
+        )
+        if completion is not None:
+            completed_recoveries.append(completion)
+            recovered_jobs.append(completion["job"])
+
+    review_jobs = [
+        item
+        for item in evaluations
+        if item.get("action") == "OPERATOR_REVIEW"
+    ]
+
+    connection.execute("SAVEPOINT scan_job_watchdog")
+
+    try:
+        for evaluation in evaluations:
+            if not evaluation.get("recoverable"):
+                continue
+
+            job_id = str(evaluation.get("job_id") or "")
+            current_row = connection.execute(
+                "SELECT * FROM scan_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+
+            if current_row is None:
+                continue
+
+            current = scan_job_to_dict(current_row)
+            current_evaluation = scan_job_watchdog_evaluation(
+                current,
+                now=now_value,
+                stale_minutes=safe_minutes,
+                proc_root=proc_root,
+            )
+
+            if not current_evaluation.get("recoverable"):
+                continue
+
+            status_json = dict(current.get("status_json") or {})
+            evidence = dict(current_evaluation)
+            evidence.update(
+                {
+                    "actor": str(actor or SCAN_JOB_WATCHDOG_ACTOR),
+                    "original_status": current.get("status"),
+                    "original_process_pid": current.get("process_pid"),
+                    "original_heartbeat_at": current.get("heartbeat_at"),
+                    "original_updated_at": current.get("updated_at"),
+                    "original_stdout_log": current.get("stdout_log"),
+                    "original_stderr_log": current.get("stderr_log"),
+                    "original_message": current.get("message"),
+                    "result": "MARKED_FAILED",
+                }
+            )
+            status_json["watchdog"] = evidence
+            classification = str(
+                current_evaluation.get("classification")
+                or "DEAD_SCAN_JOB"
+            )
+            message_prefix = (
+                "Marked failed by operator recovery"
+                if str(actor) == "operator_recovery"
+                else "Marked failed by automatic scan watchdog"
+            )
+            message = (
+                f"{message_prefix}: {classification}; "
+                f"stale heartbeat exceeded {safe_minutes} minutes; "
+                "recorded NetSniper process was absent or did not match "
+                "and was blocking scheduled scans"
+            )
+            finished_at = utc_datetime_to_text(now_value)
+
+            cursor = connection.execute(
+                """
+                UPDATE scan_jobs
+                SET status = 'FAILED',
+                    updated_at = ?,
+                    finished_at = COALESCE(finished_at, ?),
+                    exit_code = COALESCE(exit_code, 130),
+                    status_json = ?,
+                    message = ?
+                WHERE job_id = ?
+                  AND status = ?
+                  AND process_pid IS ?
+                  AND heartbeat_at IS ?
+                """,
+                (
+                    finished_at,
+                    finished_at,
+                    json.dumps(status_json, sort_keys=True),
+                    message,
+                    job_id,
+                    current.get("status"),
+                    current.get("process_pid"),
+                    current.get("heartbeat_at"),
+                ),
+            )
+
+            if cursor.rowcount != 1:
+                continue
+
+            recovered_row = connection.execute(
+                "SELECT * FROM scan_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+
+            if recovered_row is not None:
+                recovered = scan_job_to_dict(recovered_row)
+                schedule_id = str(
+                    recovered.get("schedule_id") or ""
+                )
+                if schedule_id:
+                    _, cadence_minutes = (
+                        scan_job_schedule_recovery_context(
+                            connection,
+                            schedule_id,
+                        )
+                    )
+                    update_scan_schedule_after_job(
+                        connection,
+                        schedule_id,
+                        cadence_minutes,
+                        recovered,
+                    )
+
+                recovered_jobs.append(recovered)
+
+        connection.execute("RELEASE SAVEPOINT scan_job_watchdog")
+        connection.commit()
+    except Exception:
+        connection.execute("ROLLBACK TO SAVEPOINT scan_job_watchdog")
+        connection.execute("RELEASE SAVEPOINT scan_job_watchdog")
+        raise
+
+    return {
+        "schema_version": SCAN_JOB_WATCHDOG_SCHEMA_VERSION,
+        "checked_at": utc_datetime_to_text(now_value),
+        "stale_threshold_minutes": safe_minutes,
+        "checked_count": len(evaluations),
+        "recovered_count": len(recovered_jobs),
+        "completed_recovery_count": len(completed_recoveries),
+        "failed_recovery_count": (
+            len(recovered_jobs) - len(completed_recoveries)
+        ),
+        "review_count": len(review_jobs),
+        "completed_recoveries": completed_recoveries,
+        "recovered_job_ids": [
+            str(job.get("job_id") or "")
+            for job in recovered_jobs
+        ],
+        "review_job_ids": [
+            str(item.get("job_id") or "")
+            for item in review_jobs
+        ],
+        "recovered_jobs": recovered_jobs,
+        "review_jobs": review_jobs,
+        "evaluations": evaluations,
+    }
+
 def mark_stale_active_scan_jobs_failed(
     connection: sqlite3.Connection,
     confirmation: str,
@@ -6815,65 +8099,18 @@ def mark_stale_active_scan_jobs_failed(
 ) -> list[dict[str, Any]]:
     if str(confirmation or "").strip() != STALE_SCAN_JOB_RECOVERY_CONFIRMATION:
         raise DashboardAdminUserActionError(
-            f"type {STALE_SCAN_JOB_RECOVERY_CONFIRMATION!r} to mark stale active scan jobs failed",
+            "type "
+            f"{STALE_SCAN_JOB_RECOVERY_CONFIRMATION!r} "
+            "to mark stale active scan jobs failed",
             status_code=400,
         )
 
-    safe_minutes = normalize_stale_scan_job_minutes(stale_minutes)
-    stale_jobs = query_stale_active_scan_jobs(
+    report = scan_job_watchdog_recover_dead_jobs(
         connection,
-        stale_minutes=safe_minutes,
-        limit=100,
+        stale_minutes=normalize_stale_scan_job_minutes(stale_minutes),
+        actor="operator_recovery",
     )
-
-    if not stale_jobs:
-        return []
-
-    now = utc_now_text()
-    recovered: list[dict[str, Any]] = []
-
-    for job in stale_jobs:
-        job_id = str(job.get("job_id") or "").strip()
-
-        if not job_id:
-            continue
-
-        message = (
-            "Marked failed by operator recovery: stale active scan job exceeded "
-            f"{safe_minutes} minutes and was blocking scheduled scans"
-        )
-
-        connection.execute(
-            """
-            UPDATE scan_jobs
-            SET status = ?,
-                updated_at = ?,
-                finished_at = COALESCE(finished_at, ?),
-                exit_code = COALESCE(exit_code, ?),
-                message = ?
-            WHERE job_id = ?
-              AND status IN ('QUEUED', 'RUNNING')
-            """,
-            (
-                "FAILED",
-                now,
-                now,
-                130,
-                message,
-                job_id,
-            ),
-        )
-
-        row = connection.execute(
-            "SELECT * FROM scan_jobs WHERE job_id = ?",
-            (job_id,),
-        ).fetchone()
-
-        if row is not None:
-            recovered.append(scan_job_to_dict(row))
-
-    return recovered
-
+    return list(report.get("recovered_jobs") or [])
 
 def dashboard_netsniper_stale_scan_recovery_payload(
     connection: sqlite3.Connection,
@@ -7123,6 +8360,15 @@ def run_due_scan_schedules(
 ) -> list[dict[str, Any]]:
     max_runs = max(1, int(max_runs or 1))
     results: list[dict[str, Any]] = []
+
+    # Reconcile dead rows before applying the one-active-scan lock. This path
+    # is shared by the worker, dashboard Run due scans, and the CLI runner.
+    scan_job_watchdog_recover_dead_jobs(
+        connection,
+        actor="schedule_runner",
+        events_path=events_path,
+        trueaegis_execution_mode=trueaegis_execution_mode,
+    )
 
     for row in query_due_scan_schedules(connection, limit=max_runs):
         schedule = scan_schedule_to_dict(row)
@@ -7746,39 +8992,667 @@ def command_events(args: argparse.Namespace) -> int:
 
     return 0
 
-def command_scopes(args: argparse.Namespace) -> int:
-    connection = connect(args.db)
+
+# v0.42 checkpoint 2: logical site CLI management
+def logical_site_member_detail_rows(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> list[dict[str, Any]]:
+    safe_site_id = normalize_logical_site_id(site_id)
+    site = get_logical_site(connection, safe_site_id)
+
+    if site is None:
+        raise DeltaAegisError(
+            f"logical site not found: {safe_site_id}"
+        )
 
     rows = connection.execute(
-        """
+        '''
+        WITH snapshot_summary AS (
+            SELECT
+                network_scope,
+                COUNT(*) AS snapshots,
+                SUM(
+                    CASE
+                        WHEN quality_status = 'ACCEPTED' THEN 1
+                        ELSE 0
+                    END
+                ) AS accepted_snapshots,
+                MAX(created_at) AS latest_scan_at
+            FROM snapshots
+            GROUP BY network_scope
+        )
         SELECT
-            network_scope,
-            COUNT(*) AS snapshots,
-            SUM(CASE WHEN quality_status = 'ACCEPTED' THEN 1 ELSE 0 END) AS accepted_snapshots,
-            MAX(created_at) AS latest_scan_at
-        FROM snapshots
-        GROUP BY network_scope
-        ORDER BY latest_scan_at DESC
-        """
+            m.network_scope,
+            m.created_at AS assigned_at,
+            m.updated_at AS membership_updated_at,
+            COALESCE(s.snapshots, 0) AS snapshots,
+            COALESCE(s.accepted_snapshots, 0) AS accepted_snapshots,
+            s.latest_scan_at
+        FROM logical_site_memberships m
+        LEFT JOIN snapshot_summary s
+            ON s.network_scope = m.network_scope
+        WHERE m.site_id = ?
+        ORDER BY m.network_scope
+        ''',
+        (safe_site_id,),
     ).fetchall()
 
-    if not rows:
-        print("No network scopes found.")
+    return [
+        {
+            "network_scope": str(row["network_scope"]),
+            "assigned_at": row["assigned_at"],
+            "membership_updated_at": row[
+                "membership_updated_at"
+            ],
+            "observed": int(row["snapshots"] or 0) > 0,
+            "snapshots": int(row["snapshots"] or 0),
+            "accepted_snapshots": int(
+                row["accepted_snapshots"] or 0
+            ),
+            "latest_scan_at": row["latest_scan_at"],
+        }
+        for row in rows
+    ]
+
+
+def logical_site_detail_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    site = get_logical_site(connection, site_id)
+
+    if site is None:
+        raise DeltaAegisError(
+            f"logical site not found: "
+            f"{normalize_logical_site_id(site_id)}"
+        )
+
+    members = logical_site_member_detail_rows(
+        connection,
+        site["site_id"],
+    )
+
+    return {
+        "ok": True,
+        "site": site,
+        "members": members,
+        "coverage": {
+            "member_scope_count": len(members),
+            "observed_scope_count": sum(
+                1 for item in members if item["observed"]
+            ),
+            "unobserved_scope_count": sum(
+                1 for item in members if not item["observed"]
+            ),
+            "snapshot_count": sum(
+                int(item["snapshots"]) for item in members
+            ),
+            "accepted_snapshot_count": sum(
+                int(item["accepted_snapshots"])
+                for item in members
+            ),
+        },
+    }
+
+
+def logical_site_list_payload(
+    connection: sqlite3.Connection,
+    include_archived: bool = False,
+) -> dict[str, Any]:
+    sites = list_logical_sites(
+        connection,
+        include_archived=include_archived,
+    )
+
+    return {
+        "ok": True,
+        "include_archived": bool(include_archived),
+        "site_count": len(sites),
+        "sites": sites,
+    }
+
+
+def logical_site_cli_actor(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "username": (
+            str(getattr(args, "actor", "") or "local_admin").strip()
+            or "local_admin"
+        ),
+        "role": "ADMIN",
+    }
+
+
+def logical_site_cli_receipt(
+    action: str,
+    message: str,
+    *,
+    site: dict[str, Any] | None = None,
+    membership: dict[str, Any] | None = None,
+    changed: bool = True,
+) -> dict[str, Any]:
+    receipt: dict[str, Any] = {
+        "ok": True,
+        "action": str(action),
+        "changed": bool(changed),
+        "message": str(message),
+    }
+
+    if site is not None:
+        receipt["site"] = site
+
+    if membership is not None:
+        receipt["membership"] = membership
+
+    return receipt
+
+
+def print_logical_site_json(payload: dict[str, Any]) -> None:
+    print(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+def print_logical_site_detail_human(
+    payload: dict[str, Any],
+) -> None:
+    site = payload["site"]
+    coverage = payload["coverage"]
+    members = payload["members"]
+
+    print("DeltaAegis Logical Site")
+    print("========================")
+    print(f"Site ID:      {site['site_id']}")
+    print(f"Name:         {site['name']}")
+    print(f"Status:       {site['status']}")
+    print(f"Description:  {site['description'] or '-'}")
+    print(f"Created:      {site['created_at']}")
+    print(f"Updated:      {site['updated_at']}")
+    print(f"Archived:     {site['archived_at'] or '-'}")
+    print(
+        "Coverage:     "
+        f"{coverage['observed_scope_count']}/"
+        f"{coverage['member_scope_count']} member scopes observed"
+    )
+    print()
+
+    if not members:
+        print("No network scopes are assigned to this logical site.")
+        return
+
+    print(
+        f"{'Network scope':<20} "
+        f"{'Observed':<9} "
+        f"{'Snapshots':>9} "
+        f"{'Accepted':>8} "
+        f"Latest scan"
+    )
+    print("-" * 86)
+
+    for member in members:
+        print(
+            f"{member['network_scope']:<20} "
+            f"{'yes' if member['observed'] else 'no':<9} "
+            f"{member['snapshots']:>9} "
+            f"{member['accepted_snapshots']:>8} "
+            f"{member['latest_scan_at'] or '-'}"
+        )
+
+
+def command_site_list(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        payload = logical_site_list_payload(
+            connection,
+            include_archived=args.include_archived,
+        )
+
+    if args.json:
+        print_logical_site_json(payload)
+        return 0
+
+    print("DeltaAegis Logical Sites")
+    print("========================")
+    print()
+
+    if not payload["sites"]:
+        print("No logical sites found.")
+        return 0
+
+    for site in payload["sites"]:
+        print(
+            f"{site['site_id']:<22} "
+            f"{site['status']:<8} "
+            f"members={site['member_count']:<3} "
+            f"name={site['name']}"
+        )
+
+    return 0
+
+
+def command_site_show(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        payload = logical_site_detail_payload(
+            connection,
+            args.site_id,
+        )
+
+    if args.json:
+        print_logical_site_json(payload)
+    else:
+        print_logical_site_detail_human(payload)
+
+    return 0
+
+
+def command_site_create(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        site = create_logical_site(
+            connection,
+            args.name,
+            args.description,
+        )
+        receipt = logical_site_cli_receipt(
+            "logical_site.create",
+            f"Created logical site {site['name']}.",
+            site=site,
+        )
+        record_access_audit_event(
+            connection,
+            action="LOGICAL_SITE_CREATE",
+            actor=logical_site_cli_actor(args),
+            target_type="logical_site",
+            target_key=site["site_id"],
+            details={
+                "name": site["name"],
+                "description": site["description"],
+                "status": site["status"],
+            },
+        )
+
+    if args.json:
+        print_logical_site_json(receipt)
+    else:
+        print(receipt["message"])
+        print(f"Site ID: {site['site_id']}")
+        print(f"Status:  {site['status']}")
+
+    return 0
+
+
+def command_site_rename(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        previous = get_logical_site(connection, args.site_id)
+
+        if previous is None:
+            raise DeltaAegisError(
+                f"logical site not found: "
+                f"{normalize_logical_site_id(args.site_id)}"
+            )
+
+        site = rename_logical_site(
+            connection,
+            args.site_id,
+            args.name,
+        )
+        changed = previous["name"] != site["name"]
+        receipt = logical_site_cli_receipt(
+            "logical_site.rename",
+            (
+                f"Renamed logical site to {site['name']}."
+                if changed
+                else f"Logical site already has name {site['name']}."
+            ),
+            site=site,
+            changed=changed,
+        )
+
+        if changed:
+            record_access_audit_event(
+                connection,
+                action="LOGICAL_SITE_RENAME",
+                actor=logical_site_cli_actor(args),
+                target_type="logical_site",
+                target_key=site["site_id"],
+                details={
+                    "previous_name": previous["name"],
+                    "current_name": site["name"],
+                },
+            )
+
+    if args.json:
+        print_logical_site_json(receipt)
+    else:
+        print(receipt["message"])
+        print(f"Site ID: {site['site_id']}")
+
+    return 0
+
+
+def command_site_description(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        previous = get_logical_site(connection, args.site_id)
+
+        if previous is None:
+            raise DeltaAegisError(
+                f"logical site not found: "
+                f"{normalize_logical_site_id(args.site_id)}"
+            )
+
+        site = update_logical_site_description(
+            connection,
+            args.site_id,
+            args.description,
+        )
+        changed = previous["description"] != site["description"]
+        receipt = logical_site_cli_receipt(
+            "logical_site.description.update",
+            (
+                f"Updated description for logical site "
+                f"{site['name']}."
+                if changed
+                else f"Logical site description is unchanged."
+            ),
+            site=site,
+            changed=changed,
+        )
+
+        if changed:
+            record_access_audit_event(
+                connection,
+                action="LOGICAL_SITE_DESCRIPTION_UPDATE",
+                actor=logical_site_cli_actor(args),
+                target_type="logical_site",
+                target_key=site["site_id"],
+                details={
+                    "previous_description": previous["description"],
+                    "current_description": site["description"],
+                },
+            )
+
+    if args.json:
+        print_logical_site_json(receipt)
+    else:
+        print(receipt["message"])
+        print(f"Site ID: {site['site_id']}")
+
+    return 0
+
+
+def command_site_archive(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        previous = get_logical_site(connection, args.site_id)
+
+        if previous is None:
+            raise DeltaAegisError(
+                f"logical site not found: "
+                f"{normalize_logical_site_id(args.site_id)}"
+            )
+
+        site = archive_logical_site(
+            connection,
+            args.site_id,
+        )
+        changed = previous["status"] != site["status"]
+        receipt = logical_site_cli_receipt(
+            "logical_site.archive",
+            (
+                f"Archived logical site {site['name']}."
+                if changed
+                else f"Logical site {site['name']} is already archived."
+            ),
+            site=site,
+            changed=changed,
+        )
+
+        if changed:
+            record_access_audit_event(
+                connection,
+                action="LOGICAL_SITE_ARCHIVE",
+                actor=logical_site_cli_actor(args),
+                target_type="logical_site",
+                target_key=site["site_id"],
+                details={
+                    "previous_status": previous["status"],
+                    "current_status": site["status"],
+                    "member_count": site["member_count"],
+                },
+            )
+
+    if args.json:
+        print_logical_site_json(receipt)
+    else:
+        print(receipt["message"])
+        print(f"Site ID: {site['site_id']}")
+        print(f"Members retained: {site['member_count']}")
+
+    return 0
+
+
+def command_site_assign_scope(args: argparse.Namespace) -> int:
+    safe_scope = validate_private_cidr(args.network_scope)
+
+    with connect(args.db) as connection:
+        membership = assign_network_scope_to_logical_site(
+            connection,
+            args.site_id,
+            safe_scope,
+        )
+        site = get_logical_site(connection, args.site_id)
+
+        if site is None:
+            raise DeltaAegisError(
+                f"logical site not found after assignment: "
+                f"{normalize_logical_site_id(args.site_id)}"
+            )
+
+        observed_row = connection.execute(
+            '''
+            SELECT COUNT(*) AS count
+            FROM snapshots
+            WHERE network_scope = ?
+            ''',
+            (safe_scope,),
+        ).fetchone()
+        observed = int(observed_row["count"] or 0) > 0
+        membership = dict(membership)
+        membership["observed"] = observed
+
+        receipt = logical_site_cli_receipt(
+            "logical_site.scope.assign",
+            (
+                f"Assigned network scope {safe_scope} to "
+                f"logical site {site['name']}."
+            ),
+            site=site,
+            membership=membership,
+        )
+        record_access_audit_event(
+            connection,
+            action="LOGICAL_SITE_SCOPE_ASSIGN",
+            actor=logical_site_cli_actor(args),
+            target_type="logical_site",
+            target_key=site["site_id"],
+            details={
+                "network_scope": safe_scope,
+                "observed": observed,
+            },
+        )
+
+    if args.json:
+        print_logical_site_json(receipt)
+    else:
+        print(receipt["message"])
+        print(f"Observed in snapshots: {'yes' if observed else 'no'}")
+
+    return 0
+
+
+def command_site_remove_scope(args: argparse.Namespace) -> int:
+    safe_scope = validate_private_cidr(args.network_scope)
+
+    with connect(args.db) as connection:
+        site = get_logical_site(connection, args.site_id)
+
+        if site is None:
+            raise DeltaAegisError(
+                f"logical site not found: "
+                f"{normalize_logical_site_id(args.site_id)}"
+            )
+
+        membership = remove_network_scope_from_logical_site(
+            connection,
+            args.site_id,
+            safe_scope,
+        )
+        receipt = logical_site_cli_receipt(
+            "logical_site.scope.remove",
+            (
+                f"Removed network scope {safe_scope} from "
+                f"logical site {site['name']}."
+            ),
+            site=get_logical_site(connection, args.site_id),
+            membership=membership,
+        )
+        record_access_audit_event(
+            connection,
+            action="LOGICAL_SITE_SCOPE_REMOVE",
+            actor=logical_site_cli_actor(args),
+            target_type="logical_site",
+            target_key=site["site_id"],
+            details={"network_scope": safe_scope},
+        )
+
+    if args.json:
+        print_logical_site_json(receipt)
+    else:
+        print(receipt["message"])
+
+    return 0
+
+
+def query_network_scope_catalog(
+    connection: sqlite3.Connection,
+    *,
+    unassigned_only: bool = False,
+) -> list[dict[str, Any]]:
+    where = "WHERE m.site_id IS NULL" if unassigned_only else ""
+
+    rows = connection.execute(
+        f'''
+        WITH all_scopes AS (
+            SELECT network_scope
+            FROM snapshots
+            WHERE network_scope IS NOT NULL
+              AND network_scope != ''
+            UNION
+            SELECT network_scope
+            FROM logical_site_memberships
+        ),
+        snapshot_summary AS (
+            SELECT
+                network_scope,
+                COUNT(*) AS snapshots,
+                SUM(
+                    CASE
+                        WHEN quality_status = 'ACCEPTED' THEN 1
+                        ELSE 0
+                    END
+                ) AS accepted_snapshots,
+                MAX(created_at) AS latest_scan_at
+            FROM snapshots
+            GROUP BY network_scope
+        )
+        SELECT
+            a.network_scope,
+            COALESCE(s.snapshots, 0) AS snapshots,
+            COALESCE(s.accepted_snapshots, 0) AS accepted_snapshots,
+            s.latest_scan_at,
+            m.site_id,
+            ls.name AS site_name,
+            ls.status AS site_status
+        FROM all_scopes a
+        LEFT JOIN snapshot_summary s
+            ON s.network_scope = a.network_scope
+        LEFT JOIN logical_site_memberships m
+            ON m.network_scope = a.network_scope
+        LEFT JOIN logical_sites ls
+            ON ls.site_id = m.site_id
+        {where}
+        ORDER BY
+            CASE WHEN s.latest_scan_at IS NULL THEN 1 ELSE 0 END,
+            s.latest_scan_at DESC,
+            a.network_scope
+        '''
+    ).fetchall()
+
+    return [
+        {
+            "network_scope": str(row["network_scope"]),
+            "snapshots": int(row["snapshots"] or 0),
+            "accepted_snapshots": int(
+                row["accepted_snapshots"] or 0
+            ),
+            "latest_scan_at": row["latest_scan_at"],
+            "site_id": row["site_id"],
+            "site_name": row["site_name"],
+            "site_status": row["site_status"],
+            "assigned": bool(row["site_id"]),
+        }
+        for row in rows
+    ]
+
+
+def command_scopes(args: argparse.Namespace) -> int:
+    with connect(args.db) as connection:
+        scopes = query_network_scope_catalog(
+            connection,
+            unassigned_only=bool(args.unassigned),
+        )
+
+    payload = {
+        "ok": True,
+        "unassigned_only": bool(args.unassigned),
+        "scope_count": len(scopes),
+        "scopes": scopes,
+    }
+
+    if args.json:
+        print_logical_site_json(payload)
+        return 0
+
+    if not scopes:
+        if args.unassigned:
+            print("No unassigned network scopes found.")
+        else:
+            print("No network scopes found.")
         return 0
 
     print("DeltaAegis Network Scopes")
     print("=========================")
     print()
 
-    for row in rows:
+    for row in scopes:
+        site_text = (
+            f"{row['site_name']} ({row['site_id']})"
+            if row["site_id"]
+            else "unassigned"
+        )
         print(
             f"{row['network_scope']:<18} "
             f"snapshots={row['snapshots']} "
             f"accepted={row['accepted_snapshots']} "
-            f"latest={row['latest_scan_at']}"
+            f"latest={row['latest_scan_at'] or '-'} "
+            f"site={site_text}"
         )
 
     return 0
+
+
 
 
 def command_snapshots(args: argparse.Namespace) -> int:
@@ -12944,6 +14818,1887 @@ def dashboard_telemetry_cleanup_clear_all_payload(
         result
     )
     return result
+
+
+# v0.42 checkpoint 3: logical site dashboard foundation
+# v0.42 checkpoint 4: logical site core SIEM aggregation
+def dashboard_site_aggregation_context(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    detail = logical_site_detail_payload(connection, site_id)
+    site = detail["site"]
+    scopes = [
+        str(item["network_scope"])
+        for item in detail["members"]
+    ]
+
+    return {
+        "site": site,
+        "site_id": str(site["site_id"]),
+        "site_name": str(site["name"]),
+        "member_scopes": scopes,
+        "coverage": detail["coverage"],
+        "members": detail["members"],
+    }
+
+
+def dashboard_site_aggregation_metadata(
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    coverage = context["coverage"]
+
+    return {
+        "site_aggregate": True,
+        "selected_scope": None,
+        "selected_site_id": context["site_id"],
+        "selected_site": {
+            "site_id": context["site_id"],
+            "name": context["site_name"],
+            "status": context["site"].get("status"),
+            "description": context["site"].get("description"),
+        },
+        "member_scopes": list(context["member_scopes"]),
+        "member_scope_count": int(
+            coverage.get("member_scope_count") or 0
+        ),
+        "observed_scope_count": int(
+            coverage.get("observed_scope_count") or 0
+        ),
+        "unobserved_scope_count": int(
+            coverage.get("unobserved_scope_count") or 0
+        ),
+    }
+
+
+def dashboard_site_tag_rows(
+    rows: Iterable[dict[str, Any]],
+    scope: str,
+    context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    tagged: list[dict[str, Any]] = []
+
+    for source in rows or []:
+        row = dict(source)
+        row_scope = str(
+            row.get("network_scope") or scope
+        )
+        row["network_scope"] = row_scope
+        row["site_id"] = context["site_id"]
+        row["site_name"] = context["site_name"]
+
+        identity = (
+            row.get("asset_key")
+            or row.get("subject_key")
+            or row.get("mac_identity")
+            or row.get("alert_id")
+            or row.get("event_id")
+            or row.get("job_id")
+            or row.get("annotation_id")
+            or "-"
+        )
+        row["site_scope_key"] = (
+            f"{row_scope}|{identity}"
+        )
+        tagged.append(row)
+
+    return tagged
+
+
+def dashboard_site_merge_count_rows(
+    row_groups: Iterable[Iterable[dict[str, Any]]],
+    label_key: str,
+) -> list[dict[str, Any]]:
+    totals: dict[str, int] = {}
+
+    for rows in row_groups:
+        for row in rows or []:
+            label = str(row.get(label_key) or "UNKNOWN")
+            totals[label] = totals.get(label, 0) + int(
+                row.get("count") or 0
+            )
+
+    return [
+        {label_key: label, "count": count}
+        for label, count in sorted(
+            totals.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    ]
+
+
+def dashboard_site_merge_classification_summaries(
+    summaries: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    items = [
+        dict(item)
+        for item in summaries
+        if isinstance(item, dict)
+    ]
+
+    if not items:
+        return {
+            "available": False,
+            "site_aggregate": True,
+        }
+
+    result: dict[str, Any] = {
+        "available": any(
+            bool(item.get("available", True))
+            for item in items
+        ),
+        "site_aggregate": True,
+    }
+    count_tokens = (
+        "count",
+        "total",
+        "host",
+        "asset",
+        "classified",
+        "possible",
+        "unknown",
+        "review",
+        "contradiction",
+        "confidence_candidate",
+    )
+
+    all_keys = {
+        key
+        for item in items
+        for key in item
+    }
+
+    for key in sorted(all_keys):
+        values = [
+            item.get(key)
+            for item in items
+            if item.get(key) is not None
+        ]
+
+        if not values or key in {
+            "available",
+            "site_aggregate",
+            "selected_scope",
+            "scope",
+        }:
+            continue
+
+        if all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            for value in values
+        ) and any(token in key.lower() for token in count_tokens):
+            result[key] = sum(values)
+            continue
+
+        if all(isinstance(value, dict) for value in values):
+            merged: dict[str, int] = {}
+            numeric = True
+
+            for value in values:
+                for subkey, subvalue in value.items():
+                    if (
+                        not isinstance(subvalue, (int, float))
+                        or isinstance(subvalue, bool)
+                    ):
+                        numeric = False
+                        break
+                    merged[str(subkey)] = (
+                        merged.get(str(subkey), 0)
+                        + int(subvalue)
+                    )
+
+                if not numeric:
+                    break
+
+            if numeric:
+                result[key] = merged
+            continue
+
+        if all(isinstance(value, list) for value in values):
+            flattened = [
+                dict(row)
+                for value in values
+                for row in value
+                if isinstance(row, dict)
+            ]
+
+            if flattened and all(
+                "count" in row for row in flattened
+            ):
+                possible_labels = (
+                    "type",
+                    "device_type",
+                    "decision",
+                    "band",
+                    "label",
+                    "name",
+                    "status",
+                )
+                label_key = next(
+                    (
+                        candidate
+                        for candidate in possible_labels
+                        if all(
+                            candidate in row
+                            for row in flattened
+                        )
+                    ),
+                    None,
+                )
+
+                if label_key:
+                    result[key] = dashboard_site_merge_count_rows(
+                        [flattened],
+                        label_key,
+                    )
+
+    return result
+
+
+def dashboard_site_summary_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    per_scope = [
+        (
+            scope,
+            dashboard_summary_payload(
+                connection,
+                scope=scope,
+            ),
+        )
+        for scope in context["member_scopes"]
+    ]
+    risk_rows: list[dict[str, Any]] = []
+
+    for scope, payload in per_scope:
+        risk_rows.extend(
+            dashboard_site_tag_rows(
+                payload.get("top_risks") or [],
+                scope,
+                context,
+            )
+        )
+
+    risk_rows.sort(
+        key=lambda row: (
+            -float(row.get("score") or 0),
+            str(row.get("network_scope") or ""),
+            str(row.get("subject_key") or ""),
+        )
+    )
+
+    result = {
+        **dashboard_site_aggregation_metadata(context),
+        "snapshots": sum(
+            int(payload.get("snapshots") or 0)
+            for _, payload in per_scope
+        ),
+        "events": sum(
+            int(payload.get("events") or 0)
+            for _, payload in per_scope
+        ),
+        "alerts": sum(
+            int(payload.get("alerts") or 0)
+            for _, payload in per_scope
+        ),
+        "open_alerts": sum(
+            int(payload.get("open_alerts") or 0)
+            for _, payload in per_scope
+        ),
+        "asset_annotations": sum(
+            int(payload.get("asset_annotations") or 0)
+            for _, payload in per_scope
+        ),
+        "alert_status_counts": (
+            dashboard_site_merge_count_rows(
+                [
+                    payload.get("alert_status_counts") or []
+                    for _, payload in per_scope
+                ],
+                "status",
+            )
+        ),
+        "event_severity_counts": (
+            dashboard_site_merge_count_rows(
+                [
+                    payload.get("event_severity_counts") or []
+                    for _, payload in per_scope
+                ],
+                "severity",
+            )
+        ),
+        "classification_summary": (
+            dashboard_site_merge_classification_summaries(
+                [
+                    payload.get("classification_summary") or {}
+                    for _, payload in per_scope
+                ]
+            )
+        ),
+        "netsniper_intelligence_summary": {},
+        "top_risks": risk_rows[:5],
+        "per_scope": {
+            scope: payload
+            for scope, payload in per_scope
+        },
+    }
+
+    return result
+
+
+def dashboard_site_current_state_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    states = []
+
+    for scope in context["member_scopes"]:
+        state = dashboard_current_state_payload(
+            connection,
+            scope=scope,
+        )
+        state = dict(state)
+        state["network_scope"] = scope
+        states.append(state)
+
+    available = [
+        state
+        for state in states
+        if state.get("available")
+    ]
+
+    if not available:
+        return {
+            **dashboard_site_aggregation_metadata(context),
+            "available": False,
+            "message": (
+                "No accepted snapshot is available for any "
+                "member subnet scope in this logical site."
+            ),
+            "member_states": states,
+        }
+
+    numeric_fields = (
+        "hosts_up",
+        "hosts_total",
+        "mac_backed_assets",
+        "assets",
+        "intelligence_hosts",
+        "service_observed_assets",
+        "discovery_only_or_no_open_service_assets",
+        "summary_host_count",
+        "classified",
+        "possible_or_review",
+        "unknown",
+        "contradiction_hosts",
+        "false_confidence_candidates",
+        "unknown_with_exposed_services",
+    )
+    totals = {
+        field: sum(
+            int(state.get(field) or 0)
+            for state in available
+        )
+        for field in numeric_fields
+    }
+    weights = [
+        max(
+            int(state.get("hosts_total") or 0),
+            int(state.get("assets") or 0),
+            1,
+        )
+        for state in available
+    ]
+    identity_coverage = (
+        sum(
+            float(state.get("identity_coverage") or 0.0)
+            * weight
+            for state, weight in zip(available, weights)
+        )
+        / sum(weights)
+    )
+    newest = max(
+        available,
+        key=lambda state: (
+            str(state.get("imported_at") or ""),
+            str(state.get("created_at") or ""),
+            str(state.get("scan_id") or ""),
+        ),
+    )
+    scanner_versions = {
+        str(state.get("scanner_version") or "")
+        for state in available
+        if state.get("scanner_version")
+    }
+    scan_profiles = {
+        str(state.get("scan_profile") or "")
+        for state in available
+        if state.get("scan_profile")
+    }
+
+    return {
+        **dashboard_site_aggregation_metadata(context),
+        "available": True,
+        "scan_id": f"site:{context['site_id']}:latest-per-scope",
+        "target": context["site_name"],
+        "network_scope": f"site:{context['site_id']}",
+        "created_at": max(
+            str(state.get("created_at") or "")
+            for state in available
+        ),
+        "imported_at": max(
+            str(state.get("imported_at") or "")
+            for state in available
+        ),
+        "scanner_version": (
+            next(iter(scanner_versions))
+            if len(scanner_versions) == 1
+            else "mixed"
+        ),
+        "scan_profile": (
+            next(iter(scan_profiles))
+            if len(scan_profiles) == 1
+            else "mixed"
+        ),
+        "quality_status": "ACCEPTED",
+        "identity_coverage": identity_coverage,
+        **totals,
+        "snapshot": newest.get("snapshot"),
+        "member_states": states,
+        "message": (
+            f"Aggregated latest accepted state from "
+            f"{len(available)} of "
+            f"{len(context['member_scopes'])} member subnet scopes."
+        ),
+    }
+
+
+def dashboard_site_scan_context_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    member_contexts = []
+    delta_pairs: list[dict[str, Any]] = []
+
+    for scope in context["member_scopes"]:
+        payload = dashboard_scan_context_payload(
+            connection,
+            scope=scope,
+        )
+        payload = dict(payload)
+        payload["network_scope"] = scope
+        member_contexts.append(payload)
+        delta_pairs.extend(
+            dashboard_site_tag_rows(
+                payload.get("delta_scan_pairs") or [],
+                scope,
+                context,
+            )
+        )
+
+    candidates = [
+        payload
+        for payload in member_contexts
+        if payload.get("latest_scan")
+    ]
+    selected = (
+        max(
+            candidates,
+            key=lambda payload: (
+                str(
+                    payload["latest_scan"].get(
+                        "imported_at"
+                    )
+                    or ""
+                ),
+                str(
+                    payload["latest_scan"].get(
+                        "created_at"
+                    )
+                    or ""
+                ),
+                str(
+                    payload["latest_scan"].get(
+                        "scan_id"
+                    )
+                    or ""
+                ),
+            ),
+        )
+        if candidates
+        else {}
+    )
+    delta_pairs.sort(
+        key=lambda row: (
+            str(row.get("created_at") or ""),
+            str(row.get("scan_id") or ""),
+        ),
+        reverse=True,
+    )
+
+    return {
+        **dashboard_site_aggregation_metadata(context),
+        "latest_scan": selected.get("latest_scan"),
+        "baseline_scan": selected.get("baseline_scan"),
+        "delta_scan_pairs": delta_pairs[:10],
+        "member_contexts": member_contexts,
+    }
+
+
+def dashboard_site_assets_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+    state: str | None = None,
+    identity: str | None = None,
+) -> list[dict[str, Any]]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    requested_limit = max(1, int(limit or 25))
+    rows: list[dict[str, Any]] = []
+
+    for scope in context["member_scopes"]:
+        rows.extend(
+            dashboard_site_tag_rows(
+                dashboard_assets_payload(
+                    connection,
+                    requested_limit,
+                    scope=scope,
+                    state=state,
+                    identity=identity,
+                ),
+                scope,
+                context,
+            )
+        )
+
+    rows.sort(
+        key=lambda row: (
+            str(row.get("state") or ""),
+            str(row.get("network_scope") or ""),
+            str(row.get("current_ip") or ""),
+            str(row.get("asset_key") or ""),
+        )
+    )
+    return rows[:requested_limit]
+
+
+def dashboard_site_merge_list_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+    loader,
+    *,
+    sort_key,
+    reverse: bool = False,
+    loader_kwargs: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    requested_limit = max(1, int(limit or 20))
+    rows: list[dict[str, Any]] = []
+    loader_kwargs = dict(loader_kwargs or {})
+
+    for scope in context["member_scopes"]:
+        rows.extend(
+            dashboard_site_tag_rows(
+                loader(
+                    connection,
+                    requested_limit,
+                    scope=scope,
+                    **loader_kwargs,
+                ),
+                scope,
+                context,
+            )
+        )
+
+    rows.sort(key=sort_key, reverse=reverse)
+    return rows[:requested_limit]
+
+
+def dashboard_site_events_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+) -> list[dict[str, Any]]:
+    return dashboard_site_merge_list_payload(
+        connection,
+        site_id,
+        limit,
+        dashboard_events_payload,
+        sort_key=lambda row: (
+            int(row.get("event_id") or 0),
+            str(row.get("created_at") or ""),
+        ),
+        reverse=True,
+    )
+
+
+def dashboard_site_alerts_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+) -> list[dict[str, Any]]:
+    return dashboard_site_merge_list_payload(
+        connection,
+        site_id,
+        limit,
+        dashboard_alerts_payload,
+        sort_key=lambda row: (
+            int(row.get("alert_id") or 0),
+            str(row.get("last_seen_at") or ""),
+        ),
+        reverse=True,
+    )
+
+
+def dashboard_site_annotations_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+) -> list[dict[str, Any]]:
+    return dashboard_site_merge_list_payload(
+        connection,
+        site_id,
+        limit,
+        dashboard_annotations_payload,
+        sort_key=lambda row: (
+            str(row.get("updated_at") or ""),
+            str(row.get("network_scope") or ""),
+            str(row.get("asset_key") or ""),
+        ),
+        reverse=True,
+    )
+
+
+def dashboard_site_scan_jobs_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    return dashboard_site_merge_list_payload(
+        connection,
+        site_id,
+        limit,
+        dashboard_scan_jobs_payload,
+        sort_key=lambda row: (
+            str(row.get("created_at") or ""),
+            str(row.get("updated_at") or ""),
+            str(row.get("job_id") or ""),
+        ),
+        reverse=True,
+        loader_kwargs={"status": status},
+    )
+
+
+def dashboard_site_trueaegis_jobs_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    return dashboard_site_merge_list_payload(
+        connection,
+        site_id,
+        limit,
+        dashboard_trueaegis_jobs_payload,
+        sort_key=lambda row: (
+            str(row.get("created_at") or ""),
+            str(row.get("updated_at") or ""),
+            str(row.get("job_id") or ""),
+        ),
+        reverse=True,
+        loader_kwargs={"status": status},
+    )
+
+
+def dashboard_site_port_behavior_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+    lookback: int = 5,
+) -> list[dict[str, Any]]:
+    return dashboard_site_merge_list_payload(
+        connection,
+        site_id,
+        limit,
+        dashboard_port_behavior_payload,
+        sort_key=lambda row: (
+            int(row.get("transition_count") or 0),
+            int(row.get("seen_count") or 0),
+            str(row.get("network_scope") or ""),
+            str(row.get("asset_key") or ""),
+        ),
+        reverse=True,
+        loader_kwargs={"lookback": lookback},
+    )
+
+
+def dashboard_site_current_risk_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+) -> list[dict[str, Any]]:
+    return dashboard_site_merge_list_payload(
+        connection,
+        site_id,
+        limit,
+        dashboard_current_risk_payload,
+        sort_key=lambda row: (
+            float(row.get("score") or 0),
+            str(row.get("network_scope") or ""),
+            str(row.get("subject_key") or ""),
+        ),
+        reverse=True,
+    )
+
+
+def dashboard_site_risk_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int,
+) -> list[dict[str, Any]]:
+    return dashboard_site_merge_list_payload(
+        connection,
+        site_id,
+        limit,
+        dashboard_risk_payload,
+        sort_key=lambda row: (
+            float(row.get("score") or 0),
+            str(row.get("network_scope") or ""),
+            str(row.get("subject_key") or ""),
+        ),
+        reverse=True,
+    )
+
+
+def dashboard_site_investigation_center_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int = 25,
+    ticket_status: str | None = None,
+    ticket_signal: str | None = None,
+    triage_bucket: str | None = None,
+    triage_urgency: str | None = None,
+) -> dict[str, Any]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    requested_limit = max(1, int(limit or 25))
+    query_limit = max(requested_limit * 4, 50)
+    rows: list[dict[str, Any]] = []
+    per_scope = []
+
+    for scope in context["member_scopes"]:
+        payload = dashboard_investigation_center_payload(
+            connection,
+            limit=query_limit,
+            scope=scope,
+            ticket_status=ticket_status,
+            ticket_signal=ticket_signal,
+            triage_bucket=triage_bucket,
+            triage_urgency=triage_urgency,
+        )
+        per_scope.append(
+            {"network_scope": scope, "payload": payload}
+        )
+        rows.extend(
+            dashboard_site_tag_rows(
+                payload.get("items") or [],
+                scope,
+                context,
+            )
+        )
+
+    rows = sorted(
+        rows,
+        key=operator_triage_queue_sort_key,
+    )
+    total_item_count = len(rows)
+    visible = rows[:requested_limit]
+    filters = (
+        per_scope[0]["payload"].get("filters")
+        if per_scope
+        else investigation_center_filter_payload(
+            ticket_status=ticket_status,
+            ticket_signal=ticket_signal,
+            triage_bucket=triage_bucket,
+            triage_urgency=triage_urgency,
+        )
+    )
+
+    return {
+        **dashboard_site_aggregation_metadata(context),
+        "available": True,
+        "filters": filters,
+        "item_count": len(visible),
+        "total_item_count": total_item_count,
+        "summary": investigation_center_summary(visible),
+        "workflow_summary": (
+            investigation_center_workflow_summary(rows)
+        ),
+        "signal_summary": (
+            investigation_center_signal_summary(rows)
+        ),
+        "triage_summary": operator_triage_summary(visible),
+        "view_workflow_summary": (
+            investigation_center_workflow_summary(visible)
+        ),
+        "view_signal_summary": (
+            investigation_center_signal_summary(visible)
+        ),
+        "items": visible,
+        "per_scope": per_scope,
+    }
+
+
+def dashboard_site_asset_detail_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    identifier: str,
+    limit: int = 20,
+) -> dict[str, Any]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    matches = []
+
+    for scope in context["member_scopes"]:
+        payload = dashboard_asset_detail_payload(
+            connection,
+            identifier,
+            scope=scope,
+            limit=limit,
+        )
+
+        if payload.get("found"):
+            payload = dict(payload)
+            payload.update(
+                dashboard_site_aggregation_metadata(context)
+            )
+            matches.append(payload)
+
+    if not matches:
+        return {
+            **dashboard_site_aggregation_metadata(context),
+            "found": False,
+            "identifier": identifier,
+            "message": (
+                "No asset matched the requested identifier "
+                "inside this logical site."
+            ),
+        }
+
+    if len(matches) > 1:
+        return {
+            **dashboard_site_aggregation_metadata(context),
+            "found": False,
+            "ambiguous": True,
+            "identifier": identifier,
+            "message": (
+                "Multiple member subnets matched this asset. "
+                "Select a subnet scope before opening detail."
+            ),
+            "matches": [
+                {
+                    "network_scope": match["asset"].get(
+                        "network_scope"
+                    ),
+                    "asset_key": match["asset"].get("asset_key"),
+                    "current_ip": match["asset"].get("current_ip"),
+                }
+                for match in matches
+            ],
+        }
+
+    return matches[0]
+
+
+def dashboard_site_ticket_evidence_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    subject_key: str,
+    limit: int = 10,
+) -> dict[str, Any]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    matches = []
+
+    for scope in context["member_scopes"]:
+        payload = dashboard_ticket_evidence_payload(
+            connection,
+            subject_key=subject_key,
+            scope=scope,
+            limit=limit,
+        )
+
+        if payload.get("available"):
+            payload = dict(payload)
+            payload.update(
+                dashboard_site_aggregation_metadata(context)
+            )
+            matches.append(payload)
+
+    if not matches:
+        return {
+            **dashboard_site_aggregation_metadata(context),
+            "available": False,
+            "subject_key": subject_key,
+            "message": (
+                "No ticket evidence matched this logical site."
+            ),
+        }
+
+    if len(matches) > 1:
+        return {
+            **dashboard_site_aggregation_metadata(context),
+            "available": False,
+            "ambiguous": True,
+            "subject_key": subject_key,
+            "message": (
+                "Ticket evidence exists in multiple member "
+                "subnets. Select a subnet for scoped evidence."
+            ),
+            "matches": [
+                match.get("selected_scope")
+                or match.get("scope")
+                for match in matches
+            ],
+        }
+
+    return matches[0]
+
+
+def dashboard_site_latest_network_changes_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+    limit: int = 20,
+) -> dict[str, Any]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    requested_limit = max(1, min(int(limit or 20), 100))
+    member_results = []
+    events: list[dict[str, Any]] = []
+
+    for scope in context["member_scopes"]:
+        payload = dashboard_latest_network_changes_payload(
+            connection,
+            limit=requested_limit,
+            scope=scope,
+        )
+        member_results.append(
+            {"network_scope": scope, "payload": payload}
+        )
+        events.extend(
+            dashboard_site_tag_rows(
+                payload.get("events") or [],
+                scope,
+                context,
+            )
+        )
+
+    events.sort(
+        key=lambda row: (
+            str(row.get("created_at") or ""),
+            int(row.get("event_id") or 0),
+        ),
+        reverse=True,
+    )
+    event_type_counts = dashboard_site_merge_count_rows(
+        [
+            item["payload"].get("summary", {}).get(
+                "event_type_counts"
+            )
+            or []
+            for item in member_results
+        ],
+        "event_type",
+    )
+    severity_counts = dashboard_site_merge_count_rows(
+        [
+            item["payload"].get("summary", {}).get(
+                "severity_counts"
+            )
+            or []
+            for item in member_results
+        ],
+        "severity",
+    )
+    snapshots = [
+        item["payload"].get("latest_snapshot")
+        for item in member_results
+        if item["payload"].get("latest_snapshot")
+    ]
+    latest_snapshot = (
+        max(
+            snapshots,
+            key=lambda snapshot: (
+                str(snapshot.get("imported_at") or ""),
+                str(snapshot.get("created_at") or ""),
+                str(snapshot.get("scan_id") or ""),
+            ),
+        )
+        if snapshots
+        else None
+    )
+    total_changes = sum(
+        int(row.get("count") or 0)
+        for row in event_type_counts
+    )
+
+    return {
+        **dashboard_site_aggregation_metadata(context),
+        "ok": True,
+        "generated_at": utc_now_text(),
+        "scope": "",
+        "has_latest_accepted_scan": bool(snapshots),
+        "has_changes": bool(total_changes),
+        "message": (
+            f"Latest accepted member scans produced "
+            f"{total_changes} delta event(s) across this site."
+        ),
+        "latest_snapshot": latest_snapshot,
+        "summary": {
+            "total_changes": total_changes,
+            "event_type_counts": event_type_counts,
+            "severity_counts": severity_counts,
+        },
+        "events": events[:requested_limit],
+        "member_results": member_results,
+    }
+
+
+def dashboard_site_scan_freshness_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+    members = []
+
+    for scope in context["member_scopes"]:
+        payload = dashboard_scan_freshness_payload(
+            connection,
+            scope=scope,
+        )
+        members.append(
+            {"network_scope": scope, **dict(payload)}
+        )
+
+    rank = {
+        "FRESH": 0,
+        "AGING": 1,
+        "STALE": 2,
+        "NO_ACCEPTED_SCAN": 3,
+    }
+    worst = (
+        max(
+            members,
+            key=lambda item: rank.get(
+                str(item.get("state") or ""),
+                4,
+            ),
+        )
+        if members
+        else {
+            "state": "NO_ACCEPTED_SCAN",
+            "message": (
+                "This logical site has no member subnet scopes."
+            ),
+        }
+    )
+    snapshots = [
+        item.get("latest_snapshot")
+        for item in members
+        if item.get("latest_snapshot")
+    ]
+
+    return {
+        **dashboard_site_aggregation_metadata(context),
+        "ok": True,
+        "generated_at": utc_now_text(),
+        "scope": "",
+        "state": worst.get("state"),
+        "has_latest_accepted_scan": bool(snapshots),
+        "message": (
+            f"Site freshness follows the least healthy member: "
+            f"{worst.get('network_scope') or '-'} "
+            f"({worst.get('state')})."
+        ),
+        "thresholds": worst.get("thresholds") or {},
+        "latest_snapshot": (
+            max(
+                snapshots,
+                key=lambda snapshot: (
+                    str(snapshot.get("imported_at") or ""),
+                    str(snapshot.get("created_at") or ""),
+                    str(snapshot.get("scan_id") or ""),
+                ),
+            )
+            if snapshots
+            else None
+        ),
+        "age_seconds": worst.get("age_seconds"),
+        "age_hours": worst.get("age_hours"),
+        "timestamp_field": worst.get("timestamp_field") or "",
+        "timestamp": worst.get("timestamp"),
+        "member_freshness": members,
+    }
+
+
+def dashboard_site_trueaegis_context_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    context = dashboard_site_aggregation_context(
+        connection,
+        site_id,
+    )
+
+    return {
+        **dashboard_site_aggregation_metadata(context),
+        "ok": True,
+        "ready": False,
+        "available": False,
+        "blockers": [
+            (
+                "TrueAegis execution remains subnet-scoped. "
+                "Select one member subnet before starting a run."
+            )
+        ],
+        "message": (
+            "Logical-site aggregation is read-only for "
+            "TrueAegis orchestration."
+        ),
+    }
+
+
+def dashboard_site_route_payload(
+    connection: sqlite3.Connection,
+    route: str,
+    query: dict[str, list[str]],
+    site_id: str,
+    *,
+    limit: int,
+    state: str | None = None,
+    identity: str | None = None,
+) -> dict[str, Any] | list[dict[str, Any]] | None:
+    if route == "/api/summary":
+        return dashboard_site_summary_payload(
+            connection,
+            site_id,
+        )
+
+    if route == "/api/scan-context":
+        return dashboard_site_scan_context_payload(
+            connection,
+            site_id,
+        )
+
+    if route == "/api/current-state":
+        return dashboard_site_current_state_payload(
+            connection,
+            site_id,
+        )
+
+    if route == "/api/scan-jobs":
+        status = query.get("status", [""])[0].strip() or None
+        return dashboard_site_scan_jobs_payload(
+            connection,
+            site_id,
+            limit,
+            status=status,
+        )
+
+    if route == "/api/trueaegis-jobs":
+        status = query.get("status", [""])[0].strip() or None
+        return dashboard_site_trueaegis_jobs_payload(
+            connection,
+            site_id,
+            limit,
+            status=status,
+        )
+
+    if route == "/api/assets":
+        return dashboard_site_assets_payload(
+            connection,
+            site_id,
+            limit,
+            state=state,
+            identity=identity,
+        )
+
+    if route == "/api/asset":
+        identifier = query.get(
+            "identifier",
+            query.get("asset_key", [""]),
+        )[0].strip()
+        return dashboard_site_asset_detail_payload(
+            connection,
+            site_id,
+            identifier,
+            limit=limit,
+        )
+
+    if route == "/api/investigation-center":
+        return dashboard_site_investigation_center_payload(
+            connection,
+            site_id,
+            limit=limit,
+            ticket_status=query.get(
+                "ticket_status",
+                ["ALL"],
+            )[0],
+            ticket_signal=query.get(
+                "ticket_signal",
+                ["ALL"],
+            )[0],
+            triage_bucket=query.get(
+                "triage_bucket",
+                ["ALL"],
+            )[0],
+            triage_urgency=query.get(
+                "triage_urgency",
+                ["ALL"],
+            )[0],
+        )
+
+    if route == "/api/ticket-evidence":
+        return dashboard_site_ticket_evidence_payload(
+            connection,
+            site_id,
+            subject_key=query.get(
+                "subject_key",
+                [""],
+            )[0],
+            limit=int(
+                query.get("limit", ["10"])[0] or 10
+            ),
+        )
+
+    if route == "/api/events":
+        return dashboard_site_events_payload(
+            connection,
+            site_id,
+            limit,
+        )
+
+    if route == "/api/alerts":
+        return dashboard_site_alerts_payload(
+            connection,
+            site_id,
+            limit,
+        )
+
+    if route == "/api/annotations":
+        return dashboard_site_annotations_payload(
+            connection,
+            site_id,
+            limit,
+        )
+
+    if route == "/api/port-behavior":
+        try:
+            lookback = max(
+                1,
+                min(
+                    25,
+                    int(
+                        query.get(
+                            "lookback",
+                            ["5"],
+                        )[0]
+                    ),
+                ),
+            )
+        except ValueError:
+            lookback = 5
+
+        return dashboard_site_port_behavior_payload(
+            connection,
+            site_id,
+            limit,
+            lookback=lookback,
+        )
+
+    if route == "/api/current-risk":
+        return dashboard_site_current_risk_payload(
+            connection,
+            site_id,
+            limit,
+        )
+
+    if route == "/api/risk":
+        return dashboard_site_risk_payload(
+            connection,
+            site_id,
+            limit,
+        )
+
+    if route == "/api/latest-network-changes":
+        return dashboard_site_latest_network_changes_payload(
+            connection,
+            site_id,
+            limit=limit,
+        )
+
+    if route == "/api/scan-freshness":
+        return dashboard_site_scan_freshness_payload(
+            connection,
+            site_id,
+        )
+
+    if route == "/api/trueaegis/context":
+        return dashboard_site_trueaegis_context_payload(
+            connection,
+            site_id,
+        )
+
+    return None
+
+
+
+# v0.42 hotfix checkpoint B: dashboard logical-site management.
+
+DASHBOARD_SITE_ACTION_ROUTES = {
+    "/api/site-create",
+    "/api/site-rename",
+    "/api/site-description",
+    "/api/site-archive",
+    "/api/site-assign-scope",
+    "/api/site-remove-scope",
+}
+
+DASHBOARD_SITE_UNSAFE_PAYLOAD_FIELDS = {
+    "actor",
+    "role",
+    "database",
+    "db",
+    "db_path",
+    "sql",
+    "query",
+    "command",
+    "shell",
+    "path",
+}
+
+
+def dashboard_site_management_payload(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    active: list[dict[str, Any]] = []
+    archived: list[dict[str, Any]] = []
+
+    for site in list_logical_sites(
+        connection,
+        include_archived=True,
+    ):
+        detail = logical_site_detail_payload(
+            connection,
+            site["site_id"],
+        )
+
+        if site["status"] == LOGICAL_SITE_ACTIVE:
+            active.append(detail)
+        else:
+            archived.append(detail)
+
+    unassigned = query_network_scope_catalog(
+        connection,
+        unassigned_only=True,
+    )
+
+    return {
+        "ok": True,
+        "generated_at": utc_now_text(),
+        "active_sites": active,
+        "archived_sites": archived,
+        "unassigned_scopes": unassigned,
+        "summary": {
+            "active_site_count": len(active),
+            "archived_site_count": len(archived),
+            "unassigned_scope_count": len(unassigned),
+            "member_scope_count": sum(
+                int(item["coverage"]["member_scope_count"])
+                for item in active + archived
+            ),
+            "observed_member_scope_count": sum(
+                int(item["coverage"]["observed_scope_count"])
+                for item in active + archived
+            ),
+        },
+    }
+
+
+def dashboard_site_action_allowed_fields(
+    route: str,
+) -> set[str]:
+    fields = {
+        "/api/site-create": {"name", "description", "network_scopes"},
+        "/api/site-rename": {"site_id", "name"},
+        "/api/site-description": {
+            "site_id",
+            "description",
+        },
+        "/api/site-archive": {
+            "site_id",
+            "confirmation",
+        },
+        "/api/site-assign-scope": {
+            "site_id",
+            "network_scope",
+        },
+        "/api/site-remove-scope": {
+            "site_id",
+            "network_scope",
+        },
+    }
+
+    if route not in fields:
+        raise DashboardAdminUserActionError(
+            "unsupported logical-site action route",
+            status_code=404,
+        )
+
+    return fields[route]
+
+
+def dashboard_site_action_validate_payload(
+    route: str,
+    payload: dict[str, Any],
+) -> None:
+    if not isinstance(payload, dict):
+        raise DashboardAdminUserActionError(
+            "logical-site action payload must be a JSON object",
+            status_code=400,
+        )
+
+    keys = {str(key) for key in payload}
+    unsafe = sorted(
+        key
+        for key in keys
+        if key.lower() in DASHBOARD_SITE_UNSAFE_PAYLOAD_FIELDS
+    )
+
+    if unsafe:
+        raise DashboardAdminUserActionError(
+            "unsafe logical-site payload field(s): "
+            + ", ".join(unsafe),
+            status_code=400,
+        )
+
+    unexpected = sorted(
+        keys - dashboard_site_action_allowed_fields(route)
+    )
+
+    if unexpected:
+        raise DashboardAdminUserActionError(
+            "unexpected logical-site payload field(s): "
+            + ", ".join(unexpected),
+            status_code=400,
+        )
+
+
+def dashboard_site_active_record(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    safe_site_id = normalize_logical_site_id(site_id)
+    site = get_logical_site(connection, safe_site_id)
+
+    if site is None:
+        raise DashboardAdminUserActionError(
+            f"logical site not found: {safe_site_id}",
+            status_code=404,
+        )
+
+    if site["status"] != LOGICAL_SITE_ACTIVE:
+        raise DashboardAdminUserActionError(
+            f"logical site is archived and read-only: {safe_site_id}",
+            status_code=400,
+        )
+
+    return site
+
+
+
+
+def dashboard_site_create_network_scopes(
+    payload: dict[str, Any],
+) -> list[str]:
+    raw_scopes = payload.get("network_scopes", [])
+
+    if raw_scopes is None:
+        raw_scopes = []
+
+    if not isinstance(raw_scopes, list):
+        raise DashboardAdminUserActionError(
+            "network_scopes must be a JSON array",
+            status_code=400,
+        )
+
+    if len(raw_scopes) > 256:
+        raise DashboardAdminUserActionError(
+            "network_scopes may contain at most 256 entries",
+            status_code=400,
+        )
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+
+    for value in raw_scopes:
+        if not isinstance(value, str):
+            raise DashboardAdminUserActionError(
+                "each network_scopes entry must be a CIDR string",
+                status_code=400,
+            )
+
+        safe_scope = validate_private_cidr(value)
+
+        if safe_scope in seen:
+            continue
+
+        seen.add(safe_scope)
+        normalized.append(safe_scope)
+
+    return normalized
+
+
+def dashboard_site_action_payload(
+    connection: sqlite3.Connection,
+    route: str,
+    payload: dict[str, Any],
+    *,
+    actor: dict[str, Any] | None,
+    source_ip: str | None = None,
+    user_agent: str | None = None,
+) -> dict[str, Any]:
+    clean_route = str(route or "").strip()
+    dashboard_site_action_validate_payload(
+        clean_route,
+        payload,
+    )
+
+    site: dict[str, Any] | None = None
+    membership: dict[str, Any] | None = None
+    memberships: list[dict[str, Any]] = []
+    changed = True
+    audit_action = ""
+    audit_details: dict[str, Any] = {}
+
+    if clean_route == "/api/site-create":
+        requested_scopes = dashboard_site_create_network_scopes(
+            payload
+        )
+        site = create_logical_site(
+            connection,
+            payload.get("name"),
+            payload.get("description") or "",
+        )
+
+        for safe_scope in requested_scopes:
+            assigned = assign_network_scope_to_logical_site(
+                connection,
+                site["site_id"],
+                safe_scope,
+            )
+            observed_row = connection.execute(
+                "SELECT COUNT(*) AS count "
+                "FROM snapshots WHERE network_scope = ?",
+                (safe_scope,),
+            ).fetchone()
+            assigned_item = dict(assigned)
+            assigned_item["observed"] = bool(
+                observed_row
+                and int(observed_row["count"] or 0) > 0
+            )
+            memberships.append(assigned_item)
+
+        site = get_logical_site(
+            connection,
+            site["site_id"],
+        )
+        assigned_count = len(memberships)
+        action = "logical_site.create"
+        message = (
+            f"Created logical site {site['name']} with "
+            f"{assigned_count} assigned subnet(s)."
+            if assigned_count
+            else f"Created logical site {site['name']}."
+        )
+        audit_action = "LOGICAL_SITE_CREATE"
+        audit_details = {
+            "name": site["name"],
+            "description": site["description"],
+            "status": site["status"],
+            "network_scopes": [
+                item["network_scope"]
+                for item in memberships
+            ],
+            "assigned_scope_count": assigned_count,
+            "source": "dashboard",
+        }
+
+    elif clean_route == "/api/site-rename":
+        previous = dashboard_site_active_record(
+            connection,
+            payload.get("site_id"),
+        )
+        site = rename_logical_site(
+            connection,
+            previous["site_id"],
+            payload.get("name"),
+        )
+        changed = previous["name"] != site["name"]
+        action = "logical_site.rename"
+        message = (
+            f"Renamed logical site to {site['name']}."
+            if changed
+            else f"Logical site already has name {site['name']}."
+        )
+        audit_action = "LOGICAL_SITE_RENAME"
+        audit_details = {
+            "previous_name": previous["name"],
+            "current_name": site["name"],
+            "changed": changed,
+            "source": "dashboard",
+        }
+
+    elif clean_route == "/api/site-description":
+        previous = dashboard_site_active_record(
+            connection,
+            payload.get("site_id"),
+        )
+        site = update_logical_site_description(
+            connection,
+            previous["site_id"],
+            payload.get("description") or "",
+        )
+        changed = (
+            previous["description"]
+            != site["description"]
+        )
+        action = "logical_site.description.update"
+        message = (
+            f"Updated description for logical site {site['name']}."
+            if changed
+            else "Logical site description is unchanged."
+        )
+        audit_action = "LOGICAL_SITE_DESCRIPTION_UPDATE"
+        audit_details = {
+            "description_changed": changed,
+            "source": "dashboard",
+        }
+
+    elif clean_route == "/api/site-archive":
+        previous = dashboard_site_active_record(
+            connection,
+            payload.get("site_id"),
+        )
+        required = f"ARCHIVE {previous['site_id']}"
+
+        if str(payload.get("confirmation") or "") != required:
+            raise DashboardAdminUserActionError(
+                "site archive confirmation must exactly match: "
+                + required,
+                status_code=400,
+            )
+
+        site = archive_logical_site(
+            connection,
+            previous["site_id"],
+        )
+        changed = previous["status"] != site["status"]
+        action = "logical_site.archive"
+        message = (
+            f"Archived logical site {site['name']}. "
+            f"Retained {site['member_count']} member subnet(s)."
+        )
+        audit_action = "LOGICAL_SITE_ARCHIVE"
+        audit_details = {
+            "previous_status": previous["status"],
+            "current_status": site["status"],
+            "member_count": site["member_count"],
+            "members_retained": True,
+            "source": "dashboard",
+        }
+
+    elif clean_route == "/api/site-assign-scope":
+        site = dashboard_site_active_record(
+            connection,
+            payload.get("site_id"),
+        )
+        safe_scope = validate_private_cidr(
+            payload.get("network_scope")
+        )
+        membership = assign_network_scope_to_logical_site(
+            connection,
+            site["site_id"],
+            safe_scope,
+        )
+        observed_row = connection.execute(
+            "SELECT COUNT(*) AS count "
+            "FROM snapshots WHERE network_scope = ?",
+            (safe_scope,),
+        ).fetchone()
+        observed = bool(
+            observed_row
+            and int(observed_row["count"] or 0) > 0
+        )
+        membership = dict(membership)
+        membership["observed"] = observed
+        memberships = [membership]
+        site = get_logical_site(
+            connection,
+            site["site_id"],
+        )
+        action = "logical_site.scope.assign"
+        message = (
+            f"Assigned network scope {safe_scope} "
+            f"to logical site {site['name']}."
+        )
+        audit_action = "LOGICAL_SITE_SCOPE_ASSIGN"
+        audit_details = {
+            "network_scope": safe_scope,
+            "observed": observed,
+            "source": "dashboard",
+        }
+
+    elif clean_route == "/api/site-remove-scope":
+        site = dashboard_site_active_record(
+            connection,
+            payload.get("site_id"),
+        )
+        safe_scope = validate_private_cidr(
+            payload.get("network_scope")
+        )
+        membership = remove_network_scope_from_logical_site(
+            connection,
+            site["site_id"],
+            safe_scope,
+        )
+        site = get_logical_site(
+            connection,
+            site["site_id"],
+        )
+        action = "logical_site.scope.remove"
+        message = (
+            f"Removed network scope {safe_scope} "
+            f"from logical site {site['name']}."
+        )
+        audit_action = "LOGICAL_SITE_SCOPE_REMOVE"
+        audit_details = {
+            "network_scope": safe_scope,
+            "telemetry_deleted": False,
+            "source": "dashboard",
+        }
+
+    else:
+        raise DashboardAdminUserActionError(
+            "unsupported logical-site action route",
+            status_code=404,
+        )
+
+    if site is None:
+        raise DeltaAegisError(
+            "logical-site action did not return a site"
+        )
+
+    receipt = dashboard_action_receipt(
+        action,
+        message,
+        severity=(
+            "warning"
+            if action == "logical_site.archive"
+            else "success"
+        ),
+        summary={
+            "changed": changed,
+            "site_name": site["name"],
+            "site_status": site["status"],
+            "member_count": site["member_count"],
+            "network_scope": (
+                membership.get("network_scope")
+                if membership
+                else None
+            ),
+            "assigned_scope_count": len(memberships),
+        },
+        identifiers={
+            "site_id": site["site_id"],
+        },
+        diagnostic_detail={
+            "available": False,
+        },
+    )
+
+    record_access_audit_event(
+        connection,
+        action=audit_action,
+        actor=actor,
+        target_type="logical_site",
+        target_key=site["site_id"],
+        source_ip=source_ip,
+        user_agent=user_agent,
+        details=audit_details,
+    )
+
+    return {
+        "ok": True,
+        "action": action,
+        "changed": changed,
+        "site": site,
+        "membership": membership,
+        "memberships": memberships,
+        "receipt": receipt,
+    }
+
+
+def dashboard_sites_payload(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    return logical_site_list_payload(
+        connection,
+        include_archived=False,
+    )
+
+
+def dashboard_site_detail_payload(
+    connection: sqlite3.Connection,
+    site_id: Any,
+) -> dict[str, Any]:
+    return logical_site_detail_payload(
+        connection,
+        site_id,
+    )
 
 
 def dashboard_scopes_payload(connection):
@@ -21014,7 +24769,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.41 Data Durability &amp; Recovery</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.42 Logical Site Scopes</span></div>
     </div>
   </header>
 
@@ -21031,6 +24786,7 @@ def dashboard_index_html_base_v025_operator_link():
       <button type="button" class="tab-button" data-tab-target="intelligence">Intelligence</button>
       <button type="button" class="tab-button" data-tab-target="events">Security Events</button>
       <button type="button" class="tab-button" data-tab-target="alerts">Alarms</button>
+      <button type="button" class="tab-button" data-tab-target="sites">Sites</button>
       <button type="button" class="tab-button" data-tab-target="trueaegis">TrueAegis</button>
       <button type="button" class="tab-button" data-tab-target="scan-jobs">Data Sources</button>
     </nav>
@@ -21172,10 +24928,13 @@ def dashboard_index_html_base_v025_operator_link():
     </section>
 
     <section class="card" data-tab-panel="overview">
-      <h2>Network Scopes</h2>
-      <p class="muted">Choose which subnet scope the dashboard should display. Deltas are only meaningful inside the same network scope.</p>
+      <h2>Sites &amp; Network Scopes</h2>
+      <p class="muted">Logical sites group related subnet scopes. Select a site for site-wide SIEM aggregation or choose a member subnet for subnet-specific drilldown.</p>
       <div id="selected-scope" class="callout">Viewing all network scopes.</div>
+      <div id="site-links" class="scope-links"></div>
+      <div id="scope-links-label" class="muted">Subnet scopes</div>
       <div id="scope-links" class="scope-links"></div>
+      <div id="site-detail" class="callout" hidden></div>
     </section>
 
     <section class="card" data-tab-panel="overview">
@@ -21191,7 +24950,399 @@ def dashboard_index_html_base_v025_operator_link():
     </section>
 
 
+
+
+<style id="site-management-styles">
+  #site-management-panel button,
+  #site-management-panel .actions a,
+  #site-management-panel #site-management-open-view {
+    appearance: none;
+    align-items: center;
+    background: linear-gradient(180deg, #0891b2, #0e7490);
+    border: 1px solid #22d3ee;
+    border-radius: 10px;
+    box-shadow: 0 8px 18px rgba(8, 145, 178, 0.18);
+    color: #ecfeff;
+    cursor: pointer;
+    display: inline-flex;
+    font: inherit;
+    font-weight: 700;
+    gap: 0.4rem;
+    justify-content: center;
+    min-height: 38px;
+    padding: 0.58rem 0.9rem;
+    text-decoration: none;
+    transition:
+      border-color 120ms ease,
+      box-shadow 120ms ease,
+      transform 120ms ease,
+      background 120ms ease;
+  }
+
+  #site-management-panel button:hover,
+  #site-management-panel .actions a:hover,
+  #site-management-panel #site-management-open-view:hover {
+    background: linear-gradient(180deg, #06b6d4, #0891b2);
+    box-shadow: 0 10px 24px rgba(8, 145, 178, 0.28);
+    transform: translateY(-1px);
+  }
+
+  #site-management-panel button:focus-visible,
+  #site-management-panel input:focus-visible,
+  #site-management-panel textarea:focus-visible,
+  #site-management-panel select:focus-visible {
+    outline: 3px solid rgba(34, 211, 238, 0.35);
+    outline-offset: 2px;
+  }
+
+  #site-management-panel button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+    transform: none;
+  }
+
+  #site-management-panel .danger-button {
+    background: linear-gradient(180deg, #b91c1c, #991b1b);
+    border-color: #ef4444;
+    box-shadow: 0 8px 18px rgba(185, 28, 28, 0.18);
+  }
+
+  #site-management-panel .danger-button:hover {
+    background: linear-gradient(180deg, #dc2626, #b91c1c);
+  }
+
+  #site-management-panel input[type="text"],
+  #site-management-panel textarea,
+  #site-management-panel select {
+    background: #071126;
+    border: 1px solid #334155;
+    border-radius: 9px;
+    color: #e2e8f0;
+    font: inherit;
+    min-height: 40px;
+    padding: 0.6rem 0.72rem;
+    width: 100%;
+  }
+
+  #site-management-panel textarea {
+    min-height: 90px;
+    resize: vertical;
+  }
+
+  #site-management-panel .site-form-grid {
+    align-items: end;
+    display: grid;
+    gap: 0.9rem;
+    grid-template-columns:
+      minmax(220px, 0.8fr)
+      minmax(280px, 1.4fr)
+      auto;
+  }
+
+  #site-management-panel .site-form-grid label {
+    display: grid;
+    font-weight: 700;
+    gap: 0.42rem;
+  }
+
+  #site-management-panel .site-subnet-panel {
+    background: rgba(7, 17, 38, 0.55);
+    border: 1px solid #263852;
+    border-radius: 12px;
+    margin: 1rem 0;
+    padding: 1rem;
+  }
+
+  #site-management-panel .site-subnet-grid {
+    display: grid;
+    gap: 0.72rem;
+    grid-template-columns:
+      repeat(auto-fit, minmax(240px, 1fr));
+    margin-top: 0.75rem;
+  }
+
+  #site-management-panel .site-subnet-option {
+    align-items: flex-start;
+    background: #0a142b;
+    border: 1px solid #2c3f5b;
+    border-radius: 10px;
+    cursor: pointer;
+    display: flex;
+    gap: 0.72rem;
+    min-height: 86px;
+    padding: 0.82rem;
+    transition:
+      background 120ms ease,
+      border-color 120ms ease,
+      transform 120ms ease;
+  }
+
+  #site-management-panel .site-subnet-option:hover {
+    background: #0d1b37;
+    border-color: #0891b2;
+    transform: translateY(-1px);
+  }
+
+  #site-management-panel .site-subnet-option input {
+    accent-color: #06b6d4;
+    flex: 0 0 auto;
+    height: 1.1rem;
+    margin-top: 0.15rem;
+    width: 1.1rem;
+  }
+
+  #site-management-panel .site-subnet-option-body {
+    display: grid;
+    gap: 0.28rem;
+    min-width: 0;
+  }
+
+  #site-management-panel .site-subnet-option-body code {
+    color: #a5f3fc;
+    font-size: 0.96rem;
+    overflow-wrap: anywhere;
+  }
+
+  #site-management-panel .site-subnet-meta {
+    color: #94a3b8;
+    font-size: 0.84rem;
+  }
+
+  #site-management-panel .site-create-card {
+    background: rgba(10, 20, 43, 0.65);
+    border: 1px solid #263852;
+    border-radius: 12px;
+    margin: 1rem 0 1.4rem;
+    padding: 1rem;
+  }
+
+  @media (max-width: 900px) {
+    #site-management-panel .site-form-grid {
+      grid-template-columns: 1fr;
+    }
+
+    #site-management-panel .site-form-grid button {
+      width: 100%;
+    }
+  }
+</style>
+
+<section class="card" data-tab-panel="sites" id="site-management-panel">
+  <div class="section-header">
+    <div>
+      <div class="eyebrow">Logical Site Operations</div>
+      <h2>Sites</h2>
+      <p class="muted">
+        Group related private subnet scopes into operator-facing sites.
+        Site-wide views aggregate SIEM evidence while preserving each
+        subnet as the technical scan and provenance boundary.
+      </p>
+    </div>
+    <button type="button" id="site-management-refresh-button" class="site-secondary-button">
+      Refresh sites
+    </button>
+  </div>
+
+  <div id="site-management-readonly-note" class="callout" hidden>
+    Your role has read-only access to logical sites. ADMIN access is
+    required to create, edit, archive, assign, or remove subnet scopes.
+  </div>
+
+  <div id="site-management-receipt" class="callout">
+    No logical-site action has been performed in this dashboard session.
+  </div>
+
+  <div class="summary" id="site-management-summary">
+    <div class="card">
+      <div class="card-label">Active Sites</div>
+      <div class="card-value" id="site-management-active-count">0</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Archived Sites</div>
+      <div class="card-value" id="site-management-archived-count">0</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Member Subnets</div>
+      <div class="card-value" id="site-management-member-count">0</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Unassigned Subnets</div>
+      <div class="card-value" id="site-management-unassigned-count">0</div>
+    </div>
+  </div>
+
+
+  <section class="site-subnet-panel" id="site-management-unassigned-panel">
+    <div class="section-header">
+      <div>
+        <h3>Unassigned Subnets</h3>
+        <p class="muted" id="site-management-unassigned-help">
+          Select any subnets that should become members of the new site.
+          Leaving all boxes unchecked creates an empty site.
+        </p>
+      </div>
+    </div>
+    <div
+      id="site-management-unassigned-list"
+      class="site-subnet-grid"
+    ></div>
+  </section>
+
+  <div
+    id="site-create-controls"
+    class="site-create-card"
+    data-site-admin-control
+    hidden
+  >
+    <h3>Create Site</h3>
+    <p class="muted">
+      Enter a site name and optionally select unassigned subnets above.
+    </p>
+    <div class="site-form-grid">
+      <label>
+        Site name
+        <input
+          id="site-create-name"
+          type="text"
+          maxlength="160"
+          autocomplete="off"
+        >
+      </label>
+      <label>
+        Description
+        <input
+          id="site-create-description"
+          type="text"
+          maxlength="2000"
+          placeholder="Optional operator context"
+        >
+      </label>
+      <button type="button" id="site-create-button">
+        Create site
+      </button>
+    </div>
+  </div>
+
+  <h3>Active Sites</h3>
+  <div id="site-management-active-sites" class="grid"></div>
+
+  <section id="site-management-selected" class="detail-box" hidden>
+    <div class="section-header">
+      <div>
+        <div class="eyebrow">Selected Site</div>
+        <h3 id="site-management-selected-name">—</h3>
+        <p class="muted" id="site-management-selected-description">—</p>
+      </div>
+      <a id="site-management-open-view" href="/">Open site-wide view</a>
+    </div>
+
+    <div id="site-management-selected-coverage" class="callout"></div>
+
+    <div data-site-admin-control hidden>
+      <h4>Edit Site</h4>
+      <div class="actions">
+        <label>
+          Name
+          <input
+            id="site-rename-name"
+            type="text"
+            maxlength="160"
+          >
+        </label>
+        <button type="button" id="site-rename-button">
+          Save name
+        </button>
+      </div>
+      <div class="actions">
+        <label>
+          Description
+          <textarea
+            id="site-description-value"
+            maxlength="2000"
+            rows="3"
+          ></textarea>
+        </label>
+        <button type="button" id="site-description-button">
+          Save description
+        </button>
+      </div>
+    </div>
+
+    <h4>Member Subnet Scopes</h4>
+    <div id="site-management-members"></div>
+
+    <div data-site-admin-control hidden>
+      <div class="actions">
+        <label>
+          Unassigned private subnet
+          <select id="site-assign-scope-select"></select>
+        </label>
+        <button type="button" id="site-assign-scope-button">
+          Assign subnet
+        </button>
+      </div>
+
+      <div class="actions">
+        <button
+          type="button"
+          id="site-archive-button"
+          class="danger-button"
+        >
+          Archive selected site
+        </button>
+      </div>
+      <p class="muted">
+        Archiving retains memberships and historical evidence. Archived
+        sites are read-only and reject new assignments.
+      </p>
+    </div>
+  </section>
+
+  <h3>Archived Sites</h3>
+  <div id="site-management-archived-sites" class="grid"></div>
+</section>
+
+
+<section
+  class="card"
+  data-tab-panel="overview"
+  id="trueaegis-executive-readiness-panel"
+>
+  <div class="section-header">
+    <div>
+      <div class="eyebrow">Validation Readiness</div>
+      <h2>TrueAegis Readiness</h2>
+      <p class="muted">
+        Compact operational status only. Open the TrueAegis tab for
+        blockers, paths, run controls, receipts, jobs, observations,
+        and correlations.
+      </p>
+    </div>
+    <button type="button" id="trueaegis-executive-open-tab">
+      Open TrueAegis
+    </button>
+  </div>
+  <div class="summary">
+    <div class="card">
+      <div class="card-label">Readiness</div>
+      <div class="card-value" id="trueaegis-executive-readiness">Loading</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Latest Accepted Scan</div>
+      <div class="card-value" id="trueaegis-executive-scan">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Active Jobs</div>
+      <div class="card-value" id="trueaegis-executive-active-jobs">0</div>
+    </div>
+  </div>
+  <div class="callout" id="trueaegis-executive-message">
+    Loading TrueAegis readiness.
+  </div>
+</section>
+
     <section class="card" data-tab-panel="trueaegis" id="trueaegis-validation-foundation-panel">
+      <div id="trueaegis-orchestration-mount"></div>
       <div class="section-header">
         <div>
           <div class="eyebrow">TrueAegis Foundation</div>
@@ -21455,7 +25606,7 @@ def dashboard_index_html_base_v025_operator_link():
       "intelligence",
       "events",
       "alerts",
-      "scan-jobs", "trueaegis"
+      "scan-jobs", "sites", "trueaegis"
 ];
 
     let activeDashboardTab = null;
@@ -21936,46 +26087,734 @@ def dashboard_index_html_base_v025_operator_link():
 
 
 
+    function selectedSiteId() {
+      return new URLSearchParams(window.location.search).get("site_id") || "";
+    }
+
     function selectedScope() {
+      if (selectedSiteId()) return "";
       return new URLSearchParams(window.location.search).get("scope") || "";
     }
 
     function scopedPath(path) {
+      const siteId = selectedSiteId();
       const scope = selectedScope();
-
-      if (!scope) return path;
-
       const separator = path.includes("?") ? "&" : "?";
-      return path + separator + "scope=" + encodeURIComponent(scope);
+
+      if (siteId) {
+        return path
+          + separator
+          + "site_id="
+          + encodeURIComponent(siteId);
+      }
+
+      if (scope) {
+        return path
+          + separator
+          + "scope="
+          + encodeURIComponent(scope);
+      }
+
+      return path;
     }
 
-    function renderScopes(scopes) {
+    function siteAwareInvestigationCenterPath() {
+      const path = investigationCenterFilterPath();
+      const siteId = selectedSiteId();
+
+      if (!siteId || path.includes("site_id=")) {
+        return path;
+      }
+
+      const separator = path.includes("?") ? "&" : "?";
+      return path
+        + separator
+        + "site_id="
+        + encodeURIComponent(siteId);
+    }
+
+    function selectedSiteDetailPath() {
+      const siteId = selectedSiteId();
+      if (!siteId) return "";
+      return "/api/site-detail?site_id=" + encodeURIComponent(siteId);
+    }
+
+    function renderScopeNavigation(scopes, siteCatalog, siteDetail) {
       const selected = selectedScope();
-      const links = [];
+      const selectedSite = selectedSiteId();
+      const siteLinks = [];
+      const scopeLinks = [];
+      const sites = Array.isArray(siteCatalog && siteCatalog.sites)
+        ? siteCatalog.sites
+        : [];
+      const memberScopes = new Set(
+        Array.isArray(siteDetail && siteDetail.members)
+          ? siteDetail.members.map(item => item.network_scope || "")
+          : []
+      );
+      const visibleScopes = selectedSite
+        ? scopes.filter(item => memberScopes.has(item.network_scope || ""))
+        : scopes;
 
-      links.push(`<a class="${selected ? "" : "active"}" href="/">All scopes</a>`);
+      siteLinks.push(
+        `<a class="${selected || selectedSite ? "" : "active"}" href="/">All scopes</a>`
+      );
 
-      for (const scope of scopes) {
+      for (const site of sites) {
+        const siteId = site.site_id || "";
+        const active = selectedSite === siteId ? "active" : "";
+        siteLinks.push(
+          `<a class="${active}" href="/?site_id=${encodeURIComponent(siteId)}">${esc(site.name || siteId)} · ${esc(site.member_count || 0)} subnets</a>`
+        );
+      }
+
+      for (const scope of visibleScopes) {
         const name = scope.network_scope || "";
         const active = selected === name ? "active" : "";
-        links.push(
+        scopeLinks.push(
           `<a class="${active}" href="/?scope=${encodeURIComponent(name)}">${esc(name)} · ${esc(scope.snapshots)} scans · ${esc(scope.open_alerts)} open alerts</a>`
         );
       }
 
-      const scopeLinks = document.getElementById("scope-links");
+      const siteLinksTarget = document.getElementById("site-links");
+      const scopeLinksTarget = document.getElementById("scope-links");
+      const scopeLinksLabel = document.getElementById("scope-links-label");
       const selectedScopeBox = document.getElementById("selected-scope");
+      const siteDetailBox = document.getElementById("site-detail");
 
-      if (scopeLinks) {
-        scopeLinks.innerHTML = links.join("");
+      if (siteLinksTarget) {
+        siteLinksTarget.innerHTML = siteLinks.join("");
+      }
+
+      if (scopeLinksTarget) {
+        scopeLinksTarget.innerHTML = scopeLinks.length
+          ? scopeLinks.join("")
+          : '<span class="muted">No subnet scopes are available for this selection.</span>';
+      }
+
+      if (scopeLinksLabel) {
+        scopeLinksLabel.textContent = selectedSite
+          ? "Member subnet scopes — select one for subnet drilldown"
+          : "Subnet scopes";
       }
 
       if (selectedScopeBox) {
-        selectedScopeBox.innerHTML = selected
-          ? `Viewing scope: <strong>${esc(selected)}</strong>`
-          : "Viewing all network scopes.";
+        if (selected) {
+          selectedScopeBox.innerHTML =
+            `Viewing subnet scope: <strong>${esc(selected)}</strong>`;
+        } else if (siteDetail && siteDetail.site) {
+          selectedScopeBox.innerHTML =
+            `Selected logical site: <strong>${esc(siteDetail.site.name)}</strong>`;
+        } else {
+          selectedScopeBox.innerHTML = "Viewing all network scopes.";
+        }
+      }
+
+      if (siteDetailBox) {
+        if (siteDetail && siteDetail.site && siteDetail.coverage) {
+          const site = siteDetail.site;
+          const coverage = siteDetail.coverage;
+          siteDetailBox.hidden = false;
+          siteDetailBox.innerHTML = `
+            <strong>${esc(site.name)}</strong><br>
+            ${esc(coverage.observed_scope_count)} of ${esc(coverage.member_scope_count)}
+            member subnet scopes have snapshot history.
+            <br><span class="muted">Core site-wide SIEM aggregation is active across member subnets. Rows retain network-scope provenance; select a member subnet for asset detail or subnet-specific operations.</span>
+          `;
+        } else {
+          siteDetailBox.hidden = true;
+          siteDetailBox.innerHTML = "";
+        }
       }
     }
+
+
+
+const siteManagementState = {
+  payload: null,
+  session: null,
+  selectedSiteId: "",
+  isAdmin: false,
+  lastReceipt: null
+};
+
+function siteManagementRole(session) {
+  const user = (session && session.user) || {};
+  return String(user.role || (session && session.role) || "").toUpperCase();
+}
+
+function siteManagementDetails(payload, status) {
+  const key = status === "ARCHIVED"
+    ? "archived_sites"
+    : "active_sites";
+  return Array.isArray(payload && payload[key])
+    ? payload[key]
+    : [];
+}
+
+function siteManagementSelectedDetail() {
+  const payload = siteManagementState.payload || {};
+  const all = [
+    ...siteManagementDetails(payload, "ACTIVE"),
+    ...siteManagementDetails(payload, "ARCHIVED")
+  ];
+  return all.find(item =>
+    item
+    && item.site
+    && item.site.site_id === siteManagementState.selectedSiteId
+  ) || null;
+}
+
+function siteManagementSetText(id, value) {
+  const element = document.getElementById(id);
+  if (element) {
+    element.textContent = value === null || value === undefined
+      ? "—"
+      : String(value);
+  }
+}
+
+function siteManagementRenderReceipt() {
+  const target = document.getElementById("site-management-receipt");
+  if (!target) return;
+
+  if (
+    siteManagementState.lastReceipt
+    && typeof renderDashboardActionReceipt === "function"
+  ) {
+    renderDashboardActionReceipt(
+      target,
+      siteManagementState.lastReceipt,
+      siteManagementState.lastReceipt.message
+    );
+    return;
+  }
+
+  target.textContent =
+    "No logical-site action has been performed in this dashboard session.";
+}
+
+function siteManagementSiteCard(detail, archived) {
+  const site = detail.site || {};
+  const coverage = detail.coverage || {};
+  const siteId = site.site_id || "";
+  const manageLabel = archived ? "View details" : "Manage";
+
+  return `
+    <div class="card">
+      <div class="label">${archived ? "Archived Site" : "Active Site"}</div>
+      <h4>${esc(site.name || siteId)}</h4>
+      <p class="muted">${esc(site.description || "No description recorded.")}</p>
+      <div class="detail-box">
+        <div><span>Members</span><span>${esc(coverage.member_scope_count || 0)}</span></div>
+        <div><span>Observed</span><span>${esc(coverage.observed_scope_count || 0)}</span></div>
+        <div><span>Accepted scans</span><span>${esc(coverage.accepted_snapshot_count || 0)}</span></div>
+        <div><span>Status</span><span>${esc(site.status || "-")}</span></div>
+      </div>
+      <div class="actions">
+        <button
+          type="button"
+          data-site-manage="${esc(siteId)}"
+        >${manageLabel}</button>
+        ${archived ? "" : `<a href="/?site_id=${encodeURIComponent(siteId)}">Open site-wide view</a>`}
+      </div>
+    </div>
+  `;
+}
+
+function siteManagementRenderMembers(detail) {
+  const target = document.getElementById("site-management-members");
+  if (!target) return;
+
+  const site = (detail && detail.site) || {};
+  const members = Array.isArray(detail && detail.members)
+    ? detail.members
+    : [];
+
+  if (!members.length) {
+    target.innerHTML =
+      '<p class="muted">No subnet scopes are assigned to this site.</p>';
+    return;
+  }
+
+  target.innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th>Subnet</th>
+          <th>Observed</th>
+          <th>Snapshots</th>
+          <th>Accepted</th>
+          <th>Latest Scan</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${members.map(member => `
+          <tr>
+            <td><code>${esc(member.network_scope || "-")}</code></td>
+            <td>${member.observed ? "yes" : "no"}</td>
+            <td>${esc(member.snapshots || 0)}</td>
+            <td>${esc(member.accepted_snapshots || 0)}</td>
+            <td>${esc(member.latest_scan_at || "-")}</td>
+            <td>
+              ${siteManagementState.isAdmin && site.status === "ACTIVE"
+                ? `<button type="button" data-site-remove="${esc(member.network_scope || "")}">Remove</button>`
+                : '<span class="muted">Read only</span>'}
+            </td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+
+    function siteManagementSelectedCreateScopes() {
+      return Array.from(
+        document.querySelectorAll(
+          "[data-site-create-scope]:checked"
+        )
+      ).map(element => String(element.value || ""))
+        .filter(Boolean);
+    }
+
+    function siteManagementRenderUnassigned(payload) {
+      const target = document.getElementById(
+        "site-management-unassigned-list"
+      );
+      const help = document.getElementById(
+        "site-management-unassigned-help"
+      );
+      if (!target) return;
+
+      const previous = new Set(
+        siteManagementSelectedCreateScopes()
+      );
+      const unassigned = Array.isArray(
+        payload && payload.unassigned_scopes
+      )
+        ? payload.unassigned_scopes
+        : [];
+
+      if (!unassigned.length) {
+        target.innerHTML =
+          '<p class="muted">All observed private subnets are assigned to logical sites.</p>';
+        if (help) {
+          help.textContent =
+            "No unassigned observed subnet is currently available.";
+        }
+        return;
+      }
+
+      if (help) {
+        help.textContent = siteManagementState.isAdmin
+          ? (
+              "Select any subnets that should become members of the new "
+              + "site. Leaving all boxes unchecked creates an empty site."
+            )
+          : (
+              "These observed private subnets are not assigned to a "
+              + "logical site. ADMIN access is required to select them."
+            );
+      }
+
+      target.innerHTML = unassigned.map(item => {
+        const scope = String(item.network_scope || "");
+        const snapshots = Number(item.snapshots || 0);
+        const accepted = Number(item.accepted_snapshots || 0);
+        const latest = item.latest_scan_at || "No scan timestamp";
+        const checked = previous.has(scope) ? " checked" : "";
+        const disabled = siteManagementState.isAdmin
+          ? ""
+          : " disabled";
+
+        return `
+          <label class="site-subnet-option">
+            <input
+              type="checkbox"
+              data-site-create-scope
+              value="${esc(scope)}"
+              aria-label="Assign ${esc(scope)} to the new site"
+              ${checked}${disabled}
+            >
+            <span class="site-subnet-option-body">
+              <strong><code>${esc(scope || "-")}</code></strong>
+              <span class="site-subnet-meta">
+                ${esc(snapshots)} scans · ${esc(accepted)} accepted
+              </span>
+              <span class="site-subnet-meta">
+                Latest: ${esc(latest)}
+              </span>
+            </span>
+          </label>
+        `;
+      }).join("");
+    }
+
+function renderSiteManagement(session, payload) {
+  siteManagementState.session = session || {};
+  siteManagementState.payload = payload || {};
+  siteManagementState.isAdmin =
+    siteManagementRole(session) === "ADMIN";
+
+  const active = siteManagementDetails(payload, "ACTIVE");
+  const archived = siteManagementDetails(payload, "ARCHIVED");
+  const requested = siteManagementState.selectedSiteId || selectedSiteId();
+  const requestedExists = active.concat(archived).some(
+    item => item && item.site && item.site.site_id === requested
+  );
+
+  if (!requestedExists) {
+    siteManagementState.selectedSiteId =
+      active.length && active[0].site
+        ? active[0].site.site_id
+        : (
+            archived.length && archived[0].site
+              ? archived[0].site.site_id
+              : ""
+          );
+  } else {
+    siteManagementState.selectedSiteId = requested;
+  }
+
+  const summary = (payload && payload.summary) || {};
+  siteManagementSetText(
+    "site-management-active-count",
+    summary.active_site_count || 0
+  );
+  siteManagementSetText(
+    "site-management-archived-count",
+    summary.archived_site_count || 0
+  );
+  siteManagementSetText(
+    "site-management-member-count",
+    summary.member_scope_count || 0
+  );
+  siteManagementSetText(
+    "site-management-unassigned-count",
+    summary.unassigned_scope_count || 0
+  );
+
+  const readOnly = document.getElementById(
+    "site-management-readonly-note"
+  );
+  if (readOnly) {
+    readOnly.hidden = siteManagementState.isAdmin;
+  }
+
+  document.querySelectorAll("[data-site-admin-control]").forEach(
+    element => {
+      element.hidden = !siteManagementState.isAdmin;
+    }
+  );
+
+  siteManagementRenderUnassigned(payload);
+
+  const activeTarget = document.getElementById(
+    "site-management-active-sites"
+  );
+  const archivedTarget = document.getElementById(
+    "site-management-archived-sites"
+  );
+
+  if (activeTarget) {
+    activeTarget.innerHTML = active.length
+      ? active.map(item => siteManagementSiteCard(item, false)).join("")
+      : '<p class="muted">No active logical sites exist yet.</p>';
+  }
+
+  if (archivedTarget) {
+    archivedTarget.innerHTML = archived.length
+      ? archived.map(item => siteManagementSiteCard(item, true)).join("")
+      : '<p class="muted">No archived logical sites.</p>';
+  }
+
+  const detail = siteManagementSelectedDetail();
+  const selectedPanel = document.getElementById(
+    "site-management-selected"
+  );
+
+  if (!selectedPanel || !detail || !detail.site) {
+    if (selectedPanel) selectedPanel.hidden = true;
+    siteManagementRenderReceipt();
+    bindSiteManagementControls();
+    return;
+  }
+
+  selectedPanel.hidden = false;
+  const site = detail.site;
+  const coverage = detail.coverage || {};
+  siteManagementSetText(
+    "site-management-selected-name",
+    site.name || site.site_id
+  );
+  siteManagementSetText(
+    "site-management-selected-description",
+    site.description || "No description recorded."
+  );
+
+  const openView = document.getElementById(
+    "site-management-open-view"
+  );
+  if (openView) {
+    openView.hidden = site.status !== "ACTIVE";
+    openView.href =
+      "/?site_id=" + encodeURIComponent(site.site_id || "");
+  }
+
+  const coverageBox = document.getElementById(
+    "site-management-selected-coverage"
+  );
+  if (coverageBox) {
+    coverageBox.innerHTML = `
+      <strong>${esc(coverage.observed_scope_count || 0)} of
+      ${esc(coverage.member_scope_count || 0)} member subnets observed.</strong>
+      ${esc(coverage.accepted_snapshot_count || 0)} accepted snapshots are
+      available across this site. Status: ${esc(site.status || "-")}.
+    `;
+  }
+
+  const renameInput = document.getElementById("site-rename-name");
+  const descriptionInput = document.getElementById(
+    "site-description-value"
+  );
+
+  if (renameInput) renameInput.value = site.name || "";
+  if (descriptionInput) {
+    descriptionInput.value = site.description || "";
+  }
+
+  const assignSelect = document.getElementById(
+    "site-assign-scope-select"
+  );
+  const unassigned = Array.isArray(
+    payload && payload.unassigned_scopes
+  )
+    ? payload.unassigned_scopes
+    : [];
+
+  if (assignSelect) {
+    assignSelect.innerHTML = unassigned.length
+      ? unassigned.map(item => `
+          <option value="${esc(item.network_scope || "")}">
+            ${esc(item.network_scope || "-")} ·
+            ${esc(item.snapshots || 0)} scans
+          </option>
+        `).join("")
+      : '<option value="">No unassigned observed subnets</option>';
+    assignSelect.disabled = !unassigned.length;
+  }
+
+  const activeAndAdmin = (
+    siteManagementState.isAdmin
+    && site.status === "ACTIVE"
+  );
+
+  selectedPanel.querySelectorAll(
+    "[data-site-admin-control]"
+  ).forEach(element => {
+    element.hidden = !activeAndAdmin;
+  });
+
+  siteManagementRenderMembers(detail);
+  siteManagementRenderReceipt();
+  bindSiteManagementControls();
+}
+
+async function siteManagementPost(route, payload) {
+  const response = await fetch(route, {
+    method: "POST",
+    credentials: "same-origin",
+    cache: "no-store",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload || {})
+  });
+
+  let result = {};
+  try {
+    result = await response.json();
+  } catch (error) {
+    result = {};
+  }
+
+  if (response.status === 401) {
+    window.location.href = "/login";
+    throw new Error("Authentication is required.");
+  }
+
+  if (!response.ok || result.ok === false) {
+    throw new Error(
+      result.message
+      || result.error
+      || `Logical-site action returned HTTP ${response.status}`
+    );
+  }
+
+  siteManagementState.lastReceipt = result.receipt || {
+    action: result.action || "logical_site.action",
+    severity: "success",
+    message: "Logical-site action completed."
+  };
+
+  if (result.site && result.site.site_id) {
+    siteManagementState.selectedSiteId = result.site.site_id;
+  }
+
+  await load();
+  return result;
+}
+
+async function siteManagementAction(route, payload) {
+  try {
+    await siteManagementPost(route, payload);
+  } catch (error) {
+    siteManagementState.lastReceipt = {
+      action: "logical_site.action",
+      severity: "error",
+      message: error && error.message
+        ? error.message
+        : String(error)
+    };
+    siteManagementRenderReceipt();
+  }
+}
+
+function bindSiteManagementControls() {
+  const panel = document.getElementById("site-management-panel");
+  if (!panel || panel.dataset.boundSiteManagement === "1") return;
+
+  panel.dataset.boundSiteManagement = "1";
+
+  panel.addEventListener("click", event => {
+    const button = event.target.closest("button");
+    if (!button) return;
+
+    const manageId = button.dataset.siteManage;
+    if (manageId) {
+      siteManagementState.selectedSiteId = manageId;
+      renderSiteManagement(
+        siteManagementState.session,
+        siteManagementState.payload
+      );
+      return;
+    }
+
+    const removeScope = button.dataset.siteRemove;
+    if (removeScope) {
+      const detail = siteManagementSelectedDetail();
+      const site = detail && detail.site;
+      if (!site) return;
+
+      if (!window.confirm(
+        `Remove ${removeScope} from ${site.name}? Historical telemetry will not be deleted.`
+      )) {
+        return;
+      }
+
+      siteManagementAction(
+        "/api/site-remove-scope",
+        {
+          site_id: site.site_id,
+          network_scope: removeScope
+        }
+      );
+      return;
+    }
+
+    if (button.id === "site-management-refresh-button") {
+      load();
+      return;
+    }
+
+    if (button.id === "site-create-button") {
+      const name = (
+        document.getElementById("site-create-name") || {}
+      ).value || "";
+      const description = (
+        document.getElementById("site-create-description") || {}
+      ).value || "";
+      const networkScopes =
+        siteManagementSelectedCreateScopes();
+      siteManagementAction(
+        "/api/site-create",
+        {
+          name,
+          description,
+          network_scopes: networkScopes
+        }
+      );
+      return;
+    }
+
+    const detail = siteManagementSelectedDetail();
+    const site = detail && detail.site;
+    if (!site) return;
+
+    if (button.id === "site-rename-button") {
+      const name = (
+        document.getElementById("site-rename-name") || {}
+      ).value || "";
+      siteManagementAction(
+        "/api/site-rename",
+        {site_id: site.site_id, name}
+      );
+      return;
+    }
+
+    if (button.id === "site-description-button") {
+      const description = (
+        document.getElementById(
+          "site-description-value"
+        ) || {}
+      ).value || "";
+      siteManagementAction(
+        "/api/site-description",
+        {
+          site_id: site.site_id,
+          description
+        }
+      );
+      return;
+    }
+
+    if (button.id === "site-assign-scope-button") {
+      const networkScope = (
+        document.getElementById(
+          "site-assign-scope-select"
+        ) || {}
+      ).value || "";
+      siteManagementAction(
+        "/api/site-assign-scope",
+        {
+          site_id: site.site_id,
+          network_scope: networkScope
+        }
+      );
+      return;
+    }
+
+    if (button.id === "site-archive-button") {
+      const required = `ARCHIVE ${site.site_id}`;
+      const confirmation = window.prompt(
+        `Archiving retains memberships but makes the site read-only.\nType exactly: ${required}`
+      );
+
+      if (confirmation === null) return;
+
+      siteManagementAction(
+        "/api/site-archive",
+        {
+          site_id: site.site_id,
+          confirmation
+        }
+      );
+    }
+  });
+}
+
 
 
     function scanCard(title, scan) {
@@ -24157,6 +28996,86 @@ def dashboard_index_html_base_v025_operator_link():
 
     let deltaAegisTrueAegisLastRunReceipt = null;
 
+
+    function deltaAegisTrueAegisRenderExecutiveReadiness(
+      context,
+      jobsPayload,
+      errorMessage = ""
+    ) {
+      const jobs = Array.isArray(jobsPayload)
+        ? jobsPayload
+        : ((jobsPayload && jobsPayload.jobs) || []);
+      const blockers = (
+        context && Array.isArray(context.blockers)
+      ) ? context.blockers : [];
+      const latestScan = (context && context.latest_scan) || {};
+      const activeJobs = jobs.filter(job => {
+        const status = String(
+          (job && job.status) || ""
+        ).toUpperCase();
+        return status === "QUEUED" || status === "RUNNING";
+      });
+      const ready = !!(
+        context
+        && (
+          context.ready_to_start === true
+          || context.ready === true
+        )
+      );
+      const readiness = errorMessage
+        ? "Unavailable"
+        : (ready ? "Ready" : "Blocked");
+      const scanId = (
+        latestScan.scan_id
+        || (context && context.scan_id)
+        || "—"
+      );
+      const message = errorMessage
+        || (context && context.message)
+        || (
+          blockers.length
+            ? blockers[0]
+            : (
+                ready
+                  ? "TrueAegis can start against the latest accepted subnet scan."
+                  : "TrueAegis readiness requires operator review."
+              )
+        );
+
+      const setText = (id, value) => {
+        const element = document.getElementById(id);
+        if (element) {
+          element.textContent = String(
+            value === null || value === undefined
+              ? "—"
+              : value
+          );
+        }
+      };
+
+      setText("trueaegis-executive-readiness", readiness);
+      setText("trueaegis-executive-scan", scanId);
+      setText(
+        "trueaegis-executive-active-jobs",
+        activeJobs.length
+      );
+      setText("trueaegis-executive-message", message);
+
+      const openButton = document.getElementById(
+        "trueaegis-executive-open-tab"
+      );
+
+      if (
+        openButton
+        && openButton.dataset.boundTrueAegisTab !== "1"
+      ) {
+        openButton.dataset.boundTrueAegisTab = "1";
+        openButton.addEventListener("click", () => {
+          activateDashboardTab("trueaegis");
+        });
+      }
+    }
+
     function deltaAegisTrueAegisOrchestrationEnsurePanel() {
       let panel = document.getElementById("trueaegis-orchestration-panel");
 
@@ -24164,21 +29083,42 @@ def dashboard_index_html_base_v025_operator_link():
         return panel;
       }
 
+      const foundation = (
+        document.getElementById("trueaegis-validation-foundation-panel")
+        || (
+          typeof ensureTrueAegisValidationPanel === "function"
+            ? ensureTrueAegisValidationPanel()
+            : null
+        )
+      );
+
+      if (!foundation) {
+        throw new Error(
+          "TrueAegis tab foundation is unavailable; "
+          + "orchestration was not rendered outside its tab."
+        );
+      }
+
+      let mount = document.getElementById(
+        "trueaegis-orchestration-mount"
+      );
+
+      if (!mount) {
+        mount = document.createElement("div");
+        mount.id = "trueaegis-orchestration-mount";
+        foundation.prepend(mount);
+      }
+
+      if (!foundation.contains(mount)) {
+        throw new Error(
+          "TrueAegis orchestration mount is outside the TrueAegis tab."
+        );
+      }
+
       panel = document.createElement("section");
       panel.id = "trueaegis-orchestration-panel";
-      panel.dataset.tabPanel = "trueaegis";
-
-      const correlationBody = document.getElementById("trueaegis-validation-correlations-body");
-      const correlationSection = correlationBody ? correlationBody.closest("section") : null;
-      const validationBody = document.getElementById("trueaegis-validation-observations-body");
-      const validationSection = validationBody ? validationBody.closest("section") : null;
-      const anchor = correlationSection || validationSection;
-
-      if (anchor && anchor.parentNode) {
-        anchor.parentNode.insertBefore(panel, anchor);
-      } else {
-        document.body.appendChild(panel);
-      }
+      panel.className = "detail-box trueaegis-orchestration";
+      mount.appendChild(panel);
 
       return panel;
     }
@@ -24223,6 +29163,11 @@ def dashboard_index_html_base_v025_operator_link():
     }
 
     function deltaAegisTrueAegisOrchestrationRender(context, jobsPayload, errorMessage = "") {
+      deltaAegisTrueAegisRenderExecutiveReadiness(
+        context,
+        jobsPayload,
+        errorMessage
+      );
       const panel = deltaAegisTrueAegisOrchestrationEnsurePanel();
       const jobs = Array.isArray(jobsPayload) ? jobsPayload : ((jobsPayload && jobsPayload.jobs) || []);
       const blockers = (context && Array.isArray(context.blockers)) ? context.blockers : [];
@@ -24760,12 +29705,17 @@ def dashboard_index_html_base_v025_operator_link():
       try {
         setupDashboardTabs();
 
-        const [scopes, summary, scanContext, currentState, investigationCenter, scanJobs, assets, currentRisk, historicalRisk, portBehavior, events, alerts, annotations] = await Promise.all([
+        const siteDetailPath = selectedSiteDetailPath();
+        const [scopes, siteCatalog, siteDetail, session, siteManagement, summary, scanContext, currentState, investigationCenter, scanJobs, assets, currentRisk, historicalRisk, portBehavior, events, alerts, annotations] = await Promise.all([
           api("/api/scopes"),
+          api("/api/sites"),
+          siteDetailPath ? api(siteDetailPath) : Promise.resolve(null),
+          api("/api/session"),
+          api("/api/site-management"),
           api(scopedPath("/api/summary")),
           api(scopedPath("/api/scan-context")),
           api(scopedPath("/api/current-state")),
-          api(investigationCenterFilterPath()),
+          api(siteAwareInvestigationCenterPath()),
           api(scopedPath("/api/scan-jobs?limit=10")),
           api(scopedPath("/api/assets?limit=25")),
           api(scopedPath("/api/current-risk?limit=10000")),
@@ -24776,7 +29726,8 @@ def dashboard_index_html_base_v025_operator_link():
           api(scopedPath("/api/annotations?limit=20"))
         ]);
 
-        renderScopes(scopes);
+        renderScopeNavigation(scopes, siteCatalog, siteDetail);
+        renderSiteManagement(session, siteManagement);
         renderMetrics(summary);
         renderCurrentState(currentState);
         renderInvestigationCenter(investigationCenter);
@@ -24807,6 +29758,10 @@ def dashboard_index_html_base_v025_operator_link():
     load();
     setInterval(load, 30000);
   </script>
+<footer data-deltaaegis-license="AGPL-3.0-only" style="margin:2rem 0 0;padding:1rem;border-top:1px solid currentColor;opacity:.78;text-align:center;font-size:.85rem">
+  DeltaAegis is licensed under AGPL-3.0-only.
+  <a href="https://github.com/ParkerLee07/DeltaAegis" target="_blank" rel="noopener noreferrer">View Corresponding Source</a>.
+</footer>
 </body>
 </html>
 """
@@ -25115,6 +30070,1028 @@ def dashboard_index_html() -> str:
 
     return html_text
 
+# v0.42 checkpoint F: shared dashboard evidence freshness strip.
+_deltaaegis_dashboard_index_html_v042_freshness_base = dashboard_index_html
+
+
+def dashboard_index_html() -> str:
+    html_text = (
+        _deltaaegis_dashboard_index_html_v042_freshness_base()
+    )
+
+    if 'id="dashboard-freshness-strip"' in html_text:
+        return html_text
+
+    styles = """
+  <style id="deltaaegis-v042-dashboard-freshness-styles">
+    #dashboard-freshness-strip {
+      background:
+        linear-gradient(
+          135deg,
+          rgba(8, 145, 178, 0.13),
+          rgba(15, 23, 42, 0.92) 52%
+        );
+      border: 1px solid #27435f;
+      border-left: 4px solid #22d3ee;
+      border-radius: 0 0 14px 14px;
+      box-shadow: 0 12px 30px rgba(2, 6, 23, 0.24);
+      margin: -1px 0 1rem;
+      padding: 0.86rem 1rem;
+    }
+
+    #dashboard-freshness-strip[data-state="FRESH"] {
+      border-left-color: #34d399;
+    }
+
+    #dashboard-freshness-strip[data-state="AGING"] {
+      border-left-color: #fbbf24;
+    }
+
+    #dashboard-freshness-strip[data-state="STALE"],
+    #dashboard-freshness-strip[data-state="NO_ACCEPTED_SCAN"],
+    #dashboard-freshness-strip[data-state="ERROR"] {
+      border-left-color: #fb7185;
+    }
+
+    .dashboard-freshness-header {
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.65rem;
+      justify-content: space-between;
+      margin-bottom: 0.7rem;
+    }
+
+    .dashboard-freshness-heading {
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.55rem;
+    }
+
+    .dashboard-freshness-heading strong {
+      color: #e0f2fe;
+      font-size: 0.95rem;
+    }
+
+    .dashboard-freshness-badge {
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid #334155;
+      border-radius: 999px;
+      color: #cbd5e1;
+      font-size: 0.76rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      padding: 0.28rem 0.58rem;
+    }
+
+    .dashboard-freshness-badge[data-state="FRESH"] {
+      border-color: #10b981;
+      color: #a7f3d0;
+    }
+
+    .dashboard-freshness-badge[data-state="AGING"] {
+      border-color: #d97706;
+      color: #fde68a;
+    }
+
+    .dashboard-freshness-badge[data-state="STALE"],
+    .dashboard-freshness-badge[data-state="NO_ACCEPTED_SCAN"],
+    .dashboard-freshness-badge[data-state="ERROR"] {
+      border-color: #e11d48;
+      color: #fecdd3;
+    }
+
+    .dashboard-freshness-grid {
+      display: grid;
+      gap: 0.72rem;
+      grid-template-columns:
+        repeat(auto-fit, minmax(205px, 1fr));
+    }
+
+    .dashboard-freshness-item {
+      background: rgba(7, 17, 38, 0.54);
+      border: 1px solid #263852;
+      border-radius: 10px;
+      min-width: 0;
+      padding: 0.62rem 0.72rem;
+    }
+
+    .dashboard-freshness-label {
+      color: #8fa8c8;
+      display: block;
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.07em;
+      margin-bottom: 0.28rem;
+      text-transform: uppercase;
+    }
+
+    .dashboard-freshness-value {
+      color: #e2e8f0;
+      display: block;
+      font-size: 0.88rem;
+      overflow-wrap: anywhere;
+    }
+
+    #dashboard-freshness-warning {
+      background: rgba(120, 53, 15, 0.2);
+      border: 1px solid rgba(245, 158, 11, 0.55);
+      border-radius: 9px;
+      color: #fde68a;
+      margin-top: 0.72rem;
+      padding: 0.58rem 0.72rem;
+    }
+
+    #dashboard-freshness-warning[hidden] {
+      display: none;
+    }
+
+    #dashboard-freshness-warning-summary {
+      font-weight: 800;
+    }
+
+    #dashboard-freshness-outdated-scopes {
+      display: grid;
+      gap: 0.5rem;
+      list-style: none;
+      margin: 0.65rem 0 0;
+      padding: 0;
+    }
+
+    #dashboard-freshness-outdated-scopes li {
+      background: rgba(15, 23, 42, 0.68);
+      border: 1px solid rgba(245, 158, 11, 0.35);
+      border-radius: 8px;
+      display: grid;
+      gap: 0.25rem;
+      padding: 0.58rem 0.68rem;
+    }
+
+    #dashboard-freshness-outdated-scopes code {
+      color: #a5f3fc;
+      overflow-wrap: anywhere;
+    }
+
+    .dashboard-freshness-stale-detail {
+      color: #fef3c7;
+      font-size: 0.82rem;
+    }
+
+    #dashboard-freshness-message {
+      color: #9fb5d2;
+      font-size: 0.8rem;
+      margin-top: 0.62rem;
+    }
+  </style>
+"""
+
+    strip = """
+  <section
+    id="dashboard-freshness-strip"
+    data-state="LOADING"
+    aria-live="polite"
+    aria-label="Dashboard evidence freshness"
+  >
+    <div class="dashboard-freshness-header">
+      <div class="dashboard-freshness-heading">
+        <strong>Evidence Freshness</strong>
+        <span
+          id="dashboard-freshness-state"
+          class="dashboard-freshness-badge"
+          data-state="LOADING"
+        >LOADING</span>
+      </div>
+      <span
+        id="dashboard-freshness-context"
+        class="muted"
+      >Loading selected dashboard context…</span>
+    </div>
+
+    <div class="dashboard-freshness-grid">
+      <div class="dashboard-freshness-item">
+        <span
+          id="dashboard-freshness-newest-label"
+          class="dashboard-freshness-label"
+        >Evidence through</span>
+        <time
+          id="dashboard-freshness-newest"
+          class="dashboard-freshness-value"
+        >Unknown</time>
+      </div>
+
+      <div
+        id="dashboard-freshness-oldest-item"
+        class="dashboard-freshness-item"
+      >
+        <span
+          id="dashboard-freshness-oldest-label"
+          class="dashboard-freshness-label"
+        >Oldest evidence</span>
+        <time
+          id="dashboard-freshness-oldest"
+          class="dashboard-freshness-value"
+        >Unknown</time>
+      </div>
+
+      <div class="dashboard-freshness-item">
+        <span class="dashboard-freshness-label">Imported</span>
+        <time
+          id="dashboard-freshness-imported"
+          class="dashboard-freshness-value"
+        >Unknown</time>
+      </div>
+
+      <div class="dashboard-freshness-item">
+        <span class="dashboard-freshness-label">Evidence age</span>
+        <span
+          id="dashboard-freshness-age"
+          class="dashboard-freshness-value"
+        >Unknown</span>
+      </div>
+
+      <div class="dashboard-freshness-item">
+        <span class="dashboard-freshness-label">
+          Dashboard refreshed
+        </span>
+        <time
+          id="dashboard-freshness-refreshed"
+          class="dashboard-freshness-value"
+        >Unknown</time>
+      </div>
+    </div>
+
+    <div id="dashboard-freshness-warning" hidden>
+      <div id="dashboard-freshness-warning-summary"></div>
+      <ul id="dashboard-freshness-outdated-scopes"></ul>
+    </div>
+    <div id="dashboard-freshness-message">
+      Loading accepted-scan freshness…
+    </div>
+  </section>
+"""
+
+    script = r"""
+  <script id="deltaaegis-v042-dashboard-freshness-script">
+    (() => {
+      "use strict";
+
+      const FRESHNESS_WARNING_HOURS = 24;
+
+      const STATE_RANK = {
+        FRESH: 0,
+        AGING: 1,
+        STALE: 2,
+        NO_ACCEPTED_SCAN: 3,
+        ERROR: 4
+      };
+
+      function freshnessElement(id) {
+        return document.getElementById(id);
+      }
+
+      function freshnessParseTime(value) {
+        if (!value) return null;
+        const parsed = new Date(value);
+        return Number.isNaN(parsed.getTime()) ? null : parsed;
+      }
+
+      function freshnessTimeValue(record) {
+        const snapshot = record && record.latest_snapshot
+          ? record.latest_snapshot
+          : {};
+
+        return (
+          (record && record.timestamp)
+          || snapshot.scan_completed_at
+          || snapshot.created_at
+          || snapshot.imported_at
+          || null
+        );
+      }
+
+      function freshnessImportedValue(record) {
+        const snapshot = record && record.latest_snapshot
+          ? record.latest_snapshot
+          : {};
+
+        return snapshot.imported_at || null;
+      }
+
+      function freshnessLocalLabel(value) {
+        const parsed = freshnessParseTime(value);
+
+        if (!parsed) return "Unknown";
+
+        return parsed.toLocaleString(
+          undefined,
+          {
+            dateStyle: "medium",
+            timeStyle: "medium"
+          }
+        );
+      }
+
+      function freshnessSetTime(id, value) {
+        const element = freshnessElement(id);
+        if (!element) return;
+
+        const parsed = freshnessParseTime(value);
+
+        if (!parsed) {
+          element.textContent = "Unknown";
+          element.removeAttribute("datetime");
+          element.title = "No timestamp is available";
+          return;
+        }
+
+        element.textContent = freshnessLocalLabel(value);
+        element.dateTime = parsed.toISOString();
+        element.title = String(value);
+      }
+
+      function freshnessAgeLabel(ageHours) {
+        if (
+          ageHours === null
+          || ageHours === undefined
+          || !Number.isFinite(Number(ageHours))
+        ) {
+          return "Unknown";
+        }
+
+        const value = Number(ageHours);
+
+        if (value < 1) {
+          return `${Math.max(0, Math.round(value * 60))} minutes`;
+        }
+
+        if (value < 48) {
+          return `${value.toFixed(1)} hours`;
+        }
+
+        return `${(value / 24).toFixed(1)} days`;
+      }
+
+      function freshnessWorstState(records) {
+        let result = "FRESH";
+        let rank = -1;
+
+        for (const record of records) {
+          const state = String(
+            (record && record.state) || "NO_ACCEPTED_SCAN"
+          ).toUpperCase();
+          const nextRank = Object.prototype.hasOwnProperty.call(
+            STATE_RANK,
+            state
+          )
+            ? STATE_RANK[state]
+            : STATE_RANK.ERROR;
+
+          if (nextRank > rank) {
+            rank = nextRank;
+            result = state;
+          }
+        }
+
+        return result;
+      }
+
+      function freshnessScopeDetail(record) {
+        const snapshot = record && record.latest_snapshot
+          ? record.latest_snapshot
+          : {};
+        const state = String(
+          (record && record.state) || "NO_ACCEPTED_SCAN"
+        ).toUpperCase();
+        const rawAge = Number(record && record.age_hours);
+        const ageHours = Number.isFinite(rawAge) ? rawAge : null;
+        const evidenceAt = freshnessTimeValue(record);
+        const networkScope = String(
+          (record && record.network_scope)
+          || snapshot.network_scope
+          || "Unknown subnet"
+        );
+        const scanId = String(
+          snapshot.scan_id
+          || (record && record.scan_id)
+          || "No accepted scan"
+        );
+        const noAcceptedScan = (
+          state === "NO_ACCEPTED_SCAN"
+          || !snapshot.scan_id
+        );
+        const overThreshold = (
+          ageHours !== null
+          && ageHours > FRESHNESS_WARNING_HOURS
+        );
+
+        return {
+          networkScope,
+          scanId,
+          state,
+          evidenceAt,
+          ageHours,
+          noAcceptedScan,
+          overThreshold,
+          outOfDate: noAcceptedScan || overThreshold
+        };
+      }
+
+      function freshnessAggregate(records, mode, contextLabel) {
+        const safeRecords = Array.isArray(records)
+          ? records
+          : [];
+        const evidence = [];
+        const imports = [];
+
+        for (const record of safeRecords) {
+          const evidenceValue = freshnessTimeValue(record);
+          const evidenceTime = freshnessParseTime(evidenceValue);
+
+          if (evidenceTime) {
+            evidence.push({
+              value: evidenceValue,
+              milliseconds: evidenceTime.getTime()
+            });
+          }
+
+          const importedValue = freshnessImportedValue(record);
+          const importedTime = freshnessParseTime(importedValue);
+
+          if (importedTime) {
+            imports.push({
+              value: importedValue,
+              milliseconds: importedTime.getTime()
+            });
+          }
+        }
+
+        evidence.sort(
+          (left, right) => left.milliseconds - right.milliseconds
+        );
+        imports.sort(
+          (left, right) => left.milliseconds - right.milliseconds
+        );
+
+        const oldest = evidence.length ? evidence[0] : null;
+        const newest = evidence.length
+          ? evidence[evidence.length - 1]
+          : null;
+        const newestImport = imports.length
+          ? imports[imports.length - 1]
+          : null;
+        const spreadSeconds = (
+          oldest && newest
+            ? Math.max(
+                0,
+                (newest.milliseconds - oldest.milliseconds) / 1000
+              )
+            : 0
+        );
+        const uniqueStates = new Set(
+          safeRecords.map(
+            record => String(
+              (record && record.state) || "NO_ACCEPTED_SCAN"
+            ).toUpperCase()
+          )
+        );
+        const mixed = (
+          safeRecords.length > 1
+          && (
+            spreadSeconds > 3600
+            || uniqueStates.size > 1
+          )
+        );
+        const state = safeRecords.length
+          ? freshnessWorstState(safeRecords)
+          : "NO_ACCEPTED_SCAN";
+        const scopeDetails = safeRecords.map(freshnessScopeDetail);
+        const outOfDateScopes = scopeDetails.filter(
+          item => item.outOfDate
+        ).sort(
+          (left, right) => {
+            if (left.noAcceptedScan !== right.noAcceptedScan) {
+              return left.noAcceptedScan ? -1 : 1;
+            }
+            return Number(right.ageHours || 0)
+              - Number(left.ageHours || 0);
+          }
+        );
+        const worstAge = safeRecords.reduce(
+          (current, record) => {
+            const value = Number(record && record.age_hours);
+            if (!Number.isFinite(value)) return current;
+            return current === null
+              ? value
+              : Math.max(current, value);
+          },
+          null
+        );
+
+        return {
+          mode,
+          contextLabel,
+          state,
+          newest: newest ? newest.value : null,
+          oldest: oldest ? oldest.value : null,
+          imported: newestImport ? newestImport.value : null,
+          ageHours: worstAge,
+          mixed,
+          warningThresholdHours: FRESHNESS_WARNING_HOURS,
+          scopeDetails,
+          outOfDateScopes,
+          memberCount: safeRecords.length,
+          missingCount: safeRecords.filter(
+            record => !freshnessParseTime(
+              freshnessTimeValue(record)
+            )
+          ).length
+        };
+      }
+
+      async function freshnessFetch(path) {
+        const response = await fetch(
+          path,
+          {
+            credentials: "same-origin",
+            cache: "no-store"
+          }
+        );
+
+        if (
+          response.status === 401
+          || response.status === 403
+        ) {
+          window.location.href = "/login";
+          throw new Error("Authentication required");
+        }
+
+        const payload = await response.json();
+
+        if (!response.ok || payload.ok === false) {
+          throw new Error(
+            payload.message
+            || payload.error
+            || `Freshness request failed (${response.status})`
+          );
+        }
+
+        return payload;
+      }
+
+      function freshnessSelectedSiteId() {
+        return new URLSearchParams(
+          window.location.search
+        ).get("site_id") || "";
+      }
+
+      function freshnessSelectedScope() {
+        if (freshnessSelectedSiteId()) return "";
+
+        return new URLSearchParams(
+          window.location.search
+        ).get("scope") || "";
+      }
+
+      function freshnessScopedPath(path) {
+        if (typeof scopedPath === "function") {
+          return scopedPath(path);
+        }
+
+        const siteId = freshnessSelectedSiteId();
+        const scope = freshnessSelectedScope();
+        const separator = path.includes("?") ? "&" : "?";
+
+        if (siteId) {
+          return (
+            path
+            + separator
+            + "site_id="
+            + encodeURIComponent(siteId)
+          );
+        }
+
+        if (scope) {
+          return (
+            path
+            + separator
+            + "scope="
+            + encodeURIComponent(scope)
+          );
+        }
+
+        return path;
+      }
+
+      async function freshnessLoadRecords() {
+        const siteId = freshnessSelectedSiteId();
+        const scope = freshnessSelectedScope();
+
+        if (siteId) {
+          const payload = await freshnessFetch(
+            freshnessScopedPath("/api/scan-freshness")
+          );
+          const records = Array.isArray(payload.member_freshness)
+            ? payload.member_freshness
+            : [];
+
+          return freshnessAggregate(
+            records,
+            "site",
+            (
+              payload.site_name
+              || payload.name
+              || `Logical site ${siteId}`
+            )
+          );
+        }
+
+        if (scope) {
+          const payload = await freshnessFetch(
+            freshnessScopedPath("/api/scan-freshness")
+          );
+          payload.network_scope = scope;
+
+          return freshnessAggregate(
+            [payload],
+            "scope",
+            scope
+          );
+        }
+
+        const scopesPayload = await freshnessFetch("/api/scopes");
+        const scopes = Array.isArray(scopesPayload)
+          ? scopesPayload
+          : (
+              Array.isArray(scopesPayload.scopes)
+                ? scopesPayload.scopes
+                : []
+            );
+        const scopeNames = scopes.map(
+          item => String(item.network_scope || "")
+        ).filter(Boolean);
+
+        const records = await Promise.all(
+          scopeNames.map(
+            async networkScope => {
+              const payload = await freshnessFetch(
+                "/api/scan-freshness?scope="
+                + encodeURIComponent(networkScope)
+              );
+              payload.network_scope = networkScope;
+              return payload;
+            }
+          )
+        );
+
+        return freshnessAggregate(
+          records,
+          "all-scopes",
+          "All network scopes"
+        );
+      }
+
+      function freshnessRenderOutdatedScopes(items) {
+        const list = freshnessElement(
+          "dashboard-freshness-outdated-scopes"
+        );
+        if (!list) return;
+
+        list.replaceChildren();
+
+        for (const item of items) {
+          const row = document.createElement("li");
+          const identity = document.createElement("strong");
+          const scopeCode = document.createElement("code");
+          const scanLabel = document.createElement("span");
+          const scanCode = document.createElement("code");
+          const timing = document.createElement("span");
+
+          scopeCode.textContent = item.networkScope;
+          identity.append("Subnet ", scopeCode);
+
+          scanCode.textContent = item.scanId;
+          scanLabel.className = "dashboard-freshness-stale-detail";
+          scanLabel.append("Scan ", scanCode);
+
+          timing.className = "dashboard-freshness-stale-detail";
+          if (item.noAcceptedScan) {
+            timing.textContent = "No accepted scan is available.";
+          } else {
+            timing.textContent = (
+              "Evidence through "
+              + freshnessLocalLabel(item.evidenceAt)
+              + " · "
+              + freshnessAgeLabel(item.ageHours)
+              + " old"
+            );
+            timing.title = String(item.evidenceAt || "");
+          }
+
+          row.append(identity, scanLabel, timing);
+          list.append(row);
+        }
+      }
+
+      function freshnessRender(model) {
+        const strip = freshnessElement(
+          "dashboard-freshness-strip"
+        );
+        const badge = freshnessElement(
+          "dashboard-freshness-state"
+        );
+        const warning = freshnessElement(
+          "dashboard-freshness-warning"
+        );
+        const warningSummary = freshnessElement(
+          "dashboard-freshness-warning-summary"
+        );
+        const context = freshnessElement(
+          "dashboard-freshness-context"
+        );
+        const message = freshnessElement(
+          "dashboard-freshness-message"
+        );
+        const newestLabel = freshnessElement(
+          "dashboard-freshness-newest-label"
+        );
+        const oldestLabel = freshnessElement(
+          "dashboard-freshness-oldest-label"
+        );
+        const oldestItem = freshnessElement(
+          "dashboard-freshness-oldest-item"
+        );
+        const state = String(
+          model.state || "NO_ACCEPTED_SCAN"
+        ).toUpperCase();
+
+        if (strip) strip.dataset.state = state;
+
+        if (badge) {
+          badge.dataset.state = state;
+          badge.textContent = state;
+        }
+
+        if (context) {
+          context.textContent = model.contextLabel || "Unknown context";
+        }
+
+        if (model.mode === "site") {
+          if (newestLabel) {
+            newestLabel.textContent = "Newest member evidence";
+          }
+          if (oldestLabel) {
+            oldestLabel.textContent = "Oldest member evidence";
+          }
+        } else if (model.mode === "all-scopes") {
+          if (newestLabel) {
+            newestLabel.textContent = "Newest scope evidence";
+          }
+          if (oldestLabel) {
+            oldestLabel.textContent = "Oldest scope evidence";
+          }
+        } else {
+          if (newestLabel) {
+            newestLabel.textContent = "Evidence through";
+          }
+          if (oldestLabel) {
+            oldestLabel.textContent = "Oldest evidence";
+          }
+        }
+
+        if (oldestItem) {
+          oldestItem.hidden = model.mode === "scope";
+        }
+
+        freshnessSetTime(
+          "dashboard-freshness-newest",
+          model.newest
+        );
+        freshnessSetTime(
+          "dashboard-freshness-oldest",
+          model.oldest
+        );
+        freshnessSetTime(
+          "dashboard-freshness-imported",
+          model.imported
+        );
+        freshnessSetTime(
+          "dashboard-freshness-refreshed",
+          new Date().toISOString()
+        );
+
+        const age = freshnessElement(
+          "dashboard-freshness-age"
+        );
+        if (age) {
+          age.textContent = freshnessAgeLabel(
+            model.ageHours
+          );
+          age.title = (
+            model.ageHours === null
+            || model.ageHours === undefined
+              ? "No accepted evidence timestamp is available"
+              : `${model.ageHours} hours since the oldest accepted evidence`
+          );
+        }
+
+        const outOfDateScopes = Array.isArray(
+          model.outOfDateScopes
+        ) ? model.outOfDateScopes : [];
+        const olderThanThreshold = outOfDateScopes.filter(
+          item => item.overThreshold
+        ).length;
+        const withoutAcceptedScan = outOfDateScopes.filter(
+          item => item.noAcceptedScan
+        ).length;
+
+        if (warning) {
+          warning.hidden = outOfDateScopes.length === 0;
+        }
+
+        if (warningSummary) {
+          if (!outOfDateScopes.length) {
+            warningSummary.textContent = "";
+          } else {
+            const parts = [];
+            if (olderThanThreshold) {
+              parts.push(
+                `${olderThanThreshold} subnet(s) have evidence older than `
+                + `${model.warningThresholdHours} hours`
+              );
+            }
+            if (withoutAcceptedScan) {
+              parts.push(
+                `${withoutAcceptedScan} subnet(s) have no accepted scan`
+              );
+            }
+            warningSummary.textContent = (
+              parts.join("; ")
+              + ". The affected subnet and supporting scan are listed below."
+            );
+          }
+        }
+
+        freshnessRenderOutdatedScopes(outOfDateScopes);
+
+        if (message) {
+          message.textContent = (
+            `${model.memberCount} scope(s) evaluated. `
+            + "Evidence and import times are separate from "
+            + "the browser refresh time."
+          );
+        }
+      }
+
+      function freshnessRenderError(error) {
+        const strip = freshnessElement(
+          "dashboard-freshness-strip"
+        );
+        const badge = freshnessElement(
+          "dashboard-freshness-state"
+        );
+        const warning = freshnessElement(
+          "dashboard-freshness-warning"
+        );
+        const warningSummary = freshnessElement(
+          "dashboard-freshness-warning-summary"
+        );
+        const outdatedList = freshnessElement(
+          "dashboard-freshness-outdated-scopes"
+        );
+        const message = freshnessElement(
+          "dashboard-freshness-message"
+        );
+
+        if (strip) strip.dataset.state = "ERROR";
+
+        if (badge) {
+          badge.dataset.state = "ERROR";
+          badge.textContent = "ERROR";
+        }
+
+        if (warning) {
+          warning.hidden = false;
+        }
+        if (warningSummary) {
+          warningSummary.textContent = (
+            "Freshness could not be established. "
+            + "Do not assume the visible evidence is current."
+          );
+        }
+        if (outdatedList) {
+          outdatedList.replaceChildren();
+        }
+
+        if (message) {
+          message.textContent = (
+            "Freshness lookup failed: "
+            + String(
+                (error && error.message) || error || "Unknown error"
+              )
+          );
+        }
+
+        freshnessSetTime(
+          "dashboard-freshness-refreshed",
+          new Date().toISOString()
+        );
+      }
+
+      async function dashboardFreshnessLoad() {
+        try {
+          const model = await freshnessLoadRecords();
+          freshnessRender(model);
+        } catch (error) {
+          freshnessRenderError(error);
+        }
+      }
+
+      window.deltaAegisDashboardFreshness = {
+        aggregate: freshnessAggregate,
+        formatLocalTime: freshnessLocalLabel,
+        load: dashboardFreshnessLoad
+      };
+
+      dashboardFreshnessLoad();
+
+      window.setInterval(
+        dashboardFreshnessLoad,
+        60000
+      );
+
+      document.addEventListener(
+        "visibilitychange",
+        () => {
+          if (!document.hidden) {
+            dashboardFreshnessLoad();
+          }
+        }
+      );
+    })();
+  </script>
+"""
+
+    if "</head>" not in html_text:
+        raise DeltaAegisError(
+            "dashboard freshness could not locate </head>"
+        )
+
+    if "</nav>" not in html_text:
+        raise DeltaAegisError(
+            "dashboard freshness could not locate the main navigation"
+        )
+
+    if "</body>" not in html_text:
+        raise DeltaAegisError(
+            "dashboard freshness could not locate </body>"
+        )
+
+    html_text = html_text.replace(
+        "</head>",
+        styles + "\n</head>",
+        1,
+    )
+    html_text = html_text.replace(
+        "</nav>",
+        "</nav>\n" + strip,
+        1,
+    )
+    html_text = html_text.replace(
+        "</body>",
+        script + "\n</body>",
+        1,
+    )
+
+    return html_text
+
+
+# v0.42 dashboard complete investigation asset inventory.
+_deltaaegis_dashboard_index_html_v042_asset_completeness_base = (
+    dashboard_index_html
+)
+
+
+def dashboard_index_html() -> str:
+    html_text = (
+        _deltaaegis_dashboard_index_html_v042_asset_completeness_base()
+    )
+    bounded_fetch = 'api(scopedPath("/api/assets?limit=25"))'
+    complete_fetch = 'api(scopedPath("/api/assets?limit=10000"))'
+    count = html_text.count(bounded_fetch)
+
+    if count != 1:
+        raise DeltaAegisError(
+            "dashboard expected exactly one bounded asset inventory "
+            f"fetch, found {count}"
+        )
+
+    return html_text.replace(
+        bounded_fetch,
+        complete_fetch,
+        1,
+    )
+
 
 def dashboard_operator_users_shell_html() -> str:
     return '<!doctype html>\n<html lang="en">\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-width,initial-scale=1">\n  <title>DeltaAegis User Management</title>\n  <style>\n    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #020617; color: #e2e8f0; }\n    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, rgba(34,211,238,.13), transparent 34rem), #020617; }\n    main { width: min(1180px, calc(100vw - 32px)); margin: 0 auto; padding: 44px 0; }\n    .panel { border: 1px solid rgba(148,163,184,.22); border-radius: 24px; background: rgba(15,23,42,.92); box-shadow: 0 24px 80px rgba(0,0,0,.34); padding: 28px; }\n    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: .16em; text-transform: uppercase; }\n    h1 { margin: 8px 0 8px; font-size: 32px; letter-spacing: -.04em; }\n    h2 { margin: 26px 0 12px; font-size: 18px; }\n    p { margin: 0 0 20px; color: #94a3b8; line-height: 1.55; }\n    .actions, .form-grid, .row-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }\n    a, button { border: 1px solid rgba(34,211,238,.28); border-radius: 999px; background: rgba(8,145,178,.14); color: #67e8f9; cursor: pointer; padding: 9px 13px; text-decoration: none; font-size: 13px; font-weight: 900; }\n    button:hover, a:hover { background: rgba(8,145,178,.26); }\n    button.danger { border-color: rgba(248,113,113,.35); background: rgba(220,38,38,.12); color: #fecaca; }\n    button.safe { border-color: rgba(34,197,94,.35); background: rgba(22,163,74,.12); color: #bbf7d0; }\n    input, select { border: 1px solid rgba(148,163,184,.22); border-radius: 12px; background: rgba(2,6,23,.48); color: #e2e8f0; padding: 10px 12px; font-weight: 800; }\n    input::placeholder { color: #64748b; }\n    label { color: #94a3b8; display: grid; gap: 6px; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }\n    .status { border: 1px solid rgba(148,163,184,.18); border-radius: 16px; background: rgba(2,6,23,.38); color: #cbd5e1; margin: 18px 0; padding: 12px 14px; font-weight: 700; white-space: pre-wrap; }\n    .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 18px 0 22px; }\n    .card { border: 1px solid rgba(148,163,184,.18); border-radius: 18px; background: rgba(2,6,23,.34); padding: 14px; }\n    .card-label { color: #94a3b8; font-size: 11px; font-weight: 900; letter-spacing: .11em; text-transform: uppercase; }\n    .card-value { color: #f8fafc; font-size: 24px; font-weight: 950; margin-top: 4px; }\n    .table-wrap { overflow-x: auto; border: 1px solid rgba(148,163,184,.18); border-radius: 18px; }\n    table { width: 100%; border-collapse: collapse; min-width: 1020px; }\n    th, td { border-bottom: 1px solid rgba(148,163,184,.14); padding: 12px 14px; text-align: left; vertical-align: top; }\n    th { color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }\n    td { color: #e2e8f0; font-size: 13px; font-weight: 700; }\n    .pill { display: inline-flex; border: 1px solid rgba(148,163,184,.22); border-radius: 999px; padding: 4px 8px; font-size: 11px; font-weight: 950; text-transform: uppercase; letter-spacing: .06em; }\n    .enabled { color: #bbf7d0; border-color: rgba(34,197,94,.35); background: rgba(22,163,74,.12); }\n    .disabled { color: #fecaca; border-color: rgba(248,113,113,.35); background: rgba(220,38,38,.12); }\n    .muted { color: #94a3b8; font-weight: 600; }\n  </style>\n</head>\n<body>\n  <main>\n    <section class="panel">\n      <div class="eyebrow">DeltaAegis Admin</div>\n      <h1>User Management</h1>\n      <p>ADMIN-only v0.26 control surface for local dashboard users. State-changing user actions require ADMIN access and are sent to audited backend APIs. Passwords are never displayed after submission.</p>\n\n      <div class="actions">\n        <a href="/operator">Back to operator session</a>\n        <a href="/">Back to dashboard</a>\n        <a href="/api/admin/users">View raw /api/admin/users JSON</a>\n        <button type="button" id="operator-users-refresh">Refresh users</button>\n      </div>\n\n      <h2>Create user</h2>\n      <form id="operator-create-user-form" class="form-grid">\n        <label>Username\n          <input id="operator-create-username" name="username" autocomplete="off" required placeholder="analyst.one">\n        </label>\n        <label>Display name\n          <input id="operator-create-display-name" name="display_name" autocomplete="off" placeholder="Analyst One">\n        </label>\n        <label>Role\n          <select id="operator-create-role" name="role">\n            <option value="VIEWER">VIEWER</option>\n            <option value="ANALYST">ANALYST</option>\n            <option value="ADMIN">ADMIN</option>\n          </select>\n        </label>\n        <label>Temporary password\n          <input id="operator-create-password" name="password" type="password" autocomplete="new-password" required placeholder="Minimum 8 characters">\n        </label>\n        <button type="submit" class="safe">Create user</button>\n      </form>\n\n      <div class="status" id="operator-users-status">Loading users…</div>\n\n      <div class="summary" id="operator-users-summary" hidden>\n        <div class="card"><div class="card-label">Users</div><div class="card-value" id="operator-users-count">0</div></div>\n        <div class="card"><div class="card-label">Enabled</div><div class="card-value" id="operator-users-enabled-count">0</div></div>\n        <div class="card"><div class="card-label">Admins</div><div class="card-value" id="operator-users-admin-count">0</div></div>\n        <div class="card"><div class="card-label">Analysts</div><div class="card-value" id="operator-users-analyst-count">0</div></div>\n        <div class="card"><div class="card-label">Viewers</div><div class="card-value" id="operator-users-viewer-count">0</div></div>\n      </div>\n\n      <div class="table-wrap" id="operator-users-table-wrap" hidden>\n        <table>\n          <thead>\n            <tr>\n              <th>Username</th><th>Display name</th><th>Role</th><th>Status</th>\n              <th>Password</th><th>Active tokens</th><th>Last token used</th><th>Updated</th><th>Actions</th>\n            </tr>\n          </thead>\n          <tbody id="operator-users-body"></tbody>\n        </table>\n      </div>\n\n      <h2>Recent user-management audit events</h2>\n      <p class="muted">Shows recent audited dashboard user-management actions. Secrets, password hashes, token hashes, raw tokens, and submitted password values are not displayed.</p>\n      <div class="actions">\n        <button type="button" id="operator-users-audit-refresh">Refresh audit trail</button>\n        <a href="/api/access-audit?limit=50">View raw /api/access-audit JSON</a>\n      </div>\n      <div class="status" id="operator-users-audit-status">Loading user-management audit events…</div>\n      <div class="table-wrap" id="operator-users-audit-table-wrap" hidden>\n        <table>\n          <thead>\n            <tr>\n              <th>Timestamp</th><th>Action</th><th>Target</th><th>Actor</th><th>Details</th>\n            </tr>\n          </thead>\n          <tbody id="operator-users-audit-body"></tbody>\n        </table>\n      </div>\n\n    </section>\n  </main>\n\n  <script>\n    function text(value) {\n      if (value === null || value === undefined || value === "") { return "—"; }\n      return String(value);\n    }\n\n    function setText(id, value) {\n      const element = document.getElementById(id);\n      if (element) { element.textContent = text(value); }\n    }\n\n    function adminReceiptLabel(value) {\n      return String(value || "")\n        .replaceAll("_", " ")\n        .replaceAll("-", " ")\n        .split(" ")\n        .filter(function (part) { return Boolean(part); })\n        .map(function (part) {\n          return part.charAt(0).toUpperCase() + part.slice(1);\n        })\n        .join(" ");\n    }\n\n    function adminReceiptValue(value) {\n      if (value === true) { return "Yes"; }\n      if (value === false) { return "No"; }\n      if (value === null || value === undefined || value === "") { return "—"; }\n      return String(value);\n    }\n\n    function adminActionReceiptText(receipt, fallbackMessage) {\n      const safeReceipt = receipt && typeof receipt === "object"\n        ? receipt\n        : {};\n      const lines = [\n        String(safeReceipt.message || fallbackMessage || "Action completed.")\n      ];\n      const summary = safeReceipt.summary && typeof safeReceipt.summary === "object"\n        ? safeReceipt.summary\n        : {};\n      const identifiers = safeReceipt.identifiers && typeof safeReceipt.identifiers === "object"\n        ? safeReceipt.identifiers\n        : {};\n\n      Object.entries(summary).forEach(function (entry) {\n        if (entry[1] === null || entry[1] === undefined || entry[1] === "") {\n          return;\n        }\n        lines.push(\n          `${adminReceiptLabel(entry[0])}: ${adminReceiptValue(entry[1])}`\n        );\n      });\n\n      Object.entries(identifiers).forEach(function (entry) {\n        if (entry[1] === null || entry[1] === undefined || entry[1] === "") {\n          return;\n        }\n        lines.push(\n          `${adminReceiptLabel(entry[0])}: ${adminReceiptValue(entry[1])}`\n        );\n      });\n\n      return lines.join("\\n");\n    }\n\n    function renderAdminActionReceipt(status, receipt, fallbackMessage) {\n      if (!status) { return; }\n      status.textContent = adminActionReceiptText(\n        receipt,\n        fallbackMessage\n      );\n      status.dataset.receiptSeverity = String(\n        (receipt || {}).severity || "info"\n      ).toLowerCase();\n      status.dataset.receiptAction = String(\n        (receipt || {}).action || ""\n      );\n    }\n\n    function escapeHtml(value) {\n      return text(value)\n        .replaceAll("&", "&amp;")\n        .replaceAll("<", "&lt;")\n        .replaceAll(">", "&gt;")\n        .replaceAll(\'"\', "&quot;")\n        .replaceAll("\'", "&#039;");\n    }\n\n    function roleOptions(currentRole) {\n      return ["ADMIN", "ANALYST", "VIEWER"].map(function (role) {\n        const selected = role === currentRole ? " selected" : "";\n        return `<option value="${role}"${selected}>${role}</option>`;\n      }).join("");\n    }\n\n    async function adminPost(path, payload) {\n      const response = await fetch(path, {\n        method: "POST",\n        credentials: "same-origin",\n        cache: "no-store",\n        headers: { "Content-Type": "application/json" },\n        body: JSON.stringify(payload || {})\n      });\n\n      let data = {};\n      try { data = await response.json(); } catch (error) { data = {}; }\n\n      if (response.status === 401) {\n        window.location.href = "/login";\n        return null;\n      }\n\n      if (!response.ok) {\n        throw new Error(data.error || data.message || `Request failed with HTTP ${response.status}`);\n      }\n\n      return data;\n    }\n\n    async function loadOperatorUsers() {\n      const status = document.getElementById("operator-users-status");\n      const summary = document.getElementById("operator-users-summary");\n      const tableWrap = document.getElementById("operator-users-table-wrap");\n      const body = document.getElementById("operator-users-body");\n\n      try {\n        const response = await fetch("/api/admin/users", {\n          credentials: "same-origin",\n          cache: "no-store"\n        });\n\n        if (response.status === 401) {\n          window.location.href = "/login";\n          return;\n        }\n\n        if (response.status === 403) {\n          status.textContent = "Admin role required.";\n          return;\n        }\n\n        if (!response.ok) {\n          status.textContent = "User lookup failed.";\n          return;\n        }\n\n        const payload = await response.json();\n        const roleCounts = payload.role_counts || {};\n        const users = payload.users || [];\n\n        setText("operator-users-count", payload.count || users.length || 0);\n        setText("operator-users-enabled-count", payload.enabled_count || 0);\n        setText("operator-users-admin-count", roleCounts.ADMIN || 0);\n        setText("operator-users-analyst-count", roleCounts.ANALYST || 0);\n        setText("operator-users-viewer-count", roleCounts.VIEWER || 0);\n\n        body.innerHTML = users.length\n          ? users.map(function (user) {\n              const enabledClass = user.enabled ? "enabled" : "disabled";\n              const enabledText = user.enabled ? "Enabled" : "Disabled";\n              const toggleAction = user.enabled ? "disable" : "enable";\n              const toggleLabel = user.enabled ? "Disable" : "Enable";\n              const toggleClass = user.enabled ? "danger" : "safe";\n\n              return `\n                <tr data-username="${escapeHtml(user.username)}">\n                  <td>${escapeHtml(user.username)}</td>\n                  <td>${escapeHtml(user.display_name)}</td>\n                  <td>\n                    <select data-role-select="${escapeHtml(user.username)}">\n                      ${roleOptions(user.role)}\n                    </select>\n                  </td>\n                  <td><span class="pill ${enabledClass}">${enabledText}</span></td>\n                  <td>${user.password_configured ? "Configured" : \'<span class="muted">Not set</span>\'}</td>\n                  <td>${escapeHtml(user.active_token_count)}</td>\n                  <td>${escapeHtml(user.last_token_used_at)}</td>\n                  <td>${escapeHtml(user.updated_at)}</td>\n                  <td>\n                    <div class="row-actions">\n                      <button type="button" data-action="role" data-username="${escapeHtml(user.username)}">Change role</button>\n                      <button type="button" data-action="password" data-username="${escapeHtml(user.username)}">Rotate password</button>\n                      <button type="button" class="${toggleClass}" data-action="${toggleAction}" data-username="${escapeHtml(user.username)}">${toggleLabel}</button>\n                    </div>\n                  </td>\n                </tr>\n              `;\n            }).join("")\n          : \'<tr><td colspan="9" class="muted">No users found.</td></tr>\';\n\n        status.textContent = "Users loaded.";\n        summary.hidden = false;\n        tableWrap.hidden = false;\n      } catch (error) {\n        status.textContent = `User lookup failed: ${error.message || error}`;\n      }\n    }\n\n    document.getElementById("operator-users-refresh").addEventListener("click", loadOperatorUsers);\n\n    document.getElementById("operator-create-user-form").addEventListener("submit", async function (event) {\n      event.preventDefault();\n      const status = document.getElementById("operator-users-status");\n      const form = event.currentTarget;\n\n      const payload = {\n        username: document.getElementById("operator-create-username").value,\n        display_name: document.getElementById("operator-create-display-name").value,\n        role: document.getElementById("operator-create-role").value,\n        password: document.getElementById("operator-create-password").value\n      };\n\n      try {\n        const result = await adminPost("/api/admin/users", payload);\n        form.reset();\n        await loadOperatorUsers();\n        renderAdminActionReceipt(\n          status,\n          result && result.receipt,\n          `Created user ${payload.username}.`\n        );\n      } catch (error) {\n        status.textContent = `Create user failed: ${error.message || error}`;\n      }\n    });\n\n    document.getElementById("operator-users-body").addEventListener("click", async function (event) {\n      const button = event.target.closest("button[data-action]");\n      if (!button) { return; }\n\n      const username = button.dataset.username;\n      const action = button.dataset.action;\n      const status = document.getElementById("operator-users-status");\n\n      try {\n        let result = null;\n        let fallbackMessage = `Updated user ${username}.`;\n\n        if (action === "role") {\n          const roleSelect = document.querySelector(`[data-role-select="${CSS.escape(username)}"]`);\n          result = await adminPost(`/api/admin/users/${encodeURIComponent(username)}/role`, {\n            role: roleSelect ? roleSelect.value : "VIEWER"\n          });\n          fallbackMessage = `Changed role for ${username}.`;\n        } else if (action === "password") {\n          const password = window.prompt(`Enter a new temporary password for ${username}. It will not be displayed after submission.`);\n          if (!password) {\n            status.textContent = "Password rotation cancelled.";\n            return;\n          }\n          result = await adminPost(`/api/admin/users/${encodeURIComponent(username)}/password`, {\n            password: password\n          });\n          fallbackMessage = `Rotated password for ${username}.`;\n        } else if (action === "disable" || action === "enable") {\n          result = await adminPost(`/api/admin/users/${encodeURIComponent(username)}/${action}`, {});\n          fallbackMessage = `${action === "disable" ? "Disabled" : "Enabled"} ${username}.`;\n        }\n\n        await loadOperatorUsers();\n        renderAdminActionReceipt(\n          status,\n          result && result.receipt,\n          fallbackMessage\n        );\n      } catch (error) {\n        status.textContent = `Action failed: ${error.message || error}`;\n      }\n    });\n\n\n    function auditEventsFromPayload(payload) {\n      if (!payload) { return []; }\n      if (Array.isArray(payload.events)) { return payload.events; }\n      if (Array.isArray(payload.audit_events)) { return payload.audit_events; }\n      if (Array.isArray(payload.rows)) { return payload.rows; }\n      if (Array.isArray(payload.items)) { return payload.items; }\n      return [];\n    }\n\n    function actorText(event) {\n      const details = event.details || {};\n      const actor = details.actor || {};\n      return text(\n        event.actor_username ||\n        event.username ||\n        actor.username ||\n        actor.token_name ||\n        actor.user_id ||\n        "—"\n      );\n    }\n\n    function targetText(event) {\n      return text(\n        event.target_key ||\n        event.target_username ||\n        event.target ||\n        event.resource ||\n        "—"\n      );\n    }\n\n    function safeAuditDetails(event) {\n      const details = Object.assign({}, event.details || {});\n      if (details.actor) {\n        details.actor = {\n          username: details.actor.username || details.actor.token_name || "—",\n          role: details.actor.role || "—",\n          auth_type: details.actor.auth_type || "—"\n        };\n      }\n\n      for (const key of Object.keys(details)) {\n        const lower = key.toLowerCase();\n        if (\n          lower.includes("password") ||\n          lower.includes("token") ||\n          lower.includes("secret") ||\n          lower.includes("hash")\n        ) {\n          details[key] = "[redacted]";\n        }\n      }\n\n      return JSON.stringify(details, null, 2);\n    }\n\n    async function loadOperatorUserAuditEvents() {\n      const status = document.getElementById("operator-users-audit-status");\n      const tableWrap = document.getElementById("operator-users-audit-table-wrap");\n      const body = document.getElementById("operator-users-audit-body");\n\n      try {\n        const response = await fetch("/api/access-audit?limit=50", {\n          credentials: "same-origin",\n          cache: "no-store"\n        });\n\n        if (response.status === 401) {\n          window.location.href = "/login";\n          return;\n        }\n\n        if (response.status === 403) {\n          status.textContent = "Admin role required for audit visibility.";\n          return;\n        }\n\n        if (!response.ok) {\n          status.textContent = "Audit lookup failed.";\n          return;\n        }\n\n        const payload = await response.json();\n        const events = auditEventsFromPayload(payload)\n          .filter(function (event) {\n            return String(event.action || "").startsWith("ACCESS_USER_DASHBOARD_");\n          })\n          .slice(0, 20);\n\n        body.innerHTML = events.length\n          ? events.map(function (event) {\n              return `\n                <tr>\n                  <td>${escapeHtml(event.created_at || event.timestamp || event.event_time)}</td>\n                  <td><span class="pill">${escapeHtml(event.action)}</span></td>\n                  <td>${escapeHtml(targetText(event))}</td>\n                  <td>${escapeHtml(actorText(event))}</td>\n                  <td><details><summary>View details</summary><pre class="muted">${escapeHtml(safeAuditDetails(event))}</pre></details></td>\n                </tr>\n              `;\n            }).join("")\n          : \'<tr><td colspan="5" class="muted">No user-management audit events found.</td></tr>\';\n\n        status.textContent = `Loaded ${events.length} user-management audit event(s).`;\n        tableWrap.hidden = false;\n      } catch (error) {\n        status.textContent = `Audit lookup failed: ${error.message || error}`;\n      }\n    }\n\n    document.getElementById("operator-users-audit-refresh").addEventListener("click", loadOperatorUserAuditEvents);\n\n    loadOperatorUsers();\n    loadOperatorUserAuditEvents();\n  </script>\n</body>\n</html>'
@@ -25208,6 +31185,10 @@ def dashboard_first_admin_setup_html(error: str = "") -> str:
     </form>
     <div class="setup-note">This setup page is disabled automatically after the first local dashboard account exists.</div>
   </main>
+<footer data-deltaaegis-license="AGPL-3.0-only" style="margin:2rem 0 0;padding:1rem;border-top:1px solid currentColor;opacity:.78;text-align:center;font-size:.85rem">
+  DeltaAegis is licensed under AGPL-3.0-only.
+  <a href="https://github.com/ParkerLee07/DeltaAegis" target="_blank" rel="noopener noreferrer">View Corresponding Source</a>.
+</footer>
 </body>
 </html>"""
     return html.replace("{{ERROR_HTML}}", error_html)
@@ -25725,6 +31706,10 @@ def dashboard_operator_reset_shell_html() -> str:
     loadTelemetryCleanupPreview();
     loadTelemetryResetAuditEvents();
   </script>
+<footer data-deltaaegis-license="AGPL-3.0-only" style="margin:2rem 0 0;padding:1rem;border-top:1px solid currentColor;opacity:.78;text-align:center;font-size:.85rem">
+  DeltaAegis is licensed under AGPL-3.0-only.
+  <a href="https://github.com/ParkerLee07/DeltaAegis" target="_blank" rel="noopener noreferrer">View Corresponding Source</a>.
+</footer>
 </body>
 </html>"""
 
@@ -27821,6 +33806,10 @@ def render_netsniper_page() -> str:
     window.setInterval(loadNetSniperSchedules, 15000);
     window.setInterval(loadNetSniperScheduleHistory, 15000);
   </script>
+<footer data-deltaaegis-license="AGPL-3.0-only" style="margin:2rem 0 0;padding:1rem;border-top:1px solid currentColor;opacity:.78;text-align:center;font-size:.85rem">
+  DeltaAegis is licensed under AGPL-3.0-only.
+  <a href="https://github.com/ParkerLee07/DeltaAegis" target="_blank" rel="noopener noreferrer">View Corresponding Source</a>.
+</footer>
 </body>
 </html>"""
 
@@ -27918,19 +33907,35 @@ def command_dashboard(args):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import parse_qs, urlparse
 
+    # v0.42 dashboard LAN binding
+    lan_mode = bool(getattr(args, "lan", False))
+    bind_host = "0.0.0.0" if lan_mode else args.host
+
     db_path = args.db
     token = args.token
+    has_active_password_users = False
     login_required = bool(token or getattr(args, "require_login", False))
 
     try:
         with connect(db_path) as dashboard_auth_connection:
-            login_required = login_required or dashboard_has_active_password_users(dashboard_auth_connection)
+            has_active_password_users = dashboard_has_active_password_users(
+                dashboard_auth_connection
+            )
+            login_required = login_required or has_active_password_users
     except Exception:
+        has_active_password_users = False
         login_required = bool(token or getattr(args, "require_login", False))
+
+    if lan_mode and not (token or has_active_password_users):
+        raise DeltaAegisError(
+            "dashboard --lan requires an active password user "
+            "or an explicit --token; refusing unauthenticated "
+            "network exposure"
+        )
 
 
     class DeltaAegisDashboardHandler(BaseHTTPRequestHandler):
-        server_version = "DeltaAegisDashboard/0.41.0"
+        server_version = "DeltaAegisDashboard/0.42.0"
 
         def log_message(self, fmt, *handler_args):
             if not args.quiet:
@@ -28352,6 +34357,24 @@ def command_dashboard(args):
                     )
                     return
 
+            site_id = query.get("site_id", [""])[0].strip()
+
+            if scope and site_id:
+                dashboard_json_response(
+                    self,
+                    {
+                        "ok": False,
+                        "error": "ambiguous_scope_selection",
+                        "message": (
+                            "Use either scope or site_id, not both."
+                        ),
+                        "scope": scope,
+                        "site_id": site_id,
+                    },
+                    status=400,
+                )
+                return
+
             state = query.get("state", [""])[0].strip().upper() or None
             identity = query.get("identity", [""])[0].strip().upper() or None
 
@@ -28385,7 +34408,110 @@ def command_dashboard(args):
             connection = self.open_connection()
 
             try:
-                if route == "/api/scopes":
+                if (
+                    site_id
+                    and route
+                    not in {"/api/sites", "/api/site-detail"}
+                ):
+                    try:
+                        site_payload = dashboard_site_route_payload(
+                            connection,
+                            route,
+                            query,
+                            site_id,
+                            limit=limit,
+                            state=state,
+                            identity=identity,
+                        )
+                    except DeltaAegisError as exc:
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "logical_site_not_found",
+                                "site_id": site_id,
+                                "message": str(exc),
+                            },
+                            status=404,
+                        )
+                        return
+
+                    if site_payload is None:
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": (
+                                    "site_aggregation_not_supported"
+                                ),
+                                "site_id": site_id,
+                                "path": route,
+                                "message": (
+                                    "This endpoint remains "
+                                    "subnet-scoped. Select one member "
+                                    "subnet before using it."
+                                ),
+                            },
+                            status=400,
+                        )
+                        return
+
+                    dashboard_json_response(
+                        self,
+                        site_payload,
+                    )
+                    return
+
+                if route == "/api/sites":
+                    dashboard_json_response(
+                        self,
+                        dashboard_sites_payload(connection),
+                    )
+                elif route == "/api/site-management":
+                    dashboard_json_response(
+                        self,
+                        dashboard_site_management_payload(connection),
+                    )
+                elif route == "/api/site-detail":
+                    site_id = query.get("site_id", [""])[0].strip()
+
+                    if not site_id:
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "site_id_required",
+                                "message": (
+                                    "site_id query parameter is required"
+                                ),
+                            },
+                            status=400,
+                        )
+                    else:
+                        try:
+                            site_payload = (
+                                dashboard_site_detail_payload(
+                                    connection,
+                                    site_id,
+                                )
+                            )
+                        except DeltaAegisError as exc:
+                            dashboard_json_response(
+                                self,
+                                {
+                                    "ok": False,
+                                    "error": "logical_site_not_found",
+                                    "site_id": site_id,
+                                    "message": str(exc),
+                                },
+                                status=404,
+                            )
+                        else:
+                            dashboard_json_response(
+                                self,
+                                site_payload,
+                            )
+                elif route == "/api/scopes":
                     dashboard_json_response(self, dashboard_scopes_payload(connection))
                 elif route == "/api/summary":
                     dashboard_json_response(self, dashboard_summary_payload(connection, scope=scope))
@@ -28753,6 +34879,96 @@ def command_dashboard(args):
                         connection.close()
 
                 self.dashboard_logout_redirect()
+                return
+
+            if route in DASHBOARD_SITE_ACTION_ROUTES:
+                if not self.require_permission("sites.write"):
+                    return
+
+                connection = self.open_connection()
+                payload: dict[str, Any] = {}
+
+                try:
+                    payload = dashboard_read_request_payload(
+                        self
+                    )
+                    result = dashboard_site_action_payload(
+                        connection,
+                        route,
+                        payload,
+                        actor=getattr(
+                            self,
+                            "current_actor",
+                            None,
+                        ),
+                        source_ip=(
+                            self.client_address[0]
+                            if self.client_address
+                            else None
+                        ),
+                        user_agent=self.headers.get(
+                            "User-Agent",
+                            "",
+                        ),
+                    )
+                    connection.commit()
+                except (
+                    DashboardAdminUserActionError,
+                    DeltaAegisError,
+                    ValueError,
+                ) as exc:
+                    connection.rollback()
+
+                    try:
+                        record_access_audit_event(
+                            connection,
+                            action="LOGICAL_SITE_DASHBOARD_ACTION_FAILED",
+                            actor=getattr(
+                                self,
+                                "current_actor",
+                                None,
+                            ),
+                            target_type="logical_site",
+                            target_key=str(
+                                payload.get("site_id")
+                                or route
+                            ),
+                            source_ip=(
+                                self.client_address[0]
+                                if self.client_address
+                                else None
+                            ),
+                            user_agent=self.headers.get(
+                                "User-Agent",
+                                "",
+                            ),
+                            details={
+                                "route": route,
+                                "error": str(exc),
+                                "payload_fields": sorted(
+                                    str(key)
+                                    for key in payload
+                                ),
+                            },
+                        )
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+
+                    dashboard_admin_json_error_response(
+                        self,
+                        str(exc),
+                        status_code=getattr(
+                            exc,
+                            "status_code",
+                            400,
+                        ),
+                    )
+                    return
+                finally:
+                    connection.close()
+
+                dashboard_json_response(self, result)
                 return
 
             if route == "/api/admin/users" or route.startswith("/api/admin/users/"):
@@ -29412,8 +35628,32 @@ def command_dashboard(args):
                     status=400,
                 )
 
-    server_address = (args.host, args.port)
-    server = ThreadingHTTPServer(server_address, DeltaAegisDashboardHandler)
+    # Reconcile dead rows at every dashboard start, even when the recurring
+    # schedule worker is disabled.
+    startup_watchdog_connection = connect(db_path)
+
+    try:
+        startup_watchdog = scan_job_watchdog_recover_dead_jobs(
+            startup_watchdog_connection,
+            actor="dashboard_startup",
+            events_path=args.events,
+            trueaegis_execution_mode="asynchronous",
+        )
+    finally:
+        startup_watchdog_connection.close()
+
+    if startup_watchdog.get("recovered_count") and not args.quiet:
+        print(
+            "[DeltaAegis] scan watchdog recovered "
+            f"{startup_watchdog['recovered_count']} dead scan job(s)",
+            flush=True,
+        )
+
+    server_address = (bind_host, args.port)
+    server = ThreadingHTTPServer(
+        server_address,
+        DeltaAegisDashboardHandler,
+    )
 
     dashboard_schedule_worker_thread = None
     dashboard_schedule_worker_stop = None
@@ -29439,7 +35679,7 @@ def command_dashboard(args):
 
     print("DeltaAegis dashboard starting")
     print("============================")
-    print(f"URL:      http://{args.host}:{args.port}")
+    print(f"URL:      http://{bind_host}:{args.port}")
     print(f"Database: {db_path}")
     print("Mode:     dashboard + investigation status updates")
     if getattr(args, "enable_scheduled_scans", True):
@@ -29453,7 +35693,7 @@ def command_dashboard(args):
         print("DB Tokens: accepted via X-DeltaAegis-Token")
     elif login_required:
         print("Auth:     username/password login required")
-        print("Login:    http://{host}:{port}/login".format(host=args.host, port=args.port))
+        print("Login:    http://{host}:{port}/login".format(host=bind_host, port=args.port))
         print("Sessions: HttpOnly SameSite=Lax cookie")
         print("DB Tokens: still accepted for automation via X-DeltaAegis-Token")
     else:
@@ -29474,6 +35714,13 @@ def command_dashboard(args):
             dashboard_schedule_worker_stop.set()
         if dashboard_schedule_worker_thread is not None:
             dashboard_schedule_worker_thread.join(timeout=2.0)
+            if dashboard_schedule_worker_thread.is_alive():
+                print(
+                    "[DeltaAegis] waiting for the active scheduled "
+                    "scan to finalize before dashboard shutdown",
+                    flush=True,
+                )
+                dashboard_schedule_worker_thread.join()
         server.server_close()
 
     return 0
@@ -34947,7 +41194,7 @@ def command_restore_cutover_execute(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "DeltaAegis v0.41.0 — Data Durability & Recovery, "
+            "DeltaAegis v0.42.0 — Logical Site Scopes, "
             "SQLite-consistent backups, verified manifests, "
             "restore rehearsal, guarded retention, active restore "
             "cutover planning and rollback, operator actions, "
@@ -35349,7 +41596,123 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--scope")
     p.add_argument("--lookback", type=int, default=5, help="Accepted scan history depth to compare")
-    sub.add_parser("scopes")
+    p = sub.add_parser(
+        "site-list",
+        help="List logical building or site scopes",
+    )
+    p.add_argument(
+        "--include-archived",
+        action="store_true",
+        help="Include archived logical sites",
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print structured JSON output",
+    )
+
+    p = sub.add_parser(
+        "site-show",
+        help="Show one logical site and its member subnet scopes",
+    )
+    p.add_argument("site_id")
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print structured JSON output",
+    )
+
+    p = sub.add_parser(
+        "site-create",
+        help="Create a logical building or site scope",
+    )
+    p.add_argument("name")
+    p.add_argument("--description", default="")
+    p.add_argument("--actor", default="local_admin")
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a structured action receipt",
+    )
+
+    p = sub.add_parser(
+        "site-rename",
+        help="Rename a logical site without changing its stable ID",
+    )
+    p.add_argument("site_id")
+    p.add_argument("name")
+    p.add_argument("--actor", default="local_admin")
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a structured action receipt",
+    )
+
+    p = sub.add_parser(
+        "site-description",
+        help="Update a logical site description",
+    )
+    p.add_argument("site_id")
+    p.add_argument("description")
+    p.add_argument("--actor", default="local_admin")
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a structured action receipt",
+    )
+
+    p = sub.add_parser(
+        "site-archive",
+        help="Archive a logical site while retaining memberships",
+    )
+    p.add_argument("site_id")
+    p.add_argument("--actor", default="local_admin")
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a structured action receipt",
+    )
+
+    p = sub.add_parser(
+        "site-assign-scope",
+        help="Assign one private CIDR network scope to a logical site",
+    )
+    p.add_argument("site_id")
+    p.add_argument("network_scope")
+    p.add_argument("--actor", default="local_admin")
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a structured action receipt",
+    )
+
+    p = sub.add_parser(
+        "site-remove-scope",
+        help="Remove one network scope membership without deleting data",
+    )
+    p.add_argument("site_id")
+    p.add_argument("network_scope")
+    p.add_argument("--actor", default="local_admin")
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a structured action receipt",
+    )
+
+    p = sub.add_parser(
+        "scopes",
+        help="List subnet scopes and logical-site assignments",
+    )
+    p.add_argument(
+        "--unassigned",
+        action="store_true",
+        help="Show only subnet scopes without a logical site",
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print structured JSON output",
+    )
     p = sub.add_parser("summary")
     p = sub.add_parser("snapshots"); p.add_argument("--limit", type=int, default=20); p.add_argument("--scope")
     p = sub.add_parser("events"); p.add_argument("--limit", type=int, default=50); p.add_argument("--severity"); p.add_argument("--event-type"); p.add_argument("--scope")
@@ -35417,6 +41780,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("identity", help="Host ID, IP, MAC, or hostname")
     p = sub.add_parser("dashboard")
     p.add_argument("--host", default="127.0.0.1")
+    p.add_argument(
+        "--lan",
+        action="store_true",
+        help=(
+            "Listen on all network interfaces (0.0.0.0). "
+            "Requires an active password user or --token."
+        ),
+    )
     p.add_argument("--port", type=int, default=8090)
     p.add_argument("--token")
     p.add_argument("--scope")
@@ -35514,6 +41885,14 @@ def main() -> int:
         if args.command == "investigation-center": return command_investigation_center(args)
         if args.command == "port-behavior": return command_port_behavior(args)
         if args.command == "summary": return command_summary(args)
+        if args.command == "site-list": return command_site_list(args)
+        if args.command == "site-show": return command_site_show(args)
+        if args.command == "site-create": return command_site_create(args)
+        if args.command == "site-rename": return command_site_rename(args)
+        if args.command == "site-description": return command_site_description(args)
+        if args.command == "site-archive": return command_site_archive(args)
+        if args.command == "site-assign-scope": return command_site_assign_scope(args)
+        if args.command == "site-remove-scope": return command_site_remove_scope(args)
         if args.command == "scopes": return command_scopes(args)
         if args.command == "snapshots": return command_snapshots(args)
         if args.command == "events": return command_events(args)
@@ -35555,5 +41934,63 @@ def main() -> int:
         print(f"DeltaAegis error: {exc}", file=sys.stderr); return 1
 
 
+
+
+# v0.42 numeric dashboard asset-selector ordering.
+_deltaaegis_dashboard_assets_payload_v042_numeric_base = (
+    dashboard_assets_payload
+)
+
+
+def dashboard_asset_numeric_ip_sort_key(
+    row: dict[str, Any],
+) -> tuple[Any, ...]:
+    network_scope = str(row.get("network_scope") or "")
+    raw_ip = str(
+        row.get("current_ip")
+        or row.get("ip_address")
+        or ""
+    ).strip()
+
+    try:
+        parsed_ip = ipaddress.ip_address(raw_ip)
+        ip_key: tuple[Any, ...] = (
+            0,
+            parsed_ip.version,
+            int(parsed_ip),
+        )
+    except ValueError:
+        ip_key = (
+            1,
+            0,
+            raw_ip.casefold(),
+        )
+
+    return (
+        network_scope,
+        ip_key,
+        str(row.get("mac_address") or "").casefold(),
+        str(row.get("asset_key") or "").casefold(),
+    )
+
+
+def dashboard_assets_payload(
+    connection: sqlite3.Connection,
+    limit: int,
+    scope: str | None = None,
+    state: str | None = None,
+    identity: str | None = None,
+) -> list[dict[str, Any]]:
+    rows = _deltaaegis_dashboard_assets_payload_v042_numeric_base(
+        connection,
+        limit,
+        scope=scope,
+        state=state,
+        identity=identity,
+    )
+    return sorted(
+        rows,
+        key=dashboard_asset_numeric_ip_sort_key,
+    )
 if __name__ == "__main__":
     raise SystemExit(main())

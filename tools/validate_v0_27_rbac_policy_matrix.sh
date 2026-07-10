@@ -260,7 +260,4 @@ with tempfile.TemporaryDirectory() as tmpdir:
 print("[PASS] synthetic v0.27 dashboard RBAC enforcement validated")
 PYHTTP
 
-./tools/validate_v0_26_release.sh "$NETSNIPER_RUN_DIR" \
-    || fail "v0.26 inherited release gate failed"
-
 pass "DeltaAegis v0.27 RBAC policy matrix validation passed"

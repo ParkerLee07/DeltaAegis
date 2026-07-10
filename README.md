@@ -4,15 +4,24 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.41.0
+## Current Release — v0.42.0
 
-**DeltaAegis v0.41.0 — Data Durability & Recovery**
+**DeltaAegis v0.42.0 — Logical Site Scopes**
 
-DeltaAegis v0.41.0 adds a guarded lifecycle for the local SQLite evidence store. Operators can create SQLite-consistent backups, publish checksum and schema manifests, catalog and verify backup bundles, rehearse restores into a non-active database, preview retention decisions, and delete only freshly verified retention-eligible bundles.
+DeltaAegis v0.42.0 adds additive operator-facing logical sites above the existing CIDR network scopes. Operators can group related private subnet scopes into a building or site, manage those relationships from the CLI, browse them through authenticated dashboard APIs, and aggregate core SIEM views across the latest accepted state of each member subnet.
 
-Active restore is deliberately split into planning and execution. The preview verifies the selected backup, detects running DeltaAegis dashboard processes, blocks on SQLite WAL/SHM/journal files, checks active and backup file identities, and requires an existing writable safety-backup directory. Execution requires the exact preview digest and confirmation phrase, creates a fresh verified pre-restore safety backup, restores into a temporary database, atomically replaces the active database, verifies the result, and automatically rolls back when post-cutover verification fails.
+Highlights:
 
-The default active database remains `data/deltaaegis.db`. An ignored root-level `deltaaegis.db` is treated as legacy local state and is never selected automatically. Use `--db` explicitly when operating on any non-default database.
+- DeltaAegis v0.42.0 is licensed under `AGPL-3.0-only`; alternative commercial licensing may be available by separate written agreement.
+- Stable logical-site identities with case-insensitive unique names, descriptions, active/archive state, and retained membership history.
+- A one-site-per-subnet invariant while allowing each logical site to contain many private CIDR scopes.
+- Human-readable and JSON CLI commands for site creation, listing, inspection, rename, description updates, archive, assignment, and removal.
+- Viewer-authenticated `/api/sites` and `/api/site-detail` endpoints plus site-aware dashboard navigation.
+- Site-wide aggregation for summary metrics, latest accepted current state, assets, events, alerts, annotations, risk, scan context, Investigation Center, latest changes, and scan freshness.
+- Collision-safe subnet provenance so identical MAC or IP identities in different scopes are not silently merged.
+- Fail-closed handling for ambiguous `scope` plus `site_id` requests and for endpoints that remain subnet-specific.
+- An automatic dead-scan watchdog that checks active scan rows at dashboard startup and every scheduler pass, preserves forensic evidence, recovers only missing or PID-reused processes, and retries overdue schedules without postponing them.
+- A guarded `dashboard --lan` option that binds to `0.0.0.0` only when password or token authentication is available.
 
 ## What DeltaAegis Does
 
@@ -106,6 +115,137 @@ python3 tools/reset_dashboard_admin.py \
   --db data/deltaaegis.db \
   --username admin
 ```
+
+## Scan Watchdog and Scheduler Recovery
+
+DeltaAegis checks active NetSniper scan-job rows at dashboard startup and on every scheduled-scan worker pass. A running scan heartbeat is expected to advance every few seconds.
+
+The automatic watchdog waits ten minutes before treating an active row as stale. It then verifies the recorded PID through `/proc/<pid>/cmdline`:
+
+- A missing process or a PID that belongs to an unrelated command is marked `FAILED`, with the original PID, heartbeat, log paths, schedule ID, and recovery reason preserved in `status_json.watchdog`.
+- A live process whose command still matches the expected NetSniper executable is not terminated or failed automatically. It remains blocked for operator review.
+- A fresh active row is left unchanged.
+- After a dead row is recovered, the same scheduler pass can start the oldest overdue schedule.
+
+The existing **Mark stale active scans failed** action remains an explicit ADMIN recovery tool. This preserves the established **ADMIN-only stale scan-job recovery** workflow while adding safe automatic recovery for clearly dead processes. Automatic recovery never signals or kills a live process.
+
+NetSniper schedules run NetSniper and optional auto-ingest only. TrueAegis validation remains a separate guarded workflow unless an existing schedule explicitly enables the separately validated follow-up option.
+
+The established **blocked-schedule retry behavior** is preserved: when another active scan legitimately holds the single-scan lock, the due schedule remains due, its cadence is not advanced, and the scheduler retries it after the blocker clears.
+
+
+
+## Dashboard Asset Investigation Completeness
+
+The Investigation asset selector loads the complete scoped asset lifecycle inventory instead of reusing the 25-row dashboard preview. Current identities referenced by Network Activity, Risk Analysis, Security Events, or Alarms are no longer omitted solely because they fall outside a display limit.
+
+Within each network scope, selector entries are ordered by the numeric IP value, with MAC address used only as a tie-breaker.
+
+## Dashboard Evidence Freshness
+
+Every main dashboard tab now shares a persistent evidence-freshness strip. It distinguishes the accepted scan observation time, DeltaAegis import time, and browser refresh time rather than presenting a page refresh as proof that the evidence is current.
+
+A selected logical site and the all-scopes view evaluate every member subnet independently. The strip shows the newest and oldest accepted evidence timestamps, follows the least-fresh scope for its overall state, and warns when the selected scopes contain mixed-age evidence. Missing timestamps render as `Unknown`; no timestamp is synthesized from the browser clock.
+
+Freshness warnings are intentionally actionable rather than merely
+informational. The warning panel remains hidden unless a selected subnet has
+accepted evidence more than 24 hours old or has no accepted scan. When shown,
+it lists each affected private subnet, the supporting scan ID, the evidence
+timestamp, and its age.
+
+## Sites Dashboard UX
+
+The Sites dashboard now uses dashboard-native styling for buttons, text
+inputs, selectors, and destructive actions. The site-name field no longer
+includes an organization-specific example.
+
+Every unassigned observed private subnet is listed with its CIDR, total
+snapshots, accepted snapshots, and latest observation time. ADMIN users
+can select one or more subnet checkboxes while creating a site. Site
+creation and the selected membership assignments are committed together,
+so a validation or assignment failure does not leave a partially created
+site.
+
+## Scheduled Scan Finalization Recovery
+
+DeltaAegis now reconciles an active scan ledger row when its recorded
+NetSniper process has exited but its persisted stdout and configured runs
+directory prove that a matching finalized bundle completed successfully.
+Recovery validates the manifest target, profile, completion state, run
+timestamp, and configured runs-root confinement before finalizing the
+original job.
+
+Successful orphan recovery performs idempotent auto-ingest, records the
+terminal job in schedule history, advances the linked schedule, and allows
+the next oldest overdue subnet to run. A stale dead job without valid
+completion evidence is marked failed and its linked schedule is also
+advanced so one subnet cannot indefinitely starve later schedules.
+
+Normal dashboard shutdown now waits for an active scheduled scan worker to
+finish its job, ingestion, and schedule finalization instead of abandoning
+the ledger row after a two-second timeout.
+
+## TrueAegis Tab Containment
+
+The Executive tab now shows only a compact TrueAegis readiness summary: readiness state, latest accepted scan, active-job count, and one navigation control. Full orchestration is contained inside the **TrueAegis** tab.
+
+The TrueAegis tab owns the guarded run action, blocker detail, technical paths, command preview, action receipt, job history, validation import controls, observations, and service correlations. The orchestration panel mounts inside the static TrueAegis foundation instead of being inserted as a top-level sibling after initial tab selection.
+
+This containment changes presentation only. Existing fixed-argument execution, RBAC, subnet-specific operational boundaries, validation ingestion, correlation behavior, action receipts, scheduler follow-up, polling cadence, and APIs remain unchanged.
+
+## Sites Dashboard Management
+
+The main dashboard now includes a dedicated **Sites** tab. All authenticated roles can review active and archived logical sites, member-subnet coverage, accepted-snapshot counts, and unassigned observed private subnets.
+
+ADMIN operators can create sites, rename them, update descriptions, assign or remove private CIDR members, and archive sites without leaving the dashboard. Every mutation reuses the same normalization and one-site-per-subnet invariants as the CLI, returns a human-readable action receipt, derives the actor from the authenticated session, and records access-audit evidence.
+
+Archived sites retain memberships and historical evidence, remain visible in the Sites tab, reject new assignments, and are read-only in the browser. The Executive tab keeps a compact site/scope selector for site-wide SIEM aggregation and subnet drilldown.
+
+## Logical Site Scopes
+
+Logical sites are additive parents for the technical CIDR scopes already used throughout DeltaAegis. NetSniper scan targets, snapshot identity, asset lifecycle identity, events, alerts, and evidence continue to use canonical subnet CIDRs. A building or site name never replaces `network_scope`.
+
+The relationship is intentionally constrained:
+
+```text
+one logical site -> many private CIDR subnet scopes
+one subnet scope -> zero or one logical site
+```
+
+Create and inspect a site:
+
+```bash
+python3 deltaaegis.py site-create   "CLS Health - Admin Building"   --description "Administrative building network scopes."
+
+python3 deltaaegis.py site-list
+python3 deltaaegis.py site-show SITE_ID
+```
+
+Assign private subnet scopes:
+
+```bash
+python3 deltaaegis.py site-assign-scope SITE_ID 192.168.4.0/24
+python3 deltaaegis.py site-assign-scope SITE_ID 192.168.5.0/24
+python3 deltaaegis.py scopes --unassigned
+```
+
+Use `--json` on the logical-site commands for structured receipts and payloads. For rehearsal without changing the configured evidence database, pass a temporary database explicitly:
+
+```bash
+python3 deltaaegis.py --db /tmp/deltaaegis-site-rehearsal.db   site-create "Rehearsal Site"
+```
+
+The dashboard site selector aggregates core read-only SIEM views across member subnets. Each row retains its `network_scope`, and collision-prone identities receive a scope-qualified key. Asset detail and ticket evidence fail closed when the same identifier exists in more than one member subnet.
+
+NetSniper scans remain CIDR-targeted, and TrueAegis execution remains subnet-specific. Select a member subnet before starting those operational workflows.
+
+To expose the authenticated dashboard on the local network:
+
+```bash
+python3 deltaaegis.py dashboard --lan --port 8090
+```
+
+`--lan` requires at least one active password user or an explicit API token. DeltaAegis continues to serve HTTP directly, so use a trusted LAN or place it behind an HTTPS reverse proxy for broader deployment.
 
 ## Dashboard
 
@@ -241,7 +381,7 @@ The safety backup is retained after success or rollback. DeltaAegis does not del
 
 ## Security Boundary
 
-DeltaAegis v0.41.0 does not expose arbitrary shell command execution from the dashboard.
+DeltaAegis v0.42.0 does not expose arbitrary shell command execution from the dashboard.
 
 Dashboard NetSniper execution uses guarded job records, validated private IPv4 CIDRs, and fixed argument-vector process creation. Live job-detail reads are bounded and confined to the configured scan-log root.
 
@@ -374,20 +514,64 @@ Preview uninstall actions without deleting anything:
 ./uninstall.sh --dry-run
 ```
 
+## Validator Troubleshooter
+
+The health check resolves the effective database by running `python3 deltaaegis.py paths`; it does not infer the active database from hard-coded filenames. Missing legacy database files are not treated as faults.
+
+Open the guided human-readable menu:
+
+    python3 tools/deltaaegis_troubleshooter.py --menu
+
+Running the tool without arguments also opens the menu when stdin and stdout are interactive terminals. The menu provides concise health checks, targeted validator execution, retained reports, and stable `DAE-TRB-NNNN` diagnostic codes. See [the troubleshooter and error-code reference](docs/TROUBLESHOOTER.md).
+
+DeltaAegis includes one standalone troubleshooting tool containing
+251 validator files from the fetched public
+`origin/main` history and the current local `HEAD`. When a path exists in both
+sources, the current `HEAD` copy takes precedence so the v0.42 release line is
+represented exactly.
+
+Run the current release gate in a fresh isolated `$HOME/DeltaAegis` clone:
+
+    python3 tools/deltaaegis_troubleshooter.py
+
+Strictly verify embedded hashes and Bash syntax while reporting historical
+reference and cycle warnings:
+
+    python3 tools/deltaaegis_troubleshooter.py --self-check
+
+Treat the advisory historical graph as a strict architecture check:
+
+    python3 tools/deltaaegis_troubleshooter.py --self-check --strict-graph
+
+Run every static-reference-free validator once, with a fresh clone per
+validator:
+
+    python3 tools/deltaaegis_troubleshooter.py --mode all-leaves
+
+Inspect or select a validator group:
+
+    python3 tools/deltaaegis_troubleshooter.py --match 'v0_42'
+    python3 tools/deltaaegis_troubleshooter.py --list
+
+Reports include environment details, read-only SQLite integrity checks,
+validator provenance, dependency warnings, individual logs, likely failure
+causes, and a Markdown summary. Historical validator failures are reported
+individually rather than treated as current-release regressions.
+
 ## Validation
 
-Run the complete v0.41 automated release gate from a clean checkout:
+Run the complete v0.42 automated release gate from a clean checkout:
 
 ```bash
-./tools/validate_v0_41_release_gate.sh
+./tools/validate_v0_42_release_gate.sh
 ```
 
-The release gate validates release metadata and documentation, rendered dashboard JavaScript, client-disconnect handling, all eight v0.41 durability and recovery checkpoints, the v0.40 operator-action suite, and the v0.39 compatibility suite. Every v0.41 checkpoint validator is invoked directly and exactly once.
+The release gate validates release metadata and documentation, rendered dashboard JavaScript, client-disconnect handling, all eight flat v0.42 logical-site, LAN, watchdog, Sites-management, and TrueAegis-containment validators, the isolated v0.40 operator-action compatibility suite, and the v0.39 functional compatibility suite. The v0.42 all-in validator invokes every component validator exactly once.
 
 Complete the manual backup and restore checklist before merge, tag, or publication:
 
 ```text
-MANUAL_VERIFICATION_v0.41.0.md
+operator-managed release verification
 ```
 
 Basic syntax check:
@@ -439,4 +623,8 @@ three-project defensive workflow:
 
 ## License
 
-MIT License. See `LICENSE`.
+DeltaAegis v0.42.0 is licensed under the **GNU Affero General Public License, version 3 only** (`AGPL-3.0-only`). See `LICENSE` and `LICENSING.md`.
+
+Alternative commercial licensing may be available from Parker Lee through a separate written agreement. Earlier copies already distributed under the MIT License retain the permissions that accompanied those copies.
+
+The dashboard provides a visible **Corresponding Source** link to the official repository.

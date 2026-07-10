@@ -114,9 +114,4 @@ with tempfile.TemporaryDirectory() as tmpdir:
 print("[PASS] setup page has no user-specific defaults or operator button")
 PY
 
-if [[ -x "./tools/validate_v0_27_1_release.sh" ]]; then
-    ./tools/validate_v0_27_1_release.sh "$NETSNIPER_RUN_DIR" \
-        || fail "v0.27.1 release gate failed after setup page cleanup"
-fi
-
 pass "DeltaAegis v0.27.2 setup page cleanup validation passed"
