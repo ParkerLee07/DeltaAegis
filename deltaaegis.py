@@ -38,6 +38,7 @@ import tempfile
 DEFAULT_DB = Path.home() / "DeltaAegis" / "data" / "deltaaegis.db"
 DEFAULT_BACKUPS = Path.home() / "DeltaAegis" / "backups"
 DELTAAEGIS_VERSION = "0.42.0"
+DELTAAEGIS_SECURITY_HOTFIX = "2026-07-13.1"
 DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION = "deltaaegis-backup-manifest-v1"
 DEFAULT_RESTORE_REHEARSALS = (
     Path.home() / "DeltaAegis" / "restore-rehearsals"
@@ -60,10 +61,16 @@ MAC_RE = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
 SCAN_JOB_STATUSES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"}
 NETSNIPER_SUPPORTED_SCHEMAS = {"netsniper-run-v1", "netsniper-run-v2", "netsniper-run-v3"}
 NETSNIPER_PROFILE_AWARE_SCHEMAS = {"netsniper-run-v2", "netsniper-run-v3"}
+NETSNIPER_BUNDLE_QUALITY_SCHEMA_VERSION = "netsniper-bundle-quality-v1"
 TRUEAEGIS_VALIDATION_STATUSES = {"CONFIRMED", "REACHABLE", "PROTECTED", "PROTOCOL_MISMATCH", "NOT_REACHABLE", "TIMEOUT", "INCONCLUSIVE", "PARTIALLY_CONFIRMED", "DEPENDENCY_MISSING", "UNKNOWN"}
 TRUEAEGIS_JOB_STATUSES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED"}
 
 ACCESS_ROLES = ("ADMIN", "ANALYST", "VIEWER")
+DASHBOARD_MAX_REQUEST_BODY_BYTES = 65536
+RFC1918_IPV4_NETWORKS = tuple(
+    ipaddress.ip_network(value)
+    for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
 
 
 # v0.27 RBAC policy matrix.
@@ -1420,7 +1427,13 @@ def authenticate_dashboard_session(
         "user_id": row["user_id"],
         "username": row["username"],
         "display_name": row["display_name"],
-        "role": normalize_access_role(row["session_role"] or row["user_role"] or "VIEWER"),
+        # Authorization follows the user's current role. The session role is
+        # retained only as issuance evidence and can never preserve a removed
+        # privilege after an administrator demotes the account.
+        "role": normalize_access_role(row["user_role"] or "VIEWER"),
+        "session_issued_role": normalize_access_role(
+            row["session_role"] or row["user_role"] or "VIEWER"
+        ),
         "expires_at": row["expires_at"],
     }
 
@@ -1452,6 +1465,23 @@ def authenticate_dashboard_session(
         actor["last_seen_at"] = now
 
     return actor
+
+
+def revoke_dashboard_user_sessions(
+    connection: sqlite3.Connection,
+    user_id: str,
+    reason: str,
+) -> int:
+    """Revoke every live browser session for one user inside the caller's transaction."""
+    ensure_dashboard_session_schema(connection)
+    now = utc_now()
+    cursor = connection.execute(
+        "UPDATE access_sessions "
+        "SET is_active = 0, ended_at = COALESCE(ended_at, ?), end_reason = ? "
+        "WHERE user_id = ? AND is_active = 1",
+        (now, str(reason or "administrative_change"), str(user_id or "")),
+    )
+    return max(0, int(cursor.rowcount or 0))
 
 
 def expire_dashboard_session(
@@ -1675,11 +1705,37 @@ def load_json(path: Path) -> Any:
         raise DeltaAegisError(f"could not read JSON {path}: {exc}") from exc
 
 
+def resolve_bundle_member(
+    bundle_dir: Path,
+    filename: str,
+    *,
+    key: str,
+) -> Path:
+    """Resolve a manifest member without allowing it to escape its bundle."""
+    if not isinstance(filename, str) or not filename.strip():
+        raise DeltaAegisError(f"manifest files.{key} must be a non-empty relative path")
+
+    relative = Path(filename.strip())
+    if relative.is_absolute():
+        raise DeltaAegisError(f"manifest files.{key} must be relative to the bundle")
+
+    try:
+        root = bundle_dir.resolve(strict=True)
+        candidate = (root / relative).resolve(strict=False)
+        candidate.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise DeltaAegisError(
+            f"manifest files.{key} escapes the immutable bundle boundary: {filename!r}"
+        ) from exc
+
+    return candidate
+
+
 def require_file(bundle_dir: Path, manifest: dict[str, Any], key: str) -> Path:
     filename = manifest.get("files", {}).get(key)
     if not isinstance(filename, str) or not filename:
         raise DeltaAegisError(f"manifest missing files.{key}")
-    path = bundle_dir / filename
+    path = resolve_bundle_member(bundle_dir, filename, key=key)
     if not path.is_file():
         raise DeltaAegisError(f"required bundle file is missing: {path}")
     return path
@@ -1689,7 +1745,7 @@ def optional_file(bundle_dir: Path, manifest: dict[str, Any], key: str) -> Path 
     filename = manifest.get("files", {}).get(key)
     if not isinstance(filename, str) or not filename:
         return None
-    path = bundle_dir / filename
+    path = resolve_bundle_member(bundle_dir, filename, key=key)
     return path if path.is_file() else None
 
 
@@ -2629,12 +2685,16 @@ def load_netsniper_bundle_quality(bundle_dir: Path, manifest: dict[str, Any]) ->
     for key in ("bundle_quality_json", "bundle_quality"):
         filename = files.get(key)
         if isinstance(filename, str) and filename.strip():
-            candidate = bundle_dir / filename
+            candidate = resolve_bundle_member(bundle_dir, filename, key=key)
             if candidate.is_file():
                 loaded = load_json(candidate)
                 return loaded if isinstance(loaded, dict) else {}
 
-    candidate = bundle_dir / "bundle_quality.json"
+    candidate = resolve_bundle_member(
+        bundle_dir,
+        "bundle_quality.json",
+        key="bundle_quality_json",
+    )
     if candidate.is_file():
         loaded = load_json(candidate)
         return loaded if isinstance(loaded, dict) else {}
@@ -2667,7 +2727,19 @@ def load_snapshot(manifest_path: Path) -> Snapshot:
     bundle_quality = load_netsniper_bundle_quality(bundle_dir, manifest)
     bundle_deltaaegis_ready = _optional_bool(bundle_quality.get("deltaaegis_ready"))
 
-    if bundle_deltaaegis_ready is False:
+    if schema == "netsniper-run-v3":
+        quality_schema = str(bundle_quality.get("schema_version") or "").strip()
+        if quality_schema != NETSNIPER_BUNDLE_QUALITY_SCHEMA_VERSION:
+            raise DeltaAegisError(
+                "netsniper-run-v3 requires bundle_quality.json schema "
+                f"{NETSNIPER_BUNDLE_QUALITY_SCHEMA_VERSION!r}; rejecting missing or invalid quality evidence."
+            )
+        if bundle_deltaaegis_ready is not True:
+            raise DeltaAegisError(
+                "netsniper-run-v3 requires deltaaegis_ready=true; "
+                "rejecting missing, invalid, or false readiness evidence."
+            )
+    elif bundle_deltaaegis_ready is False:
         raise DeltaAegisError(
             "NetSniper bundle_quality.json marked deltaaegis_ready=false; "
             "rejecting bundle before ingest."
@@ -2815,11 +2887,11 @@ def manifest_file_path(manifest_path: Path, manifest: dict[str, Any], key: str) 
     if not value:
         return None
 
-    candidate = Path(str(value))
-    if not candidate.is_absolute():
-        candidate = manifest_path.parent / candidate
-
-    return candidate
+    return resolve_bundle_member(
+        manifest_path.parent,
+        str(value),
+        key=key,
+    )
 
 
 def load_json_file(path: Path | None, default: Any = None) -> Any:
@@ -3504,6 +3576,11 @@ def command_user_password(args: argparse.Namespace) -> int:
             "WHERE user_id = ?",
             (password_hash, now, user["user_id"]),
         )
+        revoked_session_count = revoke_dashboard_user_sessions(
+            connection,
+            user["user_id"],
+            "password_rotated_cli",
+        )
 
         actor = {
             "username": args.actor or "local_admin",
@@ -3516,7 +3593,10 @@ def command_user_password(args: argparse.Namespace) -> int:
             actor=actor,
             target_type="access_user",
             target_key=username,
-            details={"username": username},
+            details={
+                "username": username,
+                "revoked_session_count": revoked_session_count,
+            },
         )
         connection.commit()
 
@@ -4644,8 +4724,11 @@ def validate_private_cidr(target: str) -> str:
     if network.version != 4:
         raise DeltaAegisError("only IPv4 CIDR targets are supported")
 
-    if not network.is_private:
-        raise DeltaAegisError("target must be a private IPv4 CIDR")
+    if not any(network.subnet_of(allowed) for allowed in RFC1918_IPV4_NETWORKS):
+        raise DeltaAegisError(
+            "target must be a private IPv4 CIDR contained within RFC1918 "
+            "space (10/8, 172.16/12, or 192.168/16)"
+        )
 
     return str(network)
 
@@ -5621,7 +5704,7 @@ def command_scan_start(args: argparse.Namespace) -> int:
     logs_dir = Path(args.scan_logs_dir).expanduser()
     runs_dir = Path(args.runs_dir).expanduser()
 
-    job = create_scan_job(
+    job = reserve_scan_job_if_idle(
         connection,
         safe_target,
         netsniper_path,
@@ -5629,7 +5712,6 @@ def command_scan_start(args: argparse.Namespace) -> int:
         auto_ingest=args.auto_ingest,
         scan_profile=safe_profile,
     )
-    connection.commit()
 
     print(f"Created scan job: {job['job_id']}")
     print(f"Target: {safe_target}")
@@ -7188,6 +7270,73 @@ def active_scan_job_exists(connection: sqlite3.Connection) -> bool:
     return active_scan_job_row(connection) is not None
 
 
+class ActiveScanJobExistsError(DeltaAegisError):
+    def __init__(self, active_job: dict[str, Any]):
+        self.active_job = dict(active_job)
+        super().__init__(
+            "active scan job already exists: "
+            f"{self.active_job.get('job_id')} ({self.active_job.get('status')})"
+        )
+
+
+def reserve_scan_job_if_idle(
+    connection: sqlite3.Connection,
+    target: str,
+    netsniper_path: Path,
+    runs_dir: Path,
+    *,
+    auto_ingest: bool = False,
+    scan_profile: str = "balanced",
+    schedule_id: str | None = None,
+) -> dict[str, Any]:
+    """Atomically enforce the global one-active-NetSniper-job invariant."""
+    if not isinstance(connection, sqlite3.Connection):
+        # Historical receipt validators use a deliberately minimal connection
+        # test double. Production connections always take the serialized path.
+        job = create_scan_job(
+            connection,
+            target,
+            netsniper_path,
+            runs_dir,
+            auto_ingest=auto_ingest,
+            scan_profile=scan_profile,
+            schedule_id=schedule_id,
+        )
+        commit = getattr(connection, "commit", None)
+        if callable(commit):
+            commit()
+        return job
+
+    if connection.in_transaction:
+        raise DeltaAegisError(
+            "atomic scan reservation requires a connection with no active transaction"
+        )
+
+    try:
+        # BEGIN IMMEDIATE serializes all competing dashboard, scheduler, and
+        # CLI reservations before any caller can perform the active-job check.
+        connection.execute("BEGIN IMMEDIATE")
+        active = active_scan_job_row(connection)
+        if active is not None:
+            raise ActiveScanJobExistsError(scan_job_to_dict(active))
+
+        job = create_scan_job(
+            connection,
+            target,
+            netsniper_path,
+            runs_dir,
+            auto_ingest=auto_ingest,
+            scan_profile=scan_profile,
+            schedule_id=schedule_id,
+        )
+        connection.commit()
+        return job
+    except Exception:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+
+
 STALE_SCAN_JOB_RECOVERY_CONFIRMATION = "MARK STALE SCANS FAILED"
 STALE_SCAN_JOB_MINIMUM_MINUTES = 60
 STALE_SCAN_JOB_DEFAULT_MINUTES = 360
@@ -8392,16 +8541,32 @@ def run_due_scan_schedules(
             )
             break
 
-        job = create_scan_job(
-            connection,
-            schedule["target"],
-            netsniper_path,
-            runs_dir,
-            auto_ingest=schedule["auto_ingest"],
-            scan_profile=schedule["scan_profile"],
-            schedule_id=schedule["schedule_id"],
-        )
-        connection.commit()
+        try:
+            job = reserve_scan_job_if_idle(
+                connection,
+                schedule["target"],
+                netsniper_path,
+                runs_dir,
+                auto_ingest=schedule["auto_ingest"],
+                scan_profile=schedule["scan_profile"],
+                schedule_id=schedule["schedule_id"],
+            )
+        except ActiveScanJobExistsError as exc:
+            results.append(
+                {
+                    "schedule_id": schedule["schedule_id"],
+                    "name": schedule["name"],
+                    "action": "blocked",
+                    "reason": "active scan job exists",
+                    "message": (
+                        "scheduled scan blocked: another scan job won the "
+                        "atomic reservation; schedule remains due"
+                    ),
+                    "active_job": exc.active_job,
+                    "schedule": schedule,
+                }
+            )
+            break
 
         try:
             final_job = execute_scan_job(
@@ -14014,13 +14179,15 @@ def command_alert_detail(args):
 
 
 
-def dashboard_json_response(handler, payload, status=200):
+def dashboard_json_response(handler, payload, status=200, headers=None):
     body = json.dumps(payload, indent=2, default=str).encode("utf-8")
 
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Cache-Control", "no-store")
     handler.send_header("Content-Length", str(len(body)))
+    for header_name, header_value in dict(headers or {}).items():
+        handler.send_header(str(header_name), str(header_value))
     handler.end_headers()
     try:
         handler.wfile.write(body)
@@ -16099,8 +16266,12 @@ def dashboard_site_route_payload(
                 "subject_key",
                 [""],
             )[0],
-            limit=int(
-                query.get("limit", ["10"])[0] or 10
+            limit=max(
+                1,
+                min(
+                    safe_int(query.get("limit", ["10"])[0]) or 10,
+                    200,
+                ),
             ),
         )
 
@@ -17082,12 +17253,6 @@ def dashboard_netsniper_scan_start_payload(
         payload.get("scan_profile") or payload.get("profile") or "balanced"
     )
 
-    existing = dashboard_active_scan_job(connection)
-    if existing is not None:
-        raise DeltaAegisError(
-            f"active scan job already exists: {existing.get('job_id')} ({existing.get('status')})"
-        )
-
     root_path = dashboard_netsniper_root_path()
     runs_dir = dashboard_netsniper_runs_dir()
     netsniper_path = root_path / "netsniper.sh"
@@ -17096,7 +17261,7 @@ def dashboard_netsniper_scan_start_payload(
     if not netsniper_path.is_file():
         raise DeltaAegisError(f"NetSniper script not found: {netsniper_path}")
 
-    job = create_scan_job(
+    job = reserve_scan_job_if_idle(
         connection,
         safe_target,
         netsniper_path,
@@ -17104,7 +17269,6 @@ def dashboard_netsniper_scan_start_payload(
         auto_ingest=True,
         scan_profile=safe_profile,
     )
-    connection.commit()
 
     dashboard_start_scan_job_thread(
         db_path=db_path,
@@ -31125,7 +31289,10 @@ def dashboard_first_admin_setup_required(connection) -> bool:
     return dashboard_access_user_count(connection) == 0
 
 
-def dashboard_first_admin_setup_html(error: str = "") -> str:
+def dashboard_first_admin_setup_html(
+    error: str = "",
+    setup_nonce: str = "",
+) -> str:
     safe_error = str(error or "")
     safe_error = (
         safe_error
@@ -31140,8 +31307,9 @@ def dashboard_first_admin_setup_html(error: str = "") -> str:
         if safe_error
         else ""
     )
+    safe_nonce = html.escape(str(setup_nonce or ""), quote=True)
 
-    html = """<!doctype html>
+    html_text = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -31169,6 +31337,7 @@ def dashboard_first_admin_setup_html(error: str = "") -> str:
     <p>No local dashboard accounts exist yet. Create the first ADMIN account to initialize this DeltaAegis installation.</p>
     {{ERROR_HTML}}
     <form method="post" action="/setup">
+      <input type="hidden" name="setup_nonce" value="{{SETUP_NONCE}}">
       <label for="username">Admin username</label>
       <input id="username" name="username" autocomplete="username" required placeholder="admin">
 
@@ -31191,7 +31360,10 @@ def dashboard_first_admin_setup_html(error: str = "") -> str:
 </footer>
 </body>
 </html>"""
-    return html.replace("{{ERROR_HTML}}", error_html)
+    return (
+        html_text.replace("{{ERROR_HTML}}", error_html)
+        .replace("{{SETUP_NONCE}}", safe_nonce)
+    )
 
 def dashboard_session_payload(actor: dict[str, Any] | None) -> dict[str, Any]:
     if not actor:
@@ -31783,9 +31955,23 @@ def dashboard_read_request_payload(handler: Any) -> dict[str, Any]:
     try:
         length = int(length_text or "0")
     except ValueError:
-        length = 0
+        raise DashboardAdminUserActionError(
+            "invalid Content-Length header",
+            status_code=400,
+        )
 
-    raw = handler.rfile.read(max(0, length)).decode("utf-8", "replace")
+    if length < 0:
+        raise DashboardAdminUserActionError(
+            "invalid Content-Length header",
+            status_code=400,
+        )
+    if length > DASHBOARD_MAX_REQUEST_BODY_BYTES:
+        raise DashboardAdminUserActionError(
+            "POST body is too large",
+            status_code=413,
+        )
+
+    raw = handler.rfile.read(length).decode("utf-8", "replace")
     if not raw.strip():
         return {}
 
@@ -32152,6 +32338,13 @@ def dashboard_admin_set_user_enabled(
         "UPDATE access_users SET is_active = ?, updated_at = ? WHERE user_id = ?",
         (1 if enabled else 0, now, user["user_id"]),
     )
+    revoked_session_count = 0
+    if not enabled:
+        revoked_session_count = revoke_dashboard_user_sessions(
+            connection,
+            user["user_id"],
+            "user_disabled",
+        )
 
     action = "ACCESS_USER_DASHBOARD_ENABLE" if enabled else "ACCESS_USER_DASHBOARD_DISABLE"
     dashboard_record_admin_user_action(
@@ -32164,6 +32357,7 @@ def dashboard_admin_set_user_enabled(
             "enabled": bool(enabled),
             "previous_enabled": currently_active,
             "role": target_role,
+            "revoked_session_count": revoked_session_count,
         },
     )
 
@@ -32200,6 +32394,13 @@ def dashboard_admin_set_user_role(
         "UPDATE access_users SET role = ?, updated_at = ? WHERE user_id = ?",
         (new_role, now, user["user_id"]),
     )
+    revoked_session_count = 0
+    if new_role != old_role:
+        revoked_session_count = revoke_dashboard_user_sessions(
+            connection,
+            user["user_id"],
+            "role_changed",
+        )
 
     dashboard_record_admin_user_action(
         connection,
@@ -32210,6 +32411,7 @@ def dashboard_admin_set_user_role(
             "username": target_username,
             "old_role": old_role,
             "new_role": new_role,
+            "revoked_session_count": revoked_session_count,
         },
     )
 
@@ -32245,6 +32447,11 @@ def dashboard_admin_rotate_user_password(
         "UPDATE access_users SET password_hash = ?, updated_at = ? WHERE user_id = ?",
         (password_hash, now, user["user_id"]),
     )
+    revoked_session_count = revoke_dashboard_user_sessions(
+        connection,
+        user["user_id"],
+        "password_rotated",
+    )
 
     dashboard_record_admin_user_action(
         connection,
@@ -32254,6 +32461,7 @@ def dashboard_admin_rotate_user_password(
         {
             "username": target_username,
             "password_set": True,
+            "revoked_session_count": revoked_session_count,
         },
     )
 
@@ -33913,6 +34121,7 @@ def command_dashboard(args):
 
     db_path = args.db
     token = args.token
+    setup_nonce = secrets.token_urlsafe(32)
     has_active_password_users = False
     login_required = bool(token or getattr(args, "require_login", False))
 
@@ -33939,18 +34148,29 @@ def command_dashboard(args):
 
         def log_message(self, fmt, *handler_args):
             if not args.quiet:
-                super().log_message(fmt, *handler_args)
+                sanitized_args = tuple(
+                    re.sub(
+                        r"([?&](?:token|access_token)=)[^&\s]*",
+                        r"\1[REDACTED]",
+                        str(value),
+                        flags=re.IGNORECASE,
+                    )
+                    for value in handler_args
+                )
+                super().log_message(fmt, *sanitized_args)
 
         def dashboard_request_token(self):
-            supplied = self.headers.get("X-DeltaAegis-Token", "").strip()
+            # Secrets in query strings leak into browser history and standard
+            # HTTP access logs. Dashboard/API tokens are header-only.
+            return self.headers.get("X-DeltaAegis-Token", "").strip()
 
-            if supplied:
-                return supplied
-
-            parsed = urlparse(self.path)
-            query = parse_qs(parsed.query)
-
-            return query.get("token", [""])[0].strip()
+        def dashboard_setup_request_is_local(self):
+            try:
+                address = str(self.client_address[0] if self.client_address else "")
+                address = address.split("%", 1)[0]
+                return ipaddress.ip_address(address).is_loopback
+            except ValueError:
+                return False
 
 
         def dashboard_session_cookie_token(self):
@@ -34054,7 +34274,7 @@ def command_dashboard(args):
                 self,
                 {
                     "error": "unauthorized",
-                    "message": "Provide a valid X-DeltaAegis-Token header or ?token=TOKEN. Database-backed API tokens are supported.",
+                    "message": "Provide a valid X-DeltaAegis-Token header. Database-backed API tokens are supported.",
                     "required_role": normalize_access_role(required_role),
                 },
                 status=401,
@@ -34094,6 +34314,22 @@ def command_dashboard(args):
                     )
                     return False
 
+                route = self.path.split("?", 1)[0]
+                if route in {"/", "/operator", "/operator/users", "/operator/reset", "/netsniper"}:
+                    self.dashboard_logout_redirect()
+                else:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "error": "unauthorized",
+                            "message": "The dashboard session is invalid or expired.",
+                            "required_role": normalize_access_role(required_role),
+                        },
+                        status=401,
+                        headers={
+                            "Set-Cookie": dashboard_clear_session_cookie_header(),
+                        },
+                    )
                 return False
 
             # Preserve browser UX compatibility for protected HTML pages.
@@ -34112,11 +34348,6 @@ def command_dashboard(args):
 
 
         def do_GET(self):
-            operator_route = self.path.split("?", 1)[0]
-            if operator_route == "/operator":
-                dashboard_html_response(self, dashboard_operator_session_shell_html())
-                return
-
             parsed = urlparse(self.path)
             route = parsed.path
             query = parse_qs(parsed.query)
@@ -34126,6 +34357,16 @@ def command_dashboard(args):
                 return
 
             if route == "/setup":
+                if not self.dashboard_setup_request_is_local():
+                    dashboard_json_response(
+                        self,
+                        {
+                            "error": "setup_local_only",
+                            "message": "First-admin setup is available only from a loopback client.",
+                        },
+                        status=403,
+                    )
+                    return
                 connection = self.open_connection()
 
                 try:
@@ -34137,7 +34378,10 @@ def command_dashboard(args):
                     dashboard_redirect_response(self, "/login")
                     return
 
-                dashboard_html_response(self, dashboard_first_admin_setup_html())
+                dashboard_html_response(
+                    self,
+                    dashboard_first_admin_setup_html(setup_nonce=setup_nonce),
+                )
                 return
 
             if route == "/login":
@@ -34195,6 +34439,12 @@ def command_dashboard(args):
                 dashboard_html_response(self, dashboard_index_html())
                 return
 
+            if route == "/operator":
+                if not self.require_permission("operator.session.read"):
+                    return
+                dashboard_html_response(self, dashboard_operator_session_shell_html())
+                return
+
             if not self.require_permission("dashboard.read"):
                 return
 
@@ -34232,7 +34482,13 @@ def command_dashboard(args):
 
             if route == "/api/netsniper/schedule-history":
                 query = urllib.parse.parse_qs(parsed.query or "")
-                limit = int(query.get("limit", ["50"])[0] or 50)
+                limit = max(
+                    1,
+                    min(
+                        safe_int(query.get("limit", ["50"])[0]) or 50,
+                        200,
+                    ),
+                )
                 scope = query.get("scope", [""])[0].strip() or None
                 connection = self.open_connection()
 
@@ -34300,7 +34556,13 @@ def command_dashboard(args):
                     return
 
                 query = urllib.parse.parse_qs(parsed.query or "")
-                limit = int(query.get("limit", ["20"])[0] or 20)
+                limit = max(
+                    1,
+                    min(
+                        safe_int(query.get("limit", ["20"])[0]) or 20,
+                        200,
+                    ),
+                )
                 connection = self.open_connection()
 
                 try:
@@ -34725,6 +34987,16 @@ def command_dashboard(args):
             route = parsed.path
 
             if route == "/setup":
+                if not self.dashboard_setup_request_is_local():
+                    dashboard_json_response(
+                        self,
+                        {
+                            "error": "setup_local_only",
+                            "message": "First-admin setup is available only from a loopback client.",
+                        },
+                        status=403,
+                    )
+                    return
                 connection = self.open_connection()
 
                 try:
@@ -34756,23 +35028,73 @@ def command_dashboard(args):
                 display_name = form.get("display_name", [""])[0].strip()
                 password = form.get("password", [""])[0]
                 password_confirm = form.get("password_confirm", [""])[0]
+                supplied_setup_nonce = form.get("setup_nonce", [""])[0]
+
+                if lan_mode and not secrets.compare_digest(
+                    str(supplied_setup_nonce),
+                    setup_nonce,
+                ):
+                    dashboard_html_response(
+                        self,
+                        dashboard_first_admin_setup_html(
+                            "Setup form expired or could not be verified. Reload and try again.",
+                            setup_nonce=setup_nonce,
+                        ),
+                        status=403,
+                    )
+                    return
 
                 if not username:
-                    dashboard_html_response(self, dashboard_first_admin_setup_html("Username is required."))
+                    dashboard_html_response(
+                        self,
+                        dashboard_first_admin_setup_html(
+                            "Username is required.",
+                            setup_nonce=setup_nonce,
+                        ),
+                    )
+                    return
+
+                try:
+                    username = normalize_access_username(username)
+                except DeltaAegisError as exc:
+                    dashboard_html_response(
+                        self,
+                        dashboard_first_admin_setup_html(
+                            str(exc),
+                            setup_nonce=setup_nonce,
+                        ),
+                        status=400,
+                    )
                     return
 
                 if len(password) < 8:
-                    dashboard_html_response(self, dashboard_first_admin_setup_html("Password must be at least 8 characters."))
+                    dashboard_html_response(
+                        self,
+                        dashboard_first_admin_setup_html(
+                            "Password must be at least 8 characters.",
+                            setup_nonce=setup_nonce,
+                        ),
+                    )
                     return
 
                 if password != password_confirm:
-                    dashboard_html_response(self, dashboard_first_admin_setup_html("Passwords do not match."))
+                    dashboard_html_response(
+                        self,
+                        dashboard_first_admin_setup_html(
+                            "Passwords do not match.",
+                            setup_nonce=setup_nonce,
+                        ),
+                    )
                     return
 
                 connection = self.open_connection()
 
                 try:
+                    # Serialize the check and first-user insert. Without this
+                    # lock, simultaneous setup requests can both become ADMIN.
+                    connection.execute("BEGIN IMMEDIATE")
                     if not dashboard_first_admin_setup_required(connection):
+                        connection.rollback()
                         dashboard_json_response(
                             self,
                             {
@@ -34800,6 +35122,10 @@ def command_dashboard(args):
                         user_agent=self.headers.get("User-Agent", ""),
                     )
                     connection.commit()
+                except Exception:
+                    if connection.in_transaction:
+                        connection.rollback()
+                    raise
                 finally:
                     connection.close()
 
@@ -34829,13 +35155,19 @@ def command_dashboard(args):
                 connection = self.open_connection()
 
                 try:
-                    session = dashboard_user_login(
-                        connection,
-                        username,
-                        password,
-                        source_ip=self.client_address[0] if self.client_address else None,
-                        user_agent=self.headers.get("User-Agent", ""),
-                    )
+                    try:
+                        session = dashboard_user_login(
+                            connection,
+                            username,
+                            password,
+                            source_ip=self.client_address[0] if self.client_address else None,
+                            user_agent=self.headers.get("User-Agent", ""),
+                        )
+                    except DeltaAegisError:
+                        # Invalid username syntax is an authentication failure,
+                        # not an uncaught request-handler exception.
+                        connection.rollback()
+                        session = None
                 finally:
                     connection.close()
 

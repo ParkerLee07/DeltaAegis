@@ -67,6 +67,9 @@ tools/validate_v0_40_dashboard_javascript_syntax.sh
 echo "[v0.42 release] client-disconnect response handling"
 tools/validate_v0_40_broken_pipe_response.sh
 
+echo "[v0.42 release] security and integrity hotfix regression"
+python3 tools/validate_v0_42_security_hotfix.py
+
 echo "[v0.42 release] flat logical-site, LAN, scan-watchdog, Sites-management, dashboard-freshness, asset-selector-completeness, TrueAegis-containment, schedule-finalization, install-lifecycle, and license-policy checkpoint suite"
 tools/validate_v0_42_all.sh
 

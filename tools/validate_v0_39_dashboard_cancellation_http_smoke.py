@@ -18,7 +18,7 @@ import urllib.request
 
 EXPECTED_BRANCH = "feature/v0.39-job-lifecycle-observability"
 REQUIRED_API_COMMIT = "18d255c"
-REPO = Path.home() / "DeltaAegis"
+REPO = Path(__file__).resolve().parents[1]
 SOURCE = REPO / "deltaaegis.py"
 
 
