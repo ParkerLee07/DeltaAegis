@@ -24,7 +24,7 @@ flowchart TD
 | CLI and application dispatch | `deltaaegis.py` | Argument parsing, command dispatch, human/JSON output | Sensor implementation or arbitrary shell execution |
 | Configuration and paths | `deltaaegis_core/config.py`, root facade, environment variables, launchers | Local roots, database, reports, logs, sensor paths | Secrets in source or caller-controlled filesystem escape |
 | Storage and schema bootstrap | `deltaaegis_core/db.py`, root-owned `SCHEMA_SQL` and additive helpers | SQLite connection policy, schema, compatibility additions, row serialization | Untracked destructive migrations |
-| NetSniper ingest | `deltaaegis.py` | Bundle discovery, trust checks, normalization, acceptance | Treating conclusions as raw observations |
+| NetSniper ingest | `deltaaegis_core/ingest.py` behind the root facade | Bundle discovery, trust checks, normalization, acceptance | Treating conclusions as raw observations |
 | Delta and lifecycle engine | `deltaaegis.py` | Snapshot comparison, events, alerts, lifecycle | Cross-scope identity assumptions after sensor identity exists |
 | Sites and scope aggregation | `deltaaegis.py` | Logical groupings and site-wide read aggregation | Replacing technical scope identity |
 | Authentication and authorization | `deltaaegis_core/auth.py` behind the root facade | Users, passwords, sessions, tokens, RBAC, access audit | Browser-supplied actor or privilege |
@@ -107,8 +107,8 @@ named `deltaaegis` while that facade exists.
 
 No extraction should mix functional redesign with file movement. A moved responsibility retains its existing validator coverage before cleanup begins.
 
-Stages 1–3 now implement the configuration, connection-policy, and
-authentication boundaries shown above. The root module intentionally retains
+Stages 1–4 now implement the configuration, connection-policy, authentication,
+and NetSniper ingest boundaries shown above. The root module intentionally retains
 thin functions with the established names and signatures; downstream imports
 and historical validators therefore continue to use the same public surface.
 

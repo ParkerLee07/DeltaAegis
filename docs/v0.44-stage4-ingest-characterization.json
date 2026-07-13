@@ -1,0 +1,58 @@
+{
+  "format": "deltaaegis-v0.44-stage4-ingest-characterization-v1",
+  "source_checkpoint_tree": "b80804b43fbd108f45c243e593742b4e835efa1f",
+  "compatibility_facade": "deltaaegis.py",
+  "implementation_module": "deltaaegis_core/ingest.py",
+  "schema_change": false,
+  "facade_functions": [
+    "_first_nonempty_text",
+    "_optional_bool",
+    "analysis_by_ip",
+    "canonical_network_scope",
+    "classify_identity",
+    "identity_rank",
+    "is_usable_target_address",
+    "legacy_profile_fingerprint",
+    "load_json",
+    "load_json_file",
+    "load_netsniper_bundle_quality",
+    "load_snapshot",
+    "manifest_file_path",
+    "netsniper_profile_contract",
+    "normalize_mac",
+    "optional_file",
+    "optional_network_scope",
+    "parse_discovery_xml",
+    "parse_neighbors",
+    "parse_service_xml",
+    "parse_target_network",
+    "require_file",
+    "resolve_bundle_member",
+    "safe_int"
+  ],
+  "supported_manifest_schemas": [
+    "netsniper-run-v1",
+    "netsniper-run-v2",
+    "netsniper-run-v3"
+  ],
+  "bundle_quality_schema": "netsniper-bundle-quality-v1",
+  "trust_contracts": [
+    "complete-manifest-only",
+    "confined-relative-members",
+    "required-evidence-files",
+    "v3-quality-schema-required",
+    "v3-deltaaegis-ready-required",
+    "target-network-address-filtering",
+    "duplicate-mac-ip-fallback"
+  ],
+  "fixtures": {
+    "examples/demo-emergency-alert/runs/20260617-000000-demo-baseline/manifest.json": {
+      "snapshot_sha256": "70d8728d27887846e200ee817ec4da03f5cfdca62e88faa3aa351fa904de2510",
+      "receipt": "IMPORT demo-emergency-baseline-001: quality=ACCEPTED, assets=1, mac_identity=100%, events=0"
+    },
+    "examples/demo-emergency-alert/runs/20260617-000500-demo-emergency/manifest.json": {
+      "snapshot_sha256": "e998189701499b56560cfce1b551c6ff7ce4c4e98ed702d02084992456911d0b",
+      "receipt": "IMPORT demo-emergency-alert-002: quality=ACCEPTED, assets=1, mac_identity=100%, events=11"
+    }
+  }
+}

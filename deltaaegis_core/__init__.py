@@ -8,4 +8,4 @@ as it did before modularization began.
 
 from __future__ import annotations
 
-__all__ = ("auth", "config", "db")
+__all__ = ("auth", "config", "db", "ingest")

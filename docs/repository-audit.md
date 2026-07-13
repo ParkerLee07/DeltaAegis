@@ -8,27 +8,27 @@ This is a deterministic, read-only inventory of the v0.43.0 release candidate an
 
 | Measure | Count |
 |---|---:|
-| Repository files in audit scope | 322 |
-| `deltaaegis.py` lines | 41631 |
+| Repository files in audit scope | 326 |
+| `deltaaegis.py` lines | 40985 |
 | Top-level functions | 661 |
 | Top-level classes | 6 |
 | Distinct CLI commands | 67 |
 | Distinct `/api` route literals | 57 |
 | Declared schema tables | 26 |
-| Validator scripts | 268 |
+| Validator scripts | 270 |
 | Validator version groups | 39 |
 
-Source SHA-256: `84b1ba4354e0ef78cd14d5e4e2e03a7e82b6634d470904a5c1c8455b46590a7f`
+Source SHA-256: `a8a49960ab8b78c5e9241aa7ddbf2fca5c7d3ea7fe9ca8e43b8e4a1dd2e843c1`
 
 ## Findings and disposition
 
 | ID | Severity | Area | Evidence | Planned disposition |
 |---|---|---|---|---|
-| DA043-001 | HIGH | module boundaries | deltaaegis.py has 41631 lines and 661 top-level functions. | Map and incrementally extract responsibilities in v0.44; do not perform a broad v0.43 rewrite. |
+| DA043-001 | HIGH | module boundaries | deltaaegis.py has 40985 lines and 661 top-level functions. | Map and incrementally extract responsibilities in v0.44; do not perform a broad v0.43 rewrite. |
 | DA043-002 | HIGH | source-order coupling | Repeated top-level function names: dashboard_assets_payload, dashboard_index_html, dashboard_operator_session_shell_html. | Preserve behavior with characterization tests, then remove late overrides during owned v0.44 extractions. |
 | DA043-003 | MEDIUM | storage ownership | 26 table names are declared from the monolithic source bootstrap/migration path. | Introduce the migration ledger in v0.45 after the v0.44 database boundary is extracted. |
 | DA043-004 | MEDIUM | HTTP/API ownership | 57 distinct /api route literals occur in the application source. | Inventory current routes now; introduce the stable /api/v1 contract in v0.46. |
-| DA043-005 | MEDIUM | validation estate | 268 validator scripts span 39 version groups. | Record contract ownership before retiring any validator; the v0.43 gate must compose focused validators exactly once. |
+| DA043-005 | MEDIUM | validation estate | 270 validator scripts span 39 version groups. | Record contract ownership before retiring any validator; the v0.43 gate must compose focused validators exactly once. |
 | DA043-006 | MEDIUM | documentation | 1 known stale current-architecture document was identified. | Use docs/architecture/overview.md as current authority and reconcile historical prose during v0.44. |
 | DA043-007 | MEDIUM | TrueAegis compatibility | TrueAegis is enforced by an execution/output contract but has no pinned semantic-version range in the current repository. | Publish or pin a TrueAegis semantic version and fixture contract before DeltaAegis v1.0. |
 
@@ -36,9 +36,9 @@ Source SHA-256: `84b1ba4354e0ef78cd14d5e4e2e03a7e82b6634d470904a5c1c8455b46590a7
 
 | Name | Definition lines |
 |---|---|
-| `dashboard_assets_payload` | 18782, 41612 |
-| `dashboard_index_html` | 29190, 29216, 29375, 29493, 30491 |
-| `dashboard_operator_session_shell_html` | 30515, 30653, 31147 |
+| `dashboard_assets_payload` | 18136, 40966 |
+| `dashboard_index_html` | 28544, 28570, 28729, 28847, 29845 |
+| `dashboard_operator_session_shell_html` | 29869, 30007, 30501 |
 
 These definitions are classified as source-order coupling. The audit does not assume that the earlier definitions are unreachable or safe to delete.
 
@@ -95,7 +95,7 @@ These definitions are classified as source-order coupling. The audit does not as
 | v0.41 | 12 |
 | v0.42 | 18 |
 | v0.43 | 6 |
-| v0.44 | 4 |
+| v0.44 | 6 |
 | v0.7 | 3 |
 | v0.8 | 11 |
 | v0.9 | 6 |

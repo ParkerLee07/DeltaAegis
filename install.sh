@@ -113,6 +113,7 @@ required_files=(
     "deltaaegis_core/auth.py"
     "deltaaegis_core/config.py"
     "deltaaegis_core/db.py"
+    "deltaaegis_core/ingest.py"
     "uninstall.sh"
     "tools/bootstrap_first_admin.py"
     "tools/reset_dashboard_admin.py"
@@ -310,6 +311,7 @@ for relative in (
     "deltaaegis_core/auth.py",
     "deltaaegis_core/config.py",
     "deltaaegis_core/db.py",
+    "deltaaegis_core/ingest.py",
     "tools/bootstrap_first_admin.py",
     "tools/reset_dashboard_admin.py",
     "tools/deltaaegis_troubleshooter.py",
