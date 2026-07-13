@@ -1,0 +1,71 @@
+{
+  "environment": {
+    "cpu_count": 4,
+    "machine": "x86_64",
+    "node": "v22.22.1",
+    "platform": "Linux-7.0.0-27-generic-x86_64-with-glibc2.43",
+    "python": "3.14.4",
+    "python_implementation": "CPython",
+    "sqlite": "3.46.1"
+  },
+  "fixture": {
+    "assets_per_snapshot": 240,
+    "network_scope": "10.200.0.0/16 synthetic only",
+    "real_operator_data_used": false,
+    "services_per_asset": 3,
+    "snapshots": 3
+  },
+  "generated_at": "2026-07-13T17:47:02+00:00",
+  "interpretation": [
+    "These are descriptive v0.43 baselines, not release thresholds.",
+    "The fixture is synthetic and is created under a temporary directory.",
+    "Performance targets are set during v0.49 after module, migration, API, and identity work stabilizes.",
+    "Compare future runs only when fixture size, environment, and benchmark schema match."
+  ],
+  "measurements": {
+    "bytes_per_asset_observation": 1399.467,
+    "cold_module_import": {
+      "max_ms": 575.23,
+      "median_ms": 558.686,
+      "min_ms": 556.33,
+      "repetitions": 5
+    },
+    "dashboard_assets_payload": {
+      "max_ms": 5.128,
+      "median_ms": 4.804,
+      "min_ms": 4.735,
+      "repetitions": 5
+    },
+    "dashboard_summary_payload": {
+      "max_ms": 6.55,
+      "median_ms": 5.666,
+      "min_ms": 5.3,
+      "repetitions": 5
+    },
+    "fresh_schema_initialization": {
+      "max_ms": 29.371,
+      "median_ms": 28.078,
+      "min_ms": 27.956,
+      "repetitions": 5
+    },
+    "in_process_module_load_ms": 27.238,
+    "markdown_report_bytes": 20879,
+    "markdown_report_generation_ms": 489.329,
+    "release_gate": {
+      "checkout": "disposable clean local clone",
+      "command": "tools/validate_v0_42_release_gate.sh",
+      "duration_seconds": 91.432,
+      "status": "passed"
+    },
+    "sqlite_foreign_key_violations": 0,
+    "sqlite_integrity_check": "ok",
+    "synthetic_database_bytes": 1007616,
+    "synthetic_database_generation_ms": 44.749
+  },
+  "mode": "full",
+  "schema_version": "deltaaegis-performance-baseline-v1",
+  "source": {
+    "deltaaegis_version": "0.42.2",
+    "git_tree": "e491383d59c6f93a34001f5e1060d62d3c944405"
+  }
+}
