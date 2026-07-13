@@ -2,23 +2,23 @@
 
 Schema: `deltaaegis-repository-audit-v1`
 
-This is a deterministic, read-only inventory of the v0.42.2 runtime and the v0.43 baseline artifacts. Regenerate it with `python3 tools/audit_v0_43_repository.py --write`.
+This is a deterministic, read-only inventory of the v0.43.0 release candidate and its architecture-baseline artifacts. Regenerate it with `python3 tools/audit_v0_43_repository.py --write`.
 
 ## Inventory summary
 
 | Measure | Count |
 |---|---:|
-| Repository files in audit scope | 308 |
+| Repository files in audit scope | 311 |
 | `deltaaegis.py` lines | 42546 |
 | Top-level functions | 661 |
 | Top-level classes | 8 |
 | Distinct CLI commands | 67 |
 | Distinct `/api` route literals | 57 |
 | Declared schema tables | 30 |
-| Validator scripts | 260 |
+| Validator scripts | 264 |
 | Validator version groups | 38 |
 
-Source SHA-256: `09e8ef6b7eae6a9431de3daf8c859cfa84d77026d92191ba04bdeb96aa7448d4`
+Source SHA-256: `100c0cacf03c9faf220bf5993a7fc102696e3d67cf6cbb6511fb4ae470ebe07f`
 
 ## Findings and disposition
 
@@ -28,7 +28,7 @@ Source SHA-256: `09e8ef6b7eae6a9431de3daf8c859cfa84d77026d92191ba04bdeb96aa7448d
 | DA043-002 | HIGH | source-order coupling | Repeated top-level function names: dashboard_assets_payload, dashboard_index_html, dashboard_operator_session_shell_html. | Preserve behavior with characterization tests, then remove late overrides during owned v0.44 extractions. |
 | DA043-003 | MEDIUM | storage ownership | 30 table names are declared from the monolithic source bootstrap/migration path. | Introduce the migration ledger in v0.45 after the v0.44 database boundary is extracted. |
 | DA043-004 | MEDIUM | HTTP/API ownership | 57 distinct /api route literals occur in the application source. | Inventory current routes now; introduce the stable /api/v1 contract in v0.46. |
-| DA043-005 | MEDIUM | validation estate | 260 validator scripts span 38 version groups. | Record contract ownership before retiring any validator; the v0.43 gate must compose focused validators exactly once. |
+| DA043-005 | MEDIUM | validation estate | 264 validator scripts span 38 version groups. | Record contract ownership before retiring any validator; the v0.43 gate must compose focused validators exactly once. |
 | DA043-006 | MEDIUM | documentation | 1 known stale current-architecture document was identified. | Use docs/architecture/overview.md as current authority and reconcile historical prose during v0.44. |
 | DA043-007 | MEDIUM | TrueAegis compatibility | TrueAegis is enforced by an execution/output contract but has no pinned semantic-version range in the current repository. | Publish or pin a TrueAegis semantic version and fixture contract before DeltaAegis v1.0. |
 
@@ -94,7 +94,7 @@ These definitions are classified as source-order coupling. The audit does not as
 | v0.40 | 13 |
 | v0.41 | 12 |
 | v0.42 | 18 |
-| v0.43 | 2 |
+| v0.43 | 6 |
 | v0.7 | 3 |
 | v0.8 | 11 |
 | v0.9 | 6 |
@@ -125,6 +125,6 @@ The runtime remains standard-library based. NetSniper, TrueAegis, Node.js, Git, 
 ## Audit constraints
 
 - No runtime source or database schema is changed by this audit.
-- Counts exclude runtime data roots, Git internals, bytecode caches, and this generated report.
+- Counts use Git cached and non-ignored untracked candidate files, excluding runtime data roots and this generated report.
 - A finding is architecture debt unless a focused defect reproduction proves otherwise.
 - No historical validator is removed without replacement-contract evidence.

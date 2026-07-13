@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Parker Lee
-"""DeltaAegis v0.42.2: Authorization and Integrity Hardening.
+"""DeltaAegis v0.43.0: Architecture and Stability Baseline.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -38,7 +38,7 @@ import tempfile
 
 DEFAULT_DB = Path.home() / "DeltaAegis" / "data" / "deltaaegis.db"
 DEFAULT_BACKUPS = Path.home() / "DeltaAegis" / "backups"
-DELTAAEGIS_VERSION = "0.42.2"
+DELTAAEGIS_VERSION = "0.43.0"
 DELTAAEGIS_SECURITY_HOTFIX = "2026-07-13.2"
 DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION = "deltaaegis-backup-manifest-v1"
 DEFAULT_RESTORE_REHEARSALS = (
@@ -25100,7 +25100,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.42 Logical Site Scopes</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.43 Architecture and Stability Baseline</span></div>
     </div>
   </header>
 
@@ -34355,7 +34355,7 @@ def command_dashboard(args):
 
 
     class DeltaAegisDashboardHandler(BaseHTTPRequestHandler):
-        server_version = "DeltaAegisDashboard/0.42.2"
+        server_version = "DeltaAegisDashboard/0.43.0"
 
         def log_message(self, fmt, *handler_args):
             if not args.quiet:
@@ -41744,7 +41744,7 @@ def command_restore_cutover_execute(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "DeltaAegis v0.42.2 — Authorization and Integrity Hardening, "
+            "DeltaAegis v0.43.0 — Architecture and Stability Baseline, "
             "SQLite-consistent backups, verified manifests, "
             "restore rehearsal, guarded retention, active restore "
             "cutover planning and rollback, operator actions, "

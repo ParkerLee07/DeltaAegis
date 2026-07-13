@@ -4,23 +4,24 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.42.2
+## Current Release — v0.43.0
 
-**DeltaAegis v0.42.2 — Authorization and Integrity Hardening**
+**DeltaAegis v0.43.0 — Architecture and Stability Baseline**
 
-DeltaAegis v0.42.2 is a backward-compatible maintenance release that closes authorization, authentication, concurrency, and read-only API defects found during the post-v0.42.1 security review. It retains the security maintenance delivered in v0.42.1 and the logical-site capabilities introduced in v0.42.0.
+DeltaAegis v0.43.0 is an intentionally architecture-focused release. It freezes the product and support boundaries required for v1.0, records the current system design, inventories technical debt, and establishes reproducible performance evidence without adding another operator workflow or changing the database schema.
 
 Highlights:
 
-- Capped every API token by its owner's current role, rejected token creation above that role, and downgraded elevated tokens when an account is demoted.
-- Made malformed API-token expiration values fail closed instead of silently becoming non-expiring credentials.
-- Serialized administrative user mutations so concurrent requests cannot disable or demote every active ADMIN account.
-- Added bounded, thread-safe login throttling with HTTP `429` and `Retry-After` responses while using a dummy PBKDF2 hash to reduce username timing disclosure.
-- Enforced the shared 8-to-1024-character password policy across CLI, setup, and dashboard credential-assignment paths.
-- Applied authentication requirements to every non-loopback dashboard bind, including direct `--host 0.0.0.0` usage that bypasses the `--lan` convenience flag.
-- Made `GET /api/validation-correlations` read-only; correlation rebuilding remains tied to trusted TrueAegis result ingestion.
-- Expanded the focused security validator with API-token, expiry, last-admin race, login, bind, password-policy, and read-only-route regressions.
-- DeltaAegis v0.42.2 remains licensed under `AGPL-3.0-only`; alternative commercial licensing may be available by separate written agreement.
+- Defined the exact v1.0 product promises, exclusions, supported deployment shape, and definition of done in `V1_SCOPE.md`.
+- Published the Python, Linux, SQLite, NetSniper, TrueAegis, Node.js, browser, and Git support policy in `SUPPORTED_VERSIONS.md`.
+- Added a current architecture map covering component ownership, process and storage models, trust boundaries, data flow, and the incremental v0.44 extraction plan.
+- Accepted nine architecture decisions for storage, migrations, API versioning, sensor/scope identity, authentication, jobs, backup/recovery, compatibility, and deprecation.
+- Added a deterministic repository audit that inventories commands, routes, schema tables, duplicate definitions, validators, stale documentation, and deferred technical debt.
+- Added a synthetic performance harness and machine-readable baseline for import, schema initialization, database growth, dashboard payloads, report generation, integrity, and predecessor-gate duration.
+- Added contribution governance that preserves the AGPL/commercial-licensing boundary without inventing new legal terms.
+- Added focused v0.43 documentation, metadata, architecture-baseline, and isolated predecessor-compatibility validation.
+- Preserved the v0.42.2 runtime behavior and database schema; NetSniper remains pinned to v2.0.0 for this release.
+- DeltaAegis v0.43.0 remains licensed under `AGPL-3.0-only`; alternative commercial licensing may be available by separate written agreement.
 
 ## What DeltaAegis Does
 
@@ -40,6 +41,8 @@ DeltaAegis helps answer:
 NetSniper telemetry bundle → DeltaAegis ingest → SQLite snapshot history → Delta engine → Events, alerts, and asset context → Risk prioritization and investigation workflow → Dashboard, CLI, and Markdown reports.
 
 NetSniper remains the lightweight scanner and telemetry producer. DeltaAegis is the dashboard, history store, delta engine, analyst workflow layer, and local SIEM-style console.
+
+The current architecture, responsibility boundaries, v0.44 extraction map, and accepted decisions are documented in [`docs/architecture/overview.md`](docs/architecture/overview.md). The v1.0 product boundary is defined in [`V1_SCOPE.md`](V1_SCOPE.md), and supported environments are defined in [`SUPPORTED_VERSIONS.md`](SUPPORTED_VERSIONS.md).
 
 ## Installation
 
@@ -380,7 +383,7 @@ The safety backup is retained after success or rollback. DeltaAegis does not del
 
 ## Security Boundary
 
-DeltaAegis v0.42.2 does not expose arbitrary shell command execution from the dashboard.
+DeltaAegis v0.43.0 does not expose arbitrary shell command execution from the dashboard.
 
 Dashboard NetSniper execution uses guarded job records, validated private IPv4 CIDRs, and fixed argument-vector process creation. Live job-detail reads are bounded and confined to the configured scan-log root.
 
@@ -559,13 +562,13 @@ individually rather than treated as current-release regressions.
 
 ## Validation
 
-Run the complete v0.42 automated release gate from a clean checkout:
+Run the complete v0.43 automated release gate from a clean checkout:
 
 ```bash
-./tools/validate_v0_42_release_gate.sh
+./tools/validate_v0_43_release_gate.sh
 ```
 
-The release gate validates release metadata and documentation, rendered dashboard JavaScript, client-disconnect handling, all eight flat v0.42 logical-site, LAN, watchdog, Sites-management, and TrueAegis-containment validators, the isolated v0.40 operator-action compatibility suite, and the v0.39 functional compatibility suite. The v0.42 all-in validator invokes every component validator exactly once.
+The release gate validates the v1.0 scope and support matrix, architecture map and nine ADRs, deterministic repository audit, frozen synthetic performance baseline, v0.43 metadata and documentation, and the unchanged storage boundary. It then runs v0.42 security, logical-site, dashboard, job, install, license, v0.40 operator-action, and v0.39 functional compatibility in a disposable clean snapshot of the candidate tree.
 
 Complete the manual backup and restore checklist before merge, tag, or publication:
 
@@ -622,7 +625,7 @@ three-project defensive workflow:
 
 ## License
 
-DeltaAegis v0.42.2 is licensed under the **GNU Affero General Public License, version 3 only** (`AGPL-3.0-only`). See `LICENSE` and `LICENSING.md`.
+DeltaAegis v0.43.0 is licensed under the **GNU Affero General Public License, version 3 only** (`AGPL-3.0-only`). See `LICENSE` and `LICENSING.md`.
 
 Alternative commercial licensing may be available from Parker Lee through a separate written agreement. Earlier copies already distributed under the MIT License retain the permissions that accompanied those copies.
 

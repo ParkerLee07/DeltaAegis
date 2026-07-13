@@ -1,3 +1,21 @@
+## DeltaAegis v0.43.0 — Architecture and Stability Baseline
+
+- Defined the v1.0 product promises, exclusions, supported deployment shape, scope-change policy, and release definition of done.
+- Published supported Python, Debian, Ubuntu, Kali, SQLite, NetSniper, TrueAegis, Node.js, browser, and Git expectations.
+- Documented the current component ownership, process model, storage model, evidence flow, trust boundaries, API status, and incremental v0.44 extraction map.
+- Accepted nine architecture decisions covering SQLite storage, forward-only migrations, `/api/v1`, sensor/scope/asset identity, authentication and web security, durable jobs, backup/recovery, compatibility, and deprecation.
+- Added contribution governance without changing the `AGPL-3.0-only` or separate commercial-licensing policy.
+- Added a deterministic repository audit with command, API-route, schema-table, duplicate-definition, validator, stale-document, and technical-debt inventories.
+- Recorded the monolithic source boundary and late top-level function redefinitions as architecture debt to be characterized and extracted incrementally in v0.44.
+- Added a reproducible synthetic performance harness covering import, schema initialization, database growth, dashboard summary and asset payloads, report generation, SQLite integrity, and predecessor release-gate duration.
+- Preserved the machine-specific v0.42.2 measurement as the frozen v0.43 comparison baseline rather than misrepresenting release-metadata changes as performance work.
+- Added focused v0.43 architecture-baseline, documentation, release-metadata, and candidate-snapshot predecessor-compatibility validators.
+- Added a flat v0.43 release gate for feature and main paths with clean-tree enforcement and an explicit approval hold.
+- Preserved v0.42.2 authorization and integrity hardening, all thirteen v0.42 component contracts, v0.40 operator actions, and v0.39 scan-lifecycle behavior.
+- Preserved the v0.42.2 database schema and runtime behavior; v0.43.0 introduces no major dashboard workflow or detection subsystem.
+- Kept NetSniper at v2.0.0 for v0.43 through v0.46 unless a separately verified telemetry defect requires maintenance.
+- Retained `AGPL-3.0-only`, corresponding-source notices, the prior MIT-copy boundary, and separately written commercial-licensing policy.
+
 ## DeltaAegis v0.42.2 — Authorization and Integrity Hardening
 
 - Capped API-token authorization by the owning user's current database role and rejected new tokens whose requested role exceeds the owner's role.

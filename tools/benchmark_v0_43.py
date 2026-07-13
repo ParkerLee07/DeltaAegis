@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import json
 import os
@@ -17,10 +18,11 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 
 SCHEMA_VERSION = "deltaaegis-performance-baseline-v1"
+FROZEN_SOURCE_TREE = "e491383d59c6f93a34001f5e1060d62d3c944405"
 JSON_PATH = Path("docs/performance-baseline.json")
 MARKDOWN_PATH = Path("docs/performance-baseline.md")
 
@@ -215,6 +217,62 @@ def git_tree(root: Path) -> str:
         text=True,
     )
     return completed.stdout.strip() or "unavailable"
+
+
+def commit_for_tree(root: Path, expected_tree: str) -> str:
+    commits = subprocess.run(
+        ["git", "-C", str(root), "rev-list", "--all"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if commits.returncode:
+        raise RuntimeError("could not enumerate Git history for the frozen baseline")
+    for commit in commits.stdout.splitlines():
+        candidate = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", f"{commit}^{{tree}}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if candidate.returncode == 0 and candidate.stdout.strip() == expected_tree:
+            return commit
+    raise RuntimeError(
+        f"could not locate frozen v0.42.2 source tree {expected_tree} in local Git history"
+    )
+
+
+@contextlib.contextmanager
+def frozen_baseline_source(root: Path) -> Iterator[Path]:
+    if git_tree(root) == FROZEN_SOURCE_TREE and "0.42.2" == str(load_deltaaegis(root).DELTAAEGIS_VERSION):
+        yield root
+        return
+    commit = commit_for_tree(root, FROZEN_SOURCE_TREE)
+    with tempfile.TemporaryDirectory(prefix="deltaaegis-v043-frozen-source-") as temp_name:
+        checkout = Path(temp_name) / "DeltaAegis"
+        clone = subprocess.run(
+            ["git", "clone", "--quiet", "--shared", str(root), str(checkout)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if clone.returncode:
+            raise RuntimeError(f"could not clone frozen baseline source: {clone.stderr.strip()}")
+        checked_out = subprocess.run(
+            ["git", "-C", str(checkout), "checkout", "--quiet", commit],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if checked_out.returncode:
+            raise RuntimeError(f"could not checkout frozen baseline source: {checked_out.stderr.strip()}")
+        if git_tree(checkout) != FROZEN_SOURCE_TREE:
+            raise RuntimeError("frozen baseline checkout tree verification failed")
+        yield checkout
 
 
 def measure_release_gate(root: Path) -> dict[str, Any]:
@@ -496,7 +554,11 @@ def main() -> int:
     snapshots = 2 if args.self_test else 3
     repetitions = 2 if args.self_test else 5
     include_gate = not (args.quick or args.self_test)
-    result = run_baseline(root, assets, snapshots, repetitions, include_gate)
+    if args.self_test:
+        result = run_baseline(root, assets, snapshots, repetitions, include_gate)
+    else:
+        with frozen_baseline_source(root) as source_root:
+            result = run_baseline(source_root, assets, snapshots, repetitions, include_gate)
     validate_result(result, require_gate=include_gate)
 
     if args.write:

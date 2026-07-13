@@ -8,6 +8,7 @@ import ast
 import hashlib
 import json
 import re
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -50,11 +51,37 @@ def repository_root(value: str | None = None) -> Path:
 
 
 def relative_files(root: Path) -> list[Path]:
+    completed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode:
+        details = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise SystemExit(f"could not inventory Git candidate files: {details}")
     files: list[Path] = []
-    for path in root.rglob("*"):
+    for raw in completed.stdout.split(b"\0"):
+        if not raw:
+            continue
+        try:
+            value = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SystemExit(f"repository contains a non-UTF-8 path: {exc}") from exc
+        rel = Path(value)
+        if rel.is_absolute() or any(part in {"", ".", ".."} for part in rel.parts):
+            raise SystemExit(f"unsafe path returned by Git inventory: {value!r}")
+        path = root / rel
         if not path.is_file() or path.is_symlink():
             continue
-        rel = path.relative_to(root)
         if rel == REPORT_PATH or any(part in EXCLUDED_PARTS for part in rel.parts):
             continue
         files.append(rel)
@@ -233,12 +260,12 @@ def build_audit(root: Path) -> dict[str, Any]:
     inventory = source_inventory(root, files)
     return {
         "schema_version": SCHEMA_VERSION,
-        "scope": "DeltaAegis v0.42.2 runtime observed by the v0.43 architecture baseline",
+        "scope": "DeltaAegis v0.43.0 architecture and stability release candidate",
         "inventory": inventory,
         "findings": findings(inventory),
         "constraints": [
             "No runtime source or database schema is changed by this audit.",
-            "Counts exclude runtime data roots, Git internals, bytecode caches, and this generated report.",
+            "Counts use Git cached and non-ignored untracked candidate files, excluding runtime data roots and this generated report.",
             "A finding is architecture debt unless a focused defect reproduction proves otherwise.",
             "No historical validator is removed without replacement-contract evidence.",
         ],
@@ -256,7 +283,7 @@ def render_markdown(audit: dict[str, Any]) -> str:
         "",
         f"Schema: `{audit['schema_version']}`",
         "",
-        "This is a deterministic, read-only inventory of the v0.42.2 runtime and the v0.43 baseline artifacts. Regenerate it with `python3 tools/audit_v0_43_repository.py --write`.",
+        "This is a deterministic, read-only inventory of the v0.43.0 release candidate and its architecture-baseline artifacts. Regenerate it with `python3 tools/audit_v0_43_repository.py --write`.",
         "",
         "## Inventory summary",
         "",

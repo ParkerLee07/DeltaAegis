@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import py_compile
 import subprocess
@@ -44,25 +45,36 @@ def run(command: list[str], *, timeout: int = 180) -> subprocess.CompletedProces
     )
 
 
-def validate_unchanged_runtime() -> None:
+def validate_release_runtime_boundary() -> None:
     source = require_file("deltaaegis.py").read_text(encoding="utf-8")
     tree = ast.parse(source, filename="deltaaegis.py")
     version = None
+    schema_sql = None
     for node in tree.body:
         if isinstance(node, ast.Assign):
             if any(isinstance(target, ast.Name) and target.id == "DELTAAEGIS_VERSION" for target in node.targets):
                 if isinstance(node.value, ast.Constant):
                     version = node.value.value
-                break
-    if version != "0.42.2":
-        fail(f"stages 1-5 must observe the unchanged v0.42.2 runtime, found {version!r}")
-    diff = run(["git", "diff", "--", "deltaaegis.py"])
-    cached = run(["git", "diff", "--cached", "--", "deltaaegis.py"])
-    if diff.returncode or cached.returncode:
-        fail("could not verify deltaaegis.py Git state")
-    if diff.stdout or cached.stdout:
-        fail("stages 1-5 must not modify deltaaegis.py")
-    print("PASS: unchanged v0.42.2 runtime boundary")
+            if any(isinstance(target, ast.Name) and target.id == "SCHEMA_SQL" for target in node.targets):
+                if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                    schema_sql = node.value.value
+    if version != "0.43.0":
+        fail(f"release baseline requires DeltaAegis 0.43.0 metadata, found {version!r}")
+    expected_schema_hash = "ad580f57b3a36fb3de3b268d0e1275d5f3c650af3c18d75876b0bee707f46d26"
+    actual_schema_hash = hashlib.sha256((schema_sql or "").encode("utf-8")).hexdigest()
+    if actual_schema_hash != expected_schema_hash:
+        fail("v0.43 changed the frozen v0.42.2 SCHEMA_SQL contract")
+    for marker in (
+        "DeltaAegis v0.43.0: Architecture and Stability Baseline.",
+        'DELTAAEGIS_VERSION = "0.43.0"',
+        'server_version = "DeltaAegisDashboard/0.43.0"',
+        "v0.43 Architecture and Stability Baseline",
+    ):
+        if marker not in source:
+            fail(f"release runtime metadata is missing: {marker}")
+    if len(source.splitlines()) != 42546:
+        fail("v0.43 stages 1-6 must not add runtime source lines")
+    print("PASS: v0.43 metadata-only runtime and unchanged schema boundary")
 
 
 def validate_repository_audit() -> None:
@@ -184,6 +196,10 @@ def validate_performance() -> None:
         fail("tracked performance baseline must use full mode")
     if data.get("fixture", {}).get("real_operator_data_used") is not False:
         fail("performance baseline must use synthetic data only")
+    if data.get("source", {}).get("deltaaegis_version") != "0.42.2":
+        fail("performance baseline must retain the frozen v0.42.2 measurement source")
+    if data.get("source", {}).get("git_tree") != "e491383d59c6f93a34001f5e1060d62d3c944405":
+        fail("performance baseline source tree is not the published v0.42.2 tree")
     measurements = data.get("measurements") or {}
     required = {
         "cold_module_import",
@@ -231,7 +247,7 @@ def validate_hygiene() -> None:
 def main() -> int:
     print("DeltaAegis v0.43 Architecture and Stability Baseline Validator")
     print("================================================================")
-    validate_unchanged_runtime()
+    validate_release_runtime_boundary()
     validate_scope_and_support()
     validate_architecture()
     validate_performance()
