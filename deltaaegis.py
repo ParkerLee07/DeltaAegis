@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Parker Lee
-"""DeltaAegis v0.42.1: Security and Integrity Maintenance.
+"""DeltaAegis v0.42.2: Authorization and Integrity Hardening.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -22,6 +22,7 @@ import signal
 import sqlite3
 import subprocess
 import threading
+import time
 import sys
 import uuid
 import urllib.parse
@@ -37,8 +38,8 @@ import tempfile
 
 DEFAULT_DB = Path.home() / "DeltaAegis" / "data" / "deltaaegis.db"
 DEFAULT_BACKUPS = Path.home() / "DeltaAegis" / "backups"
-DELTAAEGIS_VERSION = "0.42.1"
-DELTAAEGIS_SECURITY_HOTFIX = "2026-07-13.1"
+DELTAAEGIS_VERSION = "0.42.2"
+DELTAAEGIS_SECURITY_HOTFIX = "2026-07-13.2"
 DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION = "deltaaegis-backup-manifest-v1"
 DEFAULT_RESTORE_REHEARSALS = (
     Path.home() / "DeltaAegis" / "restore-rehearsals"
@@ -180,6 +181,16 @@ ACCESS_ROLE_RANKS = {
 }
 ACCESS_PASSWORD_ALGORITHM = "pbkdf2_sha256"
 ACCESS_PASSWORD_ITERATIONS = 260000
+ACCESS_PASSWORD_MIN_LENGTH = 8
+ACCESS_PASSWORD_MAX_LENGTH = 1024
+ACCESS_LOGIN_ACCOUNT_MAX_ATTEMPTS = 5
+ACCESS_LOGIN_SOURCE_MAX_ATTEMPTS = 20
+ACCESS_LOGIN_WINDOW_SECONDS = 300
+ACCESS_LOGIN_MAX_TRACKED_KEYS = 4096
+ACCESS_LOGIN_DUMMY_PASSWORD_HASH = (
+    "pbkdf2_sha256$260000$deltaaegis-login-dummy-v1$"
+    "a6965fd8e5a80577942e0871db72eb3f75957a535075e1cfa92b8d1f8db799f8"
+)
 ACCESS_API_TOKEN_PREFIX = "da"
 
 ACCESS_SESSION_COOKIE_NAME = "deltaaegis_session"
@@ -189,6 +200,16 @@ ACCESS_SESSION_TTL_SECONDS = 8 * 60 * 60
 
 class DeltaAegisError(RuntimeError):
     pass
+
+
+class DashboardLoginRateLimitedError(DeltaAegisError):
+    def __init__(self, retry_after: int):
+        super().__init__("too many login attempts; try again later")
+        self.retry_after = max(1, int(retry_after))
+
+
+_ACCESS_LOGIN_ATTEMPTS: dict[tuple[str, str], list[float]] = {}
+_ACCESS_LOGIN_ATTEMPTS_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -965,6 +986,15 @@ def access_role_allows(role: str | None, required_role: str | None) -> bool:
     return ACCESS_ROLE_RANKS[actual] >= ACCESS_ROLE_RANKS[required]
 
 
+def access_effective_role(*roles: str | None) -> str:
+    normalized = [normalize_access_role(role) for role in roles]
+
+    if not normalized:
+        return "VIEWER"
+
+    return min(normalized, key=lambda role: ACCESS_ROLE_RANKS[role])
+
+
 def normalize_access_username(username: str) -> str:
     value = str(username or "").strip().lower()
 
@@ -979,9 +1009,27 @@ def normalize_access_username(username: str) -> str:
     return value
 
 
-def hash_access_password(password: str, salt: str | None = None, iterations: int = ACCESS_PASSWORD_ITERATIONS) -> str:
-    if not password:
+def validate_access_password(password: str) -> str:
+    value = str(password or "")
+
+    if not value:
         raise DeltaAegisError("password is required")
+
+    if len(value) < ACCESS_PASSWORD_MIN_LENGTH:
+        raise DeltaAegisError(
+            f"password must be at least {ACCESS_PASSWORD_MIN_LENGTH} characters"
+        )
+
+    if len(value) > ACCESS_PASSWORD_MAX_LENGTH:
+        raise DeltaAegisError(
+            f"password must be at most {ACCESS_PASSWORD_MAX_LENGTH} characters"
+        )
+
+    return value
+
+
+def hash_access_password(password: str, salt: str | None = None, iterations: int = ACCESS_PASSWORD_ITERATIONS) -> str:
+    password_value = validate_access_password(password)
 
     if iterations < 100000:
         raise DeltaAegisError("password hash iteration count is too low")
@@ -989,7 +1037,7 @@ def hash_access_password(password: str, salt: str | None = None, iterations: int
     salt_value = salt or secrets.token_hex(16)
     digest = hashlib.pbkdf2_hmac(
         "sha256",
-        str(password).encode("utf-8"),
+        password_value.encode("utf-8"),
         salt_value.encode("utf-8"),
         iterations,
     ).hex()
@@ -998,7 +1046,7 @@ def hash_access_password(password: str, salt: str | None = None, iterations: int
 
 
 def verify_access_password(password: str, password_hash: str | None) -> bool:
-    if not password or not password_hash:
+    if not password_hash:
         return False
 
     try:
@@ -1010,10 +1058,86 @@ def verify_access_password(password: str, password_hash: str | None) -> bool:
     if algorithm != ACCESS_PASSWORD_ALGORITHM:
         return False
 
-    candidate = hash_access_password(password, salt=salt, iterations=iterations)
-    candidate_digest = candidate.rsplit("$", 1)[-1]
+    if iterations < 100000 or iterations > 1000000 or not salt or not expected_digest:
+        return False
+
+    candidate_digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        str(password or "").encode("utf-8"),
+        salt.encode("utf-8"),
+        iterations,
+    ).hex()
 
     return hmac.compare_digest(candidate_digest, expected_digest)
+
+
+def access_password_hash_is_usable(password_hash: str | None) -> bool:
+    try:
+        algorithm, iterations_text, salt, expected_digest = str(password_hash or "").split("$", 3)
+        iterations = int(iterations_text)
+    except (TypeError, ValueError):
+        return False
+
+    return bool(
+        algorithm == ACCESS_PASSWORD_ALGORITHM
+        and 100000 <= iterations <= 1000000
+        and salt
+        and expected_digest
+    )
+
+
+def _access_login_identity(source_ip: str | None, username: str) -> tuple[str, str]:
+    source = str(source_ip or "unknown").strip().lower()[:128] or "unknown"
+    account = str(username or "<empty>").strip().lower()[:64] or "<empty>"
+    return source, account
+
+
+def access_login_attempt_reserve(source_ip: str | None, username: str) -> None:
+    source, account = _access_login_identity(source_ip, username)
+    now = time.monotonic()
+    cutoff = now - ACCESS_LOGIN_WINDOW_SECONDS
+    dimensions = (
+        (("source", source), ACCESS_LOGIN_SOURCE_MAX_ATTEMPTS),
+        (("account", account), ACCESS_LOGIN_ACCOUNT_MAX_ATTEMPTS),
+    )
+
+    with _ACCESS_LOGIN_ATTEMPTS_LOCK:
+        for key in list(_ACCESS_LOGIN_ATTEMPTS):
+            recent = [stamp for stamp in _ACCESS_LOGIN_ATTEMPTS[key] if stamp > cutoff]
+            if recent:
+                _ACCESS_LOGIN_ATTEMPTS[key] = recent
+            else:
+                del _ACCESS_LOGIN_ATTEMPTS[key]
+
+        retry_after = 0
+        for key, maximum in dimensions:
+            attempts = _ACCESS_LOGIN_ATTEMPTS.get(key, [])
+            if len(attempts) >= maximum:
+                retry_after = max(
+                    retry_after,
+                    int(ACCESS_LOGIN_WINDOW_SECONDS - (now - attempts[0])) + 1,
+                )
+
+        if retry_after:
+            raise DashboardLoginRateLimitedError(retry_after)
+
+        while len(_ACCESS_LOGIN_ATTEMPTS) + 2 > ACCESS_LOGIN_MAX_TRACKED_KEYS:
+            oldest_key = min(
+                _ACCESS_LOGIN_ATTEMPTS,
+                key=lambda key: _ACCESS_LOGIN_ATTEMPTS[key][-1],
+            )
+            del _ACCESS_LOGIN_ATTEMPTS[oldest_key]
+
+        for key, _maximum in dimensions:
+            _ACCESS_LOGIN_ATTEMPTS.setdefault(key, []).append(now)
+
+
+def access_login_attempt_clear(source_ip: str | None, username: str) -> None:
+    source, account = _access_login_identity(source_ip, username)
+
+    with _ACCESS_LOGIN_ATTEMPTS_LOCK:
+        _ACCESS_LOGIN_ATTEMPTS.pop(("source", source), None)
+        _ACCESS_LOGIN_ATTEMPTS.pop(("account", account), None)
 
 
 def hash_access_api_token(token: str) -> str:
@@ -1124,6 +1248,17 @@ def create_access_api_token(
     token_id = str(uuid.uuid4())
     now = utc_now()
     token_role = normalize_access_role(role or user["role"])
+    user_role = normalize_access_role(user["role"])
+
+    if not access_role_allows(user_role, token_role):
+        raise DeltaAegisError(
+            f"API token role {token_role} exceeds the user's current {user_role} role"
+        )
+
+    clean_expires_at = str(expires_at or "").strip() or None
+    if clean_expires_at and access_parse_datetime(clean_expires_at) is None:
+        raise DeltaAegisError("API token expires_at must be a valid ISO-8601 timestamp")
+
     token_prefix = token_value[:12]
     clean_token_name = str(token_name or "DeltaAegis API Token").strip() or "DeltaAegis API Token"
 
@@ -1141,7 +1276,7 @@ def create_access_api_token(
             token_role,
             now,
             now,
-            expires_at,
+            clean_expires_at,
         ),
     )
 
@@ -1154,7 +1289,7 @@ def create_access_api_token(
         "token_prefix": token_prefix,
         "role": token_role,
         "created_at": now,
-        "expires_at": expires_at,
+        "expires_at": clean_expires_at,
     }
 
 
@@ -1254,50 +1389,74 @@ def dashboard_user_login(
 ) -> dict[str, Any] | None:
     ensure_dashboard_session_schema(connection)
 
-    normalized_username = normalize_access_username(username)
-    user = access_user_by_username(connection, normalized_username)
+    login_name = str(username or "").strip().lower()[:64]
 
-    if not user or not int(user.get("is_active") or 0):
+    try:
+        access_login_attempt_reserve(source_ip, login_name)
+    except DashboardLoginRateLimitedError:
+        record_access_audit_event(
+            connection,
+            action="LOGIN_RATE_LIMITED",
+            actor={"username": login_name or None, "role": None},
+            target_type="access_user",
+            target_key=login_name or "<empty>",
+            source_ip=source_ip,
+            user_agent=user_agent,
+            details={"reason": "rolling_window_limit"},
+        )
+        connection.commit()
+        raise
+
+    try:
+        normalized_username = normalize_access_username(username)
+    except DeltaAegisError:
+        normalized_username = None
+
+    user = (
+        access_user_by_username(connection, normalized_username)
+        if normalized_username
+        else None
+    )
+    active_user = user if user and int(user.get("is_active") or 0) else None
+    stored_hash = (active_user or {}).get("password_hash") or ""
+    password_hash = (
+        stored_hash
+        if access_password_hash_is_usable(stored_hash)
+        else ACCESS_LOGIN_DUMMY_PASSWORD_HASH
+    )
+    password_matches = verify_access_password(password, password_hash)
+
+    if not active_user or not password_matches:
+        failure_reason = (
+            "invalid_password"
+            if active_user
+            else "unknown_or_inactive_user"
+        )
         record_access_audit_event(
             connection,
             action="LOGIN_FAILED",
             actor={
-                "username": normalized_username or str(username or "").strip(),
-                "role": None,
+                "user_id": (user or {}).get("user_id"),
+                "username": (user or {}).get("username") or login_name or None,
+                "role": (user or {}).get("role"),
             },
             target_type="access_user",
-            target_key=normalized_username or str(username or "").strip(),
+            target_key=(user or {}).get("username") or login_name or "<empty>",
             source_ip=source_ip,
             user_agent=user_agent,
-            details={"reason": "unknown_or_inactive_user"},
+            details={"reason": failure_reason},
         )
         connection.commit()
         return None
 
-    if not verify_access_password(password, user.get("password_hash") or ""):
-        record_access_audit_event(
-            connection,
-            action="LOGIN_FAILED",
-            actor={
-                "user_id": user.get("user_id"),
-                "username": user.get("username"),
-                "role": user.get("role"),
-            },
-            target_type="access_user",
-            target_key=user.get("username"),
-            source_ip=source_ip,
-            user_agent=user_agent,
-            details={"reason": "invalid_password"},
-        )
-        connection.commit()
-        return None
-
-    return create_dashboard_session(
+    session = create_dashboard_session(
         connection,
-        user,
+        active_user,
         source_ip=source_ip,
         user_agent=user_agent,
     )
+    access_login_attempt_clear(source_ip, login_name)
+    return session
 
 
 def create_dashboard_session(
@@ -3374,10 +3533,13 @@ def access_parse_datetime(value: str | None) -> datetime | None:
 
 
 def access_token_is_expired(expires_at: str | None) -> bool:
+    if not str(expires_at or "").strip():
+        return False
+
     parsed = access_parse_datetime(expires_at)
 
     if not parsed:
-        return False
+        return True
 
     return parsed <= datetime.now(timezone.utc)
 
@@ -3431,8 +3593,10 @@ def authenticate_access_api_token(
         return None
 
     token_role = normalize_access_role(row["token_role"])
+    user_role = normalize_access_role(row["user_role"])
+    effective_role = access_effective_role(token_role, user_role)
 
-    if not access_role_allows(token_role, required_role):
+    if not access_role_allows(effective_role, required_role):
         return None
 
     authenticated_at = utc_now()
@@ -3454,8 +3618,9 @@ def authenticate_access_api_token(
         "user_id": row["user_id"],
         "username": row["username"],
         "display_name": row["display_name"],
-        "role": token_role,
-        "user_role": row["user_role"],
+        "role": effective_role,
+        "token_role": token_role,
+        "user_role": user_role,
         "last_used_at": authenticated_at if update_last_used else row["last_used_at"],
         "expires_at": row["expires_at"],
         "authenticated_at": authenticated_at,
@@ -14396,7 +14561,7 @@ def dashboard_inject_netsniper_navigation(html_text: str) -> str:
 
 
 
-def dashboard_html_response(handler, body, status=200):
+def dashboard_html_response(handler, body, status=200, headers=None):
     body = dashboard_inject_operator_floating_button(body)
     body = dashboard_inject_netsniper_navigation(body)
     body = body.encode("utf-8")
@@ -14405,6 +14570,8 @@ def dashboard_html_response(handler, body, status=200):
     handler.send_header("Content-Type", "text/html; charset=utf-8")
     handler.send_header("Cache-Control", "no-store")
     handler.send_header("Content-Length", str(len(body)))
+    for name, value in (headers or {}).items():
+        handler.send_header(str(name), str(value))
     handler.end_headers()
     handler.wfile.write(body)
 
@@ -32042,6 +32209,12 @@ def dashboard_active_admin_count(connection: sqlite3.Connection) -> int:
     return int(row["count"] if row else 0)
 
 
+def dashboard_begin_admin_user_mutation(connection: sqlite3.Connection) -> None:
+    """Serialize last-admin checks with their matching user mutation."""
+    if not connection.in_transaction:
+        connection.execute("BEGIN IMMEDIATE")
+
+
 def dashboard_actor_summary(actor: dict[str, Any] | None) -> dict[str, Any]:
     actor = actor or {}
     return {
@@ -32269,6 +32442,8 @@ def dashboard_admin_create_user(
     role = normalize_access_role(str(payload.get("role") or "VIEWER"))
     password = str(payload.get("password") or "")
 
+    dashboard_begin_admin_user_mutation(connection)
+
     if role not in ACCESS_ROLES:
         raise DashboardAdminUserActionError("invalid role", status_code=400)
 
@@ -32321,6 +32496,7 @@ def dashboard_admin_set_user_enabled(
     enabled: bool,
     actor: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    dashboard_begin_admin_user_mutation(connection)
     user = dashboard_access_user_by_username_required(connection, username)
     target_username = str(user["username"])
     target_role = normalize_access_role(user.get("role") or "VIEWER")
@@ -32374,6 +32550,7 @@ def dashboard_admin_set_user_role(
     payload: dict[str, Any],
     actor: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    dashboard_begin_admin_user_mutation(connection)
     user = dashboard_access_user_by_username_required(connection, username)
     target_username = str(user["username"])
     old_role = normalize_access_role(user.get("role") or "VIEWER")
@@ -32394,6 +32571,21 @@ def dashboard_admin_set_user_role(
         "UPDATE access_users SET role = ?, updated_at = ? WHERE user_id = ?",
         (new_role, now, user["user_id"]),
     )
+    downgraded_token_count = 0
+    if ACCESS_ROLE_RANKS[new_role] < ACCESS_ROLE_RANKS[old_role]:
+        roles_above_new = [
+            role
+            for role in ACCESS_ROLES
+            if ACCESS_ROLE_RANKS[role] > ACCESS_ROLE_RANKS[new_role]
+        ]
+        placeholders = ", ".join("?" for _role in roles_above_new)
+        cursor = connection.execute(
+            "UPDATE access_api_tokens SET role = ?, updated_at = ? "
+            "WHERE user_id = ? AND is_active = 1 "
+            f"AND role IN ({placeholders})",
+            (new_role, now, user["user_id"], *roles_above_new),
+        )
+        downgraded_token_count = max(0, int(cursor.rowcount or 0))
     revoked_session_count = 0
     if new_role != old_role:
         revoked_session_count = revoke_dashboard_user_sessions(
@@ -32412,6 +32604,7 @@ def dashboard_admin_set_user_role(
             "old_role": old_role,
             "new_role": new_role,
             "revoked_session_count": revoked_session_count,
+            "downgraded_token_count": downgraded_token_count,
         },
     )
 
@@ -32428,6 +32621,7 @@ def dashboard_admin_rotate_user_password(
     payload: dict[str, Any],
     actor: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    dashboard_begin_admin_user_mutation(connection)
     user = dashboard_access_user_by_username_required(connection, username)
     target_username = str(user["username"])
     password = str(payload.get("password") or "")
@@ -34110,6 +34304,23 @@ def dashboard_start_schedule_worker_thread(
 
 
 
+def dashboard_bind_host_is_loopback(host: str | None) -> bool:
+    value = str(host or "").strip().lower()
+
+    if value == "localhost":
+        return True
+
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+
+    value = value.split("%", 1)[0]
+
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return False
+
+
 def command_dashboard(args):
     from http.cookies import SimpleCookie
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -34118,6 +34329,7 @@ def command_dashboard(args):
     # v0.42 dashboard LAN binding
     lan_mode = bool(getattr(args, "lan", False))
     bind_host = "0.0.0.0" if lan_mode else args.host
+    non_loopback_bind = not dashboard_bind_host_is_loopback(bind_host)
 
     db_path = args.db
     token = args.token
@@ -34135,16 +34347,15 @@ def command_dashboard(args):
         has_active_password_users = False
         login_required = bool(token or getattr(args, "require_login", False))
 
-    if lan_mode and not (token or has_active_password_users):
+    if non_loopback_bind and not (token or has_active_password_users):
         raise DeltaAegisError(
-            "dashboard --lan requires an active password user "
-            "or an explicit --token; refusing unauthenticated "
-            "network exposure"
+            "a non-loopback dashboard bind requires an active password user "
+            "or an explicit --token; refusing unauthenticated network exposure"
         )
 
 
     class DeltaAegisDashboardHandler(BaseHTTPRequestHandler):
-        server_version = "DeltaAegisDashboard/0.42.1"
+        server_version = "DeltaAegisDashboard/0.42.2"
 
         def log_message(self, fmt, *handler_args):
             if not args.quiet:
@@ -34800,23 +35011,15 @@ def command_dashboard(args):
                         limit = 50
                     scope = query.get("scope", [""])[0].strip() or None
                     status = query.get("status", [""])[0].strip() or None
-                    connection = self.open_connection()
-                    try:
-                        refresh_summary = refresh_trueaegis_validation_correlations(
-                            connection,
-                            scope=scope,
-                        )
-                        connection.commit()
-                        payload = dashboard_validation_correlations_payload(
+                    dashboard_json_response(
+                        self,
+                        dashboard_validation_correlations_payload(
                             connection,
                             limit=limit,
                             scope=scope,
                             status=status,
-                        )
-                        payload["refresh_summary"] = refresh_summary
-                        dashboard_json_response(self, payload)
-                    finally:
-                        connection.close()
+                        ),
+                    )
                 elif route == "/api/current-state":
                     dashboard_json_response(self, dashboard_current_state_payload(connection, scope=scope))
                 elif route == "/api/latest-network-changes":
@@ -35030,7 +35233,7 @@ def command_dashboard(args):
                 password_confirm = form.get("password_confirm", [""])[0]
                 supplied_setup_nonce = form.get("setup_nonce", [""])[0]
 
-                if lan_mode and not secrets.compare_digest(
+                if non_loopback_bind and not secrets.compare_digest(
                     str(supplied_setup_nonce),
                     setup_nonce,
                 ):
@@ -35067,13 +35270,16 @@ def command_dashboard(args):
                     )
                     return
 
-                if len(password) < 8:
+                try:
+                    validate_access_password(password)
+                except DeltaAegisError as exc:
                     dashboard_html_response(
                         self,
                         dashboard_first_admin_setup_html(
-                            "Password must be at least 8 characters.",
+                            str(exc),
                             setup_nonce=setup_nonce,
                         ),
+                        status=400,
                     )
                     return
 
@@ -35163,6 +35369,18 @@ def command_dashboard(args):
                             source_ip=self.client_address[0] if self.client_address else None,
                             user_agent=self.headers.get("User-Agent", ""),
                         )
+                    except DashboardLoginRateLimitedError as exc:
+                        connection.rollback()
+                        dashboard_html_response(
+                            self,
+                            dashboard_login_html(
+                                message="Too many login attempts. Try again later.",
+                                username=username,
+                            ),
+                            status=429,
+                            headers={"Retry-After": str(exc.retry_after)},
+                        )
+                        return
                     except DeltaAegisError:
                         # Invalid username syntax is an authentication failure,
                         # not an uncaught request-handler exception.
@@ -41526,7 +41744,7 @@ def command_restore_cutover_execute(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "DeltaAegis v0.42.1 — Security and Integrity Maintenance, "
+            "DeltaAegis v0.42.2 — Authorization and Integrity Hardening, "
             "SQLite-consistent backups, verified manifests, "
             "restore rehearsal, guarded retention, active restore "
             "cutover planning and rollback, operator actions, "

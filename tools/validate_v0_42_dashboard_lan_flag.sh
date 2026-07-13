@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 case "$(git branch --show-current)" in
-  feature/v0.42-logical-site-scopes|release/v0.42.1|main) ;;
+  feature/v0.42-logical-site-scopes|hotfix/v0.42.1-followup|release/v0.42.1|release/v0.42.2|main) ;;
   *) echo "FAIL: unexpected branch"; exit 1 ;;
 esac
 
@@ -22,8 +22,9 @@ required = (
     "# v0.42 dashboard LAN binding",
     '"--lan"',
     'bind_host = "0.0.0.0" if lan_mode else args.host',
-    "if lan_mode and not (token or has_active_password_users):",
-    "refusing unauthenticated ",
+    "non_loopback_bind = not dashboard_bind_host_is_loopback(bind_host)",
+    "if non_loopback_bind and not (token or has_active_password_users):",
+    "refusing unauthenticated network exposure",
     "network exposure",
 )
 for item in required:
@@ -51,18 +52,29 @@ if local_args.host != "127.0.0.1" or local_args.lan:
     raise SystemExit("local-only default changed")
 if not lan_args.lan or lan_args.port != 8090:
     raise SystemExit("--lan parser behavior is incorrect")
+for host in ("127.0.0.1", "::1", "localhost"):
+    if not module.dashboard_bind_host_is_loopback(host):
+        raise SystemExit(f"loopback host rejected: {host}")
+for host in ("0.0.0.0", "::", "192.168.1.10"):
+    if module.dashboard_bind_host_is_loopback(host):
+        raise SystemExit(f"non-loopback host accepted: {host}")
 
 with tempfile.TemporaryDirectory(prefix="deltaaegis-v042-lan-") as temp:
-    args = module.build_parser().parse_args([
-        "--db", str(Path(temp) / "test.db"), "dashboard", "--lan", "--quiet"
-    ])
-    try:
-        module.command_dashboard(args)
-    except module.DeltaAegisError as exc:
-        if "requires an active password user" not in str(exc):
-            raise
-    else:
-        raise SystemExit("unauthenticated LAN exposure did not fail closed")
+    cases = (
+        ["dashboard", "--lan", "--quiet"],
+        ["dashboard", "--host", "0.0.0.0", "--no-require-login", "--quiet"],
+    )
+    for index, dashboard_args in enumerate(cases):
+        args = module.build_parser().parse_args([
+            "--db", str(Path(temp) / f"test-{index}.db"), *dashboard_args
+        ])
+        try:
+            module.command_dashboard(args)
+        except module.DeltaAegisError as exc:
+            if "non-loopback dashboard bind requires" not in str(exc):
+                raise
+        else:
+            raise SystemExit("unauthenticated network exposure did not fail closed")
 
 print("PASS: parser, binding, and authentication guard")
 PY
