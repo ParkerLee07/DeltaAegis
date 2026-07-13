@@ -23,7 +23,7 @@ echo "=============================="
 branch="$(git branch --show-current)"
 
 case "$branch" in
-  feature/v0.42-logical-site-scopes|main)
+  feature/v0.42-logical-site-scopes|release/v0.42.1|main)
     echo "PASS: supported release branch $branch"
     ;;
   *)

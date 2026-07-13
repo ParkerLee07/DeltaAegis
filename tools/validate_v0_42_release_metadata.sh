@@ -9,7 +9,7 @@ echo "============================================="
 branch="$(git branch --show-current)"
 
 case "$branch" in
-  feature/v0.42-logical-site-scopes|main)
+  feature/v0.42-logical-site-scopes|release/v0.42.1|main)
     ;;
   *)
     echo "ERROR: unsupported v0.42 release branch: $branch" >&2
@@ -46,24 +46,24 @@ for node in tree.body:
         ):
             version = node.value.value
 
-if version != "0.42.0":
+if version != "0.42.1":
     raise SystemExit(
-        f"DELTAAEGIS_VERSION is {version!r}, expected '0.42.0'"
+        f"DELTAAEGIS_VERSION is {version!r}, expected '0.42.1'"
     )
 
 module_docstring = ast.get_docstring(tree, clean=False) or ""
 if not module_docstring.startswith(
-    "DeltaAegis v0.42.0: Logical Site Scopes."
+    "DeltaAegis v0.42.1: Security and Integrity Maintenance."
 ):
     raise SystemExit(
-        "module docstring does not identify v0.42.0"
+        "module docstring does not identify v0.42.1"
     )
 
 for marker in (
-    'DELTAAEGIS_VERSION = "0.42.0"',
+    'DELTAAEGIS_VERSION = "0.42.1"',
     "v0.42 Logical Site Scopes",
-    'server_version = "DeltaAegisDashboard/0.42.0"',
-    "DeltaAegis v0.42.0 — Logical Site Scopes",
+    'server_version = "DeltaAegisDashboard/0.42.1"',
+    "DeltaAegis v0.42.1 — Security and Integrity Maintenance",
     "SPDX-License-Identifier: AGPL-3.0-only",
     'data-deltaaegis-license="AGPL-3.0-only"',
 ):
@@ -79,8 +79,8 @@ help_text = subprocess.run(
     text=True,
 ).stdout
 
-if "DeltaAegis v0.42.0 — Logical Site Scopes" not in help_text:
-    raise SystemExit("CLI help does not identify v0.42.0")
+if "DeltaAegis v0.42.1 — Security and Integrity Maintenance" not in help_text:
+    raise SystemExit("CLI help does not identify v0.42.1")
 
 readme = Path("README.md").read_text(encoding="utf-8")
 changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
@@ -94,8 +94,8 @@ release_gate = Path(
 ).read_text(encoding="utf-8")
 
 for marker in (
-    "## Current Release — v0.42.0",
-    "**DeltaAegis v0.42.0 — Logical Site Scopes**",
+    "## Current Release — v0.42.1",
+    "**DeltaAegis v0.42.1 — Security and Integrity Maintenance**",
     "tools/validate_v0_42_release_gate.sh",
     "AGPL-3.0-only",
     "LICENSING.md",
@@ -104,9 +104,9 @@ for marker in (
         raise SystemExit(f"README missing release marker: {marker}")
 
 if not changelog.startswith(
-    "## DeltaAegis v0.42.0 — Logical Site Scopes"
+    "## DeltaAegis v0.42.1 — Security and Integrity Maintenance"
 ):
-    raise SystemExit("CHANGELOG top release is not v0.42.0")
+    raise SystemExit("CHANGELOG top release is not v0.42.1")
 
 if hashlib.sha256(license_bytes).hexdigest() != (
     "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0"
@@ -153,6 +153,7 @@ for required in (
     "tools/validate_v0_42_release_metadata.sh",
     "tools/validate_v0_40_dashboard_javascript_syntax.sh",
     "tools/validate_v0_40_broken_pipe_response.sh",
+    "tools/validate_v0_42_security_hotfix.py",
     "tools/validate_v0_41_v0_40_compatibility.sh",
     "tools/validate_v0_40_v0_39_compatibility.sh",
     "Parker's explicit approval",
@@ -198,10 +199,10 @@ if tracked_manual_docs:
         + ", ".join(tracked_manual_docs)
     )
 
-print("PASS: stable v0.42.0 source and CLI metadata")
+print("PASS: stable v0.42.1 source and CLI metadata")
 print("PASS: README, CHANGELOG, and licensing metadata")
 print("PASS: flat thirteen-validator all-in composition")
-print("PASS: feature-branch and main release paths")
+print("PASS: feature, release, and main branch paths")
 print("PASS: release gate dependencies and explicit approval hold")
 print("PASS: operator-managed release verification policy")
 PY

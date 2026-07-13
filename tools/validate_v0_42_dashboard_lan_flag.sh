@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 case "$(git branch --show-current)" in
-  feature/v0.42-logical-site-scopes|main) ;;
+  feature/v0.42-logical-site-scopes|release/v0.42.1|main) ;;
   *) echo "FAIL: unexpected branch"; exit 1 ;;
 esac
 

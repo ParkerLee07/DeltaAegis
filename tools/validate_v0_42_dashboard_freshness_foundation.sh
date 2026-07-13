@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 
 branch="$(git branch --show-current)"
 case "$branch" in
-  feature/v0.42-logical-site-scopes|main)
+  feature/v0.42-logical-site-scopes|release/v0.42.1|main)
     ;;
   *)
     echo "FAIL: unexpected branch $branch"
@@ -292,4 +292,3 @@ git diff --check
 echo "PASS: repository hygiene"
 
 echo "PASS: DeltaAegis v0.42 dashboard freshness foundation validator"
-

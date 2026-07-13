@@ -15,8 +15,8 @@ changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
 licensing = Path("LICENSING.md").read_text(encoding="utf-8")
 
 required_readme = (
-    "## Current Release — v0.42.0",
-    "**DeltaAegis v0.42.0 — Logical Site Scopes**",
+    "## Current Release — v0.42.1",
+    "**DeltaAegis v0.42.1 — Security and Integrity Maintenance**",
     "## Scan Watchdog and Scheduler Recovery",
     "## Scheduled Scan Finalization Recovery",
     "## TrueAegis Tab Containment",
@@ -51,9 +51,9 @@ if "v0.41.0" in current:
     )
 
 if not changelog.startswith(
-    "## DeltaAegis v0.42.0 — Logical Site Scopes"
+    "## DeltaAegis v0.42.1 — Security and Integrity Maintenance"
 ):
-    raise SystemExit("CHANGELOG does not begin with v0.42.0")
+    raise SystemExit("CHANGELOG does not begin with v0.42.1")
 
 required_changelog = (
     "dead-scan watchdog",

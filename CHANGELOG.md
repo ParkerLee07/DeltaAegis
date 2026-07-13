@@ -1,3 +1,16 @@
+## DeltaAegis v0.42.1 — Security and Integrity Maintenance
+
+- Restricted LAN first-admin setup to loopback-originated requests with a server-issued nonce and serialized first-user creation.
+- Made current database roles authoritative for every dashboard request and revoked existing sessions after administrative identity or credential changes.
+- Serialized scan-job reservation across CLI, scheduler, and dashboard entry points to preserve the one-active-scan invariant.
+- Required valid `netsniper-bundle-quality-v1` readiness evidence before accepting NetSniper v3 bundles.
+- Confined every manifest-selected bundle member to the immutable bundle directory and rejected absolute, parent-relative, and symlink escapes.
+- Removed query-string dashboard authentication, redacted token-like query values in access logs, and retained header-based token authentication.
+- Returned bounded HTTP errors for malformed cookies, login names, limits, and request lengths instead of terminating the request handler.
+- Limited scan targets to RFC1918 IPv4 networks instead of accepting loopback, link-local, documentation, or unspecified ranges as private targets.
+- Made inherited v0.39 HTTP validators resolve their active checkout rather than a hard-coded home-directory path.
+- Added the focused v0.42 security/integrity regression validator to the complete release gate.
+
 ## DeltaAegis v0.42.0 — Logical Site Scopes
 
 - Relicensed DeltaAegis v0.42.0 under `AGPL-3.0-only`, added a visible Corresponding Source link to rendered dashboard pages, and documented the boundary for earlier MIT-licensed copies.

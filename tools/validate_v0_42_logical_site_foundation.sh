@@ -5,10 +5,10 @@ cd "$(dirname "$0")/.."
 
 branch="$(git branch --show-current)"
 case "$branch" in
-  feature/v0.42-logical-site-scopes|main)
+  feature/v0.42-logical-site-scopes|release/v0.42.1|main)
     ;;
   *)
-    echo "FAIL: expected feature/v0.42-logical-site-scopes or main"
+    echo "FAIL: expected feature/v0.42-logical-site-scopes, release/v0.42.1, or main"
     exit 1
     ;;
 esac

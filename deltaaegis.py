@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Parker Lee
-"""DeltaAegis v0.42.0: Logical Site Scopes.
+"""DeltaAegis v0.42.1: Security and Integrity Maintenance.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -37,7 +37,7 @@ import tempfile
 
 DEFAULT_DB = Path.home() / "DeltaAegis" / "data" / "deltaaegis.db"
 DEFAULT_BACKUPS = Path.home() / "DeltaAegis" / "backups"
-DELTAAEGIS_VERSION = "0.42.0"
+DELTAAEGIS_VERSION = "0.42.1"
 DELTAAEGIS_SECURITY_HOTFIX = "2026-07-13.1"
 DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION = "deltaaegis-backup-manifest-v1"
 DEFAULT_RESTORE_REHEARSALS = (
@@ -34144,7 +34144,7 @@ def command_dashboard(args):
 
 
     class DeltaAegisDashboardHandler(BaseHTTPRequestHandler):
-        server_version = "DeltaAegisDashboard/0.42.0"
+        server_version = "DeltaAegisDashboard/0.42.1"
 
         def log_message(self, fmt, *handler_args):
             if not args.quiet:
@@ -41526,7 +41526,7 @@ def command_restore_cutover_execute(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "DeltaAegis v0.42.0 — Logical Site Scopes, "
+            "DeltaAegis v0.42.1 — Security and Integrity Maintenance, "
             "SQLite-consistent backups, verified manifests, "
             "restore rehearsal, guarded retention, active restore "
             "cutover planning and rollback, operator actions, "

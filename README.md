@@ -4,15 +4,21 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.42.0
+## Current Release — v0.42.1
 
-**DeltaAegis v0.42.0 — Logical Site Scopes**
+**DeltaAegis v0.42.1 — Security and Integrity Maintenance**
 
-DeltaAegis v0.42.0 adds additive operator-facing logical sites above the existing CIDR network scopes. Operators can group related private subnet scopes into a building or site, manage those relationships from the CLI, browse them through authenticated dashboard APIs, and aggregate core SIEM views across the latest accepted state of each member subnet.
+DeltaAegis v0.42.1 is a backward-compatible maintenance release that hardens dashboard setup and authentication, scan admission, NetSniper bundle ingestion, request handling, and release validation while retaining the logical-site capabilities introduced in v0.42.0.
 
 Highlights:
 
-- DeltaAegis v0.42.0 is licensed under `AGPL-3.0-only`; alternative commercial licensing may be available by separate written agreement.
+- Restricted LAN first-admin setup to a server-issued nonce and loopback-originated setup flow, with atomic first-user creation.
+- Made current database roles authoritative for active sessions and revoked sessions after password, role, enablement, or disablement changes.
+- Serialized scan-job reservation so concurrent CLI, scheduler, and dashboard requests cannot create multiple active scans.
+- Required explicit readiness evidence for NetSniper v3 bundles and confined every manifest member to its immutable bundle directory.
+- Removed query-string dashboard tokens, redacted token-like query values from access logs, hardened malformed HTTP inputs, and limited scan CIDRs to RFC1918 space.
+- Added focused security regression coverage and made inherited compatibility validators independent of a hard-coded checkout path.
+- DeltaAegis v0.42.1 remains licensed under `AGPL-3.0-only`; alternative commercial licensing may be available by separate written agreement.
 - Stable logical-site identities with case-insensitive unique names, descriptions, active/archive state, and retained membership history.
 - A one-site-per-subnet invariant while allowing each logical site to contain many private CIDR scopes.
 - Human-readable and JSON CLI commands for site creation, listing, inspection, rename, description updates, archive, assignment, and removal.
@@ -381,7 +387,7 @@ The safety backup is retained after success or rollback. DeltaAegis does not del
 
 ## Security Boundary
 
-DeltaAegis v0.42.0 does not expose arbitrary shell command execution from the dashboard.
+DeltaAegis v0.42.1 does not expose arbitrary shell command execution from the dashboard.
 
 Dashboard NetSniper execution uses guarded job records, validated private IPv4 CIDRs, and fixed argument-vector process creation. Live job-detail reads are bounded and confined to the configured scan-log root.
 
@@ -623,7 +629,7 @@ three-project defensive workflow:
 
 ## License
 
-DeltaAegis v0.42.0 is licensed under the **GNU Affero General Public License, version 3 only** (`AGPL-3.0-only`). See `LICENSE` and `LICENSING.md`.
+DeltaAegis v0.42.1 is licensed under the **GNU Affero General Public License, version 3 only** (`AGPL-3.0-only`). See `LICENSE` and `LICENSING.md`.
 
 Alternative commercial licensing may be available from Parker Lee through a separate written agreement. Earlier copies already distributed under the MIT License retain the permissions that accompanied those copies.
 
