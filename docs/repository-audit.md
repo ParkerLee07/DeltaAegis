@@ -8,27 +8,27 @@ This is a deterministic, read-only inventory of the v0.43.0 release candidate an
 
 | Measure | Count |
 |---|---:|
-| Repository files in audit scope | 311 |
-| `deltaaegis.py` lines | 42546 |
+| Repository files in audit scope | 318 |
+| `deltaaegis.py` lines | 42553 |
 | Top-level functions | 661 |
 | Top-level classes | 8 |
 | Distinct CLI commands | 67 |
 | Distinct `/api` route literals | 57 |
 | Declared schema tables | 30 |
-| Validator scripts | 264 |
-| Validator version groups | 38 |
+| Validator scripts | 266 |
+| Validator version groups | 39 |
 
-Source SHA-256: `100c0cacf03c9faf220bf5993a7fc102696e3d67cf6cbb6511fb4ae470ebe07f`
+Source SHA-256: `02cd1262710a856675950da710febac3f3ef71c38f1884fb4f60f6f1ad8b0420`
 
 ## Findings and disposition
 
 | ID | Severity | Area | Evidence | Planned disposition |
 |---|---|---|---|---|
-| DA043-001 | HIGH | module boundaries | deltaaegis.py has 42546 lines and 661 top-level functions. | Map and incrementally extract responsibilities in v0.44; do not perform a broad v0.43 rewrite. |
+| DA043-001 | HIGH | module boundaries | deltaaegis.py has 42553 lines and 661 top-level functions. | Map and incrementally extract responsibilities in v0.44; do not perform a broad v0.43 rewrite. |
 | DA043-002 | HIGH | source-order coupling | Repeated top-level function names: dashboard_assets_payload, dashboard_index_html, dashboard_operator_session_shell_html. | Preserve behavior with characterization tests, then remove late overrides during owned v0.44 extractions. |
 | DA043-003 | MEDIUM | storage ownership | 30 table names are declared from the monolithic source bootstrap/migration path. | Introduce the migration ledger in v0.45 after the v0.44 database boundary is extracted. |
 | DA043-004 | MEDIUM | HTTP/API ownership | 57 distinct /api route literals occur in the application source. | Inventory current routes now; introduce the stable /api/v1 contract in v0.46. |
-| DA043-005 | MEDIUM | validation estate | 264 validator scripts span 38 version groups. | Record contract ownership before retiring any validator; the v0.43 gate must compose focused validators exactly once. |
+| DA043-005 | MEDIUM | validation estate | 266 validator scripts span 39 version groups. | Record contract ownership before retiring any validator; the v0.43 gate must compose focused validators exactly once. |
 | DA043-006 | MEDIUM | documentation | 1 known stale current-architecture document was identified. | Use docs/architecture/overview.md as current authority and reconcile historical prose during v0.44. |
 | DA043-007 | MEDIUM | TrueAegis compatibility | TrueAegis is enforced by an execution/output contract but has no pinned semantic-version range in the current repository. | Publish or pin a TrueAegis semantic version and fixture contract before DeltaAegis v1.0. |
 
@@ -36,9 +36,9 @@ Source SHA-256: `100c0cacf03c9faf220bf5993a7fc102696e3d67cf6cbb6511fb4ae470ebe07
 
 | Name | Definition lines |
 |---|---|
-| `dashboard_assets_payload` | 19697, 42527 |
-| `dashboard_index_html` | 30105, 30131, 30290, 30408, 31406 |
-| `dashboard_operator_session_shell_html` | 31430, 31568, 32062 |
+| `dashboard_assets_payload` | 19704, 42534 |
+| `dashboard_index_html` | 30112, 30138, 30297, 30415, 31413 |
+| `dashboard_operator_session_shell_html` | 31437, 31575, 32069 |
 
 These definitions are classified as source-order coupling. The audit does not assume that the earlier definitions are unreachable or safe to delete.
 
@@ -95,6 +95,7 @@ These definitions are classified as source-order coupling. The audit does not as
 | v0.41 | 12 |
 | v0.42 | 18 |
 | v0.43 | 6 |
+| v0.44 | 2 |
 | v0.7 | 3 |
 | v0.8 | 11 |
 | v0.9 | 6 |
@@ -107,7 +108,7 @@ These definitions are classified as source-order coupling. The audit does not as
 
 ## Dependency surface
 
-Top-level Python imports: `__future__`, `argparse`, `collections`, `dataclasses`, `datetime`, `hashlib`, `hmac`, `html`, `ipaddress`, `json`, `os`, `pathlib`, `re`, `secrets`, `signal`, `sqlite3`, `subprocess`, `sys`, `tempfile`, `threading`, `time`, `typing`, `urllib`, `uuid`, `xml`
+Top-level Python imports: `__future__`, `argparse`, `collections`, `dataclasses`, `datetime`, `deltaaegis_core`, `hashlib`, `hmac`, `html`, `ipaddress`, `json`, `os`, `pathlib`, `re`, `secrets`, `signal`, `sqlite3`, `subprocess`, `sys`, `tempfile`, `threading`, `time`, `typing`, `urllib`, `uuid`, `xml`
 
 The runtime remains standard-library based. NetSniper, TrueAegis, Node.js, Git, browsers, and supported platform expectations are defined in `SUPPORTED_VERSIONS.md`.
 

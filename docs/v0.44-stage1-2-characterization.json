@@ -1,0 +1,50 @@
+{
+  "schema_version": "deltaaegis-v0.44-stage1-2-characterization-v1",
+  "source_release": "0.43.0",
+  "contracts": {
+    "connect_signature": "(db_path: 'Path') -> 'sqlite3.Connection'",
+    "default_suffixes": {
+      "DEFAULT_BACKUPS": "~/DeltaAegis/backups",
+      "DEFAULT_DB": "~/DeltaAegis/data/deltaaegis.db",
+      "DEFAULT_EVENTS": "~/DeltaAegis/events/events.jsonl",
+      "DEFAULT_NETSNIPER": "~/NetSniper/netsniper.sh",
+      "DEFAULT_REPORTS": "~/DeltaAegis/reports",
+      "DEFAULT_RESTORE_REHEARSALS": "~/DeltaAegis/restore-rehearsals",
+      "DEFAULT_RUNS": "~/NetSniper/runs",
+      "DEFAULT_SCAN_LOGS": "~/DeltaAegis/scan-logs",
+      "DEFAULT_TRUEAEGIS": "~/TrueAegis/trueaegis.py",
+      "DEFAULT_TRUEAEGIS_LOGS": "~/DeltaAegis/trueaegis-logs"
+    },
+    "foreign_keys": 1,
+    "schema_sha256": "ad580f57b3a36fb3de3b268d0e1275d5f3c650af3c18d75876b0bee707f46d26",
+    "tables": [
+      "access_api_tokens",
+      "access_audit_log",
+      "access_sessions",
+      "access_users",
+      "alert_notes",
+      "alerts",
+      "asset_annotation_history",
+      "asset_annotations",
+      "asset_investigation_history",
+      "asset_investigations",
+      "asset_lifecycle",
+      "asset_observations",
+      "delta_events",
+      "finding_observations",
+      "investigation_ticket_history",
+      "investigation_ticket_state",
+      "logical_site_memberships",
+      "logical_sites",
+      "scan_jobs",
+      "scan_schedule_deletions",
+      "scan_schedules",
+      "service_observations",
+      "snapshots",
+      "trueaegis_jobs",
+      "validation_correlations",
+      "validation_observations",
+      "validation_runs"
+    ]
+  }
+}

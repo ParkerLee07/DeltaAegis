@@ -53,7 +53,7 @@ project="$tmp_root/DeltaAegis"
 bin_dir="$tmp_root/bin"
 archive="$tmp_root/DeltaAegis-local-archive"
 
-mkdir -p "$project/tools" "$archive"
+mkdir -p "$project/deltaaegis_core" "$project/tools" "$archive"
 printf 'archive sentinel\n' > "$archive/KEEP"
 
 cp -p \
@@ -61,6 +61,12 @@ cp -p \
     install.sh \
     uninstall.sh \
     "$project/"
+
+cp -p \
+    deltaaegis_core/__init__.py \
+    deltaaegis_core/config.py \
+    deltaaegis_core/db.py \
+    "$project/deltaaegis_core/"
 
 cp -p \
     tools/bootstrap_first_admin.py \

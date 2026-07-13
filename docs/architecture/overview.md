@@ -92,14 +92,18 @@ Extraction must be incremental and behavior-preserving. The intended ownership m
 
 | Target package | First responsibility moved | Compatibility seam |
 |---|---|---|
-| `deltaaegis/config.py` | Defaults, path resolution, environment parsing | Existing constants and CLI defaults |
-| `deltaaegis/db.py` | Connection policy and schema entry point | Existing `connect` behavior |
-| `deltaaegis/auth.py` | Passwords, users, sessions, tokens, RBAC | Existing function signatures and audit rows |
-| `deltaaegis/ingest.py` | Bundle trust and normalization | Existing ingest receipts and fixtures |
-| `deltaaegis/sites.py` | Site storage and scope aggregation | Existing CLI/API payloads |
-| `deltaaegis/jobs.py` | Scan, schedule, watchdog, cancellation, finalization | Existing durable status transitions |
-| `deltaaegis/reports.py` | Report queries and Markdown generation | Existing report sections and output |
-| `deltaaegis/web.py` | HTTP routing, response boundaries, server lifecycle | Rendered DOM/JS and HTTP smoke tests |
+| `deltaaegis_core/config.py` | Defaults and path resolution | Root-module constants and CLI defaults |
+| `deltaaegis_core/db.py` | Low-level connection policy | Existing `connect` behavior and root-owned schema bootstrap |
+| `deltaaegis_core/auth.py` | Passwords, users, sessions, tokens, RBAC | Existing function signatures and audit rows |
+| `deltaaegis_core/ingest.py` | Bundle trust and normalization | Existing ingest receipts and fixtures |
+| `deltaaegis_core/sites.py` | Site storage and scope aggregation | Existing CLI/API payloads |
+| `deltaaegis_core/jobs.py` | Scan, schedule, watchdog, cancellation, finalization | Existing durable status transitions |
+| `deltaaegis_core/reports.py` | Report queries and Markdown generation | Existing report sections and output |
+| `deltaaegis_core/web.py` | HTTP routing, response boundaries, server lifecycle | Rendered DOM/JS and HTTP smoke tests |
+
+The repository-root `deltaaegis.py` remains the executable and import
+compatibility facade.  ADR 0010 records why the internal package cannot be
+named `deltaaegis` while that facade exists.
 
 No extraction should mix functional redesign with file movement. A moved responsibility retains its existing validator coverage before cleanup begins.
 
@@ -114,6 +118,7 @@ No extraction should mix functional redesign with file movement. A moved respons
 - ADR 0007 — Backup, restore, and upgrade recovery
 - ADR 0008 — Compatibility and integration contracts
 - ADR 0009 — Versioning and deprecation
+- ADR 0010 — Internal package and compatibility facade
 
 ## Known architecture debt
 

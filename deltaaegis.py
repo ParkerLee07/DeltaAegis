@@ -36,21 +36,30 @@ import html
 import datetime as _datetime
 import tempfile
 
-DEFAULT_DB = Path.home() / "DeltaAegis" / "data" / "deltaaegis.db"
-DEFAULT_BACKUPS = Path.home() / "DeltaAegis" / "backups"
+# Historical validators load this file directly from ``tools/`` via an import
+# spec.  Keep the repository root importable for the internal v0.44 package in
+# that compatibility mode as well as during normal CLI/module execution.
+_DELTAAEGIS_MODULE_ROOT = str(Path(__file__).resolve().parent)
+if _DELTAAEGIS_MODULE_ROOT not in sys.path:
+    sys.path.insert(0, _DELTAAEGIS_MODULE_ROOT)
+
+from deltaaegis_core.config import (
+    DEFAULT_BACKUPS,
+    DEFAULT_DB,
+    DEFAULT_EVENTS,
+    DEFAULT_NETSNIPER,
+    DEFAULT_REPORTS,
+    DEFAULT_RESTORE_REHEARSALS,
+    DEFAULT_RUNS,
+    DEFAULT_SCAN_LOGS,
+    DEFAULT_TRUEAEGIS,
+    DEFAULT_TRUEAEGIS_LOGS,
+)
+from deltaaegis_core.db import open_database_connection
+
 DELTAAEGIS_VERSION = "0.43.0"
 DELTAAEGIS_SECURITY_HOTFIX = "2026-07-13.2"
 DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION = "deltaaegis-backup-manifest-v1"
-DEFAULT_RESTORE_REHEARSALS = (
-    Path.home() / "DeltaAegis" / "restore-rehearsals"
-)
-DEFAULT_RUNS = Path.home() / "NetSniper" / "runs"
-DEFAULT_NETSNIPER = Path.home() / "NetSniper" / "netsniper.sh"
-DEFAULT_SCAN_LOGS = Path.home() / "DeltaAegis" / "scan-logs"
-DEFAULT_TRUEAEGIS = Path.home() / "TrueAegis" / "trueaegis.py"
-DEFAULT_TRUEAEGIS_LOGS = Path.home() / "DeltaAegis" / "trueaegis-logs"
-DEFAULT_EVENTS = Path.home() / "DeltaAegis" / "events" / "events.jsonl"
-DEFAULT_REPORTS = Path.home() / "DeltaAegis" / "reports"
 DELTAAEGIS_V0_14_COMPATIBILITY_NOTE = "DeltaAegis v0.14.0 — NetSniper Scan Orchestration compatibility retained."
 DELTAAEGIS_V0_15_COMPATIBILITY_NOTE = "DeltaAegis v0.15.0 — MAC-Port Behavior Correlation compatibility retained."
 DELTAAEGIS_V0_16_COMPATIBILITY_NOTE = "DeltaAegis v0.16.0 — Investigation Command Center compatibility retained."
@@ -1692,9 +1701,7 @@ def expire_dashboard_session(
     return True
 
 def connect(db_path: Path) -> sqlite3.Connection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(db_path)
-    connection.row_factory = sqlite3.Row
+    connection = open_database_connection(db_path)
     connection.executescript(SCHEMA_SQL)
 
     connection.executescript(
