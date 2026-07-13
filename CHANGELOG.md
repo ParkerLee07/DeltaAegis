@@ -1,3 +1,16 @@
+## DeltaAegis v0.42.2 — Authorization and Integrity Hardening
+
+- Capped API-token authorization by the owning user's current database role and rejected new tokens whose requested role exceeds the owner's role.
+- Downgraded active elevated tokens during account demotion so later account promotion cannot revive stale token privileges.
+- Treated malformed non-empty token expiration values as expired and rejected invalid expiration timestamps during token creation.
+- Serialized dashboard administrative-user mutations with immediate SQLite write transactions to preserve the last-active-ADMIN invariant under concurrency.
+- Added bounded login throttling by account and source, HTTP `429` responses with `Retry-After`, and dummy PBKDF2 verification for unknown or inactive users.
+- Enforced a shared 8-to-1024-character password policy for new and rotated credentials across CLI, first-admin setup, and dashboard workflows.
+- Required authentication for every non-loopback dashboard bind, including direct `--host` use without `--lan`.
+- Removed database mutation from `GET /api/validation-correlations`; trusted TrueAegis result ingestion remains responsible for rebuilding correlations.
+- Added focused functional regressions for token privilege bounds, invalid expiry, concurrent last-admin protection, login throttling, password policy, bind safety, and read-only GET behavior.
+- Preserved the v0.42.1 security maintenance, v0.42 logical-site features, v0.41 durability work, v0.40 operator actions, and v0.39 scan lifecycle compatibility suites.
+
 ## DeltaAegis v0.42.1 — Security and Integrity Maintenance
 
 - Restricted LAN first-admin setup to loopback-originated requests with a server-issued nonce and serialized first-user creation.

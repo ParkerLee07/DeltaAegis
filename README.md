@@ -4,30 +4,23 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.42.1
+## Current Release — v0.42.2
 
-**DeltaAegis v0.42.1 — Security and Integrity Maintenance**
+**DeltaAegis v0.42.2 — Authorization and Integrity Hardening**
 
-DeltaAegis v0.42.1 is a backward-compatible maintenance release that hardens dashboard setup and authentication, scan admission, NetSniper bundle ingestion, request handling, and release validation while retaining the logical-site capabilities introduced in v0.42.0.
+DeltaAegis v0.42.2 is a backward-compatible maintenance release that closes authorization, authentication, concurrency, and read-only API defects found during the post-v0.42.1 security review. It retains the security maintenance delivered in v0.42.1 and the logical-site capabilities introduced in v0.42.0.
 
 Highlights:
 
-- Restricted LAN first-admin setup to a server-issued nonce and loopback-originated setup flow, with atomic first-user creation.
-- Made current database roles authoritative for active sessions and revoked sessions after password, role, enablement, or disablement changes.
-- Serialized scan-job reservation so concurrent CLI, scheduler, and dashboard requests cannot create multiple active scans.
-- Required explicit readiness evidence for NetSniper v3 bundles and confined every manifest member to its immutable bundle directory.
-- Removed query-string dashboard tokens, redacted token-like query values from access logs, hardened malformed HTTP inputs, and limited scan CIDRs to RFC1918 space.
-- Added focused security regression coverage and made inherited compatibility validators independent of a hard-coded checkout path.
-- DeltaAegis v0.42.1 remains licensed under `AGPL-3.0-only`; alternative commercial licensing may be available by separate written agreement.
-- Stable logical-site identities with case-insensitive unique names, descriptions, active/archive state, and retained membership history.
-- A one-site-per-subnet invariant while allowing each logical site to contain many private CIDR scopes.
-- Human-readable and JSON CLI commands for site creation, listing, inspection, rename, description updates, archive, assignment, and removal.
-- Viewer-authenticated `/api/sites` and `/api/site-detail` endpoints plus site-aware dashboard navigation.
-- Site-wide aggregation for summary metrics, latest accepted current state, assets, events, alerts, annotations, risk, scan context, Investigation Center, latest changes, and scan freshness.
-- Collision-safe subnet provenance so identical MAC or IP identities in different scopes are not silently merged.
-- Fail-closed handling for ambiguous `scope` plus `site_id` requests and for endpoints that remain subnet-specific.
-- An automatic dead-scan watchdog that checks active scan rows at dashboard startup and every scheduler pass, preserves forensic evidence, recovers only missing or PID-reused processes, and retries overdue schedules without postponing them.
-- A guarded `dashboard --lan` option that binds to `0.0.0.0` only when password or token authentication is available.
+- Capped every API token by its owner's current role, rejected token creation above that role, and downgraded elevated tokens when an account is demoted.
+- Made malformed API-token expiration values fail closed instead of silently becoming non-expiring credentials.
+- Serialized administrative user mutations so concurrent requests cannot disable or demote every active ADMIN account.
+- Added bounded, thread-safe login throttling with HTTP `429` and `Retry-After` responses while using a dummy PBKDF2 hash to reduce username timing disclosure.
+- Enforced the shared 8-to-1024-character password policy across CLI, setup, and dashboard credential-assignment paths.
+- Applied authentication requirements to every non-loopback dashboard bind, including direct `--host 0.0.0.0` usage that bypasses the `--lan` convenience flag.
+- Made `GET /api/validation-correlations` read-only; correlation rebuilding remains tied to trusted TrueAegis result ingestion.
+- Expanded the focused security validator with API-token, expiry, last-admin race, login, bind, password-policy, and read-only-route regressions.
+- DeltaAegis v0.42.2 remains licensed under `AGPL-3.0-only`; alternative commercial licensing may be available by separate written agreement.
 
 ## What DeltaAegis Does
 
@@ -387,7 +380,7 @@ The safety backup is retained after success or rollback. DeltaAegis does not del
 
 ## Security Boundary
 
-DeltaAegis v0.42.1 does not expose arbitrary shell command execution from the dashboard.
+DeltaAegis v0.42.2 does not expose arbitrary shell command execution from the dashboard.
 
 Dashboard NetSniper execution uses guarded job records, validated private IPv4 CIDRs, and fixed argument-vector process creation. Live job-detail reads are bounded and confined to the configured scan-log root.
 
@@ -629,7 +622,7 @@ three-project defensive workflow:
 
 ## License
 
-DeltaAegis v0.42.1 is licensed under the **GNU Affero General Public License, version 3 only** (`AGPL-3.0-only`). See `LICENSE` and `LICENSING.md`.
+DeltaAegis v0.42.2 is licensed under the **GNU Affero General Public License, version 3 only** (`AGPL-3.0-only`). See `LICENSE` and `LICENSING.md`.
 
 Alternative commercial licensing may be available from Parker Lee through a separate written agreement. Earlier copies already distributed under the MIT License retain the permissions that accompanied those copies.
 

@@ -56,10 +56,14 @@ def assert_raises(error_type, function, *args, contains: str = "", **kwargs):
 def test_source_contract() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     required = (
-        'DELTAAEGIS_SECURITY_HOTFIX = "2026-07-13.1"',
+        'DELTAAEGIS_SECURITY_HOTFIX = "2026-07-13.2"',
         "def resolve_bundle_member(",
         "def revoke_dashboard_user_sessions(",
         "def reserve_scan_job_if_idle(",
+        "def access_effective_role(",
+        "def access_login_attempt_reserve(",
+        "def dashboard_begin_admin_user_mutation(",
+        "def dashboard_bind_host_is_loopback(",
         "BEGIN IMMEDIATE",
             "dashboard_setup_request_is_local",
             "The dashboard session is invalid or expired.",
@@ -271,6 +275,294 @@ def test_session_revocation_and_live_role() -> None:
         ) is not None:
             raise AssertionError("a disabled user's old session revived after re-enable")
         connection.close()
+
+
+def test_api_token_authorization_and_expiry() -> None:
+    with tempfile.TemporaryDirectory(prefix="deltaaegis-hotfix-token-") as tmp:
+        connection = da.connect(Path(tmp) / "audit.db")
+        first_admin = da.create_access_user(
+            connection,
+            "token.admin.one",
+            role="ADMIN",
+            password="Password123!",
+        )
+        da.create_access_user(
+            connection,
+            "token.admin.two",
+            role="ADMIN",
+            password="Password123!",
+        )
+        viewer = da.create_access_user(
+            connection,
+            "token.viewer",
+            role="VIEWER",
+            password="Password123!",
+        )
+        connection.commit()
+
+        assert_raises(
+            da.DeltaAegisError,
+            da.create_access_api_token,
+            connection,
+            viewer["user_id"],
+            "forbidden elevation",
+            role="ADMIN",
+            contains="exceeds",
+        )
+        assert_raises(
+            da.DeltaAegisError,
+            da.create_access_api_token,
+            connection,
+            viewer["user_id"],
+            "invalid expiry",
+            expires_at="not-a-timestamp",
+            contains="ISO-8601",
+        )
+
+        issued = da.create_access_api_token(
+            connection,
+            first_admin["user_id"],
+            "admin automation",
+            role="ADMIN",
+        )
+        connection.commit()
+        connection.execute(
+            "UPDATE access_api_tokens SET expires_at = ? WHERE token_id = ?",
+            ("malformed-existing-value", issued["token_id"]),
+        )
+        connection.commit()
+        if da.authenticate_access_api_token(
+            connection,
+            issued["token"],
+            required_role="VIEWER",
+            update_last_used=False,
+        ) is not None:
+            raise AssertionError("malformed token expiration failed open")
+
+        connection.execute(
+            "UPDATE access_api_tokens SET expires_at = NULL WHERE token_id = ?",
+            (issued["token_id"],),
+        )
+        connection.commit()
+        da.dashboard_admin_set_user_role(
+            connection,
+            "token.admin.one",
+            {"role": "VIEWER"},
+            {"username": "token.admin.two", "role": "ADMIN"},
+        )
+        connection.commit()
+        stored_role = connection.execute(
+            "SELECT role FROM access_api_tokens WHERE token_id = ?",
+            (issued["token_id"],),
+        ).fetchone()["role"]
+        if stored_role != "VIEWER":
+            raise AssertionError(f"demotion did not downgrade token role: {stored_role}")
+        if da.authenticate_access_api_token(
+            connection,
+            issued["token"],
+            required_role="ADMIN",
+            update_last_used=False,
+        ) is not None:
+            raise AssertionError("demoted user's token retained ADMIN access")
+        authenticated = da.authenticate_access_api_token(
+            connection,
+            issued["token"],
+            required_role="VIEWER",
+            update_last_used=False,
+        )
+        if not authenticated or authenticated["role"] != "VIEWER":
+            raise AssertionError("demoted token did not retain bounded VIEWER access")
+
+        # Defense in depth for a legacy or manually corrupted elevated token.
+        connection.execute(
+            "UPDATE access_api_tokens SET role = 'ADMIN' WHERE token_id = ?",
+            (issued["token_id"],),
+        )
+        connection.commit()
+        if da.authenticate_access_api_token(
+            connection,
+            issued["token"],
+            required_role="ADMIN",
+            update_last_used=False,
+        ) is not None:
+            raise AssertionError("effective token role was not capped by live user role")
+        connection.close()
+
+
+def test_atomic_last_admin_invariant() -> None:
+    with tempfile.TemporaryDirectory(prefix="deltaaegis-hotfix-admin-race-") as tmp:
+        db_path = Path(tmp) / "audit.db"
+        connection = da.connect(db_path)
+        for username in ("race.admin.one", "race.admin.two"):
+            da.create_access_user(
+                connection,
+                username,
+                role="ADMIN",
+                password="Password123!",
+            )
+        connection.commit()
+        connection.close()
+
+        barrier = threading.Barrier(2)
+        results: list[str] = []
+        results_lock = threading.Lock()
+
+        def disable(username: str) -> None:
+            worker_connection = da.connect(db_path)
+            barrier.wait()
+            try:
+                da.dashboard_admin_set_user_enabled(
+                    worker_connection,
+                    username,
+                    False,
+                    {"username": "race.test", "role": "ADMIN"},
+                )
+                worker_connection.commit()
+                outcome = "disabled"
+            except da.DashboardAdminUserActionError as exc:
+                worker_connection.rollback()
+                if exc.status_code != 409:
+                    raise
+                outcome = "protected"
+            finally:
+                worker_connection.close()
+            with results_lock:
+                results.append(outcome)
+
+        threads = [
+            threading.Thread(target=disable, args=("race.admin.one",)),
+            threading.Thread(target=disable, args=("race.admin.two",)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+            if thread.is_alive():
+                raise AssertionError("admin mutation thread did not finish")
+        if sorted(results) != ["disabled", "protected"]:
+            raise AssertionError(f"unexpected admin-race outcomes: {results}")
+
+        connection = da.connect(db_path)
+        if da.dashboard_active_admin_count(connection) != 1:
+            raise AssertionError("concurrent mutations removed every active ADMIN")
+        connection.close()
+
+
+def test_login_throttle_and_password_policy() -> None:
+    with tempfile.TemporaryDirectory(prefix="deltaaegis-hotfix-login-") as tmp:
+        connection = da.connect(Path(tmp) / "audit.db")
+        assert_raises(
+            da.DeltaAegisError,
+            da.create_access_user,
+            connection,
+            "weak.password",
+            role="VIEWER",
+            password="x",
+            contains="at least 8",
+        )
+        user = da.create_access_user(
+            connection,
+            "login.viewer",
+            role="VIEWER",
+            password="Password123!",
+        )
+        connection.commit()
+
+        with da._ACCESS_LOGIN_ATTEMPTS_LOCK:
+            da._ACCESS_LOGIN_ATTEMPTS.clear()
+        captured_hashes: list[str] = []
+        original_verify = da.verify_access_password
+
+        def capture_verify(password: str, password_hash: str | None) -> bool:
+            captured_hashes.append(str(password_hash or ""))
+            return False
+
+        da.verify_access_password = capture_verify
+        try:
+            if da.dashboard_user_login(
+                connection,
+                "unknown.viewer",
+                "irrelevant",
+                source_ip="198.51.100.10",
+            ) is not None:
+                raise AssertionError("unknown user authenticated")
+        finally:
+            da.verify_access_password = original_verify
+        if captured_hashes != [da.ACCESS_LOGIN_DUMMY_PASSWORD_HASH]:
+            raise AssertionError("unknown-user login did not use the dummy password hash")
+
+        with da._ACCESS_LOGIN_ATTEMPTS_LOCK:
+            da._ACCESS_LOGIN_ATTEMPTS.clear()
+        for _attempt in range(da.ACCESS_LOGIN_ACCOUNT_MAX_ATTEMPTS):
+            if da.dashboard_user_login(
+                connection,
+                user["username"],
+                "WrongPassword!",
+                source_ip="198.51.100.11",
+            ) is not None:
+                raise AssertionError("incorrect password authenticated")
+        error = assert_raises(
+            da.DashboardLoginRateLimitedError,
+            da.dashboard_user_login,
+            connection,
+            user["username"],
+            "WrongPassword!",
+            source_ip="198.51.100.11",
+        )
+        if error.retry_after < 1:
+            raise AssertionError("rate limit did not provide Retry-After guidance")
+
+        da.access_login_attempt_clear("198.51.100.11", user["username"])
+        if not da.dashboard_user_login(
+            connection,
+            user["username"],
+            "Password123!",
+            source_ip="198.51.100.11",
+        ):
+            raise AssertionError("valid login failed after limiter reset")
+        connection.close()
+
+
+def test_bind_guard_and_read_only_get() -> None:
+    for host in ("127.0.0.1", "127.9.8.7", "::1", "[::1]", "localhost"):
+        if not da.dashboard_bind_host_is_loopback(host):
+            raise AssertionError(f"loopback host was rejected: {host}")
+    for host in ("0.0.0.0", "::", "192.168.1.10", "example.invalid"):
+        if da.dashboard_bind_host_is_loopback(host):
+            raise AssertionError(f"non-loopback host was accepted: {host}")
+
+    with tempfile.TemporaryDirectory(prefix="deltaaegis-hotfix-bind-") as tmp:
+        args = da.build_parser().parse_args(
+            [
+                "--db",
+                str(Path(tmp) / "audit.db"),
+                "dashboard",
+                "--host",
+                "0.0.0.0",
+                "--no-require-login",
+                "--quiet",
+            ]
+        )
+        assert_raises(
+            da.DeltaAegisError,
+            da.command_dashboard,
+            args,
+            contains="non-loopback",
+        )
+
+    source = SOURCE.read_text(encoding="utf-8")
+    route_body = source.split(
+        '                elif route == "/api/validation-correlations":', 1
+    )[1].split('                elif route == "/api/current-state":', 1)[0]
+    for forbidden in (
+        "refresh_trueaegis_validation_correlations(",
+        ".commit(",
+        "self.open_connection(",
+    ):
+        if forbidden in route_body:
+            raise AssertionError(
+                f"GET /api/validation-correlations still mutates state: {forbidden}"
+            )
 
 
 def test_atomic_scan_reservation() -> None:
@@ -488,6 +780,33 @@ def test_dashboard_http_boundaries() -> None:
                 connection.close()
                 if users != [("admin.one", "ADMIN")]:
                     raise AssertionError(f"unexpected first-admin rows: {users}")
+
+                wrong_login_body = urllib.parse.urlencode(
+                    {"username": "admin.one", "password": "WrongPassword!"}
+                )
+                for _attempt in range(da.ACCESS_LOGIN_ACCOUNT_MAX_ATTEMPTS):
+                    status, _, _ = request(
+                        port,
+                        "POST",
+                        "/login",
+                        body=wrong_login_body,
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    )
+                    if status != 200:
+                        raise AssertionError(
+                            f"pre-limit login returned HTTP {status}"
+                        )
+                status, response_headers, _ = request(
+                    port,
+                    "POST",
+                    "/login",
+                    body=wrong_login_body,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                if status != 429:
+                    raise AssertionError(f"rate-limited login returned HTTP {status}")
+                if int(response_headers.get("retry-after", "0")) < 1:
+                    raise AssertionError("HTTP 429 omitted a valid Retry-After header")
             finally:
                 process.terminate()
                 try:
@@ -513,6 +832,10 @@ def main() -> int:
         ("RFC1918 scan boundary", test_rfc1918_boundary),
         ("bundle readiness and confinement", test_bundle_quality_and_confinement),
         ("session privilege revocation", test_session_revocation_and_live_role),
+        ("API-token authorization and expiry", test_api_token_authorization_and_expiry),
+        ("atomic last-admin invariant", test_atomic_last_admin_invariant),
+        ("login throttle and password policy", test_login_throttle_and_password_policy),
+        ("bind guard and read-only GET", test_bind_guard_and_read_only_get),
         ("atomic scan reservation", test_atomic_scan_reservation),
         ("dashboard HTTP boundaries", test_dashboard_http_boundaries),
     )
