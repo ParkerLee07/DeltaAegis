@@ -1,0 +1,78 @@
+{
+  "format": "deltaaegis-v0.44-stage3-auth-characterization-v1",
+  "source_checkpoint_tree": "187d09e830bce84975d69e536d0c442d4c7e4d77",
+  "compatibility_facade": "deltaaegis.py",
+  "implementation_module": "deltaaegis_core/auth.py",
+  "schema_change": false,
+  "password_policy": {
+    "algorithm": "pbkdf2_sha256",
+    "iterations": 260000,
+    "minimum_length": 8,
+    "maximum_length": 1024
+  },
+  "session_policy": {
+    "cookie_name": "deltaaegis_session",
+    "ttl_seconds": 28800
+  },
+  "tables": {
+    "access_users": [
+      "user_id", "username", "display_name", "role", "password_hash",
+      "is_active", "created_at", "updated_at", "last_login_at"
+    ],
+    "access_api_tokens": [
+      "token_id", "user_id", "token_name", "token_hash", "token_prefix",
+      "role", "is_active", "created_at", "updated_at", "last_used_at",
+      "expires_at"
+    ],
+    "access_audit_log": [
+      "audit_id", "actor_user_id", "actor_username", "actor_role", "action",
+      "target_type", "target_key", "source_ip", "user_agent", "detail_json",
+      "created_at"
+    ],
+    "access_sessions": [
+      "session_id", "user_id", "session_token_hash", "role", "is_active",
+      "created_at", "last_seen_at", "expires_at", "source_ip", "user_agent",
+      "ended_at", "end_reason"
+    ]
+  },
+  "facade_functions": [
+    "access_audit_summary",
+    "access_effective_role",
+    "access_login_attempt_clear",
+    "access_login_attempt_reserve",
+    "access_parse_datetime",
+    "access_password_hash_is_usable",
+    "access_rbac_allows",
+    "access_rbac_required_role",
+    "access_role_allows",
+    "access_token_is_expired",
+    "access_user_by_username",
+    "authenticate_access_api_token",
+    "authenticate_dashboard_session",
+    "create_access_api_token",
+    "create_access_user",
+    "create_dashboard_session",
+    "dashboard_access_audit_payload",
+    "dashboard_route_permission",
+    "dashboard_session_expiry",
+    "dashboard_user_login",
+    "ensure_dashboard_session_schema",
+    "ensure_enterprise_access_schema",
+    "expire_dashboard_session",
+    "generate_access_api_token",
+    "generate_dashboard_session_token",
+    "hash_access_api_token",
+    "hash_access_password",
+    "hash_dashboard_session_token",
+    "list_access_api_tokens",
+    "list_access_audit_events",
+    "list_access_users",
+    "normalize_access_role",
+    "normalize_access_username",
+    "record_access_audit_event",
+    "revoke_dashboard_user_sessions",
+    "session_is_expired",
+    "validate_access_password",
+    "verify_access_password"
+  ]
+}

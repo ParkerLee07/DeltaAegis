@@ -64,6 +64,7 @@ cp -p \
 
 cp -p \
     deltaaegis_core/__init__.py \
+    deltaaegis_core/auth.py \
     deltaaegis_core/config.py \
     deltaaegis_core/db.py \
     "$project/deltaaegis_core/"

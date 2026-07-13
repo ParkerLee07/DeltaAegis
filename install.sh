@@ -110,6 +110,7 @@ BASE="$(cd -- "$BASE" 2>/dev/null && pwd -P)" \
 required_files=(
     "deltaaegis.py"
     "deltaaegis_core/__init__.py"
+    "deltaaegis_core/auth.py"
     "deltaaegis_core/config.py"
     "deltaaegis_core/db.py"
     "uninstall.sh"
@@ -306,6 +307,7 @@ root = Path(sys.argv[1])
 for relative in (
     "deltaaegis.py",
     "deltaaegis_core/__init__.py",
+    "deltaaegis_core/auth.py",
     "deltaaegis_core/config.py",
     "deltaaegis_core/db.py",
     "tools/bootstrap_first_admin.py",

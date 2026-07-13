@@ -22,12 +22,12 @@ flowchart TD
 | Component | Current owner | Responsibility | Must not own |
 |---|---|---|---|
 | CLI and application dispatch | `deltaaegis.py` | Argument parsing, command dispatch, human/JSON output | Sensor implementation or arbitrary shell execution |
-| Configuration and paths | `deltaaegis.py`, environment variables, launchers | Local roots, database, reports, logs, sensor paths | Secrets in source or caller-controlled filesystem escape |
-| Storage and schema bootstrap | `deltaaegis.py` `SCHEMA_SQL`, `connect`, additive helpers | SQLite schema, compatibility additions, row serialization | Untracked destructive migrations |
+| Configuration and paths | `deltaaegis_core/config.py`, root facade, environment variables, launchers | Local roots, database, reports, logs, sensor paths | Secrets in source or caller-controlled filesystem escape |
+| Storage and schema bootstrap | `deltaaegis_core/db.py`, root-owned `SCHEMA_SQL` and additive helpers | SQLite connection policy, schema, compatibility additions, row serialization | Untracked destructive migrations |
 | NetSniper ingest | `deltaaegis.py` | Bundle discovery, trust checks, normalization, acceptance | Treating conclusions as raw observations |
 | Delta and lifecycle engine | `deltaaegis.py` | Snapshot comparison, events, alerts, lifecycle | Cross-scope identity assumptions after sensor identity exists |
 | Sites and scope aggregation | `deltaaegis.py` | Logical groupings and site-wide read aggregation | Replacing technical scope identity |
-| Authentication and authorization | `deltaaegis.py` | Users, passwords, sessions, tokens, RBAC, access audit | Browser-supplied actor or privilege |
+| Authentication and authorization | `deltaaegis_core/auth.py` behind the root facade | Users, passwords, sessions, tokens, RBAC, access audit | Browser-supplied actor or privilege |
 | Jobs and schedules | `deltaaegis.py` | Durable state, fixed-argv process launch, cancellation, watchdog, recovery | Direct browser PID signaling or arbitrary command strings |
 | Dashboard HTTP/UI | `deltaaegis.py` | Local HTTP server, HTML/JS, JSON handlers, operator workflows | A stable public API until `/api/v1` is introduced |
 | Reports and backups | `deltaaegis.py` | Markdown reports, SQLite backups, manifests, rehearsal, cutover | Silent overwrite or unverified restore |
@@ -106,6 +106,11 @@ compatibility facade.  ADR 0010 records why the internal package cannot be
 named `deltaaegis` while that facade exists.
 
 No extraction should mix functional redesign with file movement. A moved responsibility retains its existing validator coverage before cleanup begins.
+
+Stages 1–3 now implement the configuration, connection-policy, and
+authentication boundaries shown above. The root module intentionally retains
+thin functions with the established names and signatures; downstream imports
+and historical validators therefore continue to use the same public surface.
 
 ## Architecture decision index
 
