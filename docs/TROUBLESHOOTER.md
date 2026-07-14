@@ -24,6 +24,12 @@ Noninteractive execution without arguments runs the highest versioned release
 gate present under `tools/`. In the v0.44 repository, that is
 `tools/validate_v0_44_release_gate.sh`.
 
+The troubleshooter inventories the retained validator inventory in the selected
+checkout. Validators retired by v0.44.1 remain available byte-for-byte at the
+verified `v0.44.0` tag and are documented in
+`docs/validation-retention-policy.md`; they are not silently restored or run by
+current diagnostics.
+
 ## Menu choices
 
 1. **Quick health check** checks Git state, required commands, related
@@ -39,7 +45,7 @@ gate present under `tools/`. In the v0.44 repository, that is
 6. **Latest report** displays the newest retained Markdown report.
 7. **Error-code catalog** lists all stable diagnostic codes.
 8. **Explain a code** prints its meaning and recommended action.
-9. **Advanced diagnostics** exposes static roots, complete historical
+9. **Advanced diagnostics** exposes static roots, retained validator
    execution, and strict graph auditing.
 
 ## Error-code design

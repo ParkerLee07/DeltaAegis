@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Validate Python syntax
         shell: bash
         run: |
@@ -22,8 +24,13 @@ jobs:
             tools/reset_dashboard_admin.py \
             tools/deltaaegis_troubleshooter.py \
             tools/audit_v0_44_repository.py \
-            tools/validate_v0_44_1_repository_hygiene.py
+            tools/validate_v0_44_1_repository_hygiene.py \
+            tools/validate_v0_44_1_report_contracts.py \
+            tools/validate_v0_44_1_validator_retirement.py
       - name: Run regression tests
         run: python3 -m unittest discover -s tests -p 'test*.py' -v
       - name: Validate repository hygiene
-        run: python3 tools/validate_v0_44_1_repository_hygiene.py
+        run: |
+          python3 tools/validate_v0_44_1_repository_hygiene.py
+          python3 tools/validate_v0_44_1_report_contracts.py
+          python3 tools/validate_v0_44_1_validator_retirement.py

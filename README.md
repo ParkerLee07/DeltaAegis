@@ -553,6 +553,8 @@ Inspect the current validator group:
 
 Reports include environment details, read-only SQLite integrity checks, validator provenance, individual logs, diagnostic codes, and Markdown and JSON summaries. Historical validator failures are reported individually rather than treated as current-release regressions.
 
+The default branch intentionally retains the active compatibility floor rather than every validator ever published. Retired paths and byte-for-byte archive evidence are recorded in [the validator retention policy](docs/validation-retention-policy.md) and `docs/v0.44.1-validator-retirement.json`; the verified `v0.44.0` tag preserves the pre-retirement tree.
+
 ## Validation
 
 Run the complete v0.44 automated release gate from a clean checkout:

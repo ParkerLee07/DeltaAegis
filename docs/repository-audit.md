@@ -8,7 +8,7 @@ This deterministic inventory describes the v0.44.0 Modular Core Foundation relea
 
 | Measure | Count |
 |---|---:|
-| Repository files in audit scope | 342 |
+| Repository files in audit scope | 145 |
 | `deltaaegis.py` lines | 34016 |
 | Root top-level functions | 662 |
 | Root top-level classes | 6 |
@@ -16,8 +16,8 @@ This deterministic inventory describes the v0.44.0 Modular Core Foundation relea
 | Distinct CLI commands | 67 |
 | Distinct `/api` route literals | 57 |
 | Declared schema tables | 26 |
-| Validator scripts | 279 |
-| Validator version groups | 39 |
+| Validator scripts | 81 |
+| Validator version groups | 6 |
 
 Root source SHA-256: `2cdde45c69b84dea354fa64555665428fb514106dd9f0b4dab2e728e71318e06`
 
@@ -44,7 +44,7 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 | DA044-002 | MEDIUM | source-order coupling | Repeated top-level function names in the compatibility facade: dashboard_assets_payload, dashboard_index_html, dashboard_operator_session_shell_html. | Remove only with characterization evidence and explicit compatibility ownership. |
 | DA044-003 | MEDIUM | storage migrations | 26 table names remain declared through the root-owned schema bootstrap. | Introduce the forward-only migration ledger and supported upgrade paths in v0.45. |
 | DA044-004 | MEDIUM | HTTP/API contract | 57 unversioned /api route literals remain implementation endpoints. | Introduce /api/v1, OpenAPI, CSRF, and deprecation policy implementation in v0.46. |
-| DA044-005 | MEDIUM | validation estate | 279 validator scripts span 39 version groups. | Keep flat release composition and retire historical validators only with replacement-contract evidence. |
+| DA044-005 | LOW | validation estate | 81 validator scripts span 6 version groups; 200 historical validators are preserved by a byte-verified retirement manifest. | Retain the current compatibility floor and require manifest-backed replacement evidence for any further validator retirement. |
 | DA044-006 | MEDIUM | TrueAegis compatibility | TrueAegis remains contract-validated but not pinned to a published semantic-version range. | Publish or pin the supported TrueAegis range before v1.0. |
 | DA044-007 | LOW | documentation | 0 known historical architecture document marker remains. | Keep docs/architecture/overview.md authoritative and clean historical prose only in an owned documentation change. |
 
@@ -74,45 +74,23 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 
 | Version group | Scripts |
 |---|---:|
-| unversioned | 1 |
-| v0.10 | 3 |
-| v0.11 | 4 |
-| v0.12 | 5 |
-| v0.13 | 5 |
-| v0.14 | 5 |
-| v0.15 | 5 |
-| v0.16 | 5 |
-| v0.17 | 6 |
-| v0.18 | 6 |
-| v0.19 | 5 |
-| v0.20 | 6 |
-| v0.21 | 5 |
-| v0.22 | 6 |
-| v0.23 | 7 |
-| v0.24 | 6 |
-| v0.25 | 6 |
-| v0.26 | 8 |
-| v0.27 | 8 |
-| v0.28 | 9 |
-| v0.29 | 5 |
-| v0.30 | 4 |
-| v0.31 | 10 |
-| v0.32 | 4 |
-| v0.33 | 5 |
-| v0.34 | 9 |
-| v0.35 | 5 |
-| v0.36 | 6 |
-| v0.37 | 9 |
-| v0.38 | 9 |
-| v0.39 | 18 |
+| v0.39 | 15 |
 | v0.40 | 13 |
 | v0.41 | 12 |
 | v0.42 | 18 |
 | v0.43 | 6 |
-| v0.44 | 15 |
-| v0.7 | 3 |
-| v0.8 | 11 |
-| v0.9 | 6 |
+| v0.44 | 17 |
+
+## Validator retirement evidence
+
+- Manifest: `docs/v0.44.1-validator-retirement.json`
+- Archive tag: `v0.44.0`
+- Retired tool files: 201
+- Retired validator scripts: 200
+- Retained validator scripts: 81
+- Retained shell-validator inventory: 61
+- Replacement report contract: `tools/validate_v0_44_1_report_contracts.py`
+- Policy: `docs/validation-retention-policy.md`
 
 ## Stale and historical documents
 
@@ -133,4 +111,4 @@ No known stale architecture-document marker was found.
 - The audit is read-only except when explicitly writing its deterministic Markdown report.
 - Counts use Git cached and non-ignored untracked candidate files and exclude runtime data roots and the generated report.
 - v0.44 changes module ownership but does not change the database schema or introduce a stable API.
-- No historical validator is removed without replacement-contract evidence.
+- Historical validator retirement is allowed only when exact prior bytes remain verified at an immutable release tag, current behavior has replacement-contract evidence, and the retained execution graph is complete.

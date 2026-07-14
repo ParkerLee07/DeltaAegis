@@ -87,8 +87,13 @@ def main() -> int:
         fail("troubleshooter self-check format changed")
     if payload.get("current_release_gate") != "tools/validate_v0_44_release_gate.sh":
         fail("troubleshooter does not select the v0.44 release gate")
-    if payload.get("validator_count", 0) < 250 or payload.get("integrity_ok") is not True:
-        fail("troubleshooter did not inventory the repository validators")
+    manifest = json.loads(read("docs/v0.44.1-validator-retirement.json"))
+    expected_shell = manifest.get("expected_shell_validator_count")
+    if payload.get("validator_count") != expected_shell or payload.get("integrity_ok") is not True:
+        fail(
+            "troubleshooter validator inventory differs from the retirement manifest: "
+            f"expected {expected_shell}, found {payload.get('validator_count')}"
+        )
     if payload.get("graph_ok") is not True:
         fail(
             "troubleshooter execution graph is not clean: "
@@ -148,6 +153,8 @@ def main() -> int:
         "find deltaaegis_core -maxdepth 1 -type f -name '*.py'",
         "tools/deltaaegis_troubleshooter.py",
         "tools/validate_v0_44_1_repository_hygiene.py",
+        "tools/validate_v0_44_1_report_contracts.py",
+        "tools/validate_v0_44_1_validator_retirement.py",
         "python3 -m unittest discover -s tests -p 'test*.py' -v",
     ):
         if marker not in ci:

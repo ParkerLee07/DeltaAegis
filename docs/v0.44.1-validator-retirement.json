@@ -1,0 +1,1639 @@
+{
+  "archive_tag": "v0.44.0",
+  "current_release_gate": "tools/validate_v0_44_release_gate.sh",
+  "expected_retained_validator_count": 81,
+  "expected_shell_validator_count": 61,
+  "format": "deltaaegis-validator-retirement-v1",
+  "maintenance_release": "0.44.1",
+  "replaced_stage_contracts": [
+    "tools/validate_v0_15_port_behavior_report.sh",
+    "tools/validate_v0_16_investigation_center_report.sh",
+    "tools/validate_v0_20_report_ticket_evidence.sh",
+    "tools/validate_v0_22_report_triage_summary.sh",
+    "tools/validate_v0_34_report_correlation.sh"
+  ],
+  "replacement_contract": "tools/validate_v0_44_1_report_contracts.py",
+  "retained_compatibility_floor": [
+    "v0.39 functional behavior",
+    "v0.40 operator actions",
+    "v0.42 security/components/install/license",
+    "v0.44 modular core"
+  ],
+  "retired_bytes": 761170,
+  "retired_file_count": 201,
+  "retired_files": [
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1458,
+      "kind": "validator",
+      "lines": 42,
+      "path": "tools/validate_readme_current.sh",
+      "sha256": "825ef078f3db3f33ee448fabe8de8cd117637de5be245964029a644caf8160e5"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3570,
+      "kind": "validator",
+      "lines": 108,
+      "path": "tools/validate_v0_10_netsniper_v1_6_risk_policy.sh",
+      "sha256": "8a2951474b492fc26596e80cae48692fc17e03cc1ce2ba9af7ca29b9adec0bb9"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5800,
+      "kind": "validator",
+      "lines": 170,
+      "path": "tools/validate_v0_10_netsniper_v1_6_storage.sh",
+      "sha256": "4a2ea995f73fc1edf2580ca83e86d7c4f33431cd47e90b925091efd325e300e2"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2120,
+      "kind": "validator",
+      "lines": 70,
+      "path": "tools/validate_v0_10_release.sh",
+      "sha256": "d74e57a4b8f0ce4e367f851685530d66ee664193a6fef903ec56f7041db4a807"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1699,
+      "kind": "validator",
+      "lines": 59,
+      "path": "tools/validate_v0_11_1_metadata_cleanup.sh",
+      "sha256": "036672f715d7680be675e32f6c9a46968a8b7bdfda8d0dc255bd8fdf0daa376a"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3194,
+      "kind": "validator",
+      "lines": 98,
+      "path": "tools/validate_v0_11_dashboard_intelligence.sh",
+      "sha256": "8abce1d2e6b54d21f6b339e621c5e76c201996af5bde052e71fd1fda0d06cbc4"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4011,
+      "kind": "validator",
+      "lines": 116,
+      "path": "tools/validate_v0_11_intelligence_artifacts.sh",
+      "sha256": "588a0db813226c6920e028ca5428402e2d7b52421f39c7a0d61a802339717619"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1186,
+      "kind": "validator",
+      "lines": 44,
+      "path": "tools/validate_v0_11_release.sh",
+      "sha256": "593ea4d00d617f70048099faed9fa3862b16abde09dbdeddc7b0712553c80529"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 932,
+      "kind": "validator",
+      "lines": 36,
+      "path": "tools/validate_v0_12_1_readme_cleanup.sh",
+      "sha256": "90e37169157272138896268b4fda76514e39c4eebc03d0022d3a20c1a75b0280"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3165,
+      "kind": "validator",
+      "lines": 107,
+      "path": "tools/validate_v0_12_dashboard_intelligence_api.sh",
+      "sha256": "37d1dd84fa0e27f30ca6a922909769a1600a9ec3b96679ab7b2e750786d3004e"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1324,
+      "kind": "validator",
+      "lines": 46,
+      "path": "tools/validate_v0_12_dashboard_intelligence_panel.sh",
+      "sha256": "43d267cda148ae59ff8cbeb93755ce5b590c44aecf8b9d929a8323686dd076ea"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3908,
+      "kind": "validator",
+      "lines": 130,
+      "path": "tools/validate_v0_12_intelligence_drilldown.sh",
+      "sha256": "cb89012e8055b6f4af9f912a8002ab61f5fa7cd464c66093c2217ef39cfd98b4"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1455,
+      "kind": "validator",
+      "lines": 49,
+      "path": "tools/validate_v0_12_release.sh",
+      "sha256": "354d71cc0e6b720e8a8f6e9f7c11d9ddb4d6229c2171babc0c172c49093b9331"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3733,
+      "kind": "validator",
+      "lines": 125,
+      "path": "tools/validate_v0_13_current_risk.sh",
+      "sha256": "123149a41f985279148f332f00476834033bf03fb7063acb704e395528ca291f"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1517,
+      "kind": "validator",
+      "lines": 67,
+      "path": "tools/validate_v0_13_current_state_dashboard_ui.sh",
+      "sha256": "8a8f44ea576bb1fa91bd8ec310516e9e2a1be74f84a8a3ce909ae4c287629308"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5452,
+      "kind": "validator",
+      "lines": 150,
+      "path": "tools/validate_v0_13_current_state_payload.sh",
+      "sha256": "da9c625eeda9b8963da1e6562b5d0ec36f38199e24025cebfecddcae89bd313c"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5295,
+      "kind": "validator",
+      "lines": 166,
+      "path": "tools/validate_v0_13_full_inventory_ingest.sh",
+      "sha256": "08de092cb892de5f4180ad719fa80ca3c07c5368e1204a7c761043db534a1d99"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2027,
+      "kind": "validator",
+      "lines": 64,
+      "path": "tools/validate_v0_13_release.sh",
+      "sha256": "f80766ac08483cfeccc70121e79adf704a28fb97c87cadb1403e12782558bed5"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2515,
+      "kind": "validator",
+      "lines": 81,
+      "path": "tools/validate_v0_14_release.sh",
+      "sha256": "767e1698261c1ee6540f609e43d95ee9cbe6c09ef34b28dc584c9b4554c3b4de"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1608,
+      "kind": "validator",
+      "lines": 64,
+      "path": "tools/validate_v0_14_risk_explanations.sh",
+      "sha256": "33709dc424b60a7058f5f969325f8d95b3ca76e1f94e6ffb48c7a6ec4ff40a0f"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3873,
+      "kind": "validator",
+      "lines": 166,
+      "path": "tools/validate_v0_14_scan_job_registry.sh",
+      "sha256": "2b753fd9c9505a6a860a2cbed38ebe8d54453abfbf1058e3a7a62ebc192795e4"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3518,
+      "kind": "validator",
+      "lines": 148,
+      "path": "tools/validate_v0_14_scan_jobs_dashboard.sh",
+      "sha256": "7f65a79f93d18973b746e22d9c0fb57fb6b77294a6e9986f0fef743f6280a4e7"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3975,
+      "kind": "validator",
+      "lines": 139,
+      "path": "tools/validate_v0_14_scan_start.sh",
+      "sha256": "b5839090afa12c33f6da0b59c16d85d87fa93a93a8f144ebf12e57a56cc7cb45"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5583,
+      "kind": "validator",
+      "lines": 176,
+      "path": "tools/validate_v0_15_port_behavior_cli.sh",
+      "sha256": "8623db6561a36a63fe985aea71f759893368bf0a33a9e7725abf1351d65659ec"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4854,
+      "kind": "validator",
+      "lines": 173,
+      "path": "tools/validate_v0_15_port_behavior_dashboard.sh",
+      "sha256": "9d255a115e702ee5869e07948d0491cc2b66981c80553304d0e3105cbab8db45"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4408,
+      "kind": "validator",
+      "lines": 139,
+      "path": "tools/validate_v0_15_port_behavior_report.sh",
+      "sha256": "4586d4786fb50fa99b7b4bf439453f34b834e825542ff1997853f7ad1861d66f"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4260,
+      "kind": "validator",
+      "lines": 131,
+      "path": "tools/validate_v0_15_port_behavior_risk.sh",
+      "sha256": "66cef9b0361512b5babebe025bdfc8de6f8d90090c6a98f700f76da32472d38b"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2713,
+      "kind": "validator",
+      "lines": 80,
+      "path": "tools/validate_v0_15_release.sh",
+      "sha256": "cb1c933361900e1afd3927d9dd6c2d45b3b4c85fb319d29cf3706004ab8ff009"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2045,
+      "kind": "validator",
+      "lines": 73,
+      "path": "tools/validate_v0_16_command_center_dashboard.sh",
+      "sha256": "fe88797ae861560d82d8c894de1e89d203720b2da7ab71a64a925985e3b370f5"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5134,
+      "kind": "validator",
+      "lines": 184,
+      "path": "tools/validate_v0_16_investigation_center_api.sh",
+      "sha256": "2451f158054aac88997dbbdb2ae6471e7a4905fb80a178e7678534aa0d74662d"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5093,
+      "kind": "validator",
+      "lines": 189,
+      "path": "tools/validate_v0_16_investigation_center_cli.sh",
+      "sha256": "e3be481d4110b19305f7a2151e19d76011bda0e6f0ef3f0e4bb1de3ff9e4885d"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5881,
+      "kind": "validator",
+      "lines": 203,
+      "path": "tools/validate_v0_16_investigation_center_report.sh",
+      "sha256": "e79545df8b8a194e5b0d56077ca83b93e63fa74821584e46c9c0821977a75431"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3047,
+      "kind": "validator",
+      "lines": 87,
+      "path": "tools/validate_v0_16_release.sh",
+      "sha256": "162b1f2e95fd95ddd50ca9b4ed5ffde67177793eadabec3e377e5727934a4830"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2518,
+      "kind": "validator",
+      "lines": 98,
+      "path": "tools/validate_v0_17_dashboard_shell_theme.sh",
+      "sha256": "7685fd4903c8e8c4c8960903c74d4b3fd79063a434f0a570eb99bc9b45426b7a"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2845,
+      "kind": "validator",
+      "lines": 85,
+      "path": "tools/validate_v0_17_release.sh",
+      "sha256": "21eb233dcdfb973ebd708424129bb3bd031a80697c1d2fcaa0f51b30a333a116"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2843,
+      "kind": "validator",
+      "lines": 100,
+      "path": "tools/validate_v0_17_siem_charts.sh",
+      "sha256": "dcf848ca6e157a58d4a2c4b1d45b56ebaadcbb3c78aed2fede9ef25f519d70ff"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2082,
+      "kind": "validator",
+      "lines": 76,
+      "path": "tools/validate_v0_17_ticket_queue_layout.sh",
+      "sha256": "8c1ef5372b1e923e97e28e78295a4d87c18bc030b79b4325a6026178acf9bdd9"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2240,
+      "kind": "validator",
+      "lines": 78,
+      "path": "tools/validate_v0_17_ticket_signal_badges.sh",
+      "sha256": "cda94d84d3f3a7eae170a095f0be26d8a74f486be6b150175705e3e7d3cdde27"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3919,
+      "kind": "validator",
+      "lines": 111,
+      "path": "tools/validate_v0_17_ticket_signal_tuning.sh",
+      "sha256": "3abf748484a0f551070c20ea51dd9d8c1df822ab1015db224e7a1ff3b1cab160"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5334,
+      "kind": "validator",
+      "lines": 160,
+      "path": "tools/validate_v0_18_release.sh",
+      "sha256": "8b7a377938f5f90a49968a192b8be475ad991d387db7eeff98bb8333e9b8c2cb"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3279,
+      "kind": "validator",
+      "lines": 104,
+      "path": "tools/validate_v0_18_ticket_history.sh",
+      "sha256": "fab78cc6428e0e62873b38cf6a4e9ba1222345e9ad919b8194a386979ab287e2"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2439,
+      "kind": "validator",
+      "lines": 92,
+      "path": "tools/validate_v0_18_ticket_noop_guard.sh",
+      "sha256": "bf407ab07375918b158e6872cfd8c31a653979d311ba83f67577982b4dc6c493"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4456,
+      "kind": "validator",
+      "lines": 128,
+      "path": "tools/validate_v0_18_ticket_state_model.sh",
+      "sha256": "9725a7ebce998c70d4468a4648b06adc5d446759f1a6dcf0713bb7ecce51fd2e"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2360,
+      "kind": "validator",
+      "lines": 70,
+      "path": "tools/validate_v0_18_ticket_workflow_dashboard_actions.sh",
+      "sha256": "3c0d397c535bb7d87a24067a96b14f9bb9d9f28113dd63c0ee7d8ef788d70fd3"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3215,
+      "kind": "validator",
+      "lines": 110,
+      "path": "tools/validate_v0_18_workflow_visibility.sh",
+      "sha256": "f45ab759eb272c6ffd3a9243ea1f645b0a9136e2e481595e04ec66f44580e337"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5530,
+      "kind": "validator",
+      "lines": 167,
+      "path": "tools/validate_v0_19_backend_filters.sh",
+      "sha256": "bd69aba260138586960b350d8ac9029c47063fcf7a9e8f1e873bb9824fd0019e"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2635,
+      "kind": "validator",
+      "lines": 73,
+      "path": "tools/validate_v0_19_dashboard_filters.sh",
+      "sha256": "fb1d61cc6b97deff6175365b4a94c27e2a626f1b584fde59d33843499a269785"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4011,
+      "kind": "validator",
+      "lines": 129,
+      "path": "tools/validate_v0_19_operator_views.sh",
+      "sha256": "98f55ed84d8ed477b4b004ae3608fc45f7df994d8c06a4a8f24f778f362a620d"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1135,
+      "kind": "validator",
+      "lines": 45,
+      "path": "tools/validate_v0_19_release.sh",
+      "sha256": "ba8403486e4096e7da913953386e122e772add54026fe28e2f91349d4cdc2421"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5456,
+      "kind": "validator",
+      "lines": 167,
+      "path": "tools/validate_v0_19_workflow_counters.sh",
+      "sha256": "55fb8c2da7e4d63f2ae5f8c786b9f46f13848e9bc0663d44299a94daabdd20b9"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2619,
+      "kind": "validator",
+      "lines": 87,
+      "path": "tools/validate_v0_20_dashboard_ticket_evidence.sh",
+      "sha256": "205e01c1265d1e6bb80440212dd25ecb4de12aabcc0ea8c3a603b7f095db77a4"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2197,
+      "kind": "validator",
+      "lines": 69,
+      "path": "tools/validate_v0_20_release.sh",
+      "sha256": "dbecb353e20f8f7e51c42f44df48d220ae45e11e3a1199e97715bee3faea3d34"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1648,
+      "kind": "validator",
+      "lines": 51,
+      "path": "tools/validate_v0_20_release_metadata.sh",
+      "sha256": "204d6821299c07313770274d91a4fe43062c6592f8b2a9eecf03fb94dd1f47e7"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5060,
+      "kind": "validator",
+      "lines": 176,
+      "path": "tools/validate_v0_20_report_ticket_evidence.sh",
+      "sha256": "db8d82b6750128608fe154f9514ec24b979f7184e6e6c800ca60d1dbcca0b2c5"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5028,
+      "kind": "validator",
+      "lines": 184,
+      "path": "tools/validate_v0_20_ticket_evidence_cli.sh",
+      "sha256": "ff2a52eff50b401ff423952aeae43d3dfaf71157bda339048960674bd5d88f28"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 6740,
+      "kind": "validator",
+      "lines": 203,
+      "path": "tools/validate_v0_20_ticket_evidence_payload.sh",
+      "sha256": "52b473effad162a3d3b5f93b01f306f329bb4cbd32acd6d27ca0446850c8f7f1"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3837,
+      "kind": "validator",
+      "lines": 165,
+      "path": "tools/validate_v0_21_balanced_evidence_timeline.sh",
+      "sha256": "1a49917d7312e99150214f09b521f48aa97b38001c57d67c73b5dbc3869ef5f0"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1944,
+      "kind": "validator",
+      "lines": 64,
+      "path": "tools/validate_v0_21_dashboard_timeline_polish.sh",
+      "sha256": "463a914a88720773acf90bb8c93d0f926368cd1071b472b6d9d54b51f71a76e0"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1437,
+      "kind": "validator",
+      "lines": 50,
+      "path": "tools/validate_v0_21_release.sh",
+      "sha256": "61690921e47806c3a4066aa7cca84715e186201e687a2ff1d000d66f56664841"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1779,
+      "kind": "validator",
+      "lines": 54,
+      "path": "tools/validate_v0_21_release_metadata.sh",
+      "sha256": "eaad2ed8646a2891a309298b5f1fe63a5212729bcc20fd9d2aa39b53d16d9c08"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2100,
+      "kind": "validator",
+      "lines": 97,
+      "path": "tools/validate_v0_21_why_now_summary.sh",
+      "sha256": "9a2ee65cb0a0596a05cccb1398756e439f007d77749be81d8cc3f5852e2ea2dd"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3505,
+      "kind": "validator",
+      "lines": 112,
+      "path": "tools/validate_v0_22_dashboard_triage_panel.sh",
+      "sha256": "de9de67df2d59058e9403e881767910a2c7679bf8a65b2bbaad5dd1b1d2d84fe"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1883,
+      "kind": "validator",
+      "lines": 62,
+      "path": "tools/validate_v0_22_release.sh",
+      "sha256": "abab9574ee89146ec77edb710898532d1c2b4e5b231fa0fde551ef6f94680246"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1845,
+      "kind": "validator",
+      "lines": 49,
+      "path": "tools/validate_v0_22_release_metadata.sh",
+      "sha256": "83c7c5b4504e2c2959d88caf93115697f520655947656a58fa3beb8a8641ef4a"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2694,
+      "kind": "validator",
+      "lines": 87,
+      "path": "tools/validate_v0_22_report_triage_summary.sh",
+      "sha256": "623407107983ed9a7a2132e6477a6281b645c398191d0a3c75633661f7936671"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3223,
+      "kind": "validator",
+      "lines": 105,
+      "path": "tools/validate_v0_22_triage_queue_api_cli.sh",
+      "sha256": "892a1590c08827fa2f74d48aa2351fc03d8d8808b64bffd53488304395609cc8"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3466,
+      "kind": "validator",
+      "lines": 108,
+      "path": "tools/validate_v0_22_triage_state_model.sh",
+      "sha256": "36145aacb0b4001a15cee9206752093949da95af81965eb3e144eebc864fe49e"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5183,
+      "kind": "validator",
+      "lines": 194,
+      "path": "tools/validate_v0_23_access_audit_visibility.sh",
+      "sha256": "e386a0411fd352c87ad22d00f576c58233a338f76007e847373210c3e9abc493"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4488,
+      "kind": "validator",
+      "lines": 159,
+      "path": "tools/validate_v0_23_access_cli_tokens.sh",
+      "sha256": "0480cf69cc2fc3c624bad9dddc73426ff82cddc345025442713640a73cd668aa"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5015,
+      "kind": "validator",
+      "lines": 146,
+      "path": "tools/validate_v0_23_access_model.sh",
+      "sha256": "e433523b40d3c022df1d8902fdc5f494e09fd41ff9b821d064bce524616c2a59"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1144,
+      "kind": "validator",
+      "lines": 35,
+      "path": "tools/validate_v0_23_backward_compatibility.sh",
+      "sha256": "9a7d5154ada1a8de1ee694f906524ff8e8d07c2ab5db3eeda9909d56f32a87ef"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 6273,
+      "kind": "validator",
+      "lines": 218,
+      "path": "tools/validate_v0_23_dashboard_db_token_auth.sh",
+      "sha256": "a8664fcc92aa4a04f1c4a4bb57138ad3484a6b0dc0fbffdb2278e483dcbeb786"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1065,
+      "kind": "validator",
+      "lines": 36,
+      "path": "tools/validate_v0_23_release.sh",
+      "sha256": "f3c150fb963ef543c5a4fd8753692384b0019d655d62e490b3ad37b3255afa6a"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1417,
+      "kind": "validator",
+      "lines": 45,
+      "path": "tools/validate_v0_23_release_metadata.sh",
+      "sha256": "b5b7c380b614d333cdc4549148aa9cf7fccb531dc36b8ec4a31da3342d30e8d2"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4517,
+      "kind": "validator",
+      "lines": 154,
+      "path": "tools/validate_v0_24_api_session.sh",
+      "sha256": "deaf8aa36e44f3aa624fd9a6746fdea35efc65d4dc96e8036d5af8e6a87c18e1"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3875,
+      "kind": "validator",
+      "lines": 133,
+      "path": "tools/validate_v0_24_backward_compatibility.sh",
+      "sha256": "af4f985b87763c3ea4f62632e1a1aa70563f63c178f2238175e5f9e4914e03f1"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5220,
+      "kind": "validator",
+      "lines": 169,
+      "path": "tools/validate_v0_24_login_logout_routes.sh",
+      "sha256": "5bbfa427950b98a0014e91144637b0b788d5b264fd4afd31c4e8d83401108fec"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 908,
+      "kind": "validator",
+      "lines": 33,
+      "path": "tools/validate_v0_24_release.sh",
+      "sha256": "4acbd6707b000f99d432b0fd31135c583cf1e0ae3ec8b13b886af40f5bb8a252"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1547,
+      "kind": "validator",
+      "lines": 49,
+      "path": "tools/validate_v0_24_release_metadata.sh",
+      "sha256": "611fb4d1ff8fc70a7fa6e4164074e8b75abb0ca093f3d08d7f8ca5c3ebb79cf5"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4063,
+      "kind": "validator",
+      "lines": 147,
+      "path": "tools/validate_v0_24_session_model.sh",
+      "sha256": "7a023d5b4dc923c4a4232d8d4a6c257ccc95b0261ba6ece3f322f20654e889e9"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 797,
+      "kind": "validator",
+      "lines": 37,
+      "path": "tools/validate_v0_25_backward_compatibility.sh",
+      "sha256": "3d9eb7b7c43a2d4e29af3725a4c57d194d3b47fb3768921b9fa44341cd08e614"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3658,
+      "kind": "validator",
+      "lines": 136,
+      "path": "tools/validate_v0_25_dashboard_operator_link.sh",
+      "sha256": "c14b9e4bfcb7af6e1e6484e6ef0de1f32bce67cab34090e5a3950aebc05287f5"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3845,
+      "kind": "validator",
+      "lines": 140,
+      "path": "tools/validate_v0_25_operator_session_actions.sh",
+      "sha256": "4f5adac44a3de54f49e794e063ed5720e703c81ffddd46e6c4a2245b93d849d4"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4331,
+      "kind": "validator",
+      "lines": 152,
+      "path": "tools/validate_v0_25_operator_session_page.sh",
+      "sha256": "fadde36029fe9e107acccc3d49bedad5ae67fbd9e4e296d4b5ddf1f8226abb3f"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 979,
+      "kind": "validator",
+      "lines": 33,
+      "path": "tools/validate_v0_25_release.sh",
+      "sha256": "c08370bbdfd0864eff2297549fe8c6a3c9484706cd7cf713eb3b93fb0b130f4b"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1193,
+      "kind": "validator",
+      "lines": 42,
+      "path": "tools/validate_v0_25_release_metadata.sh",
+      "sha256": "e01fce69094f7f568133696f130a6bd298583c5a5cae8e77ae5e8058c1042c61"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 10768,
+      "kind": "validator",
+      "lines": 353,
+      "path": "tools/validate_v0_26_admin_user_actions.sh",
+      "sha256": "16f5644c4438a586c2a2e65a45d333369060be84a4a06c996d414b09719c73c6"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 6784,
+      "kind": "validator",
+      "lines": 237,
+      "path": "tools/validate_v0_26_admin_users_api.sh",
+      "sha256": "4eceffa1e65e4eba9b4cf13cb219a31ca0ed7aac6351c3a16d03c970207337e3"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2727,
+      "kind": "validator",
+      "lines": 84,
+      "path": "tools/validate_v0_26_dashboard_ui_polish.sh",
+      "sha256": "f4f4444bd751fad5c970c32766995526a01139679d038d8f8f16aff4bba2fc53"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2070,
+      "kind": "validator",
+      "lines": 72,
+      "path": "tools/validate_v0_26_operator_audit_navigation_polish.sh",
+      "sha256": "a7e042339f854ee0f0091e2c5957049cf95b536b41e84465d458932c26d2aa69"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 8415,
+      "kind": "validator",
+      "lines": 282,
+      "path": "tools/validate_v0_26_operator_user_action_controls.sh",
+      "sha256": "f67b81212d875fa7afdad9770acd10c3a0c9bf7cf22aa89965f5cc42cffeeb7c"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 6605,
+      "kind": "validator",
+      "lines": 217,
+      "path": "tools/validate_v0_26_operator_users_page.sh",
+      "sha256": "e826a91d00e2e4608ea55f97d37a77b525abf7f18ab82ad0f00f5762ec3cc742"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3224,
+      "kind": "validator",
+      "lines": 95,
+      "path": "tools/validate_v0_26_release.sh",
+      "sha256": "647bf9101c80f5916d8fc17740574e7de1196686eeb38d04f186a9c0a6c632e8"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 7909,
+      "kind": "validator",
+      "lines": 277,
+      "path": "tools/validate_v0_26_user_audit_visibility.sh",
+      "sha256": "b6325c5ddf2a20664d3166ce743b6c9e96b12561a179aca59fa64ddff2245430"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5211,
+      "kind": "validator",
+      "lines": 170,
+      "path": "tools/validate_v0_27_1_dashboard_defaults.sh",
+      "sha256": "abb4f652b39f7ddcd085a92f0d3964958f72a82a1faf7b792032ea0d166bcc7f"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 480,
+      "kind": "validator",
+      "lines": 22,
+      "path": "tools/validate_v0_27_1_release.sh",
+      "sha256": "f365a4b81c4eee32a9090812eaa258123e8544fca5f0401226d99bdbb3c4407e"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 480,
+      "kind": "validator",
+      "lines": 22,
+      "path": "tools/validate_v0_27_2_release.sh",
+      "sha256": "c29cf3cc19fb0fad33d727f3d6194c3f819f4bb70a4cc16f041b4fb71e208bcb"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3136,
+      "kind": "validator",
+      "lines": 117,
+      "path": "tools/validate_v0_27_2_setup_page_cleanup.sh",
+      "sha256": "07c9560990c18e056826e62adbe754ac3b0032759277c47d87177c6cd52fb8f4"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 6042,
+      "kind": "validator",
+      "lines": 194,
+      "path": "tools/validate_v0_27_first_admin_setup.sh",
+      "sha256": "24e3ad22d5f72121cc166b691e9b0bf4b77c4b76615e8228139e39468cff2062"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4377,
+      "kind": "validator",
+      "lines": 167,
+      "path": "tools/validate_v0_27_install_first_admin_bootstrap.sh",
+      "sha256": "d4632be26eab3b71ed88263d7bbccf209442e59b9168bbd4367e017b48da1720"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 8667,
+      "kind": "validator",
+      "lines": 263,
+      "path": "tools/validate_v0_27_rbac_policy_matrix.sh",
+      "sha256": "133c866746decfb77f9abc2c831d3198ebf0c212152ac20d9228cee433a7901c"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1405,
+      "kind": "validator",
+      "lines": 50,
+      "path": "tools/validate_v0_27_release.sh",
+      "sha256": "dc936fe688909ba3cacec30ace04fd28eeb3ff442b0cecf1fbe40fde2d9c2bb2"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3137,
+      "kind": "validator",
+      "lines": 91,
+      "path": "tools/validate_v0_28_1_docs_uninstall.sh",
+      "sha256": "4a2b3aa13e70f5c41ecc11dc7927af1a182c9476ae08569a6c675bc2b8329f93"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1117,
+      "kind": "validator",
+      "lines": 44,
+      "path": "tools/validate_v0_28_1_release.sh",
+      "sha256": "31a3ec349f2b7430d76ca2d4df93b169abbe77d990486f701596c6cdc4652ef9"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1257,
+      "kind": "validator",
+      "lines": 39,
+      "path": "tools/validate_v0_28_1_release_metadata.sh",
+      "sha256": "e8d80d3c391e0ed5ff9d8a026c82e19ea42895e4e600469dcbc43e95a6d29a1f"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2579,
+      "kind": "validator",
+      "lines": 79,
+      "path": "tools/validate_v0_28_dashboard_db_defaults.sh",
+      "sha256": "dc454c40bb815b8a7ae78a159a21f640e06bc37c6729316d147641fec59defcb"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5209,
+      "kind": "validator",
+      "lines": 168,
+      "path": "tools/validate_v0_28_netsniper_import_latest.sh",
+      "sha256": "e8064958fe25b5c3f0e3ed95e528bef6edd43ed47bc281559a5d5fef94907b21"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3282,
+      "kind": "validator",
+      "lines": 115,
+      "path": "tools/validate_v0_28_netsniper_navigation.sh",
+      "sha256": "c8535637ac1c2b279712a8f630f5d967f30642382caa58c9dfea1c2c6f12a20d"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3963,
+      "kind": "validator",
+      "lines": 140,
+      "path": "tools/validate_v0_28_netsniper_status_tab.sh",
+      "sha256": "adcea5bf9a3ead63fd624980a77c9183bf5bb1ec4578a32dbc6d04a3093b0eb7"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1428,
+      "kind": "validator",
+      "lines": 45,
+      "path": "tools/validate_v0_28_release.sh",
+      "sha256": "f6939e7a3217f6479131e79d304e74f0bc4fdb108fb9a23b4f0b46a172b37056"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1471,
+      "kind": "validator",
+      "lines": 47,
+      "path": "tools/validate_v0_28_release_metadata.sh",
+      "sha256": "3ad17466e4012f440dfc2d11aaf13c4ad2aa21a0b734e6a0f8edbb2abb532fec"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4343,
+      "kind": "validator",
+      "lines": 151,
+      "path": "tools/validate_v0_29_dashboard_scan_start_background.sh",
+      "sha256": "99cae3144219ae47aea3f36d1baedba7e1a386ad775aab25af3ea7a32148b1cc"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4665,
+      "kind": "validator",
+      "lines": 158,
+      "path": "tools/validate_v0_29_netsniper_scan_ui.sh",
+      "sha256": "239259a23c361144749854cfc657815b1423234f0309bc4e0caca085a2edd744"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1481,
+      "kind": "validator",
+      "lines": 46,
+      "path": "tools/validate_v0_29_release.sh",
+      "sha256": "3d1469c345f901cf79d1111137d0670591760f08c0d69fe7967d934324bb06de"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1819,
+      "kind": "validator",
+      "lines": 59,
+      "path": "tools/validate_v0_29_release_metadata.sh",
+      "sha256": "42b09140502590d180982a911f99815c07f98c610b42afe2e7eff88df4dbd3b5"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3321,
+      "kind": "validator",
+      "lines": 114,
+      "path": "tools/validate_v0_29_scan_start_foundation.sh",
+      "sha256": "958a2e23d7be555a9eebae977daf6993409c9107403a27b75763f84f222f3efd"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4506,
+      "kind": "validator",
+      "lines": 149,
+      "path": "tools/validate_v0_30_dashboard_scan_profile_ui.sh",
+      "sha256": "b9b81d57caa37546c9862a18e17618c89afa44daf064eec70bf69552f36f7e1c"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1106,
+      "kind": "validator",
+      "lines": 38,
+      "path": "tools/validate_v0_30_release.sh",
+      "sha256": "4a4754ec66c2f049635f54592afc0b2da64a1413e9f684d373f2e78f0596cda4"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1730,
+      "kind": "validator",
+      "lines": 48,
+      "path": "tools/validate_v0_30_release_metadata.sh",
+      "sha256": "0bb183c7e874fb39c34cf2feab27c5eaa5e6ecc1fb7fe9555ec5ff54abd65329"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3296,
+      "kind": "validator",
+      "lines": 111,
+      "path": "tools/validate_v0_30_scan_profile_backend.sh",
+      "sha256": "5070a392c9da79a0fd25c4b14ab360ca59187f402798e1032e85610da9b22d92"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5487,
+      "kind": "validator",
+      "lines": 178,
+      "path": "tools/validate_v0_31_dashboard_schedule_api.sh",
+      "sha256": "d85676ea1591381bdba469019cd7189650ce3a70a39cf1358d5c7e27ad77919b"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2131,
+      "kind": "validator",
+      "lines": 64,
+      "path": "tools/validate_v0_31_dashboard_schedule_ui.sh",
+      "sha256": "180793d3298ef21cbfee170916faabf6529bdc46c92b7e34322ac0a17e0b709b"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4692,
+      "kind": "validator",
+      "lines": 163,
+      "path": "tools/validate_v0_31_dashboard_schedule_worker.sh",
+      "sha256": "ec491fdc8763180286cac586fd95fe41a52a4b90d4f4e262e5214b484a25847f"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4566,
+      "kind": "validator",
+      "lines": 145,
+      "path": "tools/validate_v0_31_hourly_monitoring.sh",
+      "sha256": "3bfa014a1355bb1aa011f5ce6a11aef852b3b8a024d5eb27b692bb7bc7545c57"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2069,
+      "kind": "validator",
+      "lines": 63,
+      "path": "tools/validate_v0_31_release.sh",
+      "sha256": "efab9306f02e7c6622ba72ee5a3b93b4049c3a12a53acb2f50a05488c51f8eff"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3509,
+      "kind": "validator",
+      "lines": 95,
+      "path": "tools/validate_v0_31_release_metadata.sh",
+      "sha256": "deff6806fa4c2bc58bb47ddaba7570e519c8e7cbe42827ae7a4dd6b9b9031a35"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5223,
+      "kind": "validator",
+      "lines": 185,
+      "path": "tools/validate_v0_31_scan_result_capture.sh",
+      "sha256": "9b097cdb29f0b962a10d4c948b037bc7c2f3fa4ad263fc5c12190f1fd65fcbdc"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5065,
+      "kind": "validator",
+      "lines": 168,
+      "path": "tools/validate_v0_31_scan_schedule_backend.sh",
+      "sha256": "89db5256b27569d1461713f4eb73714f79c72f9fffdcc859df104c448424e0b3"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2808,
+      "kind": "validator",
+      "lines": 94,
+      "path": "tools/validate_v0_31_schedule_failure_persistence.sh",
+      "sha256": "5d4e37f83a9ea40e85eec35d07cd8759484939bc6b93c90ee5e8f8680ffa5f93"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4330,
+      "kind": "validator",
+      "lines": 150,
+      "path": "tools/validate_v0_31_schedule_runner.sh",
+      "sha256": "29d697d6ecdc5cbe47f2c0ecf4b2a88a5976f2bd1f48e3c21b5e85602a0a1fbb"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2971,
+      "kind": "validator",
+      "lines": 95,
+      "path": "tools/validate_v0_32_dashboard_v2_metadata.sh",
+      "sha256": "531846d5a998a77263ba90b05675e6ae7925d5d2bfb833ffd7f3e4f6131cb099"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3679,
+      "kind": "validator",
+      "lines": 100,
+      "path": "tools/validate_v0_32_netsniper_v2_ingest.sh",
+      "sha256": "6a442fa6a461b6b9b880d431da0d6984c06ba6c7b6b1ae4d0498e56111c165e3"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 997,
+      "kind": "validator",
+      "lines": 36,
+      "path": "tools/validate_v0_32_release.sh",
+      "sha256": "56cb84dd84f6005c4cd2306f58c13dfac8c89564fad10d5f585692aa06f216b2"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3499,
+      "kind": "validator",
+      "lines": 102,
+      "path": "tools/validate_v0_32_release_metadata.sh",
+      "sha256": "0177d59fbcfc52295902016e4af147147ecf40d20d5cb11171ea96d0debde11f"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1406,
+      "kind": "validator",
+      "lines": 46,
+      "path": "tools/validate_v0_33_release.sh",
+      "sha256": "3039a867bab731a4a0a7ad01e81a2bc17337de01a338df32d1d2242d9fa7cc5f"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1796,
+      "kind": "validator",
+      "lines": 48,
+      "path": "tools/validate_v0_33_release_metadata.sh",
+      "sha256": "a33c166636cc336a1fc1a7d87a4968c73f5d5bd346a5e79e584300eca2365d80"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1725,
+      "kind": "validator",
+      "lines": 54,
+      "path": "tools/validate_v0_33_report_validation.sh",
+      "sha256": "22ead1cac3ce6eac4e9e69b90dfaf473cc9e7eb868b1fc3205b83d8dde85f2ff"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3516,
+      "kind": "validator",
+      "lines": 110,
+      "path": "tools/validate_v0_33_trueaegis_storage.sh",
+      "sha256": "d8f267ef86d55a5c99e4fa245abdf10256ba5201792faa08bd2a534daee0f07c"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 6943,
+      "kind": "validator",
+      "lines": 200,
+      "path": "tools/validate_v0_33_validation_dashboard.sh",
+      "sha256": "64fc028dbe721d2c948b06378cb00e4c12384fa081477916f4bafe2e6f9fcb37"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4943,
+      "kind": "validator",
+      "lines": 207,
+      "path": "tools/validate_v0_34_asset_detail_validation_correlation.sh",
+      "sha256": "a21c74bd63f3e4a627b457fd7624914f8fd36cfde17fae19aeecbda0de18ee11"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1531,
+      "kind": "validator",
+      "lines": 44,
+      "path": "tools/validate_v0_34_dashboard_donut_chart.sh",
+      "sha256": "70e6da039840f15044e3c24a46c35757c2bf73d0d3ca758c0d072b5b0815b8a7"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1784,
+      "kind": "validator",
+      "lines": 48,
+      "path": "tools/validate_v0_34_dashboard_risk_distribution_scope.sh",
+      "sha256": "9c279922690346e468c3220e38a9be1d08f6c4b356faaebe939a18ee61cdf743"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1310,
+      "kind": "validator",
+      "lines": 40,
+      "path": "tools/validate_v0_34_release.sh",
+      "sha256": "0aae3bc7f9d07a2d5ddb24a3b39f0bac96b0c5e92b7dee3dc478ea0987b5cd79"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1069,
+      "kind": "validator",
+      "lines": 27,
+      "path": "tools/validate_v0_34_release_metadata.sh",
+      "sha256": "e89a9949a4e718b0985dec93bebaf043b955c4651c6d719ef50498e323767f67"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4664,
+      "kind": "validator",
+      "lines": 166,
+      "path": "tools/validate_v0_34_report_correlation.sh",
+      "sha256": "f9bf3014a326933f8da9299ea0e076463bbc6e31ce5e4d00fa03fc97e1d7a422"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 7934,
+      "kind": "validator",
+      "lines": 224,
+      "path": "tools/validate_v0_34_scan_auto_ingest_hotfix.sh",
+      "sha256": "79ae1a8474e56fd6a22df24a75ff3d8ecf7d5300644573cea383c266423427d0"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 865,
+      "kind": "validator",
+      "lines": 20,
+      "path": "tools/validate_v0_34_validation_correlation_dashboard.sh",
+      "sha256": "ab7413d6a8b7d95ec23cdfccca79384bd1d67ad50e08dd24fa084ad849ba1506"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5277,
+      "kind": "validator",
+      "lines": 175,
+      "path": "tools/validate_v0_34_validation_correlation_storage.sh",
+      "sha256": "3227092d573b01ffb2d26d6e59311e0574ab40fc852ac48d01eab61b06190b63"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2807,
+      "kind": "validator",
+      "lines": 87,
+      "path": "tools/validate_v0_35_release.sh",
+      "sha256": "99a65b9922ba2ef0b3acc2bcd6e0395f114be3ef6ed43bb818ce9b1f39f62a30"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 8365,
+      "kind": "validator",
+      "lines": 252,
+      "path": "tools/validate_v0_35_trueaegis_auto_import.sh",
+      "sha256": "9e00bb20d6f7ec4cc85ceef180f94c314d5d1db4db788aa8390e9ad325e1a6dc"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 7365,
+      "kind": "validator",
+      "lines": 216,
+      "path": "tools/validate_v0_35_trueaegis_execution_worker.sh",
+      "sha256": "01c2b3e060c9e4c3003a81b32c5581c71ff1be2f75563a6f22775ec6f4fb530f"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4348,
+      "kind": "validator",
+      "lines": 120,
+      "path": "tools/validate_v0_35_trueaegis_job_storage.sh",
+      "sha256": "8cbdb14528cd2325a326489471cfb9d711cb83c5c53419e93ba0d5ab84d4d1d0"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 6477,
+      "kind": "validator",
+      "lines": 168,
+      "path": "tools/validate_v0_35_trueaegis_orchestration_context.sh",
+      "sha256": "a05b1203ac3b46c6ccc0c12df148322028d544005b69288a98ad20081f9ce598"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2885,
+      "kind": "validator",
+      "lines": 78,
+      "path": "tools/validate_v0_36_local_time_formatting.sh",
+      "sha256": "9cc738b430652353a8120de87188217c053a104c974b456d6315a8407f0a0efc"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2834,
+      "kind": "validator",
+      "lines": 82,
+      "path": "tools/validate_v0_36_operator_reset_page.sh",
+      "sha256": "183ca83b81e356531e5d2961e59a37c44744faf0e87ac62f8c3998c20f0dd867"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2496,
+      "kind": "validator",
+      "lines": 86,
+      "path": "tools/validate_v0_36_release.sh",
+      "sha256": "1a293c4bec46e53df9297cf78d7ecd5ae25923b3b4889c943885186d483133f6"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3125,
+      "kind": "validator",
+      "lines": 88,
+      "path": "tools/validate_v0_36_scheduled_scan_worker.sh",
+      "sha256": "6f708db0b63415cfbd3f9c654df2e0fdae5945e452524c8976bd7137492ad7af"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 13108,
+      "kind": "validator",
+      "lines": 395,
+      "path": "tools/validate_v0_36_telemetry_cleanup.sh",
+      "sha256": "db39792dd2a9dbbcf078baa5a21e098262c74ef542b1d5b7b33fd9f9fddaeeea"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3522,
+      "kind": "validator",
+      "lines": 86,
+      "path": "tools/validate_v0_36_telemetry_cleanup_dashboard_api.sh",
+      "sha256": "02767480d96ea876c64566f3d79cf7a9f60337e3611a4d3e05addb520031292a"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 978,
+      "kind": "validator",
+      "lines": 37,
+      "path": "tools/validate_v0_37_dashboard_query_import.sh",
+      "sha256": "0c1e57968c4296f993180e52d7ddb88fe38a29365c6e1384098fe9483e37085f"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 9021,
+      "kind": "validator",
+      "lines": 277,
+      "path": "tools/validate_v0_37_latest_change_summary.sh",
+      "sha256": "29b2d3d03920ff8eba574dd6369301551df0df3469b612e52d12ea4b37b41ae9"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4125,
+      "kind": "validator",
+      "lines": 140,
+      "path": "tools/validate_v0_37_release.sh",
+      "sha256": "4518347c5669010b1bae08e5069587da0eb742925dabfba48fd20809e1259d16"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 6850,
+      "kind": "validator",
+      "lines": 178,
+      "path": "tools/validate_v0_37_reset_audit_visibility.sh",
+      "sha256": "3498e1f5d7f158edbd8e04715ca281f9c4b161a25a15d6bd8f8b594236568045"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 7461,
+      "kind": "validator",
+      "lines": 239,
+      "path": "tools/validate_v0_37_scan_freshness.sh",
+      "sha256": "ed6e8805e7f24b6f82565e1b803cf7b4b64b73ce09e1f2a643658fa026912bd7"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5531,
+      "kind": "validator",
+      "lines": 183,
+      "path": "tools/validate_v0_37_schedule_block_retry.sh",
+      "sha256": "2d2e685c6cfe9712e3e90eae008be4f08ffd131a85ae2ca80e359f55ca478931"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4743,
+      "kind": "validator",
+      "lines": 143,
+      "path": "tools/validate_v0_37_schedule_history.sh",
+      "sha256": "6cf980e180cbddad562226bf1eee40edda857bbd71ba3a56c1ff9cdb3ecfa8d6"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2771,
+      "kind": "validator",
+      "lines": 101,
+      "path": "tools/validate_v0_37_schedule_id_migration_order.sh",
+      "sha256": "309a21dfcbddb64b490389307bcbcd0bae2b5e2bc23d92e108601914ee156f1b"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5699,
+      "kind": "validator",
+      "lines": 189,
+      "path": "tools/validate_v0_37_stale_scan_recovery.sh",
+      "sha256": "3b685ef61c3835903e5e469680dad2e8825cf95f29d1ed6492010d5426d3b8d7"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1028,
+      "kind": "validator",
+      "lines": 38,
+      "path": "tools/validate_v0_38_documentation_accuracy.sh",
+      "sha256": "bdd9e50e09e2515fbffaa08230bc657159ce848e86e5fb3ccd317209125d72e5"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2924,
+      "kind": "validator",
+      "lines": 107,
+      "path": "tools/validate_v0_38_due_schedule_followup_intent.sh",
+      "sha256": "de07818cca0747128b39945fa773665e32de267131aa0eb6d5b73939646e5b7e"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5541,
+      "kind": "validator",
+      "lines": 190,
+      "path": "tools/validate_v0_38_release.sh",
+      "sha256": "01ea910d5fbc6f37eb5411d8f0392382dbc8b136f2b2ca061df286dfbcb7ebbc"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 12655,
+      "kind": "validator",
+      "lines": 361,
+      "path": "tools/validate_v0_38_trueaegis_execution_modes.sh",
+      "sha256": "36dac30b146538f9873c007f83cecee4ea402c1d4bd76b84fc54ebf77e4f9bd2"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 12430,
+      "kind": "validator",
+      "lines": 376,
+      "path": "tools/validate_v0_38_trueaegis_followup_execution.sh",
+      "sha256": "296baad3eb9dd6ed3bb8d514db378c38af58f66deabf9d7e76b9cf89f747780c"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5583,
+      "kind": "validator",
+      "lines": 182,
+      "path": "tools/validate_v0_38_trueaegis_followup_intent.sh",
+      "sha256": "ab7aa87a549a3c705e71d5ff621025828d8cd50ba251fcf4ea758d15fa1d1c81"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 9759,
+      "kind": "validator",
+      "lines": 323,
+      "path": "tools/validate_v0_38_trueaegis_followup_planner.sh",
+      "sha256": "a75090b3475cdfa8eab5b301266ba323cd8e08590c9aa6a24ba3b40b4aa8d345"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 11107,
+      "kind": "validator",
+      "lines": 347,
+      "path": "tools/validate_v0_38_trueaegis_followup_queue.sh",
+      "sha256": "45b77ad38dda3de625373c841873742d5ad68f0b3c942f323b5a525a73e5451a"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 8368,
+      "kind": "validator",
+      "lines": 252,
+      "path": "tools/validate_v0_38_trueaegis_ingest_provenance.sh",
+      "sha256": "7c165acc182a2803071415ea995166466a33bfc3cb94f387b50586fa49bd9902"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1755,
+      "kind": "validator",
+      "lines": 67,
+      "path": "tools/validate_v0_39_release_gate.sh",
+      "sha256": "ce8fb89959325d2f7e452e8ff82b8efd98c4ea0df4fadc1bb03a322e4eafae2b"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 7431,
+      "kind": "validator",
+      "lines": 231,
+      "path": "tools/validate_v0_39_release_metadata.sh",
+      "sha256": "2613c51918ee9c90de923eedde86307f779cf956c8cbc9eb628a862086822710"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4071,
+      "kind": "validator",
+      "lines": 137,
+      "path": "tools/validate_v0_39_v0_38_compatibility.sh",
+      "sha256": "1086a5aeeca0f85cf3b465a06d16ddba0a64d3b0880a3f5c2fdadbe93687a95c"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2356,
+      "kind": "validator",
+      "lines": 86,
+      "path": "tools/validate_v0_7_classification_baseline_noise_fix.sh",
+      "sha256": "365bae14a55803d310d9cbbd541b9f27e40bb45841d05f5ba956e7a8640fe4bb"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4290,
+      "kind": "validator",
+      "lines": 134,
+      "path": "tools/validate_v0_7_classification_events.sh",
+      "sha256": "6a28bc130cd511ffb77db1d2d9f537bfd8db3e889d0714e5e2d0444675fad9e3"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3355,
+      "kind": "validator",
+      "lines": 114,
+      "path": "tools/validate_v0_7_classification_storage.sh",
+      "sha256": "3949ce57d05a7207c6e717a047ad8d5f682ef01f07102397a2f71d99059f6768"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4881,
+      "kind": "validator",
+      "lines": 180,
+      "path": "tools/validate_v0_8_5_dashboard_column_alignment.sh",
+      "sha256": "76968077a03979cdb5c687855cdb813280c7a91cd9bb967d7d26bf909907c4d6"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1473,
+      "kind": "validator",
+      "lines": 59,
+      "path": "tools/validate_v0_8_5_dashboard_severity_colors.sh",
+      "sha256": "ad4ebff3ba294e02835b4aa33e33a75c3130f1bdd7acfd55945c587814c200ba"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2498,
+      "kind": "validator",
+      "lines": 87,
+      "path": "tools/validate_v0_8_5_dashboard_tables.sh",
+      "sha256": "3447d160136cd23707ef80008d3fe8d595668dbb5c0bcf9fcc7979f4aca334b3"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2480,
+      "kind": "validator",
+      "lines": 79,
+      "path": "tools/validate_v0_8_5_docs.sh",
+      "sha256": "f16db37634bcd34d6638eee50324657ee077750e85aa4b3cc52f1af25b8988e4"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4856,
+      "kind": "validator",
+      "lines": 169,
+      "path": "tools/validate_v0_8_5_recommendation_polish.sh",
+      "sha256": "fc54325f9bf4117226810f9d1acda3479a8a32286a6dbe3d81b26197b5d0ac44"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3925,
+      "kind": "validator",
+      "lines": 145,
+      "path": "tools/validate_v0_8_5_role_aware_recommendations.sh",
+      "sha256": "de584462ea3e770e373129f52697206cc7ced855f6c191e49cceb5ff57cdc505"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3801,
+      "kind": "validator",
+      "lines": 134,
+      "path": "tools/validate_v0_8_5_role_aware_risk.sh",
+      "sha256": "1c51437995818719a44328a4eeda9e4cf12ed393c28f9d8848faddb0847f81f6"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2189,
+      "kind": "validator",
+      "lines": 85,
+      "path": "tools/validate_v0_8_6_release.sh",
+      "sha256": "0ae536243acb0a02512479601e15f8b9a9c3a4f985ba1e56e284acd92a601e64"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3833,
+      "kind": "validator",
+      "lines": 127,
+      "path": "tools/validate_v0_8_intelligence_summary.sh",
+      "sha256": "4ab9b8d4013e91619f3f57f7e1bd573c0b4152443b86093c8df50eb577755da7"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2240,
+      "kind": "validator",
+      "lines": 83,
+      "path": "tools/validate_v0_8_report_intelligence_summary.sh",
+      "sha256": "067c6e7531589e0d9dc9ea3543b3ecb668f07bf61bd75fdb4c4bb1146d44916b"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4272,
+      "kind": "validator",
+      "lines": 145,
+      "path": "tools/validate_v0_8_visibility.sh",
+      "sha256": "1fac30c5ab2dd402b8b8224947b5de23ef91e014dc663a440e6c1813f899443c"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4825,
+      "kind": "validator",
+      "lines": 181,
+      "path": "tools/validate_v0_9_asset_investigation_detail.sh",
+      "sha256": "d3f22cba630717f4a33c2661eaa15a76c66894be9ae390bd5ece7091c35996af"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1901,
+      "kind": "validator",
+      "lines": 67,
+      "path": "tools/validate_v0_9_clickable_investigation_rows.sh",
+      "sha256": "1653006148159911dbf133e756e10191c17ed94e79dbb098a776791ed2a2e9d7"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 5435,
+      "kind": "validator",
+      "lines": 197,
+      "path": "tools/validate_v0_9_dashboard_investigation_controls.sh",
+      "sha256": "fa004a523084a6cde4b9c2bb2f0a11cbb9542b7481d6ef29e05e0ed3bf5ff3ef"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3514,
+      "kind": "validator",
+      "lines": 111,
+      "path": "tools/validate_v0_9_dashboard_tabs.sh",
+      "sha256": "abcf0d334542e62a0a01016e1622bf5ae2eeeb2f15e98d74b73e5087d5771707"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4299,
+      "kind": "validator",
+      "lines": 157,
+      "path": "tools/validate_v0_9_persistent_investigation_status.sh",
+      "sha256": "d15b0d5c96bdde64c16430954d4ae1a95d3e5baf85d0f5065252e37a714c7248"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3486,
+      "kind": "validator",
+      "lines": 112,
+      "path": "tools/validate_v0_9_release.sh",
+      "sha256": "f5fee0b91b55df00c25b060ec0a697f2d36e512f6fa24c44d706f955b7461af9"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3126,
+      "kind": "legacy_verifier",
+      "lines": 100,
+      "path": "tools/verify_v0_7_intelligence_pipeline.sh",
+      "sha256": "79738879420c09741788fd827dca83d9d28c3eb78ff40f7224d7f58e23afe553"
+    }
+  ],
+  "retired_lines": 24873,
+  "retired_nonvalidator_tool_count": 1,
+  "retired_validator_count": 200,
+  "retirement_scope": "Retire all pre-v0.39 validator scaffolding, obsolete v0.39 release-only wrappers, the unversioned legacy README validator, and the v0.7 final verifier. Replace five report-stage roots with one current v0.44.1 report-contract validator.",
+  "source_release": "0.44.0"
+}
