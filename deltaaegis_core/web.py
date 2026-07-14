@@ -1811,7 +1811,7 @@ def _command_dashboard_impl(args):
 
 
     class DeltaAegisDashboardHandler(BaseHTTPRequestHandler):
-        server_version = "DeltaAegisDashboard/0.43.0"
+        server_version = "DeltaAegisDashboard/0.44.0"
 
         def log_message(self, fmt, *handler_args):
             if not args.quiet:

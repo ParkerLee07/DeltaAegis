@@ -1,38 +1,54 @@
-# DeltaAegis v0.43 Repository Audit
+# DeltaAegis v0.44 Repository Audit
 
-Schema: `deltaaegis-repository-audit-v1`
+Schema: `deltaaegis-repository-audit-v2`
 
-This is a deterministic, read-only inventory of the v0.43.0 release candidate and its architecture-baseline artifacts. Regenerate it with `python3 tools/audit_v0_43_repository.py --write`.
+This deterministic inventory describes the v0.44.0 Modular Core Foundation release candidate. Regenerate it with `python3 tools/audit_v0_44_repository.py --write`.
 
 ## Inventory summary
 
 | Measure | Count |
 |---|---:|
-| Repository files in audit scope | 336 |
+| Repository files in audit scope | 342 |
 | `deltaaegis.py` lines | 34016 |
-| Top-level functions | 662 |
-| Top-level classes | 6 |
+| Root top-level functions | 662 |
+| Root top-level classes | 6 |
+| Internal core modules | 8 |
 | Distinct CLI commands | 67 |
-| Distinct `/api` route literals | 53 |
+| Distinct `/api` route literals | 57 |
 | Declared schema tables | 26 |
-| Validator scripts | 274 |
+| Validator scripts | 278 |
 | Validator version groups | 39 |
 
-Source SHA-256: `628584689f86c76acde428531eae17f9c0731326877cfc60d4ff68f64fd4cd44`
+Root source SHA-256: `2cdde45c69b84dea354fa64555665428fb514106dd9f0b4dab2e728e71318e06`
+
+## Modular core inventory
+
+| Module | Lines | Functions | Classes | Internal dependencies | SHA-256 |
+|---|---:|---:|---:|---|---|
+| `deltaaegis_core/auth.py` | 1234 | 40 | 2 | None | `a219c97ce1b73744567866959fb61365202bb36d81697d1d39eda553c702e11f` |
+| `deltaaegis_core/config.py` | 76 | 1 | 1 | None | `5155b29f0cf665989722b235e58104f9d39276bedbf6f4fbf9ffe2888e8719cb` |
+| `deltaaegis_core/db.py` | 25 | 1 | 0 | None | `8637f696f78a861a2d2f1ea00e5e671a1f5dd239659fcb99eb16b6c9154e3488` |
+| `deltaaegis_core/ingest.py` | 788 | 25 | 1 | `auth` | `321d00cfeb0eee57f6fb9bdae0d50adc51e6ad5ded1325cd20a3cbd77057d7c9` |
+| `deltaaegis_core/jobs.py` | 1857 | 46 | 1 | `auth` | `11ae9f4c1c16dc4c362c441ee5c1dabef0d69634a117d4added03fc9b34ee3d5` |
+| `deltaaegis_core/reports.py` | 796 | 37 | 1 | None | `26b5ddf1e2f93261f510dccb3b76636f5e860fc8b71974d7921edf5a83301e90` |
+| `deltaaegis_core/sites.py` | 654 | 20 | 0 | `auth`, `ingest` | `a59a9ab1fdd700ef5b1be1957e35d7e11c84c500e786fac6eafa5293b32d84ce` |
+| `deltaaegis_core/web.py` | 3736 | 15 | 0 | `auth` | `d30b193820bca8ebbe2e03dd3912e5c6db65aac8d41f360f749b694df1191261` |
+
+Forbidden imports of the root `deltaaegis` module from internal core modules: None detected.
 
 ## Findings and disposition
 
 | ID | Severity | Area | Evidence | Planned disposition |
 |---|---|---|---|---|
-| DA043-001 | HIGH | module boundaries | deltaaegis.py has 34016 lines and 662 top-level functions. | Map and incrementally extract responsibilities in v0.44; do not perform a broad v0.43 rewrite. |
-| DA043-002 | HIGH | source-order coupling | Repeated top-level function names: dashboard_assets_payload, dashboard_index_html, dashboard_operator_session_shell_html. | Preserve behavior with characterization tests, then remove late overrides during owned v0.44 extractions. |
-| DA043-003 | MEDIUM | storage ownership | 26 table names are declared from the monolithic source bootstrap/migration path. | Introduce the migration ledger in v0.45 after the v0.44 database boundary is extracted. |
-| DA043-004 | MEDIUM | HTTP/API ownership | 53 distinct /api route literals occur in the application source. | Inventory current routes now; introduce the stable /api/v1 contract in v0.46. |
-| DA043-005 | MEDIUM | validation estate | 274 validator scripts span 39 version groups. | Record contract ownership before retiring any validator; the v0.43 gate must compose focused validators exactly once. |
-| DA043-006 | MEDIUM | documentation | 1 known stale current-architecture document was identified. | Use docs/architecture/overview.md as current authority and reconcile historical prose during v0.44. |
-| DA043-007 | MEDIUM | TrueAegis compatibility | TrueAegis is enforced by an execution/output contract but has no pinned semantic-version range in the current repository. | Publish or pin a TrueAegis semantic version and fixture contract before DeltaAegis v1.0. |
+| DA044-001 | MEDIUM | compatibility facade | deltaaegis.py remains 34016 lines with 662 top-level functions; the eight core modules contain 9166 lines. | Retain the facade through the planned migration/API releases; continue only owned incremental extraction. |
+| DA044-002 | MEDIUM | source-order coupling | Repeated top-level function names in the compatibility facade: dashboard_assets_payload, dashboard_index_html, dashboard_operator_session_shell_html. | Remove only with characterization evidence and explicit compatibility ownership. |
+| DA044-003 | MEDIUM | storage migrations | 26 table names remain declared through the root-owned schema bootstrap. | Introduce the forward-only migration ledger and supported upgrade paths in v0.45. |
+| DA044-004 | MEDIUM | HTTP/API contract | 57 unversioned /api route literals remain implementation endpoints. | Introduce /api/v1, OpenAPI, CSRF, and deprecation policy implementation in v0.46. |
+| DA044-005 | MEDIUM | validation estate | 278 validator scripts span 39 version groups. | Keep flat release composition and retire historical validators only with replacement-contract evidence. |
+| DA044-006 | MEDIUM | TrueAegis compatibility | TrueAegis remains contract-validated but not pinned to a published semantic-version range. | Publish or pin the supported TrueAegis range before v1.0. |
+| DA044-007 | LOW | documentation | 1 known historical architecture document marker remains. | Keep docs/architecture/overview.md authoritative and clean historical prose only in an owned documentation change. |
 
-## Duplicate top-level definitions
+## Duplicate root definitions
 
 | Name | Definition lines |
 |---|---|
@@ -40,17 +56,15 @@ Source SHA-256: `628584689f86c76acde428531eae17f9c0731326877cfc60d4ff68f64fd4cd4
 | `dashboard_index_html` | 24979, 25005, 25164, 25282, 26280 |
 | `dashboard_operator_session_shell_html` | 26304, 26442, 26936 |
 
-These definitions are classified as source-order coupling. The audit does not assume that the earlier definitions are unreachable or safe to delete.
-
 ## Command, route, and schema catalogs
 
 ### CLI commands (67)
 
 `access-audit`, `ack`, `alert-detail`, `alert-notes`, `alerts`, `annotate-asset`, `api-token-create`, `api-tokens`, `approve`, `asset`, `asset-annotations`, `asset-notes`, `asset-risk`, `asset-timeline`, `assets`, `backup`, `backup-catalog`, `backup-retention-execute`, `backup-retention-preview`, `backup-verify`, `dashboard`, `events`, `health`, `ingest`, `intelligence`, `intelligence-host`, `intelligence-hosts`, `investigate-asset`, `investigation-center`, `latest`, `menu`, `paths`, `port-behavior`, `report`, `restore-cutover-execute`, `restore-cutover-preview`, `restore-rehearsal`, `risk`, `scan-jobs`, `scan-start`, `schedule-create`, `schedule-delete`, `schedule-disable`, `schedule-enable`, `schedule-list`, `schedule-run-due`, `scopes`, `site-archive`, `site-assign-scope`, `site-create`, `site-description`, `site-list`, `site-remove-scope`, `site-rename`, `site-show`, `snapshots`, `summary`, `suppress`, `ticket-evidence`, `ticket-history`, `ticket-list`, `ticket-status`, `user-create`, `user-password`, `users`, `validation-ingest`, `validations`
 
-### API route literals (53)
+### API route literals (57)
 
-`/api/access-audit`, `/api/admin/users`, `/api/alerts`, `/api/annotations`, `/api/asset`, `/api/assets`, `/api/current-risk`, `/api/current-state`, `/api/events`, `/api/intelligence-host`, `/api/investigate-asset`, `/api/investigation-center`, `/api/latest-network-changes`, `/api/netsniper/hourly-monitoring`, `/api/netsniper/job-detail`, `/api/netsniper/scan-cancel`, `/api/netsniper/scan-start`, `/api/netsniper/schedule-create`, `/api/netsniper/schedule-delete`, `/api/netsniper/schedule-disable`, `/api/netsniper/schedule-enable`, `/api/netsniper/schedule-run-due`, `/api/netsniper/stale-scan-fail`, `/api/netsniper/status`, `/api/port-behavior`, `/api/risk`, `/api/scan-context`, `/api/scan-freshness`, `/api/scan-jobs`, `/api/scopes`, `/api/session`, `/api/site-archive`, `/api/site-assign-scope`, `/api/site-create`, `/api/site-description`, `/api/site-detail`, `/api/site-management`, `/api/site-remove-scope`, `/api/site-rename`, `/api/sites`, `/api/summary`, `/api/telemetry-cleanup/audit-events`, `/api/telemetry-cleanup/clear-all`, `/api/telemetry-cleanup/preview`, `/api/ticket-evidence`, `/api/ticket-status`, `/api/trueaegis-jobs`, `/api/trueaegis/context`, `/api/trueaegis/run`, `/api/validation-correlations`, `/api/validation-ingest`, `/api/validation-summary`, `/api/validations`
+`/api/access-audit`, `/api/admin/users`, `/api/alerts`, `/api/annotations`, `/api/asset`, `/api/assets`, `/api/current-risk`, `/api/current-state`, `/api/events`, `/api/intelligence-host`, `/api/investigate-asset`, `/api/investigation-center`, `/api/latest-network-changes`, `/api/netsniper/hourly-monitoring`, `/api/netsniper/import-latest`, `/api/netsniper/job-detail`, `/api/netsniper/scan-cancel`, `/api/netsniper/scan-start`, `/api/netsniper/schedule-`, `/api/netsniper/schedule-create`, `/api/netsniper/schedule-delete`, `/api/netsniper/schedule-disable`, `/api/netsniper/schedule-enable`, `/api/netsniper/schedule-history`, `/api/netsniper/schedule-run-due`, `/api/netsniper/schedules`, `/api/netsniper/stale-scan-fail`, `/api/netsniper/status`, `/api/port-behavior`, `/api/risk`, `/api/scan-context`, `/api/scan-freshness`, `/api/scan-jobs`, `/api/scopes`, `/api/session`, `/api/site-archive`, `/api/site-assign-scope`, `/api/site-create`, `/api/site-description`, `/api/site-detail`, `/api/site-management`, `/api/site-remove-scope`, `/api/site-rename`, `/api/sites`, `/api/summary`, `/api/telemetry-cleanup/audit-events`, `/api/telemetry-cleanup/clear-all`, `/api/telemetry-cleanup/preview`, `/api/ticket-evidence`, `/api/ticket-status`, `/api/trueaegis-jobs`, `/api/trueaegis/context`, `/api/trueaegis/run`, `/api/validation-correlations`, `/api/validation-ingest`, `/api/validation-summary`, `/api/validations`
 
 ### Schema tables (26)
 
@@ -95,7 +109,7 @@ These definitions are classified as source-order coupling. The audit does not as
 | v0.41 | 12 |
 | v0.42 | 18 |
 | v0.43 | 6 |
-| v0.44 | 10 |
+| v0.44 | 14 |
 | v0.7 | 3 |
 | v0.8 | 11 |
 | v0.9 | 6 |
@@ -104,19 +118,12 @@ These definitions are classified as source-order coupling. The audit does not as
 
 | Path | Evidence | Disposition |
 |---|---|---|
-| `docs/architecture.md` | Historical v0.8.5 architecture narrative; superseded as the current map by docs/architecture/overview.md. | Retain as historical context until v0.44 decides whether to archive or merge it. |
-
-## Dependency surface
-
-Top-level Python imports: `__future__`, `argparse`, `collections`, `dataclasses`, `datetime`, `deltaaegis_core`, `hashlib`, `hmac`, `html`, `ipaddress`, `json`, `os`, `pathlib`, `re`, `secrets`, `signal`, `sqlite3`, `subprocess`, `sys`, `tempfile`, `threading`, `time`, `typing`, `urllib`, `uuid`, `xml`
-
-The runtime remains standard-library based. NetSniper, TrueAegis, Node.js, Git, browsers, and supported platform expectations are defined in `SUPPORTED_VERSIONS.md`.
+| `docs/architecture.md` | Historical v0.8.5 narrative; docs/architecture/overview.md is current. | Retain as historical context until a dedicated documentation cleanup owns it. |
 
 ## Deferred work map
 
-| Release | Owned work from this audit |
+| Release | Owned work after v0.44 |
 |---|---|
-| v0.44 | Incremental module extraction and removal of characterized source-order overrides |
 | v0.45 | Migration ledger, supported upgrades, and backup-integrated recovery |
 | v0.46 | `/api/v1`, OpenAPI, CSRF, sessions/tokens, and web security headers |
 | v0.47 | Sensor/scope identity and overlapping CIDRs |
@@ -125,7 +132,7 @@ The runtime remains standard-library based. NetSniper, TrueAegis, Node.js, Git, 
 
 ## Audit constraints
 
-- No runtime source or database schema is changed by this audit.
-- Counts use Git cached and non-ignored untracked candidate files, excluding runtime data roots and this generated report.
-- A finding is architecture debt unless a focused defect reproduction proves otherwise.
+- The audit is read-only except when explicitly writing its deterministic Markdown report.
+- Counts use Git cached and non-ignored untracked candidate files and exclude runtime data roots and the generated report.
+- v0.44 changes module ownership but does not change the database schema or introduce a stable API.
 - No historical validator is removed without replacement-contract evidence.

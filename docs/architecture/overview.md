@@ -1,10 +1,10 @@
 # DeltaAegis Architecture Overview
 
-Status: v0.43.0 current-state map and v1.0 extraction baseline
+Status: v0.44.0 modular core foundation and v1.0 boundary map
 
 ## System role
 
-DeltaAegis is the durable history, comparison, investigation, orchestration, and reporting layer between NetSniper telemetry and an operator. It is currently a single Python application backed by SQLite. TrueAegis is an optional defensive validation producer.
+DeltaAegis is the durable history, comparison, investigation, orchestration, and reporting layer between NetSniper telemetry and an operator. It is a single deployable standard-library Python application backed by SQLite, with a repository-root compatibility facade and an internal modular core package. TrueAegis is an optional defensive validation producer.
 
 ```mermaid
 flowchart TD
@@ -34,7 +34,7 @@ flowchart TD
 | Troubleshooter | `tools/deltaaegis_troubleshooter.py` | Read-mostly diagnostics and bounded repair guidance | Hidden mutation of active evidence |
 | Validation estate | `tools/validate_*` | Release contracts and predecessor compatibility | Unowned duplicate execution graphs |
 
-The current single-file organization is deliberate historical accumulation, not the v1.0 target. Late function redefinitions and appended compatibility layers make source order significant. v0.43 records that risk; v0.44 performs incremental extraction behind compatibility tests.
+The repository-root facade remains deliberately compatible with historical imports and validators, but configuration, database connection policy, authentication, ingest, Sites, durable Jobs policy, Reports, and dashboard web ownership now live in explicit internal modules. Remaining root-owned lifecycle, schema-bootstrap, backup, and process-orchestration responsibilities stay mapped work rather than permission for a broad rewrite.
 
 ## Runtime process model
 
@@ -84,11 +84,11 @@ Trust rules:
 
 ## Current API boundary
 
-The dashboard uses unversioned `/api/*` endpoints implemented by the local handler in `deltaaegis.py`. They are authenticated implementation endpoints, not yet a stable third-party contract. ADR 0003 reserves `/api/v1` for the stable API introduced in v0.46.
+The dashboard uses unversioned `/api/*` endpoints implemented by the local handler in `deltaaegis_core/web.py` behind the root compatibility facade. They are authenticated implementation endpoints, not yet a stable third-party contract. ADR 0003 reserves `/api/v1` for the stable API introduced in v0.46.
 
-## v0.44 extraction map
+## v0.44 modular boundary result
 
-Extraction must be incremental and behavior-preserving. The intended ownership map is:
+Extraction was completed incrementally behind characterization and predecessor-compatibility tests. The resulting ownership map is:
 
 | Target package | First responsibility moved | Compatibility seam |
 |---|---|---|
@@ -105,7 +105,7 @@ The repository-root `deltaaegis.py` remains the executable and import
 compatibility facade.  ADR 0010 records why the internal package cannot be
 named `deltaaegis` while that facade exists.
 
-No extraction should mix functional redesign with file movement. A moved responsibility retains its existing validator coverage before cleanup begins.
+The completed extraction did not mix functional redesign with file movement. Each moved responsibility retains its existing validator coverage, public facade, and frozen behavior evidence.
 
 Stages 1–8 now implement the configuration, connection-policy, authentication,
 NetSniper ingest, Sites, durable Jobs policy, Reports, and dashboard web boundaries shown above. The root module intentionally retains
@@ -127,4 +127,4 @@ and historical validators therefore continue to use the same public surface.
 
 ## Known architecture debt
 
-The reproducible inventory and disposition are maintained in `docs/repository-audit.md`. The highest-risk items are the monolithic source boundary, late top-level function redefinitions, inline storage/API/UI ownership, stale historical architecture prose, and the size of the validator estate. These are mapped work, not authorization for a broad v0.43 rewrite.
+The reproducible inventory and disposition are maintained in `docs/repository-audit.md`. The highest-risk items are the monolithic source boundary, late top-level function redefinitions, inline storage/API/UI ownership, stale historical architecture prose, and the size of the validator estate. These are mapped work, not authorization for a broad post-v0.44 rewrite.

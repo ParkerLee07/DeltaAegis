@@ -46,7 +46,7 @@ bash -n tools/validate_v0_44_stage1_2_all.sh
 echo "PASS: syntax and whitespace"
 
 python3 tools/validate_v0_44_stage1_2.py
-python3 tools/audit_v0_43_repository.py --check
+python3 tools/audit_v0_44_repository.py --check
 echo "PASS: deterministic repository audit"
 
 echo "[v0.44 stage 1-2] predecessor behavior compatibility"

@@ -86,7 +86,7 @@ git -C "$compat_root/repository" switch -q -C main
 rm -rf "$compat_root"
 trap - EXIT
 
-python3 tools/audit_v0_43_repository.py --check
+python3 tools/audit_v0_44_repository.py --check
 echo "PASS: deterministic repository audit"
 
 echo "[v0.44 stages 5-7] complete predecessor behavior compatibility"

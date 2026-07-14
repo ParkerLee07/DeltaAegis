@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Parker Lee
-"""DeltaAegis v0.43.0: Architecture and Stability Baseline.
+"""DeltaAegis v0.44.0: Modular Core Foundation.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -77,7 +77,7 @@ def _report_context() -> _reports.ReportContext:
         operator_triage_summary=operator_triage_summary,
     )
 
-DELTAAEGIS_VERSION = "0.43.0"
+DELTAAEGIS_VERSION = "0.44.0"
 DELTAAEGIS_SECURITY_HOTFIX = "2026-07-13.2"
 DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION = "deltaaegis-backup-manifest-v1"
 DELTAAEGIS_V0_14_COMPATIBILITY_NOTE = "DeltaAegis v0.14.0 — NetSniper Scan Orchestration compatibility retained."
@@ -19974,7 +19974,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.43 Architecture and Stability Baseline</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.44 Modular Core Foundation</span></div>
     </div>
   </header>
 
@@ -33214,7 +33214,7 @@ def command_restore_cutover_execute(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "DeltaAegis v0.43.0 — Architecture and Stability Baseline, "
+            "DeltaAegis v0.44.0 — Modular Core Foundation, "
             "SQLite-consistent backups, verified manifests, "
             "restore rehearsal, guarded retention, active restore "
             "cutover planning and rollback, operator actions, "
