@@ -9,8 +9,8 @@ This deterministic inventory describes the v0.44.0 Modular Core Foundation relea
 | Measure | Count |
 |---|---:|
 | Repository files in audit scope | 145 |
-| `deltaaegis.py` lines | 34016 |
-| Root top-level functions | 662 |
+| `deltaaegis.py` lines | 33843 |
+| Root top-level functions | 661 |
 | Root top-level classes | 6 |
 | Internal core modules | 8 |
 | Distinct CLI commands | 67 |
@@ -19,7 +19,7 @@ This deterministic inventory describes the v0.44.0 Modular Core Foundation relea
 | Validator scripts | 81 |
 | Validator version groups | 6 |
 
-Root source SHA-256: `2cdde45c69b84dea354fa64555665428fb514106dd9f0b4dab2e728e71318e06`
+Root source SHA-256: `de1f255e9ddaeb89dc03b25eb25d162e61bd428ce4731607403057a27f32bc07`
 
 ## Modular core inventory
 
@@ -40,7 +40,7 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 
 | ID | Severity | Area | Evidence | Planned disposition |
 |---|---|---|---|---|
-| DA044-001 | MEDIUM | compatibility facade | deltaaegis.py remains 34016 lines with 662 top-level functions; the eight core modules contain 9166 lines. | Retain the facade through the planned migration/API releases; continue only owned incremental extraction. |
+| DA044-001 | MEDIUM | compatibility facade | deltaaegis.py remains 33843 lines with 661 top-level functions; the eight core modules contain 9166 lines. | Retain the facade through the planned migration/API releases; continue only owned incremental extraction. |
 | DA044-002 | MEDIUM | source-order coupling | Repeated top-level function names in the compatibility facade: dashboard_assets_payload, dashboard_index_html, dashboard_operator_session_shell_html. | Remove only with characterization evidence and explicit compatibility ownership. |
 | DA044-003 | MEDIUM | storage migrations | 26 table names remain declared through the root-owned schema bootstrap. | Introduce the forward-only migration ledger and supported upgrade paths in v0.45. |
 | DA044-004 | MEDIUM | HTTP/API contract | 57 unversioned /api route literals remain implementation endpoints. | Introduce /api/v1, OpenAPI, CSRF, and deprecation policy implementation in v0.46. |
@@ -52,9 +52,9 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 
 | Name | Definition lines |
 |---|---|
-| `dashboard_assets_payload` | 14592, 33997 |
+| `dashboard_assets_payload` | 14592, 33824 |
 | `dashboard_index_html` | 24979, 25005, 25164, 25282, 26280 |
-| `dashboard_operator_session_shell_html` | 26304, 26442, 26936 |
+| `dashboard_operator_session_shell_html` | 26304, 26763 |
 
 ## Command, route, and schema catalogs
 

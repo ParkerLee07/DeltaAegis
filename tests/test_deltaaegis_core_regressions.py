@@ -60,7 +60,7 @@ def make_snapshot(scan_id: str, assets: dict[str, da.AssetObservation], fingerpr
     )
 
 
-class DeltaAegisV02Tests(unittest.TestCase):
+class DeltaAegisCoreRegressionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)

@@ -50,6 +50,57 @@ def main() -> int:
         fail("V1_SCOPE.md does not identify its current planning status")
     print("PASS: v1.0 scope status is current without rewriting the approved baseline")
 
+    source = read("deltaaegis.py")
+    if "_deltaaegis_operator_session_shell_html_v036_telemetry_cleanup_base" in source:
+        fail("dead telemetry-cleanup operator wrapper alias remains")
+    if source.count("def dashboard_operator_session_shell_html() -> str:") != 2:
+        fail("operator-session renderer definition count changed")
+    if source.count("def dashboard_operator_reset_shell_html() -> str:") != 1:
+        fail("operator reset renderer definition count changed")
+
+    behavior = run([
+        sys.executable,
+        "-c",
+        (
+            "import hashlib, json, deltaaegis; "
+            "operator = deltaaegis.dashboard_operator_session_shell_html(); "
+            "reset = deltaaegis.dashboard_operator_reset_shell_html(); "
+            "print(json.dumps({"
+            "'operator_sha256': hashlib.sha256(operator.encode()).hexdigest(), "
+            "'reset_sha256': hashlib.sha256(reset.encode()).hexdigest(), "
+            "'operator_has_reset': 'href=\"/operator/reset\"' in operator, "
+            "'operator_has_cleanup_panel': 'id=\"deltaaegis-telemetry-cleanup-panel\"' in operator, "
+            "'reset_has_receipt': 'function cleanupReceiptText(receipt, fallbackMessage)' in reset, "
+            "'reset_has_audit_refresh': 'loadTelemetryResetAuditEvents();' in reset"
+            "}))"
+        ),
+    ])
+    if behavior.returncode:
+        fail(f"operator/reset rendering characterization failed: {behavior.stderr or behavior.stdout}")
+    rendering = json.loads(behavior.stdout)
+    expected_rendering = {
+        "operator_sha256": "56760638e3e0fe926fed574cbe9f623e3797e7345d1a351cb7591eb139e95218",
+        "reset_sha256": "d4311b30e31dbd49a0e3f854c60eee8ed08d11796e13aacd914bf94e6b959b52",
+        "operator_has_reset": True,
+        "operator_has_cleanup_panel": False,
+        "reset_has_receipt": True,
+        "reset_has_audit_refresh": True,
+    }
+    if rendering != expected_rendering:
+        fail(f"operator/reset rendering changed: {rendering}")
+    print("PASS: dead operator wrapper removed without changing rendered behavior")
+
+    legacy_test = ROOT / "tests/test_deltaaegis_v02.py"
+    current_test = ROOT / "tests/test_deltaaegis_core_regressions.py"
+    if legacy_test.exists() or not current_test.is_file():
+        fail("core regression test file was not renamed")
+    test_source = current_test.read_text(encoding="utf-8")
+    if "DeltaAegisV02Tests" in test_source or "test_deltaaegis_v02" in test_source:
+        fail("core regression tests retain release-specific names")
+    if "class DeltaAegisCoreRegressionTests(unittest.TestCase):" not in test_source:
+        fail("core regression test class name changed")
+    print("PASS: core regression tests use release-neutral names")
+
     troubleshooter_path = ROOT / "tools/deltaaegis_troubleshooter.py"
     troubleshooter = read("tools/deltaaegis_troubleshooter.py")
     for forbidden in (
