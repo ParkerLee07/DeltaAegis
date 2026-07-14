@@ -8,7 +8,7 @@ This deterministic inventory describes the v0.44.1 Repository Hygiene and Valida
 
 | Measure | Count |
 |---|---:|
-| Repository files in audit scope | 148 |
+| Repository files in audit scope | 130 |
 | `deltaaegis.py` lines | 33843 |
 | Root top-level functions | 661 |
 | Root top-level classes | 6 |
@@ -16,7 +16,7 @@ This deterministic inventory describes the v0.44.1 Repository Hygiene and Valida
 | Distinct CLI commands | 67 |
 | Distinct `/api` route literals | 57 |
 | Declared schema tables | 26 |
-| Validator scripts | 84 |
+| Validator scripts | 68 |
 | Validator version groups | 6 |
 
 Root source SHA-256: `c8e51cda413b1c3601906fd58365c8cc8d7cede81535a6eeb7f187becb554fff`
@@ -44,7 +44,7 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 | DA044-002 | MEDIUM | source-order coupling | Repeated top-level function names in the compatibility facade: dashboard_assets_payload, dashboard_index_html, dashboard_operator_session_shell_html. | Remove only with characterization evidence and explicit compatibility ownership. |
 | DA044-003 | MEDIUM | storage migrations | 26 table names remain declared through the root-owned schema bootstrap. | Introduce the forward-only migration ledger and supported upgrade paths in v0.45. |
 | DA044-004 | MEDIUM | HTTP/API contract | 57 unversioned /api route literals remain implementation endpoints. | Introduce /api/v1, OpenAPI, CSRF, and deprecation policy implementation in v0.46. |
-| DA044-005 | LOW | validation estate | 84 validator scripts span 6 version groups; 200 historical validators are preserved by a byte-verified retirement manifest. | Retain the current compatibility floor and require manifest-backed replacement evidence for any further validator retirement. |
+| DA044-005 | LOW | validation estate | 68 validator scripts span 6 version groups; 216 historical validators are preserved by a byte-verified retirement manifest. | Retain the current compatibility floor and require manifest-backed replacement evidence for any further validator retirement. |
 | DA044-006 | MEDIUM | TrueAegis compatibility | TrueAegis remains contract-validated but not pinned to a published semantic-version range. | Publish or pin the supported TrueAegis range before v1.0. |
 | DA044-007 | LOW | documentation | 0 known historical architecture document marker remains. | Keep docs/architecture/overview.md authoritative and clean historical prose only in an owned documentation change. |
 
@@ -75,20 +75,20 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 | Version group | Scripts |
 |---|---:|
 | v0.39 | 15 |
-| v0.40 | 13 |
-| v0.41 | 12 |
-| v0.42 | 18 |
-| v0.43 | 6 |
-| v0.44 | 20 |
+| v0.40 | 11 |
+| v0.41 | 9 |
+| v0.42 | 15 |
+| v0.43 | 1 |
+| v0.44 | 17 |
 
 ## Validator retirement evidence
 
 - Manifest: `docs/v0.44.1-validator-retirement.json`
 - Archive tag: `v0.44.0`
-- Retired tool files: 201
-- Retired validator scripts: 200
-- Retained validator scripts: 84
-- Retained shell-validator inventory: 62
+- Retired tool files: 219
+- Retired validator scripts: 216
+- Retained validator scripts: 68
+- Retained shell-validator inventory: 51
 - Replacement report contract: `tools/validate_v0_44_1_report_contracts.py`
 - Policy: `docs/validation-retention-policy.md`
 

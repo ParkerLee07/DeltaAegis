@@ -3,9 +3,9 @@
 Status: DeltaAegis v0.44.1 repository-hygiene maintenance
 
 DeltaAegis keeps validators required by the current release gate, current staged
-checkpoint wrappers, supported compatibility floor, installation lifecycle
-checks, and repository diagnostics. The default branch is not an archive of
-every validator ever published.
+checkpoint diagnostics, the supported compatibility floor, installation
+lifecycle checks, and repository troubleshooting. The default branch is not an
+archive of every release gate or validator ever published.
 
 ## Current compatibility floor
 
@@ -15,11 +15,10 @@ The retained automated floor covers:
 - v0.40 operator-action behavior;
 - v0.41 data-durability, backup, retention, restore-rehearsal, and guarded-cutover behavior;
 - v0.42 security, logical-site, installation, and license contracts;
-- the complete v0.44 modular-core boundary suite; and
-- the v0.44.1 repository-hygiene and retention release gate.
+- the complete v0.44 modular-core boundary suite and staged diagnostics; and
+- the v0.44.1 repository-hygiene, retention, and durability release gate.
 
-The v0.44.1 report-contract validator replaces the five pre-v0.39 report roots
-formerly called by `tools/validate_v0_44_stage5_7_all.sh`:
+The v0.44.1 report-contract validator replaces five pre-v0.39 report roots:
 
 - `tools/validate_v0_15_port_behavior_report.sh`
 - `tools/validate_v0_16_investigation_center_report.sh`
@@ -33,23 +32,30 @@ rendering, Investigation Command Center triage output, ticket-evidence appendix
 collection and rendering, and TrueAegis correlation reporting without carrying
 obsolete recursive release chains.
 
-## Retired historical validators
+## Retired historical tooling
 
-The v0.44.1 hygiene maintenance removes 200
-validator scripts and 1 legacy
-verifier outside the current compatibility composition. Exact paths, byte
-sizes, line counts, and SHA-256 digests are recorded in
+The v0.44.1 hygiene maintenance retires 219 tool files:
+
+- 216 validator scripts; and
+- 3 non-validator historical tools.
+
+The second retirement wave removes superseded v0.40 through v0.44 release-only
+gates, release metadata, release documentation validators, and the v0.43 audit
+and benchmark generators. Current functional validators and v0.44 staged
+checkpoint wrappers remain available in the working tree.
+
+Exact paths, byte sizes, line counts, and SHA-256 digests are recorded in
 `docs/v0.44.1-validator-retirement.json`.
 
-The verified `v0.44.0` tag preserves the exact pre-retirement contents. Inspect
-a retired file without changing the working tree:
+The verified `v0.44.0` tag preserves every retired file byte-for-byte. Inspect a
+retired file without changing the working tree:
 
 ```bash
 git show v0.44.0:tools/<retired-file>
 ```
 
-Run historical suites from a detached worktree at the relevant release tag
-rather than restoring obsolete scripts to current `main`:
+Run a historical release-only suite from a detached worktree instead of
+restoring obsolete files to current `main`:
 
 ```bash
 temporary="$(mktemp -d)"
@@ -58,11 +64,16 @@ git worktree add --detach "$temporary" v0.44.0
 git worktree remove --force "$temporary"
 ```
 
-## Further retirement
+The frozen v0.43 performance artifacts remain under `docs/`. Their retired
+benchmark generator is available from the same tag when exact historical
+regeneration is required.
 
-Later cleanup may remove additional v0.40-v0.43 release-only scaffolding, but
-only after the v0.44.1 release gate, retained functional compatibility suites,
-troubleshooter graph, CI, and deterministic audit prove that no executable
-dependency remains. Every
-retirement change must update the manifest and preserve the prior tree in an
-immutable release tag.
+## Future retirement requirements
+
+Additional retirement is allowed only when all of the following are true:
+
+1. a current release gate owns the replacement behavior;
+2. the strict troubleshooter graph remains complete and acyclic;
+3. CI and the deterministic repository audit reflect the retained inventory;
+4. exact retired bytes remain available from an immutable release tag; and
+5. the complete disposable release gate passes before commit or publication.

@@ -2,7 +2,8 @@
 
 - Replaced the stale embedded troubleshooter bundle with live repository inventory, strict executable-graph validation, and automatic selection of the highest retained release gate.
 - Removed the superseded parallel architecture document and retained `docs/architecture/overview.md` as the authoritative architecture entry point.
-- Retired 200 obsolete historical validators and one legacy verifier under `docs/v0.44.1-validator-retirement.json`, with exact prior contents preserved at tag `v0.44.0`.
+- Retired 216 obsolete historical validators and three legacy or release-only tools under `docs/v0.44.1-validator-retirement.json`, with exact prior contents preserved at tag `v0.44.0`.
+- Removed superseded v0.40-v0.44 release-only gates, metadata/documentation validators, and v0.43 audit/benchmark generators while retaining staged diagnostics and the active compatibility floor.
 - Consolidated five historical report-stage validators into `tools/validate_v0_44_1_report_contracts.py`.
 - Removed an unreachable operator-session renderer while preserving operator/reset HTML fingerprints, reset audit behavior, and v0.40 action-receipt compatibility.
 - Renamed the core regression test module and test class to release-neutral names.

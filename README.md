@@ -14,7 +14,8 @@ Highlights:
 
 - Replaced the stale embedded troubleshooter bundle with a repository-aware diagnostic runner that selects the highest retained release gate and verifies an acyclic executable validator graph.
 - Removed the superseded parallel architecture document and made `docs/architecture/overview.md` the single authoritative architecture entry point.
-- Retired 200 obsolete historical validators and one legacy verifier under an exact SHA-256 manifest while preserving every retired file byte-for-byte at tag `v0.44.0`.
+- Retired 216 obsolete historical validators and three legacy or release-only tools under an exact SHA-256 manifest while preserving every retired file byte-for-byte at tag `v0.44.0`.
+- Removed superseded v0.40-v0.44 release-only gates, metadata/documentation validators, and v0.43 audit/benchmark generators while retaining staged diagnostics and the active compatibility floor.
 - Consolidated five historical report-stage roots into one current report-contract validator.
 - Removed one unreachable operator-session rendering wrapper while preserving the operator and reset-page HTML fingerprints and all v0.40 action-receipt behavior.
 - Renamed the core regression test module and class to release-neutral names.

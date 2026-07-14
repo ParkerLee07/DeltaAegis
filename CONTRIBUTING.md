@@ -13,7 +13,7 @@ DeltaAegis accepts focused, reviewable changes that preserve evidence integrity 
 
 - Add a focused automated validator for every defect fix or contract change.
 - Use synthetic or temporary data and fixed argument vectors.
-- Run `git diff --check`, Python syntax checks, the focused validator, and the current release gate (`tools/validate_v0_44_release_gate.sh` for v0.44).
+- Run `git diff --check`, Python syntax checks, the focused validator, and the current release gate (`tools/validate_v0_44_1_release_gate.sh` for v0.44.1).
 - Preserve predecessor compatibility until a documented deprecation has completed.
 - Keep CHANGELOG cumulative. Do not add tracked manual checklists or version-specific release-note files.
 

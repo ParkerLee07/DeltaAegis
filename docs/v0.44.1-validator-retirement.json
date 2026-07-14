@@ -1,9 +1,9 @@
 {
   "archive_tag": "v0.44.0",
   "current_release_gate": "tools/validate_v0_44_1_release_gate.sh",
-  "expected_retained_validator_count": 84,
-  "expected_shell_validator_count": 62,
-  "format": "deltaaegis-validator-retirement-v1",
+  "expected_retained_validator_count": 68,
+  "expected_shell_validator_count": 51,
+  "format": "deltaaegis-validator-retirement-v2",
   "maintenance_release": "0.44.1",
   "replaced_stage_contracts": [
     "tools/validate_v0_15_port_behavior_report.sh",
@@ -21,9 +21,25 @@
     "v0.44 modular core",
     "v0.44.1 repository hygiene and validation retention"
   ],
-  "retired_bytes": 761170,
-  "retired_file_count": 201,
+  "retired_bytes": 881256,
+  "retired_file_count": 219,
   "retired_files": [
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 16564,
+      "kind": "release_tool",
+      "lines": 424,
+      "path": "tools/audit_v0_43_repository.py",
+      "sha256": "919c6222264a5f7d2d0b47ea07f94717b3698338c55b56413ffbbde36327ea84"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 23020,
+      "kind": "release_tool",
+      "lines": 580,
+      "path": "tools/benchmark_v0_43.py",
+      "sha256": "4197e9aec52c7b654fb8ef9943392c7a30baff0b73aecf79a2c7fb96af237919"
+    },
     {
       "archive_tag": "v0.44.0",
       "bytes": 1458,
@@ -1466,6 +1482,134 @@
     },
     {
       "archive_tag": "v0.44.0",
+      "bytes": 1544,
+      "kind": "validator",
+      "lines": 59,
+      "path": "tools/validate_v0_40_release_gate.sh",
+      "sha256": "db496684e348abc0d5ebdf61db6cff382b6633c529de42a9facb2231f23aa012"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 10535,
+      "kind": "validator",
+      "lines": 349,
+      "path": "tools/validate_v0_40_release_metadata.sh",
+      "sha256": "19b82ca37d7102829304209d2b8207a33842389555c7261c60f8ef05cbe0d944"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 3059,
+      "kind": "validator",
+      "lines": 112,
+      "path": "tools/validate_v0_41_documentation_accuracy.sh",
+      "sha256": "44876342a56f35a4618fa7db6fb66c460d596f8ea3ed46a169da3874a43a7972"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 1910,
+      "kind": "validator",
+      "lines": 64,
+      "path": "tools/validate_v0_41_release_gate.sh",
+      "sha256": "2770fb7e751f5be17b13381f1b30237c0cadd405dca05f41514d765129dc8bf6"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 8093,
+      "kind": "validator",
+      "lines": 286,
+      "path": "tools/validate_v0_41_release_metadata.sh",
+      "sha256": "b2b7bd60dc11d175de034ef7ecb741b8719a0cdf8599b961fc9cea7ac00e62d0"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4024,
+      "kind": "validator",
+      "lines": 136,
+      "path": "tools/validate_v0_42_documentation_accuracy.sh",
+      "sha256": "1641462e8c878c3701adf3b170618b0e9511ab207bdd2460984602cb40c8fcc7"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2484,
+      "kind": "validator",
+      "lines": 84,
+      "path": "tools/validate_v0_42_release_gate.sh",
+      "sha256": "af149d1f09bf6f0616071c03992f83400c9b098262bf4b12a2525dca7537f12d"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 6524,
+      "kind": "validator",
+      "lines": 210,
+      "path": "tools/validate_v0_42_release_metadata.sh",
+      "sha256": "b7b7303f5eccd007c56f750fce8ce205279da6f80af75cfe6208a2b8c57fe773"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 9986,
+      "kind": "validator",
+      "lines": 261,
+      "path": "tools/validate_v0_43_baseline.py",
+      "sha256": "0d0de18aea8dc8d6d141e1113a136f2f1f58995a28e153972cf458381a0c7248"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 148,
+      "kind": "validator",
+      "lines": 7,
+      "path": "tools/validate_v0_43_baseline_all.sh",
+      "sha256": "30599176029f94d13cb43679d17093830c2a673edfe5345fa7fd6baf27bdf94e"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 7232,
+      "kind": "validator",
+      "lines": 205,
+      "path": "tools/validate_v0_43_documentation.py",
+      "sha256": "fd1f82fb5f42d207bbfc4f83dc048402ce5656a99f2e3af36ea415d987e3cba3"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2018,
+      "kind": "validator",
+      "lines": 68,
+      "path": "tools/validate_v0_43_release_gate.sh",
+      "sha256": "9dab0d7eabc25e07a6c3669b02fda14e6dc92f62d5c4c0f8d51111ff547dc697"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 7233,
+      "kind": "validator",
+      "lines": 194,
+      "path": "tools/validate_v0_43_release_metadata.py",
+      "sha256": "8fa12efc5a7a5a227d761b2af640c54adb270dbea7ce7c67705fc5bcd5663a65"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 4909,
+      "kind": "validator",
+      "lines": 109,
+      "path": "tools/validate_v0_44_documentation.py",
+      "sha256": "1b5224ca184384662486d9811f41159cc8d6f3d9c1f7561d541eddae61b6bf3a"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 2597,
+      "kind": "validator",
+      "lines": 85,
+      "path": "tools/validate_v0_44_release_gate.sh",
+      "sha256": "6a54876b56c292ebcd28f50f10b8c18efd5c2b0a91755a1dc0c1e2d75d2280c9"
+    },
+    {
+      "archive_tag": "v0.44.0",
+      "bytes": 8206,
+      "kind": "validator",
+      "lines": 189,
+      "path": "tools/validate_v0_44_release_metadata.py",
+      "sha256": "2ddd874b078509f8eca83928791072bd691bccafa878c91dc0395ae5e974fbb2"
+    },
+    {
+      "archive_tag": "v0.44.0",
       "bytes": 2356,
       "kind": "validator",
       "lines": 86,
@@ -1633,9 +1777,9 @@
       "sha256": "79738879420c09741788fd827dca83d9d28c3eb78ff40f7224d7f58e23afe553"
     }
   ],
-  "retired_lines": 24873,
-  "retired_nonvalidator_tool_count": 1,
-  "retired_validator_count": 200,
-  "retirement_scope": "Retire all pre-v0.39 validator scaffolding, obsolete v0.39 release-only wrappers, the unversioned legacy README validator, and the v0.7 final verifier. Replace five report-stage roots with one current v0.44.1 report-contract validator.",
+  "retired_lines": 28295,
+  "retired_nonvalidator_tool_count": 3,
+  "retired_validator_count": 216,
+  "retirement_scope": "Retire all pre-v0.39 validator scaffolding; obsolete v0.39 release-only wrappers; the unversioned legacy README validator; the v0.7 final verifier; and superseded v0.40-v0.44 release-only gates, metadata, documentation, and v0.43 benchmark/audit tools. Preserve current staged checkpoint wrappers and the active v0.39-v0.44.1 compatibility floor. Replace five report-stage roots with one current report contract.",
   "source_release": "0.44.0"
 }

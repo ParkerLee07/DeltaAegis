@@ -102,14 +102,18 @@ def main() -> int:
         "source_release": "0.44.0",
         "archive_tag": "v0.44.0",
         "current_release_gate": "tools/validate_v0_44_1_release_gate.sh",
-        "expected_retained_validator_count": 84,
-        "expected_shell_validator_count": 62,
+        "expected_retained_validator_count": 68,
+        "expected_shell_validator_count": 51,
     }
     for key, value in expected_manifest.items():
         if manifest.get(key) != value:
             fail(f"retirement manifest {key} changed: {manifest.get(key)!r}")
     if "v0.41 data durability and recovery" not in manifest.get("retained_compatibility_floor", []):
         fail("retirement manifest omits retained v0.41 durability coverage")
+    if manifest.get("format") != "deltaaegis-validator-retirement-v2":
+        fail("retirement manifest is not the final v0.44.1 format")
+    if "v0.40-v0.44 release-only" not in manifest.get("retirement_scope", ""):
+        fail("retirement manifest omits final release-only scope")
 
     gate = read("tools/validate_v0_44_1_release_gate.sh")
     invocations = (
@@ -130,15 +134,17 @@ def main() -> int:
     for invocation in invocations:
         if gate.count(invocation) != 1:
             fail(f"release gate must invoke exactly once: {invocation}")
-    for forbidden in (
-        "validate_v0_44_release_gate.sh",
-        "validate_v0_41_release_gate.sh",
-        "validate_v0_42_release_gate.sh",
-        "validate_v0_43_release_gate.sh",
-        "validate_v0_44_1_data_durability_compatibility.sh",
-    ):
-        if forbidden in gate:
-            fail(f"v0.44.1 gate delegates to obsolete release gate: {forbidden}")
+    retired_names = {
+        Path(entry["path"]).name
+        for entry in manifest.get("retired_files", [])
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+    }
+    delegated_retired = sorted(name for name in retired_names if name in gate)
+    if delegated_retired:
+        fail(
+            "v0.44.1 gate delegates to retired tooling: "
+            f"{delegated_retired[:5]}"
+        )
     for marker in (
         "maintenance/v0.44.1-repository-hygiene|main",
         "git status --short",
@@ -189,7 +195,7 @@ def main() -> int:
     payload = json.loads(troubleshooter.stdout)
     if payload.get("current_release_gate") != "tools/validate_v0_44_1_release_gate.sh":
         fail("troubleshooter does not select the v0.44.1 gate")
-    if payload.get("validator_count") != 62 or payload.get("graph_ok") is not True:
+    if payload.get("validator_count") != 51 or payload.get("graph_ok") is not True:
         fail(f"troubleshooter inventory or graph changed: {payload}")
 
     for required in (

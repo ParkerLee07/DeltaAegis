@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the v0.44.1 historical-validator retirement contract."""
+"""Validate the v0.44.1 historical-tool retirement contract."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def main() -> int:
     if not MANIFEST_PATH.is_file():
         fail("retirement manifest is missing")
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    if manifest.get("format") != "deltaaegis-validator-retirement-v1":
+    if manifest.get("format") != "deltaaegis-validator-retirement-v2":
         fail("retirement manifest format changed")
     if manifest.get("source_release") != "0.44.0" or manifest.get("archive_tag") != "v0.44.0":
         fail("retirement archive lineage changed")
@@ -53,16 +53,29 @@ def main() -> int:
         fail("retired inventory must be sorted and unique")
     if manifest.get("retired_file_count") != len(entries):
         fail("retired file count does not match the inventory")
-    retired_validator_count = sum(Path(path).name.startswith("validate") for path in paths)
+
+    retired_validator_count = sum(
+        Path(path).name.startswith("validate") for path in paths
+    )
+    retired_nonvalidator_count = len(paths) - retired_validator_count
     if retired_validator_count != manifest.get("retired_validator_count"):
         fail("retired validator count does not match the inventory")
+    if retired_nonvalidator_count != manifest.get("retired_nonvalidator_tool_count"):
+        fail("retired non-validator count does not match the inventory")
+    if sum(entry.get("bytes", -1) for entry in entries) != manifest.get("retired_bytes"):
+        fail("retired byte total does not match the inventory")
+    if sum(entry.get("lines", -1) for entry in entries) != manifest.get("retired_lines"):
+        fail("retired line total does not match the inventory")
 
     present = [path for path in paths if (ROOT / path).exists()]
     if present:
         fail(f"retired files remain in the current tree: {present[:5]}")
     print(f"PASS: {len(paths)} retired tool files are absent from the current tree")
 
-    archive = run(["git", "archive", "--format=tar", "v0.44.0", "--", *paths], binary=True)
+    archive = run(
+        ["git", "archive", "--format=tar", "v0.44.0", "--", *paths],
+        binary=True,
+    )
     if archive.returncode:
         error = archive.stderr.decode(errors="replace")
         fail(f"could not read retirement archive tag: {error}")
@@ -115,6 +128,8 @@ def main() -> int:
     if not isinstance(replacement, str) or not (ROOT / replacement).is_file():
         fail("consolidated report replacement contract is missing")
     stage_path = ROOT / "tools/validate_v0_44_stage5_7_all.sh"
+    if not stage_path.is_file():
+        fail("retained Stage 5-7 diagnostic wrapper is missing")
     stage = stage_path.read_text(encoding="utf-8")
     if stage.count(f"python3 {replacement}") != 1:
         fail("Stage 5-7 wrapper does not invoke the replacement report contract exactly once")
@@ -123,18 +138,28 @@ def main() -> int:
             fail(f"Stage 5-7 wrapper still references retired report root: {old_path}")
     replacement_run = run([sys.executable, replacement])
     if replacement_run.returncode:
-        fail(f"replacement report contract failed: {replacement_run.stderr or replacement_run.stdout}")
+        fail(
+            "replacement report contract failed: "
+            f"{replacement_run.stderr or replacement_run.stdout}"
+        )
     print("PASS: consolidated report contract replaces five retired report roots")
 
     retired_names = {Path(path).name for path in paths}
     for source in sorted((ROOT / "tools").iterdir()):
         if not source.is_file() or source.suffix not in {".sh", ".py"}:
             continue
-        tokens = set(VALIDATOR_TOKEN.findall(source.read_text(encoding="utf-8", errors="replace")))
+        tokens = set(
+            VALIDATOR_TOKEN.findall(
+                source.read_text(encoding="utf-8", errors="replace")
+            )
+        )
         overlap = sorted(tokens & retired_names)
         if overlap:
-            fail(f"retained tool {source.relative_to(ROOT)} references retired validators: {overlap[:5]}")
-    print("PASS: retained tools contain no validator references to retired paths")
+            fail(
+                f"retained tool {source.relative_to(ROOT)} references "
+                f"retired validators: {overlap[:5]}"
+            )
+    print("PASS: retained tools contain no executable references to retired validators")
 
     graph = run([
         sys.executable,
@@ -148,7 +173,11 @@ def main() -> int:
     if graph.returncode:
         fail(f"strict troubleshooter graph failed: {graph.stderr or graph.stdout}")
     payload = json.loads(graph.stdout)
-    if payload.get("graph_ok") is not True or payload.get("cycles") != [] or payload.get("missing_references") != {}:
+    if (
+        payload.get("graph_ok") is not True
+        or payload.get("cycles") != []
+        or payload.get("missing_references") != {}
+    ):
         fail(f"troubleshooter graph is not clean: {payload}")
     if payload.get("validator_count") != manifest.get("expected_shell_validator_count"):
         fail("troubleshooter inventory does not match the manifest")
@@ -159,12 +188,15 @@ def main() -> int:
     for relative, marker in (
         ("README.md", "docs/validation-retention-policy.md"),
         ("docs/TROUBLESHOOTER.md", "retained validator inventory"),
-        ("docs/validation-retention-policy.md", "v0.44.0` tag preserves"),
+        ("docs/validation-retention-policy.md", "219 tool files"),
+        ("docs/validation-retention-policy.md", "v0.44.0` tag preserves every retired file"),
+        ("docs/performance-baseline.md", "git worktree add --detach"),
+        ("CONTRIBUTING.md", "tools/validate_v0_44_1_release_gate.sh"),
     ):
         text = (ROOT / relative).read_text(encoding="utf-8")
         if marker not in text:
             fail(f"{relative} is missing retention-policy marker: {marker}")
-    print("PASS: operator documentation explains validator retention")
+    print("PASS: operator and contributor documentation explains validator retention")
 
     audit = run([sys.executable, "tools/audit_v0_44_repository.py", "--check"])
     if audit.returncode:
@@ -172,7 +204,7 @@ def main() -> int:
     whitespace = run(["git", "diff", "--check"])
     if whitespace.returncode:
         fail(f"whitespace check failed: {whitespace.stderr or whitespace.stdout}")
-    print("PASS: historical-validator retirement contract")
+    print("PASS: historical-tool retirement contract")
     return 0
 
 
