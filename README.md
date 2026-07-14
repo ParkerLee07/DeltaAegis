@@ -528,35 +528,30 @@ Open the guided human-readable menu:
 
 Running the tool without arguments also opens the menu when stdin and stdout are interactive terminals. The menu provides concise health checks, targeted validator execution, retained reports, and stable `DAE-TRB-NNNN` diagnostic codes. See [the troubleshooter and error-code reference](docs/TROUBLESHOOTER.md).
 
-DeltaAegis includes one standalone troubleshooting tool containing validator files from the fetched public `origin/main` history and the current local `HEAD`. When a path exists in both sources, the current `HEAD` copy takes precedence so the active release candidate is represented exactly.
+DeltaAegis includes one repository-aware troubleshooting tool. It reads the validator inventory from the selected checkout, identifies the highest versioned release gate, and runs selected validators in fresh isolated clones. It no longer carries an embedded copy of historical validator scripts that can drift behind the repository.
 
 Run the current release gate in a fresh isolated `$HOME/DeltaAegis` clone:
 
     python3 tools/deltaaegis_troubleshooter.py
 
-Strictly verify embedded hashes and Bash syntax while reporting historical
-reference and cycle warnings:
+Verify validator Bash syntax and the executable reference graph:
 
     python3 tools/deltaaegis_troubleshooter.py --self-check
-
-Treat the advisory historical graph as a strict architecture check:
-
     python3 tools/deltaaegis_troubleshooter.py --self-check --strict-graph
 
-Run every static-reference-free validator once, with a fresh clone per
-validator:
+Run the current staged checkpoint wrappers:
+
+    python3 tools/deltaaegis_troubleshooter.py --mode stages
+
+Run every static root once, with a fresh clone per validator:
 
     python3 tools/deltaaegis_troubleshooter.py --mode all-leaves
 
-Inspect or select a validator group:
+Inspect the current validator group:
 
-    python3 tools/deltaaegis_troubleshooter.py --match 'v0_42'
-    python3 tools/deltaaegis_troubleshooter.py --list
+    python3 tools/deltaaegis_troubleshooter.py --match 'v0_44' --list
 
-Reports include environment details, read-only SQLite integrity checks,
-validator provenance, dependency warnings, individual logs, likely failure
-causes, and a Markdown summary. Historical validator failures are reported
-individually rather than treated as current-release regressions.
+Reports include environment details, read-only SQLite integrity checks, validator provenance, individual logs, diagnostic codes, and Markdown and JSON summaries. Historical validator failures are reported individually rather than treated as current-release regressions.
 
 ## Validation
 

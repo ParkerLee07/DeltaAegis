@@ -303,7 +303,7 @@ else
     warn "Create the first ADMIN later from the dashboard /setup page."
 fi
 
-log "Running non-mutating syntax and bundle checks"
+log "Running non-mutating syntax and troubleshooter checks"
 PYTHONDONTWRITEBYTECODE=1 python3 - "$BASE" <<'PY'
 from pathlib import Path
 import sys

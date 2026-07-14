@@ -16,7 +16,7 @@ This deterministic inventory describes the v0.44.0 Modular Core Foundation relea
 | Distinct CLI commands | 67 |
 | Distinct `/api` route literals | 57 |
 | Declared schema tables | 26 |
-| Validator scripts | 278 |
+| Validator scripts | 279 |
 | Validator version groups | 39 |
 
 Root source SHA-256: `2cdde45c69b84dea354fa64555665428fb514106dd9f0b4dab2e728e71318e06`
@@ -44,9 +44,9 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 | DA044-002 | MEDIUM | source-order coupling | Repeated top-level function names in the compatibility facade: dashboard_assets_payload, dashboard_index_html, dashboard_operator_session_shell_html. | Remove only with characterization evidence and explicit compatibility ownership. |
 | DA044-003 | MEDIUM | storage migrations | 26 table names remain declared through the root-owned schema bootstrap. | Introduce the forward-only migration ledger and supported upgrade paths in v0.45. |
 | DA044-004 | MEDIUM | HTTP/API contract | 57 unversioned /api route literals remain implementation endpoints. | Introduce /api/v1, OpenAPI, CSRF, and deprecation policy implementation in v0.46. |
-| DA044-005 | MEDIUM | validation estate | 278 validator scripts span 39 version groups. | Keep flat release composition and retire historical validators only with replacement-contract evidence. |
+| DA044-005 | MEDIUM | validation estate | 279 validator scripts span 39 version groups. | Keep flat release composition and retire historical validators only with replacement-contract evidence. |
 | DA044-006 | MEDIUM | TrueAegis compatibility | TrueAegis remains contract-validated but not pinned to a published semantic-version range. | Publish or pin the supported TrueAegis range before v1.0. |
-| DA044-007 | LOW | documentation | 1 known historical architecture document marker remains. | Keep docs/architecture/overview.md authoritative and clean historical prose only in an owned documentation change. |
+| DA044-007 | LOW | documentation | 0 known historical architecture document marker remains. | Keep docs/architecture/overview.md authoritative and clean historical prose only in an owned documentation change. |
 
 ## Duplicate root definitions
 
@@ -109,16 +109,14 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 | v0.41 | 12 |
 | v0.42 | 18 |
 | v0.43 | 6 |
-| v0.44 | 14 |
+| v0.44 | 15 |
 | v0.7 | 3 |
 | v0.8 | 11 |
 | v0.9 | 6 |
 
 ## Stale and historical documents
 
-| Path | Evidence | Disposition |
-|---|---|---|
-| `docs/architecture.md` | Historical v0.8.5 narrative; docs/architecture/overview.md is current. | Retain as historical context until a dedicated documentation cleanup owns it. |
+No known stale architecture-document marker was found.
 
 ## Deferred work map
 

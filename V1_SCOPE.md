@@ -1,6 +1,6 @@
 # DeltaAegis v1.0 Product Scope
 
-Status: approved planning baseline for DeltaAegis v0.43.0
+Status: approved at v0.43.0 and current through DeltaAegis v0.44.0
 
 ## Product definition
 
