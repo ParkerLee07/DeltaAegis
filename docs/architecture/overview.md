@@ -1,10 +1,10 @@
 # DeltaAegis Architecture Overview
 
-Status: v0.43.0 current-state map and v1.0 extraction baseline
+Status: v0.44.0 modular core foundation and v1.0 boundary map
 
 ## System role
 
-DeltaAegis is the durable history, comparison, investigation, orchestration, and reporting layer between NetSniper telemetry and an operator. It is currently a single Python application backed by SQLite. TrueAegis is an optional defensive validation producer.
+DeltaAegis is the durable history, comparison, investigation, orchestration, and reporting layer between NetSniper telemetry and an operator. It is a single deployable standard-library Python application backed by SQLite, with a repository-root compatibility facade and an internal modular core package. TrueAegis is an optional defensive validation producer.
 
 ```mermaid
 flowchart TD
@@ -22,19 +22,19 @@ flowchart TD
 | Component | Current owner | Responsibility | Must not own |
 |---|---|---|---|
 | CLI and application dispatch | `deltaaegis.py` | Argument parsing, command dispatch, human/JSON output | Sensor implementation or arbitrary shell execution |
-| Configuration and paths | `deltaaegis.py`, environment variables, launchers | Local roots, database, reports, logs, sensor paths | Secrets in source or caller-controlled filesystem escape |
-| Storage and schema bootstrap | `deltaaegis.py` `SCHEMA_SQL`, `connect`, additive helpers | SQLite schema, compatibility additions, row serialization | Untracked destructive migrations |
-| NetSniper ingest | `deltaaegis.py` | Bundle discovery, trust checks, normalization, acceptance | Treating conclusions as raw observations |
+| Configuration and paths | `deltaaegis_core/config.py`, root facade, environment variables, launchers | Local roots, database, reports, logs, sensor paths | Secrets in source or caller-controlled filesystem escape |
+| Storage and schema bootstrap | `deltaaegis_core/db.py`, root-owned `SCHEMA_SQL` and additive helpers | SQLite connection policy, schema, compatibility additions, row serialization | Untracked destructive migrations |
+| NetSniper ingest | `deltaaegis_core/ingest.py` behind the root facade | Bundle discovery, trust checks, normalization, acceptance | Treating conclusions as raw observations |
 | Delta and lifecycle engine | `deltaaegis.py` | Snapshot comparison, events, alerts, lifecycle | Cross-scope identity assumptions after sensor identity exists |
-| Sites and scope aggregation | `deltaaegis.py` | Logical groupings and site-wide read aggregation | Replacing technical scope identity |
-| Authentication and authorization | `deltaaegis.py` | Users, passwords, sessions, tokens, RBAC, access audit | Browser-supplied actor or privilege |
-| Jobs and schedules | `deltaaegis.py` | Durable state, fixed-argv process launch, cancellation, watchdog, recovery | Direct browser PID signaling or arbitrary command strings |
-| Dashboard HTTP/UI | `deltaaegis.py` | Local HTTP server, HTML/JS, JSON handlers, operator workflows | A stable public API until `/api/v1` is introduced |
-| Reports and backups | `deltaaegis.py` | Markdown reports, SQLite backups, manifests, rehearsal, cutover | Silent overwrite or unverified restore |
+| Sites and scope aggregation | `deltaaegis_core/sites.py` behind the root facade | Logical groupings and site-wide read aggregation | Replacing technical scope identity |
+| Authentication and authorization | `deltaaegis_core/auth.py` behind the root facade | Users, passwords, sessions, tokens, RBAC, access audit | Browser-supplied actor or privilege |
+| Jobs and schedules | `deltaaegis_core/jobs.py` for durable policy; root facade for process orchestration | Durable state, fixed-argv process launch, cancellation, watchdog, recovery | Direct browser PID signaling or arbitrary command strings |
+| Dashboard HTTP/UI | `deltaaegis_core/web.py` behind the root facade | Local HTTP server, HTML/JS, JSON handlers, operator workflows | A stable public API until `/api/v1` is introduced |
+| Reports and backups | `deltaaegis_core/reports.py` for queries/Markdown; root facade for file output and backups | Markdown reports, SQLite backups, manifests, rehearsal, cutover | Silent overwrite or unverified restore |
 | Troubleshooter | `tools/deltaaegis_troubleshooter.py` | Read-mostly diagnostics and bounded repair guidance | Hidden mutation of active evidence |
 | Validation estate | `tools/validate_*` | Release contracts and predecessor compatibility | Unowned duplicate execution graphs |
 
-The current single-file organization is deliberate historical accumulation, not the v1.0 target. Late function redefinitions and appended compatibility layers make source order significant. v0.43 records that risk; v0.44 performs incremental extraction behind compatibility tests.
+The repository-root facade remains deliberately compatible with historical imports and validators, but configuration, database connection policy, authentication, ingest, Sites, durable Jobs policy, Reports, and dashboard web ownership now live in explicit internal modules. Remaining root-owned lifecycle, schema-bootstrap, backup, and process-orchestration responsibilities stay mapped work rather than permission for a broad rewrite.
 
 ## Runtime process model
 
@@ -84,24 +84,33 @@ Trust rules:
 
 ## Current API boundary
 
-The dashboard uses unversioned `/api/*` endpoints implemented by the local handler in `deltaaegis.py`. They are authenticated implementation endpoints, not yet a stable third-party contract. ADR 0003 reserves `/api/v1` for the stable API introduced in v0.46.
+The dashboard uses unversioned `/api/*` endpoints implemented by the local handler in `deltaaegis_core/web.py` behind the root compatibility facade. They are authenticated implementation endpoints, not yet a stable third-party contract. ADR 0003 reserves `/api/v1` for the stable API introduced in v0.46.
 
-## v0.44 extraction map
+## v0.44 modular boundary result
 
-Extraction must be incremental and behavior-preserving. The intended ownership map is:
+Extraction was completed incrementally behind characterization and predecessor-compatibility tests. The resulting ownership map is:
 
 | Target package | First responsibility moved | Compatibility seam |
 |---|---|---|
-| `deltaaegis/config.py` | Defaults, path resolution, environment parsing | Existing constants and CLI defaults |
-| `deltaaegis/db.py` | Connection policy and schema entry point | Existing `connect` behavior |
-| `deltaaegis/auth.py` | Passwords, users, sessions, tokens, RBAC | Existing function signatures and audit rows |
-| `deltaaegis/ingest.py` | Bundle trust and normalization | Existing ingest receipts and fixtures |
-| `deltaaegis/sites.py` | Site storage and scope aggregation | Existing CLI/API payloads |
-| `deltaaegis/jobs.py` | Scan, schedule, watchdog, cancellation, finalization | Existing durable status transitions |
-| `deltaaegis/reports.py` | Report queries and Markdown generation | Existing report sections and output |
-| `deltaaegis/web.py` | HTTP routing, response boundaries, server lifecycle | Rendered DOM/JS and HTTP smoke tests |
+| `deltaaegis_core/config.py` | Defaults and path resolution | Root-module constants and CLI defaults |
+| `deltaaegis_core/db.py` | Low-level connection policy | Existing `connect` behavior and root-owned schema bootstrap |
+| `deltaaegis_core/auth.py` | Passwords, users, sessions, tokens, RBAC | Existing function signatures and audit rows |
+| `deltaaegis_core/ingest.py` | Bundle trust and normalization | Existing ingest receipts and fixtures |
+| `deltaaegis_core/sites.py` | Site storage and scope aggregation | Existing CLI/API payloads |
+| `deltaaegis_core/jobs.py` | Scan, schedule, watchdog, cancellation, finalization | Existing durable status transitions |
+| `deltaaegis_core/reports.py` | Report queries and Markdown generation | Existing report sections and output |
+| `deltaaegis_core/web.py` | HTTP routing, response boundaries, server lifecycle | Rendered DOM/JS and HTTP smoke tests |
 
-No extraction should mix functional redesign with file movement. A moved responsibility retains its existing validator coverage before cleanup begins.
+The repository-root `deltaaegis.py` remains the executable and import
+compatibility facade.  ADR 0010 records why the internal package cannot be
+named `deltaaegis` while that facade exists.
+
+The completed extraction did not mix functional redesign with file movement. Each moved responsibility retains its existing validator coverage, public facade, and frozen behavior evidence.
+
+Stages 1–8 now implement the configuration, connection-policy, authentication,
+NetSniper ingest, Sites, durable Jobs policy, Reports, and dashboard web boundaries shown above. The root module intentionally retains
+thin functions with the established names and signatures; downstream imports
+and historical validators therefore continue to use the same public surface.
 
 ## Architecture decision index
 
@@ -114,7 +123,8 @@ No extraction should mix functional redesign with file movement. A moved respons
 - ADR 0007 — Backup, restore, and upgrade recovery
 - ADR 0008 — Compatibility and integration contracts
 - ADR 0009 — Versioning and deprecation
+- ADR 0010 — Internal package and compatibility facade
 
 ## Known architecture debt
 
-The reproducible inventory and disposition are maintained in `docs/repository-audit.md`. The highest-risk items are the monolithic source boundary, late top-level function redefinitions, inline storage/API/UI ownership, stale historical architecture prose, and the size of the validator estate. These are mapped work, not authorization for a broad v0.43 rewrite.
+The reproducible inventory and disposition are maintained in `docs/repository-audit.md`. The highest-risk items are the monolithic source boundary, late top-level function redefinitions, inline storage/API/UI ownership, stale historical architecture prose, and the size of the validator estate. These are mapped work, not authorization for a broad post-v0.44 rewrite.

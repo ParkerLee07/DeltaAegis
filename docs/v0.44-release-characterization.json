@@ -1,0 +1,32 @@
+{
+  "format": "deltaaegis-v0.44-release-characterization-v1",
+  "release": "0.44.0",
+  "release_name": "Modular Core Foundation",
+  "source_checkpoint": "b5dc440079278a01d7ecea0c4b588663a495d52c",
+  "source_checkpoint_tree": "2247edec5ecc47f03d4a312fa2fc41309ff45f41",
+  "base_release": "0.43.0",
+  "base_tag_target": "6061b0cdee43e076b662fe85b3e8e92672c64206",
+  "schema_change": false,
+  "stable_api_introduced": false,
+  "operator_workflow_change": false,
+  "netsniper_contract": "2.0.0",
+  "compatibility_facade": "deltaaegis.py",
+  "internal_package": "deltaaegis_core",
+  "modules": [
+    "auth",
+    "config",
+    "db",
+    "ingest",
+    "jobs",
+    "reports",
+    "sites",
+    "web"
+  ],
+  "extraction_commits": [
+    "ac896f0 Establish v0.44 module and database boundaries",
+    "480bc1e Extract v0.44 authentication boundary",
+    "fdcb719 Extract v0.44 NetSniper ingest boundary",
+    "800064f Extract v0.44 Sites Jobs and Reports boundaries",
+    "b5dc440 Extract v0.44 dashboard web boundary"
+  ]
+}

@@ -1,6 +1,6 @@
 # DeltaAegis Supported Versions
 
-Status: v0.43.0 architecture and stability baseline
+Status: v0.44.0 modular core foundation
 
 This matrix defines the environment DeltaAegis intends to validate on the path to v1.0. A listed platform is supported only when its operating-system vendor still supplies security maintenance and the installed components remain within the ranges below.
 
@@ -13,14 +13,14 @@ This matrix defines the environment DeltaAegis intends to validate on the path t
 | SQLite | 3.37 or newer through Python's standard `sqlite3` module | Foreign keys must be enabled by DeltaAegis. WAL/sidecar handling, backup, integrity, and migration behavior are release-gated. No external SQLite server is required. |
 | NetSniper | v2.0.0 for DeltaAegis v0.43 through v0.46 | Finalized manifest-v3 bundles, compatibility aliases, checksums, profile evidence, and bundle-readiness evidence are required. NetSniper changes are defect-driven until sensor identity work begins with DeltaAegis v0.47. |
 | TrueAegis | Contract-compatible local checkout | TrueAegis is optional. The checkout must support fixed-argv `trueaegis.py MANIFEST --validate --quiet` execution and the validation JSON contract covered by DeltaAegis fixtures. A semantic-version pin is required before v1.0; the absence of one is tracked architecture debt, not permission to accept arbitrary output. |
-| Node.js | Active LTS or Maintenance LTS; Node 20, 22, and 24 are the v0.43 validation range | Node.js is a validator dependency for rendered dashboard JavaScript, not a DeltaAegis runtime service. |
+| Node.js | Active LTS or Maintenance LTS; Node 20, 22, and 24 are the v0.44 validation range | Node.js is a validator dependency for rendered dashboard JavaScript, not a DeltaAegis runtime service. |
 | Browser | Current and previous stable Firefox, Chrome/Chromium, or Edge | JavaScript, cookies, Fetch, and same-origin behavior are required. Safari and mobile browsers are best-effort until a release gate explicitly adds them. |
 | Git | 2.39 or newer | Required for source installation, release gates, source-state verification, and operator-managed upgrades. |
 
 ## Integration contracts
 
 - DeltaAegis consumes only finalized NetSniper run directories whose manifest and referenced evidence pass confinement, checksum, readiness, and compatibility validation.
-- `network_scope` remains the authoritative v0.43 technical CIDR key. Logical-site names are presentation groupings, not evidence identity.
+- `network_scope` remains the authoritative technical CIDR key through v0.44. Logical-site names are presentation groupings, not evidence identity.
 - TrueAegis observations are evidence-only until correlated by DeltaAegis. A validation result does not silently mutate NetSniper observations.
 - Node.js and a browser do not receive direct filesystem or database access.
 

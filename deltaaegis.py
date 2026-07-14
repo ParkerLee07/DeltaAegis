@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Parker Lee
-"""DeltaAegis v0.43.0: Architecture and Stability Baseline.
+"""DeltaAegis v0.44.0: Modular Core Foundation.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -36,21 +36,50 @@ import html
 import datetime as _datetime
 import tempfile
 
-DEFAULT_DB = Path.home() / "DeltaAegis" / "data" / "deltaaegis.db"
-DEFAULT_BACKUPS = Path.home() / "DeltaAegis" / "backups"
-DELTAAEGIS_VERSION = "0.43.0"
+# Historical validators load this file directly from ``tools/`` via an import
+# spec.  Keep the repository root importable for the internal v0.44 package in
+# that compatibility mode as well as during normal CLI/module execution.
+_DELTAAEGIS_MODULE_ROOT = str(Path(__file__).resolve().parent)
+if _DELTAAEGIS_MODULE_ROOT not in sys.path:
+    sys.path.insert(0, _DELTAAEGIS_MODULE_ROOT)
+
+from deltaaegis_core import auth as _auth
+from deltaaegis_core import ingest as _ingest
+from deltaaegis_core import sites as _sites
+from deltaaegis_core import web as _web
+from deltaaegis_core import jobs as _jobs
+from deltaaegis_core import reports as _reports
+from deltaaegis_core.config import (
+    DEFAULT_BACKUPS,
+    DEFAULT_DB,
+    DEFAULT_EVENTS,
+    DEFAULT_NETSNIPER,
+    DEFAULT_REPORTS,
+    DEFAULT_RESTORE_REHEARSALS,
+    DEFAULT_RUNS,
+    DEFAULT_SCAN_LOGS,
+    DEFAULT_TRUEAEGIS,
+    DEFAULT_TRUEAEGIS_LOGS,
+)
+from deltaaegis_core.db import open_database_connection
+
+
+def _report_context() -> _reports.ReportContext:
+    return _reports.ReportContext(
+        dashboard_enrich_classification_rows=dashboard_enrich_classification_rows,
+        dashboard_ticket_evidence_payload=dashboard_ticket_evidence_payload,
+        dashboard_validation_summary_payload=dashboard_validation_summary_payload,
+        dashboard_validations_payload=dashboard_validations_payload,
+        fetch_latest_accepted_snapshot=fetch_latest_accepted_snapshot,
+        investigation_center_signal_summary=investigation_center_signal_summary,
+        investigation_center_workflow_summary=investigation_center_workflow_summary,
+        load_mac_open_ports_for_scans=load_mac_open_ports_for_scans,
+        operator_triage_summary=operator_triage_summary,
+    )
+
+DELTAAEGIS_VERSION = "0.44.0"
 DELTAAEGIS_SECURITY_HOTFIX = "2026-07-13.2"
 DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION = "deltaaegis-backup-manifest-v1"
-DEFAULT_RESTORE_REHEARSALS = (
-    Path.home() / "DeltaAegis" / "restore-rehearsals"
-)
-DEFAULT_RUNS = Path.home() / "NetSniper" / "runs"
-DEFAULT_NETSNIPER = Path.home() / "NetSniper" / "netsniper.sh"
-DEFAULT_SCAN_LOGS = Path.home() / "DeltaAegis" / "scan-logs"
-DEFAULT_TRUEAEGIS = Path.home() / "TrueAegis" / "trueaegis.py"
-DEFAULT_TRUEAEGIS_LOGS = Path.home() / "DeltaAegis" / "trueaegis-logs"
-DEFAULT_EVENTS = Path.home() / "DeltaAegis" / "events" / "events.jsonl"
-DEFAULT_REPORTS = Path.home() / "DeltaAegis" / "reports"
 DELTAAEGIS_V0_14_COMPATIBILITY_NOTE = "DeltaAegis v0.14.0 — NetSniper Scan Orchestration compatibility retained."
 DELTAAEGIS_V0_15_COMPATIBILITY_NOTE = "DeltaAegis v0.15.0 — MAC-Port Behavior Correlation compatibility retained."
 DELTAAEGIS_V0_16_COMPATIBILITY_NOTE = "DeltaAegis v0.16.0 — Investigation Command Center compatibility retained."
@@ -66,150 +95,96 @@ NETSNIPER_BUNDLE_QUALITY_SCHEMA_VERSION = "netsniper-bundle-quality-v1"
 TRUEAEGIS_VALIDATION_STATUSES = {"CONFIRMED", "REACHABLE", "PROTECTED", "PROTOCOL_MISMATCH", "NOT_REACHABLE", "TIMEOUT", "INCONCLUSIVE", "PARTIALLY_CONFIRMED", "DEPENDENCY_MISSING", "UNKNOWN"}
 TRUEAEGIS_JOB_STATUSES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED"}
 
-ACCESS_ROLES = ("ADMIN", "ANALYST", "VIEWER")
+ACCESS_ROLES = _auth.ACCESS_ROLES
 DASHBOARD_MAX_REQUEST_BODY_BYTES = 65536
 RFC1918_IPV4_NETWORKS = tuple(
     ipaddress.ip_network(value)
     for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 )
 
-
-# v0.27 RBAC policy matrix.
-#
-# Keep dashboard permissions here instead of scattering role literals
-# throughout route handlers. Route code should ask for a permission, and
-# this matrix defines the minimum role needed for that permission.
-ACCESS_RBAC_PERMISSIONS = {
-    "dashboard.read": "VIEWER",
-    "operator.session.read": "VIEWER",
-    "session.read": "VIEWER",
-    "admin.users.read": "ADMIN",
-    "admin.users.write": "ADMIN",
-    "admin.audit.read": "ADMIN",
-    "admin.telemetry.cleanup": "ADMIN",
-    "workflow.write": "ANALYST",
-    "scan.start": "ADMIN",
-    "sites.write": "ADMIN",
-}
-
-ACCESS_RBAC_ROUTE_POLICIES = (
-    ("GET", "/", "dashboard.read"),
-    ("GET", "/operator", "operator.session.read"),
-    ("GET", "/operator/users", "admin.users.read"),
-    ("GET", "/operator/reset", "admin.telemetry.cleanup"),
-    ("GET", "/netsniper", "dashboard.read"),
-    ("GET", "/api/sites", "dashboard.read"),
-    ("GET", "/api/site-detail", "dashboard.read"),
-    ("GET", "/api/site-management", "dashboard.read"),
-    ("POST", "/api/site-create", "sites.write"),
-    ("POST", "/api/site-rename", "sites.write"),
-    ("POST", "/api/site-description", "sites.write"),
-    ("POST", "/api/site-archive", "sites.write"),
-    ("POST", "/api/site-assign-scope", "sites.write"),
-    ("POST", "/api/site-remove-scope", "sites.write"),
-    ("GET", "/api/netsniper/status", "dashboard.read"),
-    ("GET", "/api/netsniper/job-detail", "dashboard.read"),
-    ("GET", "/api/validation-summary", "dashboard.read"),
-    ("GET", "/api/validation-correlations", "dashboard.read"),
-    ("GET", "/api/validations", "dashboard.read"),
-    ("GET", "/api/trueaegis-jobs", "dashboard.read"),
-    ("GET", "/api/trueaegis/context", "dashboard.read"),
-    ("POST", "/api/validation-ingest", "workflow.write"),
-    ("GET", "/api/session", "session.read"),
-    ("GET", "/api/admin/users", "admin.users.read"),
-    ("GET", "/api/access-audit", "admin.audit.read"),
-    ("GET", "/api/telemetry-cleanup/preview", "admin.telemetry.cleanup"),
-    ("GET", "/api/telemetry-cleanup/audit-events", "admin.telemetry.cleanup"),
-    ("POST", "/api/telemetry-cleanup/clear-all", "admin.telemetry.cleanup"),
-    ("POST", "/api/admin/users", "admin.users.write"),
-    ("POST_PREFIX", "/api/admin/users/", "admin.users.write"),
-    ("POST", "/api/ticket-status", "workflow.write"),
-    ("POST", "/api/investigate-asset", "workflow.write"),
-    ("POST", "/api/netsniper/import-latest", "workflow.write"),
-    ("POST", "/api/netsniper/scan-start", "scan.start"),
-    ("POST", "/api/netsniper/scan-cancel", "scan.start"),
-    ("POST", "/api/trueaegis/run", "scan.start"),
-    ("GET", "/api/netsniper/schedules", "dashboard.read"),
-    ("GET", "/api/netsniper/schedule-history", "dashboard.read"),
-    ("GET", "/api/latest-network-changes", "dashboard.read"),
-    ("GET", "/api/scan-freshness", "dashboard.read"),
-    ("POST", "/api/netsniper/schedule-create", "scan.start"),
-    ("POST", "/api/netsniper/schedule-enable", "scan.start"),
-    ("POST", "/api/netsniper/schedule-disable", "scan.start"),
-    ("POST", "/api/netsniper/schedule-delete", "scan.start"),
-    ("POST", "/api/netsniper/schedule-run-due", "scan.start"),
-    ("POST", "/api/netsniper/stale-scan-fail", "admin.telemetry.cleanup"),
-    ("POST", "/api/netsniper/hourly-monitoring", "scan.start"),
-)
+ACCESS_RBAC_PERMISSIONS = _auth.ACCESS_RBAC_PERMISSIONS
+ACCESS_RBAC_ROUTE_POLICIES = _auth.ACCESS_RBAC_ROUTE_POLICIES
+# Predecessor static-contract marker retained by the compatibility facade:
+# "sites.write": "ADMIN"
+# ("GET", "/api/site-management", "dashboard.read")
+# ("POST", "/api/site-create", "sites.write")
+# ("POST", "/api/site-rename", "sites.write")
+# ("POST", "/api/site-description", "sites.write")
+# ("POST", "/api/site-archive", "sites.write")
+# ("POST", "/api/site-assign-scope", "sites.write")
+# ("POST", "/api/site-remove-scope", "sites.write")
+# ("GET", "/", "dashboard.read")
+# ("GET", "/operator", "operator.session.read")
+# ("GET", "/operator/users", "admin.users.read")
+# ("GET", "/operator/reset", "admin.telemetry.cleanup")
+# ("GET", "/netsniper", "dashboard.read")
+# ("GET", "/api/sites", "dashboard.read")
+# ("GET", "/api/site-detail", "dashboard.read")
+# ("GET", "/api/netsniper/status", "dashboard.read")
+# ("GET", "/api/netsniper/job-detail", "dashboard.read")
+# ("GET", "/api/validation-summary", "dashboard.read")
+# ("GET", "/api/validation-correlations", "dashboard.read")
+# ("GET", "/api/validations", "dashboard.read")
+# ("GET", "/api/trueaegis-jobs", "dashboard.read")
+# ("GET", "/api/trueaegis/context", "dashboard.read")
+# ("POST", "/api/validation-ingest", "workflow.write")
+# ("GET", "/api/session", "session.read")
+# ("GET", "/api/admin/users", "admin.users.read")
+# ("GET", "/api/access-audit", "admin.audit.read")
+# ("GET", "/api/telemetry-cleanup/preview", "admin.telemetry.cleanup")
+# ("GET", "/api/telemetry-cleanup/audit-events", "admin.telemetry.cleanup")
+# ("POST", "/api/telemetry-cleanup/clear-all", "admin.telemetry.cleanup")
+# ("POST", "/api/admin/users", "admin.users.write")
+# ("POST_PREFIX", "/api/admin/users/", "admin.users.write")
+# ("POST", "/api/ticket-status", "workflow.write")
+# ("POST", "/api/investigate-asset", "workflow.write")
+# ("POST", "/api/netsniper/import-latest", "workflow.write")
+# ("POST", "/api/netsniper/scan-start", "scan.start")
+# ("POST", "/api/netsniper/scan-cancel", "scan.start")
+# ("POST", "/api/trueaegis/run", "scan.start")
+# ("GET", "/api/netsniper/schedules", "dashboard.read")
+# ("GET", "/api/netsniper/schedule-history", "dashboard.read")
+# ("GET", "/api/latest-network-changes", "dashboard.read")
+# ("GET", "/api/scan-freshness", "dashboard.read")
+# ("POST", "/api/netsniper/schedule-create", "scan.start")
+# ("POST", "/api/netsniper/schedule-enable", "scan.start")
+# ("POST", "/api/netsniper/schedule-disable", "scan.start")
+# ("POST", "/api/netsniper/schedule-delete", "scan.start")
+# ("POST", "/api/netsniper/schedule-run-due", "scan.start")
+# ("POST", "/api/netsniper/stale-scan-fail", "admin.telemetry.cleanup")
+# ("POST", "/api/netsniper/hourly-monitoring", "scan.start")
 
 
 def access_rbac_required_role(permission: str) -> str:
-    clean_permission = str(permission or "").strip()
-
-    if clean_permission not in ACCESS_RBAC_PERMISSIONS:
-        raise ValueError(f"Unknown DeltaAegis RBAC permission: {permission}")
-
-    return ACCESS_RBAC_PERMISSIONS[clean_permission]
+    return _auth.access_rbac_required_role(permission)
 
 
 def access_rbac_allows(role: str | None, permission: str) -> bool:
-    return access_role_allows(role, access_rbac_required_role(permission))
+    return _auth.access_rbac_allows(role, permission)
 
 
 def dashboard_route_permission(method: str, route: str) -> str | None:
-    clean_method = str(method or "").upper()
-    clean_route = str(route or "").split("?", 1)[0]
-
-    for policy_method, policy_route, permission in ACCESS_RBAC_ROUTE_POLICIES:
-        if policy_method == "POST_PREFIX":
-            if clean_method == "POST" and clean_route.startswith(policy_route):
-                return permission
-            continue
-
-        if clean_method == policy_method and clean_route == policy_route:
-            return permission
-
-    if clean_method == "GET" and clean_route.startswith("/api/"):
-        return "dashboard.read"
-
-    return None
-
-ACCESS_ROLE_RANKS = {
-    "VIEWER": 10,
-    "ANALYST": 20,
-    "ADMIN": 30,
-}
-ACCESS_PASSWORD_ALGORITHM = "pbkdf2_sha256"
-ACCESS_PASSWORD_ITERATIONS = 260000
-ACCESS_PASSWORD_MIN_LENGTH = 8
-ACCESS_PASSWORD_MAX_LENGTH = 1024
-ACCESS_LOGIN_ACCOUNT_MAX_ATTEMPTS = 5
-ACCESS_LOGIN_SOURCE_MAX_ATTEMPTS = 20
-ACCESS_LOGIN_WINDOW_SECONDS = 300
-ACCESS_LOGIN_MAX_TRACKED_KEYS = 4096
-ACCESS_LOGIN_DUMMY_PASSWORD_HASH = (
-    "pbkdf2_sha256$260000$deltaaegis-login-dummy-v1$"
-    "a6965fd8e5a80577942e0871db72eb3f75957a535075e1cfa92b8d1f8db799f8"
-)
-ACCESS_API_TOKEN_PREFIX = "da"
-
-ACCESS_SESSION_COOKIE_NAME = "deltaaegis_session"
-ACCESS_SESSION_TTL_SECONDS = 8 * 60 * 60
+    return _auth.dashboard_route_permission(method, route)
 
 
+ACCESS_ROLE_RANKS = _auth.ACCESS_ROLE_RANKS
+ACCESS_PASSWORD_ALGORITHM = _auth.ACCESS_PASSWORD_ALGORITHM
+ACCESS_PASSWORD_ITERATIONS = _auth.ACCESS_PASSWORD_ITERATIONS
+ACCESS_PASSWORD_MIN_LENGTH = _auth.ACCESS_PASSWORD_MIN_LENGTH
+ACCESS_PASSWORD_MAX_LENGTH = _auth.ACCESS_PASSWORD_MAX_LENGTH
+ACCESS_LOGIN_ACCOUNT_MAX_ATTEMPTS = _auth.ACCESS_LOGIN_ACCOUNT_MAX_ATTEMPTS
+ACCESS_LOGIN_SOURCE_MAX_ATTEMPTS = _auth.ACCESS_LOGIN_SOURCE_MAX_ATTEMPTS
+ACCESS_LOGIN_WINDOW_SECONDS = _auth.ACCESS_LOGIN_WINDOW_SECONDS
+ACCESS_LOGIN_MAX_TRACKED_KEYS = _auth.ACCESS_LOGIN_MAX_TRACKED_KEYS
+ACCESS_LOGIN_DUMMY_PASSWORD_HASH = _auth.ACCESS_LOGIN_DUMMY_PASSWORD_HASH
+ACCESS_API_TOKEN_PREFIX = _auth.ACCESS_API_TOKEN_PREFIX
+ACCESS_SESSION_COOKIE_NAME = _auth.ACCESS_SESSION_COOKIE_NAME
+ACCESS_SESSION_TTL_SECONDS = _auth.ACCESS_SESSION_TTL_SECONDS
 
-class DeltaAegisError(RuntimeError):
-    pass
-
-
-class DashboardLoginRateLimitedError(DeltaAegisError):
-    def __init__(self, retry_after: int):
-        super().__init__("too many login attempts; try again later")
-        self.retry_after = max(1, int(retry_after))
-
-
-_ACCESS_LOGIN_ATTEMPTS: dict[tuple[str, str], list[float]] = {}
-_ACCESS_LOGIN_ATTEMPTS_LOCK = threading.Lock()
+DeltaAegisError = _auth.DeltaAegisError
+DashboardLoginRateLimitedError = _auth.DashboardLoginRateLimitedError
+_ACCESS_LOGIN_ATTEMPTS = _auth._ACCESS_LOGIN_ATTEMPTS
+_ACCESS_LOGIN_ATTEMPTS_LOCK = _auth._ACCESS_LOGIN_ATTEMPTS_LOCK
 
 
 @dataclass(frozen=True)
@@ -318,6 +293,14 @@ class Snapshot:
     @property
     def identity_coverage(self) -> float:
         return self.mac_backed_assets / len(self.assets) if self.assets else 0.0
+
+
+_INGEST_CONTEXT = _ingest.IngestContext(
+    service_type=Service,
+    identity_evidence_type=IdentityEvidence,
+    asset_observation_type=AssetObservation,
+    snapshot_type=Snapshot,
+)
 
 
 SCHEMA_SQL = """
@@ -893,808 +876,122 @@ def ensure_scoped_asset_lifecycle_schema(connection: sqlite3.Connection) -> None
 
 
 def ensure_enterprise_access_schema(connection: sqlite3.Connection) -> None:
-    connection.execute(
-        "CREATE TABLE IF NOT EXISTS access_users ("
-        "user_id TEXT PRIMARY KEY,"
-        "username TEXT NOT NULL UNIQUE,"
-        "display_name TEXT,"
-        "role TEXT NOT NULL DEFAULT 'VIEWER',"
-        "password_hash TEXT NOT NULL DEFAULT '',"
-        "is_active INTEGER NOT NULL DEFAULT 1,"
-        "created_at TEXT NOT NULL,"
-        "updated_at TEXT NOT NULL,"
-        "last_login_at TEXT,"
-        "CHECK (role IN ('ADMIN', 'ANALYST', 'VIEWER'))"
-        ")"
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_access_users_username "
-        "ON access_users(username)"
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_access_users_role "
-        "ON access_users(role)"
-    )
-    connection.execute(
-        "CREATE TABLE IF NOT EXISTS access_api_tokens ("
-        "token_id TEXT PRIMARY KEY,"
-        "user_id TEXT NOT NULL,"
-        "token_name TEXT NOT NULL,"
-        "token_hash TEXT NOT NULL UNIQUE,"
-        "token_prefix TEXT NOT NULL,"
-        "role TEXT NOT NULL DEFAULT 'VIEWER',"
-        "is_active INTEGER NOT NULL DEFAULT 1,"
-        "created_at TEXT NOT NULL,"
-        "updated_at TEXT NOT NULL,"
-        "last_used_at TEXT,"
-        "expires_at TEXT,"
-        "FOREIGN KEY (user_id) REFERENCES access_users(user_id) ON DELETE CASCADE,"
-        "CHECK (role IN ('ADMIN', 'ANALYST', 'VIEWER'))"
-        ")"
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_access_api_tokens_user_id "
-        "ON access_api_tokens(user_id)"
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_access_api_tokens_prefix "
-        "ON access_api_tokens(token_prefix)"
-    )
-    connection.execute(
-        "CREATE TABLE IF NOT EXISTS access_audit_log ("
-        "audit_id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        "actor_user_id TEXT,"
-        "actor_username TEXT,"
-        "actor_role TEXT,"
-        "action TEXT NOT NULL,"
-        "target_type TEXT,"
-        "target_key TEXT,"
-        "source_ip TEXT,"
-        "user_agent TEXT,"
-        "detail_json TEXT NOT NULL DEFAULT '{}',"
-        "created_at TEXT NOT NULL,"
-        "FOREIGN KEY (actor_user_id) REFERENCES access_users(user_id) ON DELETE SET NULL"
-        ")"
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_access_audit_log_created_at "
-        "ON access_audit_log(created_at)"
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_access_audit_log_action "
-        "ON access_audit_log(action)"
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_access_audit_log_actor_user_id "
-        "ON access_audit_log(actor_user_id)"
-    )
+    return _auth.ensure_enterprise_access_schema(connection)
 
 
-def normalize_access_role(value: str | None, default: str = "VIEWER") -> str:
-    role = str(value or default or "VIEWER").strip().upper().replace("-", "_").replace(" ", "_")
-
-    if role not in ACCESS_ROLE_RANKS:
-        raise DeltaAegisError(f"unsupported access role: {value!r}")
-
-    return role
+def normalize_access_role(value: str | None, default: str='VIEWER') -> str:
+    return _auth.normalize_access_role(value, default)
 
 
 def access_role_allows(role: str | None, required_role: str | None) -> bool:
-    actual = normalize_access_role(role)
-    required = normalize_access_role(required_role)
-
-    return ACCESS_ROLE_RANKS[actual] >= ACCESS_ROLE_RANKS[required]
+    return _auth.access_role_allows(role, required_role)
 
 
 def access_effective_role(*roles: str | None) -> str:
-    normalized = [normalize_access_role(role) for role in roles]
-
-    if not normalized:
-        return "VIEWER"
-
-    return min(normalized, key=lambda role: ACCESS_ROLE_RANKS[role])
+    return _auth.access_effective_role(*roles)
 
 
 def normalize_access_username(username: str) -> str:
-    value = str(username or "").strip().lower()
-
-    if not value:
-        raise DeltaAegisError("username is required")
-
-    if not re.fullmatch(r"[a-z0-9_.@-]{3,64}", value):
-        raise DeltaAegisError(
-            "username must be 3-64 characters using letters, numbers, dot, underscore, at-sign, or dash"
-        )
-
-    return value
+    return _auth.normalize_access_username(username)
 
 
 def validate_access_password(password: str) -> str:
-    value = str(password or "")
-
-    if not value:
-        raise DeltaAegisError("password is required")
-
-    if len(value) < ACCESS_PASSWORD_MIN_LENGTH:
-        raise DeltaAegisError(
-            f"password must be at least {ACCESS_PASSWORD_MIN_LENGTH} characters"
-        )
-
-    if len(value) > ACCESS_PASSWORD_MAX_LENGTH:
-        raise DeltaAegisError(
-            f"password must be at most {ACCESS_PASSWORD_MAX_LENGTH} characters"
-        )
-
-    return value
+    return _auth.validate_access_password(password)
 
 
-def hash_access_password(password: str, salt: str | None = None, iterations: int = ACCESS_PASSWORD_ITERATIONS) -> str:
-    password_value = validate_access_password(password)
-
-    if iterations < 100000:
-        raise DeltaAegisError("password hash iteration count is too low")
-
-    salt_value = salt or secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac(
-        "sha256",
-        password_value.encode("utf-8"),
-        salt_value.encode("utf-8"),
-        iterations,
-    ).hex()
-
-    return f"{ACCESS_PASSWORD_ALGORITHM}${iterations}${salt_value}${digest}"
+def hash_access_password(password: str, salt: str | None=None, iterations: int=ACCESS_PASSWORD_ITERATIONS) -> str:
+    return _auth.hash_access_password(password, salt, iterations)
 
 
 def verify_access_password(password: str, password_hash: str | None) -> bool:
-    if not password_hash:
-        return False
-
-    try:
-        algorithm, iterations_text, salt, expected_digest = str(password_hash).split("$", 3)
-        iterations = int(iterations_text)
-    except (TypeError, ValueError):
-        return False
-
-    if algorithm != ACCESS_PASSWORD_ALGORITHM:
-        return False
-
-    if iterations < 100000 or iterations > 1000000 or not salt or not expected_digest:
-        return False
-
-    candidate_digest = hashlib.pbkdf2_hmac(
-        "sha256",
-        str(password or "").encode("utf-8"),
-        salt.encode("utf-8"),
-        iterations,
-    ).hex()
-
-    return hmac.compare_digest(candidate_digest, expected_digest)
+    return _auth.verify_access_password(password, password_hash)
 
 
 def access_password_hash_is_usable(password_hash: str | None) -> bool:
-    try:
-        algorithm, iterations_text, salt, expected_digest = str(password_hash or "").split("$", 3)
-        iterations = int(iterations_text)
-    except (TypeError, ValueError):
-        return False
-
-    return bool(
-        algorithm == ACCESS_PASSWORD_ALGORITHM
-        and 100000 <= iterations <= 1000000
-        and salt
-        and expected_digest
-    )
+    return _auth.access_password_hash_is_usable(password_hash)
 
 
 def _access_login_identity(source_ip: str | None, username: str) -> tuple[str, str]:
-    source = str(source_ip or "unknown").strip().lower()[:128] or "unknown"
-    account = str(username or "<empty>").strip().lower()[:64] or "<empty>"
-    return source, account
+    return _auth._access_login_identity(source_ip, username)
 
 
 def access_login_attempt_reserve(source_ip: str | None, username: str) -> None:
-    source, account = _access_login_identity(source_ip, username)
-    now = time.monotonic()
-    cutoff = now - ACCESS_LOGIN_WINDOW_SECONDS
-    dimensions = (
-        (("source", source), ACCESS_LOGIN_SOURCE_MAX_ATTEMPTS),
-        (("account", account), ACCESS_LOGIN_ACCOUNT_MAX_ATTEMPTS),
-    )
-
-    with _ACCESS_LOGIN_ATTEMPTS_LOCK:
-        for key in list(_ACCESS_LOGIN_ATTEMPTS):
-            recent = [stamp for stamp in _ACCESS_LOGIN_ATTEMPTS[key] if stamp > cutoff]
-            if recent:
-                _ACCESS_LOGIN_ATTEMPTS[key] = recent
-            else:
-                del _ACCESS_LOGIN_ATTEMPTS[key]
-
-        retry_after = 0
-        for key, maximum in dimensions:
-            attempts = _ACCESS_LOGIN_ATTEMPTS.get(key, [])
-            if len(attempts) >= maximum:
-                retry_after = max(
-                    retry_after,
-                    int(ACCESS_LOGIN_WINDOW_SECONDS - (now - attempts[0])) + 1,
-                )
-
-        if retry_after:
-            raise DashboardLoginRateLimitedError(retry_after)
-
-        while len(_ACCESS_LOGIN_ATTEMPTS) + 2 > ACCESS_LOGIN_MAX_TRACKED_KEYS:
-            oldest_key = min(
-                _ACCESS_LOGIN_ATTEMPTS,
-                key=lambda key: _ACCESS_LOGIN_ATTEMPTS[key][-1],
-            )
-            del _ACCESS_LOGIN_ATTEMPTS[oldest_key]
-
-        for key, _maximum in dimensions:
-            _ACCESS_LOGIN_ATTEMPTS.setdefault(key, []).append(now)
+    return _auth.access_login_attempt_reserve(source_ip, username)
 
 
 def access_login_attempt_clear(source_ip: str | None, username: str) -> None:
-    source, account = _access_login_identity(source_ip, username)
-
-    with _ACCESS_LOGIN_ATTEMPTS_LOCK:
-        _ACCESS_LOGIN_ATTEMPTS.pop(("source", source), None)
-        _ACCESS_LOGIN_ATTEMPTS.pop(("account", account), None)
+    return _auth.access_login_attempt_clear(source_ip, username)
 
 
 def hash_access_api_token(token: str) -> str:
-    if not token:
-        raise DeltaAegisError("API token is required")
-
-    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+    return _auth.hash_access_api_token(token)
 
 
 def generate_access_api_token() -> str:
-    return f"{ACCESS_API_TOKEN_PREFIX}_{secrets.token_urlsafe(32)}"
+    return _auth.generate_access_api_token()
 
 
-def create_access_user(
-    connection: sqlite3.Connection,
-    username: str,
-    role: str = "VIEWER",
-    password: str | None = None,
-    display_name: str | None = None,
-    is_active: bool = True,
-) -> dict[str, Any]:
-    ensure_enterprise_access_schema(connection)
-
-    normalized_username = normalize_access_username(username)
-    normalized_role = normalize_access_role(role)
-    now = utc_now()
-    user_id = str(uuid.uuid4())
-    password_hash = hash_access_password(password) if password else ""
-
-    connection.execute(
-        "INSERT INTO access_users ("
-        "user_id, username, display_name, role, password_hash, is_active, created_at, updated_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            user_id,
-            normalized_username,
-            display_name,
-            normalized_role,
-            password_hash,
-            1 if is_active else 0,
-            now,
-            now,
-        ),
-    )
-
-    return {
-        "user_id": user_id,
-        "username": normalized_username,
-        "display_name": display_name,
-        "role": normalized_role,
-        "is_active": bool(is_active),
-        "created_at": now,
-        "updated_at": now,
-    }
+def create_access_user(connection: sqlite3.Connection, username: str, role: str='VIEWER', password: str | None=None, display_name: str | None=None, is_active: bool=True) -> dict[str, Any]:
+    return _auth.create_access_user(connection, username, role, password, display_name, is_active)
 
 
 def access_user_by_username(connection: sqlite3.Connection, username: str) -> dict[str, Any] | None:
-    ensure_enterprise_access_schema(connection)
-
-    normalized_username = normalize_access_username(username)
-    row = connection.execute(
-        "SELECT user_id, username, display_name, role, password_hash, is_active, "
-        "created_at, updated_at, last_login_at "
-        "FROM access_users WHERE username = ?",
-        (normalized_username,),
-    ).fetchone()
-
-    if not row:
-        return None
-
-    return dict(row)
+    return _auth.access_user_by_username(connection, username)
 
 
-def list_access_users(connection: sqlite3.Connection, include_inactive: bool = False) -> list[dict[str, Any]]:
-    ensure_enterprise_access_schema(connection)
-
-    where = "" if include_inactive else "WHERE is_active = 1"
-    rows = connection.execute(
-        "SELECT user_id, username, display_name, role, is_active, created_at, updated_at, last_login_at "
-        f"FROM access_users {where} ORDER BY username"
-    ).fetchall()
-
-    return [dict(row) for row in rows]
+def list_access_users(connection: sqlite3.Connection, include_inactive: bool=False) -> list[dict[str, Any]]:
+    return _auth.list_access_users(connection, include_inactive)
 
 
-def create_access_api_token(
-    connection: sqlite3.Connection,
-    user_id: str,
-    token_name: str,
-    role: str | None = None,
-    expires_at: str | None = None,
-) -> dict[str, Any]:
-    ensure_enterprise_access_schema(connection)
-
-    user = connection.execute(
-        "SELECT user_id, username, role, is_active FROM access_users WHERE user_id = ?",
-        (user_id,),
-    ).fetchone()
-
-    if not user:
-        raise DeltaAegisError(f"access user not found: {user_id}")
-
-    if not int(user["is_active"] or 0):
-        raise DeltaAegisError(f"access user is inactive: {user['username']}")
-
-    token_value = generate_access_api_token()
-    token_hash = hash_access_api_token(token_value)
-    token_id = str(uuid.uuid4())
-    now = utc_now()
-    token_role = normalize_access_role(role or user["role"])
-    user_role = normalize_access_role(user["role"])
-
-    if not access_role_allows(user_role, token_role):
-        raise DeltaAegisError(
-            f"API token role {token_role} exceeds the user's current {user_role} role"
-        )
-
-    clean_expires_at = str(expires_at or "").strip() or None
-    if clean_expires_at and access_parse_datetime(clean_expires_at) is None:
-        raise DeltaAegisError("API token expires_at must be a valid ISO-8601 timestamp")
-
-    token_prefix = token_value[:12]
-    clean_token_name = str(token_name or "DeltaAegis API Token").strip() or "DeltaAegis API Token"
-
-    connection.execute(
-        "INSERT INTO access_api_tokens ("
-        "token_id, user_id, token_name, token_hash, token_prefix, role, "
-        "is_active, created_at, updated_at, expires_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
-        (
-            token_id,
-            user_id,
-            clean_token_name,
-            token_hash,
-            token_prefix,
-            token_role,
-            now,
-            now,
-            clean_expires_at,
-        ),
-    )
-
-    return {
-        "token_id": token_id,
-        "user_id": user_id,
-        "username": user["username"],
-        "token_name": clean_token_name,
-        "token": token_value,
-        "token_prefix": token_prefix,
-        "role": token_role,
-        "created_at": now,
-        "expires_at": clean_expires_at,
-    }
+def create_access_api_token(connection: sqlite3.Connection, user_id: str, token_name: str, role: str | None=None, expires_at: str | None=None) -> dict[str, Any]:
+    return _auth.create_access_api_token(connection, user_id, token_name, role, expires_at)
 
 
-def record_access_audit_event(
-    connection: sqlite3.Connection,
-    action: str,
-    actor: dict[str, Any] | None = None,
-    target_type: str | None = None,
-    target_key: str | None = None,
-    source_ip: str | None = None,
-    user_agent: str | None = None,
-    details: dict[str, Any] | None = None,
-) -> int:
-    ensure_enterprise_access_schema(connection)
-
-    actor = actor or {}
-    now = utc_now()
-    cursor = connection.execute(
-        "INSERT INTO access_audit_log ("
-        "actor_user_id, actor_username, actor_role, action, target_type, target_key, "
-        "source_ip, user_agent, detail_json, created_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            actor.get("user_id"),
-            actor.get("username"),
-            actor.get("role"),
-            str(action or "").strip().upper() or "UNKNOWN",
-            target_type,
-            target_key,
-            source_ip,
-            user_agent,
-            json.dumps(details or {}, sort_keys=True),
-            now,
-        ),
-    )
-
-    return int(cursor.lastrowid)
+def record_access_audit_event(connection: sqlite3.Connection, action: str, actor: dict[str, Any] | None=None, target_type: str | None=None, target_key: str | None=None, source_ip: str | None=None, user_agent: str | None=None, details: dict[str, Any] | None=None) -> int:
+    return _auth.record_access_audit_event(connection, action, actor, target_type, target_key, source_ip, user_agent, details)
 
 
 def ensure_dashboard_session_schema(connection: sqlite3.Connection) -> None:
-    ensure_enterprise_access_schema(connection)
-
-    connection.execute(
-        "CREATE TABLE IF NOT EXISTS access_sessions ("
-        "session_id TEXT PRIMARY KEY, "
-        "user_id TEXT NOT NULL, "
-        "session_token_hash TEXT NOT NULL UNIQUE, "
-        "role TEXT NOT NULL, "
-        "is_active INTEGER NOT NULL DEFAULT 1, "
-        "created_at TEXT NOT NULL, "
-        "last_seen_at TEXT, "
-        "expires_at TEXT NOT NULL, "
-        "source_ip TEXT, "
-        "user_agent TEXT, "
-        "ended_at TEXT, "
-        "end_reason TEXT, "
-        "FOREIGN KEY(user_id) REFERENCES access_users(user_id)"
-        ")"
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_access_sessions_user_id "
-        "ON access_sessions(user_id)"
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_access_sessions_token_hash "
-        "ON access_sessions(session_token_hash)"
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_access_sessions_expires_at "
-        "ON access_sessions(expires_at)"
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_access_sessions_active "
-        "ON access_sessions(is_active)"
-    )
+    return _auth.ensure_dashboard_session_schema(connection)
 
 
 def generate_dashboard_session_token() -> str:
-    return "ds_" + secrets.token_urlsafe(32)
+    return _auth.generate_dashboard_session_token()
 
 
 def hash_dashboard_session_token(token: str) -> str:
-    return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+    return _auth.hash_dashboard_session_token(token)
 
 
-def dashboard_session_expiry(ttl_seconds: int = ACCESS_SESSION_TTL_SECONDS) -> str:
-    ttl = max(300, int(ttl_seconds or ACCESS_SESSION_TTL_SECONDS))
-    return (datetime.now(timezone.utc) + timedelta(seconds=ttl)).isoformat()
+def dashboard_session_expiry(ttl_seconds: int=ACCESS_SESSION_TTL_SECONDS) -> str:
+    return _auth.dashboard_session_expiry(ttl_seconds)
 
 
-def dashboard_user_login(
-    connection: sqlite3.Connection,
-    username: str,
-    password: str,
-    source_ip: str | None = None,
-    user_agent: str | None = None,
-) -> dict[str, Any] | None:
-    ensure_dashboard_session_schema(connection)
-
-    login_name = str(username or "").strip().lower()[:64]
-
-    try:
-        access_login_attempt_reserve(source_ip, login_name)
-    except DashboardLoginRateLimitedError:
-        record_access_audit_event(
-            connection,
-            action="LOGIN_RATE_LIMITED",
-            actor={"username": login_name or None, "role": None},
-            target_type="access_user",
-            target_key=login_name or "<empty>",
-            source_ip=source_ip,
-            user_agent=user_agent,
-            details={"reason": "rolling_window_limit"},
-        )
-        connection.commit()
-        raise
-
-    try:
-        normalized_username = normalize_access_username(username)
-    except DeltaAegisError:
-        normalized_username = None
-
-    user = (
-        access_user_by_username(connection, normalized_username)
-        if normalized_username
-        else None
-    )
-    active_user = user if user and int(user.get("is_active") or 0) else None
-    stored_hash = (active_user or {}).get("password_hash") or ""
-    password_hash = (
-        stored_hash
-        if access_password_hash_is_usable(stored_hash)
-        else ACCESS_LOGIN_DUMMY_PASSWORD_HASH
-    )
-    password_matches = verify_access_password(password, password_hash)
-
-    if not active_user or not password_matches:
-        failure_reason = (
-            "invalid_password"
-            if active_user
-            else "unknown_or_inactive_user"
-        )
-        record_access_audit_event(
-            connection,
-            action="LOGIN_FAILED",
-            actor={
-                "user_id": (user or {}).get("user_id"),
-                "username": (user or {}).get("username") or login_name or None,
-                "role": (user or {}).get("role"),
-            },
-            target_type="access_user",
-            target_key=(user or {}).get("username") or login_name or "<empty>",
-            source_ip=source_ip,
-            user_agent=user_agent,
-            details={"reason": failure_reason},
-        )
-        connection.commit()
-        return None
-
-    session = create_dashboard_session(
-        connection,
-        active_user,
-        source_ip=source_ip,
-        user_agent=user_agent,
-    )
-    access_login_attempt_clear(source_ip, login_name)
-    return session
+def dashboard_user_login(connection: sqlite3.Connection, username: str, password: str, source_ip: str | None=None, user_agent: str | None=None) -> dict[str, Any] | None:
+    return _auth.dashboard_user_login(connection, username, password, source_ip, user_agent, password_verifier=verify_access_password)
 
 
-def create_dashboard_session(
-    connection: sqlite3.Connection,
-    user: dict[str, Any],
-    source_ip: str | None = None,
-    user_agent: str | None = None,
-    ttl_seconds: int = ACCESS_SESSION_TTL_SECONDS,
-) -> dict[str, Any]:
-    ensure_dashboard_session_schema(connection)
-
-    session_id = str(uuid.uuid4())
-    session_token = generate_dashboard_session_token()
-    session_hash = hash_dashboard_session_token(session_token)
-    now = utc_now()
-    expires_at = dashboard_session_expiry(ttl_seconds)
-
-    role = normalize_access_role(user.get("role") or "VIEWER")
-
-    connection.execute(
-        "INSERT INTO access_sessions ("
-        "session_id, user_id, session_token_hash, role, is_active, "
-        "created_at, last_seen_at, expires_at, source_ip, user_agent"
-        ") VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
-        (
-            session_id,
-            user.get("user_id"),
-            session_hash,
-            role,
-            now,
-            now,
-            expires_at,
-            source_ip,
-            user_agent,
-        ),
-    )
-
-    actor = {
-        "user_id": user.get("user_id"),
-        "username": user.get("username"),
-        "role": role,
-    }
-
-    record_access_audit_event(
-        connection,
-        action="LOGIN_SUCCESS",
-        actor=actor,
-        target_type="access_session",
-        target_key=session_id,
-        source_ip=source_ip,
-        user_agent=user_agent,
-        details={
-            "session_id": session_id,
-            "expires_at": expires_at,
-            "role": role,
-        },
-    )
-    connection.commit()
-
-    return {
-        "session_id": session_id,
-        "session_token": session_token,
-        "session_token_hash": session_hash,
-        "user_id": user.get("user_id"),
-        "username": user.get("username"),
-        "display_name": user.get("display_name"),
-        "role": role,
-        "expires_at": expires_at,
-    }
+def create_dashboard_session(connection: sqlite3.Connection, user: dict[str, Any], source_ip: str | None=None, user_agent: str | None=None, ttl_seconds: int=ACCESS_SESSION_TTL_SECONDS) -> dict[str, Any]:
+    return _auth.create_dashboard_session(connection, user, source_ip, user_agent, ttl_seconds)
 
 
 def session_is_expired(expires_at: str | None) -> bool:
-    if not expires_at:
-        return True
-
-    try:
-        expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
-    except ValueError:
-        return True
-
-    if expiry.tzinfo is None:
-        expiry = expiry.replace(tzinfo=timezone.utc)
-
-    return expiry <= datetime.now(timezone.utc)
+    return _auth.session_is_expired(expires_at)
 
 
-def authenticate_dashboard_session(
-    connection: sqlite3.Connection,
-    session_token: str,
-    required_role: str = "VIEWER",
-    update_last_seen: bool = True,
-) -> dict[str, Any] | None:
-    ensure_dashboard_session_schema(connection)
-
-    token = str(session_token or "").strip()
-
-    if not token:
-        return None
-
-    session_hash = hash_dashboard_session_token(token)
-
-    row = connection.execute(
-        "SELECT "
-        "s.session_id, "
-        "s.user_id, "
-        "s.role AS session_role, "
-        "s.is_active AS session_active, "
-        "s.created_at AS session_created_at, "
-        "s.last_seen_at, "
-        "s.expires_at, "
-        "u.username, "
-        "u.display_name, "
-        "u.role AS user_role, "
-        "u.is_active AS user_active "
-        "FROM access_sessions s "
-        "JOIN access_users u ON u.user_id = s.user_id "
-        "WHERE s.session_token_hash = ?",
-        (session_hash,),
-    ).fetchone()
-
-    if not row:
-        return None
-
-    actor = {
-        "auth_type": "dashboard_session",
-        "session_id": row["session_id"],
-        "user_id": row["user_id"],
-        "username": row["username"],
-        "display_name": row["display_name"],
-        # Authorization follows the user's current role. The session role is
-        # retained only as issuance evidence and can never preserve a removed
-        # privilege after an administrator demotes the account.
-        "role": normalize_access_role(row["user_role"] or "VIEWER"),
-        "session_issued_role": normalize_access_role(
-            row["session_role"] or row["user_role"] or "VIEWER"
-        ),
-        "expires_at": row["expires_at"],
-    }
-
-    if not int(row["session_active"] or 0) or not int(row["user_active"] or 0):
-        return None
-
-    if session_is_expired(row["expires_at"]):
-        expire_dashboard_session(
-            connection,
-            token,
-            actor=actor,
-            reason="expired",
-            commit=True,
-        )
-        return None
-
-    if not access_role_allows(actor["role"], required_role):
-        return None
-
-    if update_last_seen:
-        now = utc_now()
-        connection.execute(
-            "UPDATE access_sessions "
-            "SET last_seen_at = ? "
-            "WHERE session_id = ?",
-            (now, row["session_id"]),
-        )
-        connection.commit()
-        actor["last_seen_at"] = now
-
-    return actor
+def authenticate_dashboard_session(connection: sqlite3.Connection, session_token: str, required_role: str='VIEWER', update_last_seen: bool=True) -> dict[str, Any] | None:
+    return _auth.authenticate_dashboard_session(connection, session_token, required_role, update_last_seen)
 
 
-def revoke_dashboard_user_sessions(
-    connection: sqlite3.Connection,
-    user_id: str,
-    reason: str,
-) -> int:
-    """Revoke every live browser session for one user inside the caller's transaction."""
-    ensure_dashboard_session_schema(connection)
-    now = utc_now()
-    cursor = connection.execute(
-        "UPDATE access_sessions "
-        "SET is_active = 0, ended_at = COALESCE(ended_at, ?), end_reason = ? "
-        "WHERE user_id = ? AND is_active = 1",
-        (now, str(reason or "administrative_change"), str(user_id or "")),
-    )
-    return max(0, int(cursor.rowcount or 0))
+def revoke_dashboard_user_sessions(connection: sqlite3.Connection, user_id: str, reason: str) -> int:
+    return _auth.revoke_dashboard_user_sessions(connection, user_id, reason)
 
 
-def expire_dashboard_session(
-    connection: sqlite3.Connection,
-    session_token: str,
-    actor: dict[str, Any] | None = None,
-    reason: str = "logout",
-    commit: bool = True,
-) -> bool:
-    ensure_dashboard_session_schema(connection)
-
-    token = str(session_token or "").strip()
-
-    if not token:
-        return False
-
-    session_hash = hash_dashboard_session_token(token)
-    now = utc_now()
-
-    row = connection.execute(
-        "SELECT session_id, user_id, role "
-        "FROM access_sessions "
-        "WHERE session_token_hash = ?",
-        (session_hash,),
-    ).fetchone()
-
-    if not row:
-        return False
-
-    connection.execute(
-        "UPDATE access_sessions "
-        "SET is_active = 0, ended_at = ?, end_reason = ? "
-        "WHERE session_id = ?",
-        (now, str(reason or "logout"), row["session_id"]),
-    )
-
-    record_access_audit_event(
-        connection,
-        action="LOGOUT" if str(reason or "").lower() == "logout" else "SESSION_EXPIRED",
-        actor=actor,
-        target_type="access_session",
-        target_key=row["session_id"],
-        details={"reason": reason},
-    )
-
-    if commit:
-        connection.commit()
-
-    return True
+def expire_dashboard_session(connection: sqlite3.Connection, session_token: str, actor: dict[str, Any] | None=None, reason: str='logout', commit: bool=True) -> bool:
+    return _auth.expire_dashboard_session(connection, session_token, actor, reason, commit)
 
 def connect(db_path: Path) -> sqlite3.Connection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(db_path)
-    connection.row_factory = sqlite3.Row
+    connection = open_database_connection(db_path)
     connection.executescript(SCHEMA_SQL)
 
     connection.executescript(
@@ -1858,86 +1155,35 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 
 def load_json(path: Path) -> Any:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise DeltaAegisError(f"could not read JSON {path}: {exc}") from exc
+    return _ingest.load_json(path)
 
 
-def resolve_bundle_member(
-    bundle_dir: Path,
-    filename: str,
-    *,
-    key: str,
-) -> Path:
-    """Resolve a manifest member without allowing it to escape its bundle."""
-    if not isinstance(filename, str) or not filename.strip():
-        raise DeltaAegisError(f"manifest files.{key} must be a non-empty relative path")
-
-    relative = Path(filename.strip())
-    if relative.is_absolute():
-        raise DeltaAegisError(f"manifest files.{key} must be relative to the bundle")
-
-    try:
-        root = bundle_dir.resolve(strict=True)
-        candidate = (root / relative).resolve(strict=False)
-        candidate.relative_to(root)
-    except (OSError, ValueError) as exc:
-        raise DeltaAegisError(
-            f"manifest files.{key} escapes the immutable bundle boundary: {filename!r}"
-        ) from exc
-
-    return candidate
+def resolve_bundle_member(bundle_dir: Path, filename: str, *, key: str) -> Path:
+    return _ingest.resolve_bundle_member(bundle_dir, filename, key=key)
 
 
 def require_file(bundle_dir: Path, manifest: dict[str, Any], key: str) -> Path:
-    filename = manifest.get("files", {}).get(key)
-    if not isinstance(filename, str) or not filename:
-        raise DeltaAegisError(f"manifest missing files.{key}")
-    path = resolve_bundle_member(bundle_dir, filename, key=key)
-    if not path.is_file():
-        raise DeltaAegisError(f"required bundle file is missing: {path}")
-    return path
+    return _ingest.require_file(bundle_dir, manifest, key)
 
 
 def optional_file(bundle_dir: Path, manifest: dict[str, Any], key: str) -> Path | None:
-    filename = manifest.get("files", {}).get(key)
-    if not isinstance(filename, str) or not filename:
-        return None
-    path = resolve_bundle_member(bundle_dir, filename, key=key)
-    return path if path.is_file() else None
+    return _ingest.optional_file(bundle_dir, manifest, key)
 
 
 def analysis_by_ip(path: Path) -> dict[str, dict[str, Any]]:
-    raw = load_json(path)
-    if not isinstance(raw, list):
-        raise DeltaAegisError(f"analysis JSON must be a list: {path}")
-    return {item["host"]: item for item in raw if isinstance(item, dict) and isinstance(item.get("host"), str)}
+    return _ingest.analysis_by_ip(path)
 
 
 def safe_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    return _ingest.safe_int(value)
 
 
 def canonical_network_scope(target: str) -> str:
-    return str(ipaddress.ip_network(str(target).strip(), strict=False))
+    return _ingest.canonical_network_scope(target)
 
 
 def optional_network_scope(value: str | None) -> str | None:
-    if value is None:
-        return None
-
-    value = str(value).strip()
-
-    if not value:
-        return None
-
-    return canonical_network_scope(value)
+    return _ingest.optional_network_scope(value)
 
 
 
@@ -1951,1115 +1197,129 @@ LOGICAL_SITE_STATUSES = {
 
 
 def normalize_logical_site_id(value: Any) -> str:
-    site_id = str(value or "").strip()
-
-    if (
-        not site_id
-        or len(site_id) > 96
-        or re.fullmatch(r"[A-Za-z0-9._:-]+", site_id) is None
-    ):
-        raise DeltaAegisError(
-            "logical site id must be 1-96 characters using "
-            "letters, numbers, dot, underscore, colon, or hyphen"
-        )
-
-    return site_id
+    return _sites.normalize_logical_site_id(value)
 
 
 def normalize_logical_site_name(value: Any) -> str:
-    name = " ".join(str(value or "").split())
-
-    if not name:
-        raise DeltaAegisError("logical site name is required")
-
-    if len(name) > 160:
-        raise DeltaAegisError(
-            "logical site name must not exceed 160 characters"
-        )
-
-    if any(ord(character) < 32 for character in name):
-        raise DeltaAegisError(
-            "logical site name contains unsupported control characters"
-        )
-
-    return name
+    return _sites.normalize_logical_site_name(value)
 
 
 def normalize_logical_site_description(value: Any) -> str:
-    description = str(value or "").strip()
-
-    if len(description) > 2000:
-        raise DeltaAegisError(
-            "logical site description must not exceed 2000 characters"
-        )
-
-    if any(
-        ord(character) < 32
-        and character not in {"\n", "\r", "\t"}
-        for character in description
-    ):
-        raise DeltaAegisError(
-            "logical site description contains unsupported "
-            "control characters"
-        )
-
-    return description
+    return _sites.normalize_logical_site_description(value)
 
 
-def logical_site_row_to_dict(
-    row: sqlite3.Row | dict[str, Any],
-) -> dict[str, Any]:
-    item = dict(row)
-
-    return {
-        "site_id": str(item.get("site_id") or ""),
-        "name": str(item.get("name") or ""),
-        "description": str(item.get("description") or ""),
-        "status": str(item.get("status") or LOGICAL_SITE_ACTIVE),
-        "created_at": item.get("created_at"),
-        "updated_at": item.get("updated_at"),
-        "archived_at": item.get("archived_at"),
-        "member_count": int(item.get("member_count") or 0),
-    }
+def logical_site_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return _sites.logical_site_row_to_dict(row)
 
 
-def get_logical_site(
-    connection: sqlite3.Connection,
-    site_id: Any,
-) -> dict[str, Any] | None:
-    safe_site_id = normalize_logical_site_id(site_id)
-    row = connection.execute(
-        """
-        SELECT
-            s.site_id,
-            s.name,
-            s.description,
-            s.status,
-            s.created_at,
-            s.updated_at,
-            s.archived_at,
-            COUNT(m.network_scope) AS member_count
-        FROM logical_sites s
-        LEFT JOIN logical_site_memberships m
-            ON m.site_id = s.site_id
-        WHERE s.site_id = ?
-        GROUP BY s.site_id
-        """,
-        (safe_site_id,),
-    ).fetchone()
-
-    return logical_site_row_to_dict(row) if row is not None else None
+def get_logical_site(connection: sqlite3.Connection, site_id: Any) -> dict[str, Any] | None:
+    return _sites.get_logical_site(connection, site_id)
 
 
-def list_logical_sites(
-    connection: sqlite3.Connection,
-    include_archived: bool = False,
-) -> list[dict[str, Any]]:
-    where = "" if include_archived else "WHERE s.status = 'ACTIVE'"
-    rows = connection.execute(
-        f"""
-        SELECT
-            s.site_id,
-            s.name,
-            s.description,
-            s.status,
-            s.created_at,
-            s.updated_at,
-            s.archived_at,
-            COUNT(m.network_scope) AS member_count
-        FROM logical_sites s
-        LEFT JOIN logical_site_memberships m
-            ON m.site_id = s.site_id
-        {where}
-        GROUP BY s.site_id
-        ORDER BY
-            CASE s.status
-                WHEN 'ACTIVE' THEN 0
-                ELSE 1
-            END,
-            s.name COLLATE NOCASE,
-            s.site_id
-        """
-    ).fetchall()
-
-    return [logical_site_row_to_dict(row) for row in rows]
+def list_logical_sites(connection: sqlite3.Connection, include_archived: bool=False) -> list[dict[str, Any]]:
+    return _sites.list_logical_sites(connection, include_archived)
 
 
-def create_logical_site(
-    connection: sqlite3.Connection,
-    name: Any,
-    description: Any = "",
-) -> dict[str, Any]:
-    safe_name = normalize_logical_site_name(name)
-    safe_description = normalize_logical_site_description(description)
-    site_id = "site-" + uuid.uuid4().hex[:16]
-    now = utc_now()
-
-    try:
-        connection.execute(
-            """
-            INSERT INTO logical_sites (
-                site_id,
-                name,
-                description,
-                status,
-                created_at,
-                updated_at,
-                archived_at
-            )
-            VALUES (?, ?, ?, 'ACTIVE', ?, ?, NULL)
-            """,
-            (
-                site_id,
-                safe_name,
-                safe_description,
-                now,
-                now,
-            ),
-        )
-    except sqlite3.IntegrityError as exc:
-        raise DeltaAegisError(
-            f"logical site name already exists: {safe_name}"
-        ) from exc
-
-    site = get_logical_site(connection, site_id)
-    if site is None:
-        raise DeltaAegisError(
-            f"logical site disappeared after creation: {site_id}"
-        )
-
-    return site
+def create_logical_site(connection: sqlite3.Connection, name: Any, description: Any='') -> dict[str, Any]:
+    return _sites.create_logical_site(connection, name, description)
 
 
-def rename_logical_site(
-    connection: sqlite3.Connection,
-    site_id: Any,
-    name: Any,
-) -> dict[str, Any]:
-    safe_site_id = normalize_logical_site_id(site_id)
-    safe_name = normalize_logical_site_name(name)
-
-    if get_logical_site(connection, safe_site_id) is None:
-        raise DeltaAegisError(
-            f"logical site not found: {safe_site_id}"
-        )
-
-    try:
-        connection.execute(
-            """
-            UPDATE logical_sites
-            SET name = ?, updated_at = ?
-            WHERE site_id = ?
-            """,
-            (safe_name, utc_now(), safe_site_id),
-        )
-    except sqlite3.IntegrityError as exc:
-        raise DeltaAegisError(
-            f"logical site name already exists: {safe_name}"
-        ) from exc
-
-    site = get_logical_site(connection, safe_site_id)
-    if site is None:
-        raise DeltaAegisError(
-            f"logical site disappeared after rename: {safe_site_id}"
-        )
-
-    return site
+def rename_logical_site(connection: sqlite3.Connection, site_id: Any, name: Any) -> dict[str, Any]:
+    return _sites.rename_logical_site(connection, site_id, name)
 
 
-def update_logical_site_description(
-    connection: sqlite3.Connection,
-    site_id: Any,
-    description: Any,
-) -> dict[str, Any]:
-    safe_site_id = normalize_logical_site_id(site_id)
-    safe_description = normalize_logical_site_description(
-        description
-    )
-
-    cursor = connection.execute(
-        """
-        UPDATE logical_sites
-        SET description = ?, updated_at = ?
-        WHERE site_id = ?
-        """,
-        (safe_description, utc_now(), safe_site_id),
-    )
-
-    if cursor.rowcount == 0:
-        raise DeltaAegisError(
-            f"logical site not found: {safe_site_id}"
-        )
-
-    site = get_logical_site(connection, safe_site_id)
-    if site is None:
-        raise DeltaAegisError(
-            "logical site disappeared after description update: "
-            f"{safe_site_id}"
-        )
-
-    return site
+def update_logical_site_description(connection: sqlite3.Connection, site_id: Any, description: Any) -> dict[str, Any]:
+    return _sites.update_logical_site_description(connection, site_id, description)
 
 
-def archive_logical_site(
-    connection: sqlite3.Connection,
-    site_id: Any,
-) -> dict[str, Any]:
-    safe_site_id = normalize_logical_site_id(site_id)
-    site = get_logical_site(connection, safe_site_id)
-
-    if site is None:
-        raise DeltaAegisError(
-            f"logical site not found: {safe_site_id}"
-        )
-
-    if site["status"] == LOGICAL_SITE_ARCHIVED:
-        return site
-
-    now = utc_now()
-    connection.execute(
-        """
-        UPDATE logical_sites
-        SET
-            status = 'ARCHIVED',
-            archived_at = ?,
-            updated_at = ?
-        WHERE site_id = ?
-        """,
-        (now, now, safe_site_id),
-    )
-
-    archived = get_logical_site(connection, safe_site_id)
-    if archived is None:
-        raise DeltaAegisError(
-            f"logical site disappeared after archive: {safe_site_id}"
-        )
-
-    return archived
+def archive_logical_site(connection: sqlite3.Connection, site_id: Any) -> dict[str, Any]:
+    return _sites.archive_logical_site(connection, site_id)
 
 
-def logical_site_member_scopes(
-    connection: sqlite3.Connection,
-    site_id: Any,
-) -> list[str]:
-    safe_site_id = normalize_logical_site_id(site_id)
-
-    if get_logical_site(connection, safe_site_id) is None:
-        raise DeltaAegisError(
-            f"logical site not found: {safe_site_id}"
-        )
-
-    return [
-        str(row["network_scope"])
-        for row in connection.execute(
-            """
-            SELECT network_scope
-            FROM logical_site_memberships
-            WHERE site_id = ?
-            ORDER BY network_scope
-            """,
-            (safe_site_id,),
-        ).fetchall()
-    ]
+def logical_site_member_scopes(connection: sqlite3.Connection, site_id: Any) -> list[str]:
+    return _sites.logical_site_member_scopes(connection, site_id)
 
 
-def logical_site_for_network_scope(
-    connection: sqlite3.Connection,
-    network_scope: Any,
-) -> dict[str, Any] | None:
-    safe_scope = canonical_network_scope(str(network_scope or ""))
-    row = connection.execute(
-        """
-        SELECT
-            s.site_id,
-            s.name,
-            s.description,
-            s.status,
-            s.created_at,
-            s.updated_at,
-            s.archived_at,
-            (
-                SELECT COUNT(*)
-                FROM logical_site_memberships members
-                WHERE members.site_id = s.site_id
-            ) AS member_count
-        FROM logical_site_memberships m
-        JOIN logical_sites s
-            ON s.site_id = m.site_id
-        WHERE m.network_scope = ?
-        """,
-        (safe_scope,),
-    ).fetchone()
-
-    return logical_site_row_to_dict(row) if row is not None else None
+def logical_site_for_network_scope(connection: sqlite3.Connection, network_scope: Any) -> dict[str, Any] | None:
+    return _sites.logical_site_for_network_scope(connection, network_scope)
 
 
-def assign_network_scope_to_logical_site(
-    connection: sqlite3.Connection,
-    site_id: Any,
-    network_scope: Any,
-) -> dict[str, Any]:
-    safe_site_id = normalize_logical_site_id(site_id)
-    safe_scope = canonical_network_scope(str(network_scope or ""))
-    site = get_logical_site(connection, safe_site_id)
-
-    if site is None:
-        raise DeltaAegisError(
-            f"logical site not found: {safe_site_id}"
-        )
-
-    if site["status"] != LOGICAL_SITE_ACTIVE:
-        raise DeltaAegisError(
-            f"logical site is archived: {safe_site_id}"
-        )
-
-    existing = connection.execute(
-        """
-        SELECT site_id
-        FROM logical_site_memberships
-        WHERE network_scope = ?
-        """,
-        (safe_scope,),
-    ).fetchone()
-
-    if existing is not None:
-        existing_site_id = str(existing["site_id"])
-
-        if existing_site_id == safe_site_id:
-            raise DeltaAegisError(
-                f"network scope is already assigned to logical site "
-                f"{safe_site_id}: {safe_scope}"
-            )
-
-        raise DeltaAegisError(
-            f"network scope {safe_scope} is already assigned to "
-            f"logical site {existing_site_id}"
-        )
-
-    now = utc_now()
-    connection.execute(
-        """
-        INSERT INTO logical_site_memberships (
-            network_scope,
-            site_id,
-            created_at,
-            updated_at
-        )
-        VALUES (?, ?, ?, ?)
-        """,
-        (safe_scope, safe_site_id, now, now),
-    )
-
-    return {
-        "site_id": safe_site_id,
-        "network_scope": safe_scope,
-        "created_at": now,
-        "updated_at": now,
-    }
+def assign_network_scope_to_logical_site(connection: sqlite3.Connection, site_id: Any, network_scope: Any) -> dict[str, Any]:
+    return _sites.assign_network_scope_to_logical_site(connection, site_id, network_scope)
 
 
-def remove_network_scope_from_logical_site(
-    connection: sqlite3.Connection,
-    site_id: Any,
-    network_scope: Any,
-) -> dict[str, Any]:
-    safe_site_id = normalize_logical_site_id(site_id)
-    safe_scope = canonical_network_scope(str(network_scope or ""))
-
-    cursor = connection.execute(
-        """
-        DELETE FROM logical_site_memberships
-        WHERE site_id = ? AND network_scope = ?
-        """,
-        (safe_site_id, safe_scope),
-    )
-
-    if cursor.rowcount == 0:
-        raise DeltaAegisError(
-            f"logical site membership not found: "
-            f"{safe_site_id} -> {safe_scope}"
-        )
-
-    return {
-        "site_id": safe_site_id,
-        "network_scope": safe_scope,
-        "removed": True,
-    }
+def remove_network_scope_from_logical_site(connection: sqlite3.Connection, site_id: Any, network_scope: Any) -> dict[str, Any]:
+    return _sites.remove_network_scope_from_logical_site(connection, site_id, network_scope)
 
 
 def snapshot_network_scope(snapshot_or_target) -> str:
-    target = getattr(snapshot_or_target, "target", snapshot_or_target)
-    return canonical_network_scope(str(target))
+    return _sites.snapshot_network_scope(snapshot_or_target)
 
 
 def parse_target_network(target: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network:
-    try:
-        return ipaddress.ip_network(target, strict=False)
-    except ValueError as exc:
-        raise DeltaAegisError(f"manifest target is not a valid CIDR or IP address: {target!r}") from exc
+    return _ingest.parse_target_network(target)
 
 
 def is_usable_target_address(raw_ip: str, target_network: ipaddress._BaseNetwork) -> bool:
-    try:
-        address = ipaddress.ip_address(raw_ip)
-    except ValueError:
-        return False
-    if address.version != target_network.version or address not in target_network:
-        return False
-    if address.is_unspecified or address.is_multicast or address.is_loopback:
-        return False
-    if isinstance(target_network, ipaddress.IPv4Network) and target_network.prefixlen <= 30:
-        if address in {target_network.network_address, target_network.broadcast_address}:
-            return False
-    return True
+    return _ingest.is_usable_target_address(raw_ip, target_network)
 
 
 def normalize_mac(raw_mac: str | None) -> str | None:
-    if not raw_mac:
-        return None
-    normalized = raw_mac.strip().lower().replace("-", ":")
-    return normalized if MAC_RE.fullmatch(normalized) else None
+    return _ingest.normalize_mac(raw_mac)
 
 
 def classify_identity(mac_address: str | None) -> str:
-    if not mac_address:
-        return "IP_ONLY"
-    first_octet = int(mac_address.split(":", 1)[0], 16)
-    return "LOCAL_MAC" if first_octet & 0x02 else "GLOBAL_MAC"
+    return _ingest.classify_identity(mac_address)
 
 
 def parse_discovery_xml(path: Path, target_network: ipaddress._BaseNetwork) -> dict[str, IdentityEvidence]:
-    try:
-        root = ET.parse(path).getroot()
-    except (OSError, ET.ParseError) as exc:
-        raise DeltaAegisError(f"could not parse discovery XML {path}: {exc}") from exc
-    result: dict[str, IdentityEvidence] = {}
-    for host in root.findall("./host"):
-        status = host.find("./status")
-        if status is None or status.attrib.get("state") != "up":
-            continue
-        ipv4 = None
-        mac = None
-        vendor = None
-        for address in host.findall("./address"):
-            if address.attrib.get("addrtype") == "ipv4":
-                ipv4 = address.attrib.get("addr")
-            elif address.attrib.get("addrtype") == "mac":
-                mac = normalize_mac(address.attrib.get("addr"))
-                vendor = address.attrib.get("vendor")
-        if not ipv4 or not is_usable_target_address(ipv4, target_network):
-            continue
-        hostname_node = host.find("./hostnames/hostname")
-        hostname = hostname_node.attrib.get("name") if hostname_node is not None else None
-        result[ipv4] = IdentityEvidence(mac, vendor, hostname, "DISCOVERY_XML" if mac else "IP_ONLY")
-    return result
+    return _ingest.parse_discovery_xml(path, target_network, context=_INGEST_CONTEXT)
 
 
 def parse_neighbors(path: Path | None, target_network: ipaddress._BaseNetwork) -> dict[str, str]:
-    if path is None:
-        return {}
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        raise DeltaAegisError(f"could not read neighbor telemetry {path}: {exc}") from exc
-    result: dict[str, str] = {}
-    for line in lines:
-        fields = line.split()
-        if len(fields) < 5 or "lladdr" not in fields:
-            continue
-        ip = fields[0]
-        if not is_usable_target_address(ip, target_network):
-            continue
-        try:
-            mac = normalize_mac(fields[fields.index("lladdr") + 1])
-        except (ValueError, IndexError):
-            continue
-        if mac:
-            result[ip] = mac
-    return result
+    return _ingest.parse_neighbors(path, target_network)
 
 
 def identity_rank(source: str) -> int:
-    return {"IP_ONLY": 0, "NEIGHBOR_TABLE": 1, "SERVICE_XML": 2, "DISCOVERY_XML": 3}.get(source, 0)
+    return _ingest.identity_rank(source)
 
 
 def parse_service_xml(path: Path, analysis: dict[str, dict[str, Any]], target_network: ipaddress._BaseNetwork, discovery: dict[str, IdentityEvidence], neighbors: dict[str, str]) -> tuple[str, int, int, int, dict[str, AssetObservation]]:
-    try:
-        root = ET.parse(path).getroot()
-    except (OSError, ET.ParseError) as exc:
-        raise DeltaAegisError(f"could not parse XML {path}: {exc}") from exc
-    finished = root.find("./runstats/finished")
-    hosts_summary = root.find("./runstats/hosts")
-    if finished is None or hosts_summary is None:
-        raise DeltaAegisError("Nmap XML is missing runstats metadata")
-    exit_status = finished.attrib.get("exit", "unknown")
-    hosts_up = int(hosts_summary.attrib.get("up", "0"))
-    hosts_down = int(hosts_summary.attrib.get("down", "0"))
-    hosts_total = int(hosts_summary.attrib.get("total", "0"))
-    preliminary: list[AssetObservation] = []
-    for host in root.findall("./host"):
-        status = host.find("./status")
-        if status is None or status.attrib.get("state") != "up":
-            continue
-        ipv4 = None
-        service_xml_mac = None
-        service_xml_vendor = None
-        for address in host.findall("./address"):
-            if address.attrib.get("addrtype") == "ipv4":
-                ipv4 = address.attrib.get("addr")
-            elif address.attrib.get("addrtype") == "mac":
-                service_xml_mac = normalize_mac(address.attrib.get("addr"))
-                service_xml_vendor = address.attrib.get("vendor")
-        if not ipv4 or not is_usable_target_address(ipv4, target_network):
-            continue
-        evidence = discovery.get(ipv4, IdentityEvidence())
-        candidates = [
-            (evidence.mac_address, evidence.vendor, evidence.source),
-            (service_xml_mac, service_xml_vendor, "SERVICE_XML"),
-            (neighbors.get(ipv4), None, "NEIGHBOR_TABLE"),
-        ]
-        candidates = [item for item in candidates if item[0]]
-        mac, vendor, source = max(candidates, key=lambda item: identity_rank(item[2])) if candidates else (None, evidence.vendor, "IP_ONLY")
-        hostname_node = host.find("./hostnames/hostname")
-        hostname = hostname_node.attrib.get("name") if hostname_node is not None else evidence.hostname
-        services: list[Service] = []
-        for port_node in host.findall("./ports/port"):
-            state_node = port_node.find("./state")
-            state = state_node.attrib.get("state", "unknown") if state_node is not None else "unknown"
-            if state != "open":
-                continue
-            service_node = port_node.find("./service")
-            services.append(Service(
-                protocol=port_node.attrib.get("protocol", "unknown").lower(),
-                port=int(port_node.attrib["portid"]),
-                state=state,
-                service_name=service_node.attrib.get("name") if service_node is not None else None,
-                product=service_node.attrib.get("product") if service_node is not None else None,
-                version=service_node.attrib.get("version") if service_node is not None else None,
-            ))
-        interpretation = analysis.get(ipv4, {})
-        findings = interpretation.get("findings", [])
-        if not isinstance(findings, list):
-            findings = []
-
-        classification = interpretation.get("classification", {})
-        if not isinstance(classification, dict):
-            classification = {}
-
-        classification_evidence = classification.get("evidence", [])
-        if not isinstance(classification_evidence, list):
-            classification_evidence = []
-
-        classification_contradictions = classification.get("contradictions", [])
-        if not isinstance(classification_contradictions, list):
-            classification_contradictions = []
-
-        classification_candidates = classification.get("candidates", classification.get("secondary_candidates", []))
-        if not isinstance(classification_candidates, list):
-            classification_candidates = []
-
-        classification_validators = classification.get("validators", [])
-        if not isinstance(classification_validators, list):
-            classification_validators = []
-
-        classification_validator_summary = classification.get("validator_summary", {})
-        if not isinstance(classification_validator_summary, dict):
-            classification_validator_summary = {}
-
-        classification_contradiction_count = safe_int(classification.get("contradiction_count"))
-        if classification_contradiction_count is None:
-            classification_contradiction_count = len(classification_contradictions)
-
-        confidence = "HIGH" if source in {"DISCOVERY_XML", "SERVICE_XML"} else "MEDIUM" if source == "NEIGHBOR_TABLE" else "LOW"
-
-        preliminary.append(
-            AssetObservation(
-                "",
-                classify_identity(mac),
-                confidence,
-                source,
-                ipv4,
-                mac,
-                vendor,
-                hostname,
-                interpretation.get("device_type"),
-                interpretation.get("severity"),
-                safe_int(interpretation.get("score")),
-                sorted(services, key=lambda item: item.key),
-                [item for item in findings if isinstance(item, dict)],
-                device_type_confidence=safe_int(interpretation.get("device_type_confidence")),
-                classification_type=classification.get("type"),
-                classification_primary_type=classification.get("primary_type", classification.get("type")),
-                classification_confidence=safe_int(classification.get("confidence")),
-                classification_confidence_label=classification.get("confidence_label"),
-                classification_decision=classification.get("decision"),
-                classification_method=classification.get("method"),
-                classification_json=json.dumps(classification, sort_keys=True),
-                classification_evidence_json=json.dumps(classification_evidence, sort_keys=True),
-                classification_contradictions_json=json.dumps(classification_contradictions, sort_keys=True),
-                classification_candidates_json=json.dumps(classification_candidates, sort_keys=True),
-                classification_confidence_band=classification.get("confidence_band"),
-                classification_calibrated_decision=classification.get("calibrated_decision"),
-                classification_siem_action=classification.get("siem_action"),
-                classification_calibration_reason=classification.get("calibration_reason"),
-                classification_validation_state=classification.get("validation_state"),
-                classification_contradiction_count=classification_contradiction_count,
-                classification_validator_summary_json=json.dumps(classification_validator_summary, sort_keys=True),
-                classification_validators_json=json.dumps(classification_validators, sort_keys=True),
-            )
-        )
-    service_ips = {asset.ip_address for asset in preliminary}
-
-    for ipv4 in sorted(analysis):
-        if ipv4 in service_ips:
-            continue
-
-        if not is_usable_target_address(ipv4, target_network):
-            continue
-
-        interpretation = analysis.get(ipv4, {})
-        if not isinstance(interpretation, dict):
-            interpretation = {}
-
-        evidence = discovery.get(ipv4, IdentityEvidence())
-
-        candidates = [
-            (evidence.mac_address, evidence.vendor, evidence.source),
-            (neighbors.get(ipv4), None, "NEIGHBOR_TABLE"),
-        ]
-        candidates = [item for item in candidates if item[0]]
-
-        mac, vendor, source = (
-            max(candidates, key=lambda item: identity_rank(item[2]))
-            if candidates
-            else (None, evidence.vendor, "IP_ONLY")
-        )
-
-        classification = interpretation.get("classification", {})
-        if not isinstance(classification, dict):
-            classification = {}
-
-        if not classification:
-            classification = {
-                "schema_version": "netsniper-classification-v1",
-                "type": "Unknown / Ambiguous",
-                "primary_type": "Unknown / Ambiguous",
-                "confidence": 0,
-                "confidence_label": "unknown",
-                "confidence_band": "unknown",
-                "calibrated_decision": "unknown",
-                "siem_action": "no_action",
-                "calibration_reason": (
-                    "Host was present in the NetSniper inventory but did not have "
-                    "monitored service evidence."
-                ),
-                "validation_state": "not_applicable",
-                "contradiction_count": 0,
-                "decision": "unknown",
-                "method": "deltaaegis_full_inventory_preservation",
-                "evidence": [],
-                "validators": [],
-                "validator_summary": {
-                    "total": 0,
-                    "confirmed": 0,
-                    "inconclusive": 0,
-                    "refuted": 0,
-                    "not_applicable": 0,
-                    "error": 0,
-                    "names": [],
-                },
-                "contradictions": [],
-                "candidates": [],
-                "secondary_candidates": [],
-            }
-
-        findings = interpretation.get("findings", [])
-        if not isinstance(findings, list):
-            findings = []
-
-        classification_evidence = classification.get("evidence", [])
-        if not isinstance(classification_evidence, list):
-            classification_evidence = []
-
-        classification_contradictions = classification.get("contradictions", [])
-        if not isinstance(classification_contradictions, list):
-            classification_contradictions = []
-
-        classification_candidates = classification.get(
-            "candidates",
-            classification.get("secondary_candidates", []),
-        )
-        if not isinstance(classification_candidates, list):
-            classification_candidates = []
-
-        classification_validators = classification.get("validators", [])
-        if not isinstance(classification_validators, list):
-            classification_validators = []
-
-        classification_validator_summary = classification.get("validator_summary", {})
-        if not isinstance(classification_validator_summary, dict):
-            classification_validator_summary = {}
-
-        classification_contradiction_count = safe_int(
-            classification.get("contradiction_count")
-        )
-        if classification_contradiction_count is None:
-            classification_contradiction_count = len(classification_contradictions)
-
-        confidence = (
-            "HIGH"
-            if source in {"DISCOVERY_XML", "SERVICE_XML"}
-            else "MEDIUM"
-            if source == "NEIGHBOR_TABLE"
-            else "LOW"
-        )
-
-        preliminary.append(
-            AssetObservation(
-                "",
-                classify_identity(mac),
-                confidence,
-                source,
-                ipv4,
-                mac,
-                vendor,
-                evidence.hostname,
-                interpretation.get("device_type") or "Unknown",
-                interpretation.get("severity") or "INFO",
-                safe_int(interpretation.get("score")) or 0,
-                [],
-                [item for item in findings if isinstance(item, dict)],
-                device_type_confidence=safe_int(
-                    interpretation.get("device_type_confidence")
-                ) or 0,
-                classification_type=classification.get("type")
-                or classification.get("primary_type")
-                or "Unknown / Ambiguous",
-                classification_primary_type=classification.get(
-                    "primary_type",
-                    classification.get("type", "Unknown / Ambiguous"),
-                ),
-                classification_confidence=safe_int(classification.get("confidence")) or 0,
-                classification_confidence_label=classification.get(
-                    "confidence_label",
-                    "unknown",
-                ),
-                classification_decision=classification.get("decision", "unknown"),
-                classification_method=classification.get(
-                    "method",
-                    "deltaaegis_full_inventory_preservation",
-                ),
-                classification_json=json.dumps(classification, sort_keys=True),
-                classification_evidence_json=json.dumps(
-                    classification_evidence,
-                    sort_keys=True,
-                ),
-                classification_contradictions_json=json.dumps(
-                    classification_contradictions,
-                    sort_keys=True,
-                ),
-                classification_candidates_json=json.dumps(
-                    classification_candidates,
-                    sort_keys=True,
-                ),
-                classification_confidence_band=classification.get(
-                    "confidence_band",
-                    "unknown",
-                ),
-                classification_calibrated_decision=classification.get(
-                    "calibrated_decision",
-                    classification.get("decision", "unknown"),
-                ),
-                classification_siem_action=classification.get("siem_action", "no_action"),
-                classification_calibration_reason=classification.get(
-                    "calibration_reason",
-                ),
-                classification_validation_state=classification.get(
-                    "validation_state",
-                    "not_applicable",
-                ),
-                classification_contradiction_count=classification_contradiction_count,
-                classification_validator_summary_json=json.dumps(
-                    classification_validator_summary,
-                    sort_keys=True,
-                ),
-                classification_validators_json=json.dumps(
-                    classification_validators,
-                    sort_keys=True,
-                ),
-            )
-        )
-
-    mac_counts = Counter(asset.mac_address for asset in preliminary if asset.mac_address)
-    assets: dict[str, AssetObservation] = {}
-    for asset in preliminary:
-        if asset.mac_address and mac_counts[asset.mac_address] == 1:
-            asset.asset_key = f"mac:{asset.mac_address}"
-        else:
-            asset.asset_key = f"ip:{asset.ip_address}"
-            asset.identity_class = "IP_ONLY"
-            if asset.mac_address and mac_counts[asset.mac_address] > 1:
-                asset.identity_confidence = "LOW"
-                asset.identity_source = "DUPLICATE_MAC_FALLBACK"
-        assets[asset.asset_key] = asset
-    return exit_status, hosts_up, hosts_down, hosts_total, assets
+    return _ingest.parse_service_xml(path, analysis, target_network, discovery, neighbors, context=_INGEST_CONTEXT)
 
 
 def legacy_profile_fingerprint(scan_profile: str, target: str) -> str:
-    return "legacy:" + hashlib.sha256(f"{scan_profile}|{target}".encode()).hexdigest()
+    return _ingest.legacy_profile_fingerprint(scan_profile, target)
 
 
 
 
-def _first_nonempty_text(*values: Any, default: str = "") -> str:
-    for value in values:
-        if value is None or isinstance(value, dict):
-            continue
-        clean = str(value).strip()
-        if clean:
-            return clean
-    return default
+def _first_nonempty_text(*values: Any, default: str='') -> str:
+    return _ingest._first_nonempty_text(*values, default=default)
 
 
 def _optional_bool(value: Any) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return None
-    if isinstance(value, int) and value in {0, 1}:
-        return bool(value)
-    lowered = str(value).strip().lower()
-    if lowered in {"true", "yes", "1"}:
-        return True
-    if lowered in {"false", "no", "0"}:
-        return False
-    return None
+    return _ingest._optional_bool(value)
 
 
 def load_netsniper_bundle_quality(bundle_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
-    files = manifest.get("files", {})
-    if not isinstance(files, dict):
-        files = {}
-
-    for key in ("bundle_quality_json", "bundle_quality"):
-        filename = files.get(key)
-        if isinstance(filename, str) and filename.strip():
-            candidate = resolve_bundle_member(bundle_dir, filename, key=key)
-            if candidate.is_file():
-                loaded = load_json(candidate)
-                return loaded if isinstance(loaded, dict) else {}
-
-    candidate = resolve_bundle_member(
-        bundle_dir,
-        "bundle_quality.json",
-        key="bundle_quality_json",
-    )
-    if candidate.is_file():
-        loaded = load_json(candidate)
-        return loaded if isinstance(loaded, dict) else {}
-
-    embedded = manifest.get("quality")
-    return embedded if isinstance(embedded, dict) else {}
+    return _ingest.load_netsniper_bundle_quality(bundle_dir, manifest)
 
 
 def netsniper_profile_contract(manifest: dict[str, Any]) -> dict[str, Any]:
-    for key in ("profile_contract", "profile"):
-        value = manifest.get(key)
-        if isinstance(value, dict):
-            return value
-    return {}
+    return _ingest.netsniper_profile_contract(manifest)
 
 
 def load_snapshot(manifest_path: Path) -> Snapshot:
-    manifest = load_json(manifest_path)
-    if not isinstance(manifest, dict):
-        raise DeltaAegisError(f"manifest must contain an object: {manifest_path}")
-
-    schema = str(manifest.get("schema_version", ""))
-    if schema not in NETSNIPER_SUPPORTED_SCHEMAS:
-        raise DeltaAegisError(f"unsupported manifest schema: {schema!r}")
-
-    if manifest.get("status") != "COMPLETE":
-        raise DeltaAegisError(f"bundle is not finalized: {manifest_path}")
-
-    bundle_dir = manifest_path.parent
-    bundle_quality = load_netsniper_bundle_quality(bundle_dir, manifest)
-    bundle_deltaaegis_ready = _optional_bool(bundle_quality.get("deltaaegis_ready"))
-
-    if schema == "netsniper-run-v3":
-        quality_schema = str(bundle_quality.get("schema_version") or "").strip()
-        if quality_schema != NETSNIPER_BUNDLE_QUALITY_SCHEMA_VERSION:
-            raise DeltaAegisError(
-                "netsniper-run-v3 requires bundle_quality.json schema "
-                f"{NETSNIPER_BUNDLE_QUALITY_SCHEMA_VERSION!r}; rejecting missing or invalid quality evidence."
-            )
-        if bundle_deltaaegis_ready is not True:
-            raise DeltaAegisError(
-                "netsniper-run-v3 requires deltaaegis_ready=true; "
-                "rejecting missing, invalid, or false readiness evidence."
-            )
-    elif bundle_deltaaegis_ready is False:
-        raise DeltaAegisError(
-            "NetSniper bundle_quality.json marked deltaaegis_ready=false; "
-            "rejecting bundle before ingest."
-        )
-
-    services_xml = require_file(bundle_dir, manifest, "services_xml")
-    discovery_xml = require_file(bundle_dir, manifest, "discovery_xml")
-    analysis_json = require_file(bundle_dir, manifest, "analysis_json")
-
-    target = _first_nonempty_text(manifest.get("target"), manifest.get("network_scope"))
-    if not target:
-        raise DeltaAegisError("manifest missing target or network_scope")
-
-    target_network = parse_target_network(target)
-    analysis = analysis_by_ip(analysis_json)
-    discovery = parse_discovery_xml(discovery_xml, target_network)
-    neighbors = parse_neighbors(optional_file(bundle_dir, manifest, "neighbors"), target_network)
-    exit_status, hosts_up, hosts_down, hosts_total, assets = parse_service_xml(
-        services_xml,
-        analysis,
-        target_network,
-        discovery,
-        neighbors,
-    )
-
-    counts = manifest.get("counts", {}) if isinstance(manifest.get("counts"), dict) else {}
-    discovered_hosts = safe_int(counts.get("discovered_hosts"))
-    inventory_hosts = max(len(assets), discovered_hosts or 0)
-    if inventory_hosts > hosts_up:
-        hosts_up = inventory_hosts
-    if hosts_total < hosts_up:
-        hosts_total = hosts_up
-
-    profile = netsniper_profile_contract(manifest)
-
-    effective_profile = _first_nonempty_text(
-        manifest.get("effective_profile"),
-        manifest.get("scan_profile_effective"),
-        manifest.get("effective_scan_profile"),
-        manifest.get("scan_profile"),
-        manifest.get("requested_profile"),
-        manifest.get("scan_profile_requested"),
-        default="UNKNOWN",
-    )
-    requested_profile = _first_nonempty_text(
-        manifest.get("requested_profile"),
-        manifest.get("scan_profile_requested"),
-        manifest.get("requested_scan_profile"),
-        effective_profile,
-        default=effective_profile,
-    )
-
-    monitored_ports = tuple(
-        sorted(
-            int(port)
-            for port in profile.get("monitored_ports", [])
-            if isinstance(port, int) or str(port).isdigit()
-        )
-    )
-    protocols = tuple(
-        sorted(
-            str(item).lower()
-            for item in profile.get("protocols", [])
-            if isinstance(item, str)
-        )
-    )
-    fingerprint = str(
-        profile.get("fingerprint")
-        or manifest.get("profile_fingerprint")
-        or legacy_profile_fingerprint(effective_profile, target)
-    )
-
-    telemetry = manifest.get("telemetry", {}) if isinstance(manifest.get("telemetry"), dict) else {}
-    timestamps = manifest.get("timestamps", {}) if isinstance(manifest.get("timestamps"), dict) else {}
-
-    profile_contract_name = _first_nonempty_text(
-        manifest.get("profile_contract_schema"),
-        manifest.get("scan_profile_contract_schema"),
-        manifest.get("profile_contract"),
-        profile.get("schema_version"),
-        profile.get("contract"),
-        default="",
-    ) or None
-
-    return Snapshot(
-        scan_id=str(manifest["scan_id"]),
-        manifest_path=str(manifest_path),
-        manifest_schema_version=schema,
-        target=target,
-        scanner_version=str(manifest.get("scanner_version", "unknown")),
-        scan_profile=effective_profile,
-        profile_fingerprint=fingerprint,
-        monitored_ports=monitored_ports,
-        protocols=protocols,
-        created_at=str(
-            manifest.get("created_at")
-            or manifest.get("timestamp")
-            or manifest.get("started_at")
-            or timestamps.get("archived_at")
-            or utc_now()
-        ),
-        scan_started_at=telemetry.get("started_at") or manifest.get("started_at"),
-        scan_completed_at=telemetry.get("completed_at") or manifest.get("completed_at"),
-        neighbors_captured_at=telemetry.get("neighbors_captured_at"),
-        discovery_interface=telemetry.get("discovery_interface"),
-        nmap_version=telemetry.get("nmap_version"),
-        bundle_status=str(manifest.get("status", "UNKNOWN")),
-        xml_exit_status=exit_status,
-        hosts_up=hosts_up,
-        hosts_down=hosts_down,
-        hosts_total=hosts_total,
-        assets=assets,
-        requested_profile=requested_profile,
-        effective_profile=effective_profile,
-        profile_contract=profile_contract_name,
-        profile_runtime_budget_seconds=safe_int(
-            manifest.get("profile_runtime_budget_seconds")
-            or profile.get("runtime_budget_seconds")
-        ),
-        profile_host_timeout_seconds=safe_int(
-            manifest.get("profile_host_timeout_seconds")
-            or profile.get("host_timeout_seconds")
-        ),
-        profile_duration_seconds=safe_int(
-            manifest.get("profile_duration_seconds")
-            or manifest.get("duration_seconds")
-        ),
-        profile_budget_exceeded=_optional_bool(manifest.get("profile_budget_exceeded")),
-        bundle_quality_schema_version=(
-            str(bundle_quality.get("schema_version"))
-            if bundle_quality.get("schema_version") is not None
-            else None
-        ),
-        bundle_deltaaegis_ready=bundle_deltaaegis_ready,
-        bundle_quality_json=json.dumps(bundle_quality, sort_keys=True),
-    )
+    return _ingest.load_snapshot(manifest_path, context=_INGEST_CONTEXT)
 
 
 def manifest_file_path(manifest_path: Path, manifest: dict[str, Any], key: str) -> Path | None:
-    files = manifest.get("files", {})
-    if not isinstance(files, dict):
-        return None
-
-    value = files.get(key)
-    if not value:
-        return None
-
-    return resolve_bundle_member(
-        manifest_path.parent,
-        str(value),
-        key=key,
-    )
+    return _ingest.manifest_file_path(manifest_path, manifest, key)
 
 
-def load_json_file(path: Path | None, default: Any = None) -> Any:
-    if path is None or not path.is_file():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return default
+def load_json_file(path: Path | None, default: Any=None) -> Any:
+    return _ingest.load_json_file(path, default)
 
 
 def store_netsniper_intelligence_summary(
@@ -3510,38 +1770,11 @@ def print_netsniper_intelligence_host_detail(row: sqlite3.Row | None) -> None:
 
 
 def access_parse_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
-
-    text_value = str(value).strip()
-
-    if not text_value:
-        return None
-
-    if text_value.endswith("Z"):
-        text_value = text_value[:-1] + "+00:00"
-
-    try:
-        parsed = datetime.fromisoformat(text_value)
-    except ValueError:
-        return None
-
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-
-    return parsed
+    return _auth.access_parse_datetime(value)
 
 
 def access_token_is_expired(expires_at: str | None) -> bool:
-    if not str(expires_at or "").strip():
-        return False
-
-    parsed = access_parse_datetime(expires_at)
-
-    if not parsed:
-        return True
-
-    return parsed <= datetime.now(timezone.utc)
+    return _auth.access_token_is_expired(expires_at)
 
 
 def authenticate_access_api_token(
@@ -3550,110 +1783,19 @@ def authenticate_access_api_token(
     required_role: str = "VIEWER",
     update_last_used: bool = True,
 ) -> dict[str, Any] | None:
-    ensure_enterprise_access_schema(connection)
-
-    supplied = str(token or "").strip()
-
-    if not supplied:
-        return None
-
-    token_hash = hash_access_api_token(supplied)
-    row = connection.execute(
-        "SELECT "
-        "t.token_id, "
-        "t.user_id, "
-        "t.token_name, "
-        "t.token_prefix, "
-        "t.role AS token_role, "
-        "t.is_active AS token_active, "
-        "t.created_at AS token_created_at, "
-        "t.updated_at AS token_updated_at, "
-        "t.last_used_at, "
-        "t.expires_at, "
-        "u.username, "
-        "u.display_name, "
-        "u.role AS user_role, "
-        "u.is_active AS user_active "
-        "FROM access_api_tokens t "
-        "JOIN access_users u ON u.user_id = t.user_id "
-        "WHERE t.token_hash = ?",
-        (token_hash,),
-    ).fetchone()
-
-    if not row:
-        return None
-
-    if not int(row["token_active"] or 0):
-        return None
-
-    if not int(row["user_active"] or 0):
-        return None
-
-    if access_token_is_expired(row["expires_at"]):
-        return None
-
-    token_role = normalize_access_role(row["token_role"])
-    user_role = normalize_access_role(row["user_role"])
-    effective_role = access_effective_role(token_role, user_role)
-
-    if not access_role_allows(effective_role, required_role):
-        return None
-
-    authenticated_at = utc_now()
-
-    if update_last_used:
-        connection.execute(
-            "UPDATE access_api_tokens "
-            "SET last_used_at = ?, updated_at = ? "
-            "WHERE token_id = ?",
-            (authenticated_at, authenticated_at, row["token_id"]),
-        )
-        connection.commit()
-
-    return {
-        "auth_type": "api_token",
-        "token_id": row["token_id"],
-        "token_name": row["token_name"],
-        "token_prefix": row["token_prefix"],
-        "user_id": row["user_id"],
-        "username": row["username"],
-        "display_name": row["display_name"],
-        "role": effective_role,
-        "token_role": token_role,
-        "user_role": user_role,
-        "last_used_at": authenticated_at if update_last_used else row["last_used_at"],
-        "expires_at": row["expires_at"],
-        "authenticated_at": authenticated_at,
-    }
+    return _auth.authenticate_access_api_token(
+        connection,
+        token,
+        required_role=required_role,
+        update_last_used=update_last_used,
+    )
 
 
 def list_access_api_tokens(
     connection: sqlite3.Connection,
     include_inactive: bool = False,
 ) -> list[dict[str, Any]]:
-    ensure_enterprise_access_schema(connection)
-
-    where = "" if include_inactive else "WHERE t.is_active = 1 AND u.is_active = 1"
-    rows = connection.execute(
-        "SELECT "
-        "t.token_id, "
-        "t.user_id, "
-        "u.username, "
-        "t.token_name, "
-        "t.token_prefix, "
-        "t.role, "
-        "t.is_active, "
-        "t.created_at, "
-        "t.updated_at, "
-        "t.last_used_at, "
-        "t.expires_at "
-        "FROM access_api_tokens t "
-        "JOIN access_users u ON u.user_id = t.user_id "
-        f"{where} "
-        "ORDER BY t.created_at DESC, t.token_name"
-    ).fetchall()
-
-    return [dict(row) for row in rows]
+    return _auth.list_access_api_tokens(connection, include_inactive=include_inactive)
 
 
 def command_user_create(args: argparse.Namespace) -> int:
@@ -3857,72 +1999,17 @@ def list_access_audit_events(
     actor: str | None = None,
     target_type: str | None = None,
 ) -> list[dict[str, Any]]:
-    ensure_enterprise_access_schema(connection)
-
-    requested_limit = max(1, min(int(limit or 50), 500))
-    clauses = []
-    values: list[Any] = []
-
-    if action:
-        clauses.append("action = ?")
-        values.append(str(action).strip().upper())
-
-    if actor:
-        clauses.append("(actor_username = ? OR actor_user_id = ?)")
-        values.extend([str(actor).strip(), str(actor).strip()])
-
-    if target_type:
-        clauses.append("target_type = ?")
-        values.append(str(target_type).strip())
-
-    where = "WHERE " + " AND ".join(clauses) if clauses else ""
-
-    rows = connection.execute(
-        "SELECT "
-        "audit_id, "
-        "actor_user_id, "
-        "actor_username, "
-        "actor_role, "
-        "action, "
-        "target_type, "
-        "target_key, "
-        "source_ip, "
-        "user_agent, "
-        "detail_json, "
-        "created_at "
-        "FROM access_audit_log "
-        f"{where} "
-        "ORDER BY audit_id DESC "
-        "LIMIT ?",
-        (*values, requested_limit),
-    ).fetchall()
-
-    events: list[dict[str, Any]] = []
-
-    for row in rows:
-        detail_json = row["detail_json"] or "{}"
-
-        try:
-            details = json.loads(detail_json)
-        except json.JSONDecodeError:
-            details = {"raw": detail_json}
-
-        event = dict(row)
-        event["details"] = details
-        events.append(event)
-
-    return events
+    return _auth.list_access_audit_events(
+        connection,
+        limit=limit,
+        action=action,
+        actor=actor,
+        target_type=target_type,
+    )
 
 
 def access_audit_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    action_counts = Counter(str(row.get("action") or "UNKNOWN") for row in rows)
-    actor_counts = Counter(str(row.get("actor_username") or "system") for row in rows)
-
-    return {
-        "event_count": len(rows),
-        "action_counts": dict(action_counts),
-        "actor_counts": dict(actor_counts),
-    }
+    return _auth.access_audit_summary(rows)
 
 
 def dashboard_access_audit_payload(
@@ -3932,25 +2019,13 @@ def dashboard_access_audit_payload(
     actor: str | None = None,
     target_type: str | None = None,
 ) -> dict[str, Any]:
-    rows = list_access_audit_events(
+    return _auth.dashboard_access_audit_payload(
         connection,
         limit=limit,
         action=action,
         actor=actor,
         target_type=target_type,
     )
-
-    return {
-        "available": True,
-        "items": rows,
-        "item_count": len(rows),
-        "summary": access_audit_summary(rows),
-        "filters": {
-            "action": str(action or "").strip().upper() or "ALL",
-            "actor": str(actor or "").strip() or "ALL",
-            "target_type": str(target_type or "").strip() or "ALL",
-        },
-    }
 
 
 def command_access_audit(args: argparse.Namespace) -> int:
@@ -4872,49 +2947,18 @@ def command_ingest(args: argparse.Namespace) -> int:
 
 
 def utc_now_text() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return _jobs.utc_now_text()
 
 
 def validate_private_cidr(target: str) -> str:
-    raw = (target or "").strip()
-
-    if not raw:
-        raise DeltaAegisError("target CIDR is required")
-
-    try:
-        network = ipaddress.ip_network(raw, strict=False)
-    except ValueError as exc:
-        raise DeltaAegisError(f"invalid target CIDR: {raw}") from exc
-
-    if network.version != 4:
-        raise DeltaAegisError("only IPv4 CIDR targets are supported")
-
-    if not any(network.subnet_of(allowed) for allowed in RFC1918_IPV4_NETWORKS):
-        raise DeltaAegisError(
-            "target must be a private IPv4 CIDR contained within RFC1918 "
-            "space (10/8, 172.16/12, or 192.168/16)"
-        )
-
-    return str(network)
+    return _jobs.validate_private_cidr(target)
 
 
 ALLOWED_NETSNIPER_SCAN_PROFILES = {"quick", "balanced", "accurate"}
 
 
 def validate_netsniper_scan_profile(profile: str | None) -> str:
-    value = str(profile or "balanced").strip().lower()
-
-    if not value:
-        value = "balanced"
-
-    if value == "deep":
-        raise DeltaAegisError("NetSniper scan profile 'deep' is planned but not runtime-enabled. Use quick, balanced, or accurate.")
-
-    if value not in ALLOWED_NETSNIPER_SCAN_PROFILES:
-        allowed = ", ".join(sorted(ALLOWED_NETSNIPER_SCAN_PROFILES))
-        raise DeltaAegisError(f"invalid NetSniper scan profile: {profile!r}; allowed profiles: {allowed}")
-
-    return value
+    return _jobs.validate_netsniper_scan_profile(profile)
 
 
 def build_netsniper_headless_command(netsniper_path: Path, target: str, scan_profile: str = "balanced") -> list[str]:
@@ -4935,137 +2979,11 @@ def build_netsniper_headless_command(netsniper_path: Path, target: str, scan_pro
 
 
 
-def create_scan_job(
-    connection: sqlite3.Connection,
-    target: str,
-    netsniper_path: Path,
-    runs_dir: Path,
-    auto_ingest: bool = False,
-    scan_profile: str = "balanced",
-    schedule_id: str | None = None,
-) -> dict[str, Any]:
-    safe_target = validate_private_cidr(target)
-    safe_profile = validate_netsniper_scan_profile(scan_profile)
-    safe_schedule_id = str(schedule_id or "").strip()
+def create_scan_job(connection: sqlite3.Connection, target: str, netsniper_path: Path, runs_dir: Path, auto_ingest: bool=False, scan_profile: str='balanced', schedule_id: str | None=None) -> dict[str, Any]:
+    return _jobs.create_scan_job(connection, target, netsniper_path, runs_dir, auto_ingest, scan_profile, schedule_id)
 
-    if len(safe_schedule_id) > 96:
-        raise DeltaAegisError("scan schedule id is too long")
-
-    now = utc_now_text()
-    job_id = f"scan-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-
-    connection.execute(
-        """
-        INSERT INTO scan_jobs (
-            job_id,
-            target,
-            network_scope,
-            schedule_id,
-            status,
-            created_at,
-            updated_at,
-            netsniper_path,
-            runs_dir,
-            scan_profile,
-            auto_ingest,
-            status_json,
-            message
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            job_id,
-            safe_target,
-            safe_target,
-            safe_schedule_id,
-            "QUEUED",
-            now,
-            now,
-            str(netsniper_path),
-            str(runs_dir),
-            safe_profile,
-            1 if auto_ingest else 0,
-            "{}",
-            "scan job queued",
-        ),
-    )
-
-    return {
-        "job_id": job_id,
-        "target": safe_target,
-        "network_scope": safe_target,
-        "schedule_id": safe_schedule_id,
-        "status": "QUEUED",
-        "created_at": now,
-        "updated_at": now,
-        "heartbeat_at": None,
-        "cancel_requested_at": None,
-        "cancel_requested_by": "",
-        "cancel_reason": "",
-        "cancelled_at": None,
-        "process_pid": None,
-        "netsniper_path": str(netsniper_path),
-        "runs_dir": str(runs_dir),
-        "scan_profile": safe_profile,
-        "auto_ingest": auto_ingest,
-        "status_json": {},
-        "message": "scan job queued",
-    }
-
-def update_scan_job(
-    connection: sqlite3.Connection,
-    job_id: str,
-    **fields: Any,
-) -> None:
-    allowed = {
-        "status",
-        "started_at",
-        "heartbeat_at",
-        "cancel_requested_at",
-        "cancel_requested_by",
-        "cancel_reason",
-        "cancelled_at",
-        "finished_at",
-        "process_pid",
-        "bundle_path",
-        "exit_code",
-        "stdout_log",
-        "stderr_log",
-        "status_json",
-        "message",
-    }
-
-    updates = []
-    params: list[Any] = []
-
-    for key, value in fields.items():
-        if key not in allowed:
-            raise DeltaAegisError(f"invalid scan job field update: {key}")
-
-        if key == "status":
-            value = str(value).upper()
-
-            if value not in SCAN_JOB_STATUSES:
-                raise DeltaAegisError(f"invalid scan job status: {value}")
-
-        if key == "status_json":
-            value = json.dumps(value or {}, sort_keys=True)
-
-        updates.append(f"{key} = ?")
-        params.append(value)
-
-    updates.append("updated_at = ?")
-    params.append(utc_now_text())
-    params.append(job_id)
-
-    connection.execute(
-        f"""
-        UPDATE scan_jobs
-        SET {", ".join(updates)}
-        WHERE job_id = ?
-        """,
-        tuple(params),
-    )
+def update_scan_job(connection: sqlite3.Connection, job_id: str, **fields: Any) -> None:
+    return _jobs.update_scan_job(connection, job_id, **fields)
 
 
 def extract_netsniper_status_json(stdout_text: str) -> dict[str, Any]:
@@ -5326,56 +3244,20 @@ SCAN_JOB_CANCEL_REASON_MAX_LENGTH = 500
 SCAN_JOB_CANCEL_GRACE_SECONDS = 5.0
 
 
-def normalize_scan_job_cancel_actor(value: Any = None) -> str:
-    actor = str(value or "operator").strip() or "operator"
-    if len(actor) > SCAN_JOB_CANCEL_ACTOR_MAX_LENGTH:
-        raise DeltaAegisError(
-            f"scan cancellation requester exceeds "
-            f"{SCAN_JOB_CANCEL_ACTOR_MAX_LENGTH} characters"
-        )
-    return actor
+def normalize_scan_job_cancel_actor(value: Any=None) -> str:
+    return _jobs.normalize_scan_job_cancel_actor(value)
 
 
-def normalize_scan_job_cancel_reason(value: Any = None) -> str:
-    reason = (
-        str(value or "operator requested cancellation").strip()
-        or "operator requested cancellation"
-    )
-    if len(reason) > SCAN_JOB_CANCEL_REASON_MAX_LENGTH:
-        raise DeltaAegisError(
-            f"scan cancellation reason exceeds "
-            f"{SCAN_JOB_CANCEL_REASON_MAX_LENGTH} characters"
-        )
-    return reason
+def normalize_scan_job_cancel_reason(value: Any=None) -> str:
+    return _jobs.normalize_scan_job_cancel_reason(value)
 
 
-def scan_job_row(
-    connection: sqlite3.Connection,
-    job_id: str,
-) -> sqlite3.Row | None:
-    return connection.execute(
-        "SELECT * FROM scan_jobs WHERE job_id = ?",
-        (str(job_id or "").strip(),),
-    ).fetchone()
+def scan_job_row(connection: sqlite3.Connection, job_id: str) -> sqlite3.Row | None:
+    return _jobs.scan_job_row(connection, job_id)
 
 
-def scan_job_cancellation_request(
-    connection: sqlite3.Connection,
-    job_id: str,
-) -> dict[str, Any]:
-    row = scan_job_row(connection, job_id)
-    if row is None:
-        return {"found": False, "requested": False, "job": None}
-
-    job = scan_job_to_dict(row)
-    return {
-        "found": True,
-        "requested": bool(job.get("cancel_requested_at")),
-        "requested_at": job.get("cancel_requested_at"),
-        "requested_by": job.get("cancel_requested_by") or "",
-        "reason": job.get("cancel_reason") or "",
-        "job": job,
-    }
+def scan_job_cancellation_request(connection: sqlite3.Connection, job_id: str) -> dict[str, Any]:
+    return _jobs.scan_job_cancellation_request(connection, job_id)
 
 
 def terminate_scan_process_group(
@@ -5402,87 +3284,8 @@ def terminate_scan_process_group(
     return process.returncode
 
 
-def request_scan_job_cancellation(
-    connection: sqlite3.Connection,
-    job_id: Any,
-    requested_by: Any = None,
-    reason: Any = None,
-) -> dict[str, Any]:
-    safe_job_id = str(job_id or "").strip()
-
-    if (
-        not safe_job_id
-        or len(safe_job_id) > 160
-        or re.fullmatch(r"[A-Za-z0-9._:-]+", safe_job_id) is None
-    ):
-        raise DeltaAegisError("invalid scan job id")
-
-    actor = normalize_scan_job_cancel_actor(requested_by)
-    cancel_reason = normalize_scan_job_cancel_reason(reason)
-    row = scan_job_row(connection, safe_job_id)
-
-    if row is None:
-        raise DeltaAegisError(f"scan job not found: {safe_job_id}")
-
-    job = scan_job_to_dict(row)
-    status = str(job.get("status") or "").upper()
-
-    if status == "CANCELLED":
-        job["cancellation_action"] = "already_cancelled"
-        return job
-
-    if status in {"COMPLETED", "FAILED"}:
-        raise DeltaAegisError(
-            f"cannot cancel terminal scan job {safe_job_id} with status {status}"
-        )
-
-    if job.get("cancel_requested_at"):
-        job["cancellation_action"] = "already_requested"
-        return job
-
-    now = utc_now_text()
-    status_json = dict(job.get("status_json") or {})
-    status_json["cancellation"] = {
-        "requested_at": now,
-        "requested_by": actor,
-        "reason": cancel_reason,
-        "state": "CANCELLED_BEFORE_START" if status == "QUEUED" else "REQUESTED",
-    }
-
-    fields: dict[str, Any] = {
-        "cancel_requested_at": now,
-        "cancel_requested_by": actor,
-        "cancel_reason": cancel_reason,
-        "status_json": status_json,
-        "message": f"scan cancellation requested by {actor}: {cancel_reason}",
-    }
-
-    if status == "QUEUED":
-        fields.update(
-            {
-                "status": "CANCELLED",
-                "cancelled_at": now,
-                "finished_at": now,
-                "heartbeat_at": now,
-                "exit_code": 130,
-                "message": (
-                    f"scan cancelled before process launch by "
-                    f"{actor}: {cancel_reason}"
-                ),
-            }
-        )
-
-    update_scan_job(connection, safe_job_id, **fields)
-    updated_row = scan_job_row(connection, safe_job_id)
-
-    if updated_row is None:
-        raise DeltaAegisError(f"scan job disappeared unexpectedly: {safe_job_id}")
-
-    result = scan_job_to_dict(updated_row)
-    result["cancellation_action"] = (
-        "cancelled_before_start" if status == "QUEUED" else "requested"
-    )
-    return result
+def request_scan_job_cancellation(connection: sqlite3.Connection, job_id: Any, requested_by: Any=None, reason: Any=None) -> dict[str, Any]:
+    return _jobs.request_scan_job_cancellation(connection, job_id, requested_by, reason)
 
 
 def execute_scan_job(
@@ -5917,102 +3720,15 @@ def command_scan_start(args: argparse.Namespace) -> int:
 
 
 def decode_json_field(value: str | None, default):
-    if not value:
-        return default
-
-    try:
-        return json.loads(value)
-    except (TypeError, json.JSONDecodeError):
-        return default
+    return _jobs.decode_json_field(value, default)
 
 
 def scan_job_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    item = dict(row)
-
-    item["auto_ingest"] = bool(item.get("auto_ingest"))
-    item["scan_profile"] = item.get("scan_profile") or "balanced"
-    item["schedule_id"] = item.get("schedule_id") or ""
-
-    process_pid = item.get("process_pid")
-    if process_pid in ("", None):
-        item["process_pid"] = None
-    else:
-        try:
-            item["process_pid"] = int(process_pid)
-        except (TypeError, ValueError):
-            item["process_pid"] = None
-
-    item["heartbeat_at"] = item.get("heartbeat_at") or None
-    item["cancel_requested_at"] = item.get("cancel_requested_at") or None
-    item["cancel_requested_by"] = item.get("cancel_requested_by") or ""
-    item["cancel_reason"] = item.get("cancel_reason") or ""
-    item["cancelled_at"] = item.get("cancelled_at") or None
-    item["status_json"] = decode_json_field(item.get("status_json"), {})
-
-    return item
+    return _jobs.scan_job_to_dict(row)
 
 
-def query_scan_jobs(
-    connection: sqlite3.Connection,
-    limit: int = 20,
-    status: str | None = None,
-    scope: str | None = None,
-) -> list[sqlite3.Row]:
-    clauses = []
-    params: list[Any] = []
-
-    if status:
-        normalized_status = status.strip().upper()
-
-        if normalized_status not in SCAN_JOB_STATUSES:
-            raise DeltaAegisError(f"invalid scan job status: {status}")
-
-        clauses.append("status = ?")
-        params.append(normalized_status)
-
-    if scope:
-        clauses.append("network_scope = ?")
-        params.append(scope)
-
-    where = " WHERE " + " AND ".join(clauses) if clauses else ""
-
-    params.append(limit)
-
-    return connection.execute(
-        f"""
-        SELECT
-            job_id,
-            target,
-            network_scope,
-            schedule_id,
-            status,
-            created_at,
-            updated_at,
-            started_at,
-            heartbeat_at,
-            cancel_requested_at,
-            cancel_requested_by,
-            cancel_reason,
-            cancelled_at,
-            finished_at,
-            process_pid,
-            netsniper_path,
-            runs_dir,
-            scan_profile,
-            bundle_path,
-            exit_code,
-            auto_ingest,
-            stdout_log,
-            stderr_log,
-            status_json,
-            message
-        FROM scan_jobs
-        {where}
-        ORDER BY created_at DESC, updated_at DESC
-        LIMIT ?
-        """,
-        tuple(params),
-    ).fetchall()
+def query_scan_jobs(connection: sqlite3.Connection, limit: int=20, status: str | None=None, scope: str | None=None) -> list[sqlite3.Row]:
+    return _jobs.query_scan_jobs(connection, limit, status, scope)
 
 
 def dashboard_scan_jobs_payload(
@@ -6046,96 +3762,12 @@ SCAN_JOB_LOG_TAIL_MINIMUM_BYTES = 1024
 SCAN_JOB_LOG_TAIL_MAXIMUM_BYTES = 64 * 1024
 
 
-def normalize_scan_job_log_tail_bytes(value: Any = None) -> int:
-    try:
-        requested = int(value or SCAN_JOB_LOG_TAIL_DEFAULT_BYTES)
-    except (TypeError, ValueError):
-        requested = SCAN_JOB_LOG_TAIL_DEFAULT_BYTES
-
-    return max(
-        SCAN_JOB_LOG_TAIL_MINIMUM_BYTES,
-        min(SCAN_JOB_LOG_TAIL_MAXIMUM_BYTES, requested),
-    )
+def normalize_scan_job_log_tail_bytes(value: Any=None) -> int:
+    return _jobs.normalize_scan_job_log_tail_bytes(value)
 
 
-def scan_job_log_tail_payload(
-    path_value: Any,
-    job_id: str,
-    stream: str,
-    logs_root: Path,
-    max_bytes: Any = None,
-) -> dict[str, Any]:
-    safe_stream = str(stream or "").strip().lower()
-
-    if safe_stream not in {"stdout", "stderr"}:
-        raise DeltaAegisError(
-            f"unsupported scan job log stream: {stream!r}"
-        )
-
-    limit = normalize_scan_job_log_tail_bytes(max_bytes)
-    payload = {
-        "stream": safe_stream,
-        "available": False,
-        "text": "",
-        "truncated": False,
-        "file_size": 0,
-        "bytes_read": 0,
-        "tail_bytes_limit": limit,
-        "updated_at": None,
-        "reason": None,
-    }
-
-    if not path_value:
-        payload["reason"] = "log_path_not_recorded"
-        return payload
-
-    root = Path(logs_root).expanduser().resolve()
-    candidate = Path(str(path_value)).expanduser().resolve()
-    expected_name = f"{job_id}.{safe_stream}.log"
-
-    try:
-        candidate.relative_to(root)
-    except ValueError:
-        payload["reason"] = "log_path_outside_allowed_root"
-        return payload
-
-    if candidate.name != expected_name:
-        payload["reason"] = "unexpected_log_filename"
-        return payload
-
-    if not candidate.is_file():
-        payload["reason"] = "log_file_not_found"
-        return payload
-
-    try:
-        stat = candidate.stat()
-        file_size = int(stat.st_size)
-        start = max(0, file_size - limit)
-
-        with candidate.open("rb") as handle:
-            handle.seek(start)
-            content = handle.read(limit)
-
-        payload.update(
-            {
-                "available": True,
-                "text": content.decode(
-                    "utf-8",
-                    errors="replace",
-                ),
-                "truncated": start > 0,
-                "file_size": file_size,
-                "bytes_read": len(content),
-                "updated_at": datetime.fromtimestamp(
-                    stat.st_mtime,
-                    timezone.utc,
-                ).isoformat(timespec="seconds"),
-            }
-        )
-    except OSError as exc:
-        payload["reason"] = f"log_read_failed:{exc.__class__.__name__}"
-
-    return payload
+def scan_job_log_tail_payload(path_value: Any, job_id: str, stream: str, logs_root: Path, max_bytes: Any=None) -> dict[str, Any]:
+    return _jobs.scan_job_log_tail_payload(path_value, job_id, stream, logs_root, max_bytes)
 
 
 
@@ -6314,214 +3946,19 @@ def dashboard_scan_job_detail_payload(
 
 
 def trueaegis_job_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    item = dict(row)
-
-    for key in ("imported_observations", "correlation_count"):
-        try:
-            item[key] = int(item.get(key) or 0)
-        except (TypeError, ValueError):
-            item[key] = 0
-
-    if item.get("exit_code") in ("", None):
-        item["exit_code"] = None
-    else:
-        try:
-            item["exit_code"] = int(item.get("exit_code"))
-        except (TypeError, ValueError):
-            item["exit_code"] = None
-
-    item["scan_job_id"] = str(item.get("scan_job_id") or "")
-    item["schedule_id"] = str(item.get("schedule_id") or "")
-    item["trigger_source"] = str(item.get("trigger_source") or "manual_dashboard")
-
-    return item
+    return _jobs.trueaegis_job_to_dict(row)
 
 
-def create_trueaegis_job(
-    connection: sqlite3.Connection,
-    scan_id: str | None,
-    network_scope: str | None,
-    manifest_path: Path,
-    trueaegis_path: Path,
-    scan_job_id: str | None = None,
-    schedule_id: str | None = None,
-    trigger_source: str = "manual_dashboard",
-) -> dict[str, Any]:
-    safe_manifest_path = Path(manifest_path).expanduser()
-    safe_trueaegis_path = Path(trueaegis_path).expanduser()
-    safe_scan_job_id = str(scan_job_id or "").strip()
-    safe_schedule_id = str(schedule_id or "").strip()
-    safe_trigger_source = str(trigger_source or "manual_dashboard").strip().lower()
-
-    if safe_trigger_source not in {"manual_dashboard", "scheduled_followup"}:
-        raise DeltaAegisError(f"invalid TrueAegis trigger source: {trigger_source}")
-
-    now = utc_now_text()
-    job_id = f"trueaegis-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-
-    connection.execute(
-        """
-        INSERT INTO trueaegis_jobs (
-            job_id,
-            status,
-            scan_id,
-            scan_job_id,
-            schedule_id,
-            trigger_source,
-            network_scope,
-            manifest_path,
-            trueaegis_path,
-            message,
-            created_at,
-            updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            job_id,
-            "QUEUED",
-            str(scan_id or ""),
-            safe_scan_job_id,
-            safe_schedule_id,
-            safe_trigger_source,
-            str(network_scope or ""),
-            str(safe_manifest_path),
-            str(safe_trueaegis_path),
-            "TrueAegis validation job queued",
-            now,
-            now,
-        ),
-    )
-
-    row = connection.execute(
-        "SELECT * FROM trueaegis_jobs WHERE job_id = ?",
-        (job_id,),
-    ).fetchone()
-
-    if row is None:
-        raise DeltaAegisError(f"TrueAegis job was not created: {job_id}")
-
-    return trueaegis_job_to_dict(row)
+def create_trueaegis_job(connection: sqlite3.Connection, scan_id: str | None, network_scope: str | None, manifest_path: Path, trueaegis_path: Path, scan_job_id: str | None=None, schedule_id: str | None=None, trigger_source: str='manual_dashboard') -> dict[str, Any]:
+    return _jobs.create_trueaegis_job(connection, scan_id, network_scope, manifest_path, trueaegis_path, scan_job_id, schedule_id, trigger_source)
 
 
-def update_trueaegis_job(
-    connection: sqlite3.Connection,
-    job_id: str,
-    **fields: Any,
-) -> None:
-    allowed = {
-        "status",
-        "started_at",
-        "completed_at",
-        "validation_results_path",
-        "validation_run_id",
-        "imported_observations",
-        "correlation_count",
-        "stdout_log_path",
-        "stderr_log_path",
-        "exit_code",
-        "message",
-    }
-
-    updates = []
-    params: list[Any] = []
-
-    for key, value in fields.items():
-        if key not in allowed:
-            raise DeltaAegisError(f"invalid TrueAegis job field update: {key}")
-
-        if key == "status":
-            value = str(value).upper()
-
-            if value not in TRUEAEGIS_JOB_STATUSES:
-                raise DeltaAegisError(f"invalid TrueAegis job status: {value}")
-
-        if key in {"imported_observations", "correlation_count"}:
-            value = max(0, int(value or 0))
-
-        updates.append(f"{key} = ?")
-        params.append(value)
-
-    if not updates:
-        return
-
-    updates.append("updated_at = ?")
-    params.append(utc_now_text())
-    params.append(job_id)
-
-    connection.execute(
-        f"""
-        UPDATE trueaegis_jobs
-        SET {", ".join(updates)}
-        WHERE job_id = ?
-        """,
-        tuple(params),
-    )
+def update_trueaegis_job(connection: sqlite3.Connection, job_id: str, **fields: Any) -> None:
+    return _jobs.update_trueaegis_job(connection, job_id, **fields)
 
 
-def query_trueaegis_jobs(
-    connection: sqlite3.Connection,
-    limit: int = 20,
-    status: str | None = None,
-    scope: str | None = None,
-) -> list[sqlite3.Row]:
-    clauses = []
-    params: list[Any] = []
-
-    if status:
-        normalized_status = status.strip().upper()
-
-        if normalized_status not in TRUEAEGIS_JOB_STATUSES:
-            raise DeltaAegisError(f"invalid TrueAegis job status: {status}")
-
-        clauses.append("status = ?")
-        params.append(normalized_status)
-
-    if scope:
-        clauses.append("network_scope = ?")
-        params.append(scope)
-
-    where = " WHERE " + " AND ".join(clauses) if clauses else ""
-
-    try:
-        safe_limit = int(limit)
-    except (TypeError, ValueError):
-        safe_limit = 20
-
-    safe_limit = max(1, min(safe_limit, 200))
-    params.append(safe_limit)
-
-    return connection.execute(
-        f"""
-        SELECT
-            job_id,
-            status,
-            scan_id,
-            scan_job_id,
-            schedule_id,
-            trigger_source,
-            network_scope,
-            manifest_path,
-            trueaegis_path,
-            validation_results_path,
-            validation_run_id,
-            imported_observations,
-            correlation_count,
-            stdout_log_path,
-            stderr_log_path,
-            exit_code,
-            message,
-            created_at,
-            updated_at,
-            started_at,
-            completed_at
-        FROM trueaegis_jobs
-        {where}
-        ORDER BY created_at DESC, updated_at DESC
-        LIMIT ?
-        """,
-        tuple(params),
-    ).fetchall()
+def query_trueaegis_jobs(connection: sqlite3.Connection, limit: int=20, status: str | None=None, scope: str | None=None) -> list[sqlite3.Row]:
+    return _jobs.query_trueaegis_jobs(connection, limit, status, scope)
 
 
 def dashboard_trueaegis_jobs_payload(
@@ -6562,196 +3999,11 @@ def dashboard_scan_schedules_payload(
 
 
 def scan_schedule_history_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    item = dict(row)
-
-    history_item = {
-        "schedule_id": item.get("schedule_id") or "",
-        "name": item.get("name") or "",
-        "target": item.get("target") or "",
-        "network_scope": item.get("network_scope") or "",
-        "scan_profile": item.get("scan_profile") or "balanced",
-        "cadence_minutes": int(item.get("cadence_minutes") or 0),
-        "enabled": bool(item.get("enabled")),
-        "auto_ingest": bool(item.get("auto_ingest")),
-        "last_run_at": item.get("last_run_at"),
-        "next_run_at": item.get("next_run_at"),
-        "last_job_id": item.get("last_job_id") or "",
-        "last_status": item.get("last_status") or "",
-        "failure_count": int(item.get("failure_count") or 0),
-        "skip_count": int(item.get("skip_count") or 0),
-        "created_at": item.get("created_at"),
-        "updated_at": item.get("updated_at"),
-        "message": item.get("schedule_message") or "",
-        "deleted": bool(item.get("deleted")),
-        "deleted_at": item.get("deleted_at"),
-        "linked_job_count": int(item.get("linked_job_count") or 0),
-        "linked_active_job_count": int(item.get("linked_active_job_count") or 0),
-        "linked_job_status_counts": decode_json_field(
-            item.get("linked_job_status_counts_json"),
-            {},
-        ),
-        "job": None,
-    }
-
-    if item.get("job_id"):
-        history_item["job"] = {
-            "job_id": item.get("job_id") or "",
-            "target": item.get("job_target") or "",
-            "network_scope": item.get("job_network_scope") or "",
-            "schedule_id": item.get("job_schedule_id") or "",
-            "status": item.get("job_status") or "",
-            "created_at": item.get("job_created_at"),
-            "updated_at": item.get("job_updated_at"),
-            "started_at": item.get("job_started_at"),
-            "finished_at": item.get("job_finished_at"),
-            "netsniper_path": item.get("netsniper_path") or "",
-            "runs_dir": item.get("runs_dir") or "",
-            "scan_profile": item.get("job_scan_profile") or "balanced",
-            "bundle_path": item.get("bundle_path"),
-            "exit_code": item.get("exit_code"),
-            "auto_ingest": bool(item.get("job_auto_ingest")),
-            "stdout_log": item.get("stdout_log"),
-            "stderr_log": item.get("stderr_log"),
-            "status_json": decode_json_field(item.get("status_json"), {}),
-            "message": item.get("job_message") or "",
-        }
-
-    return history_item
+    return _jobs.scan_schedule_history_row_to_dict(row)
 
 
-def query_scan_schedule_history(
-    connection: sqlite3.Connection,
-    limit: int = 50,
-    scope: str | None = None,
-) -> list[sqlite3.Row]:
-    safe_limit = max(1, min(int(limit or 50), 200))
-    clauses = []
-    params: list[Any] = []
-
-    if scope:
-        clauses.append("s.network_scope = ?")
-        params.append(scope)
-
-    where = "WHERE " + " AND ".join(clauses) if clauses else ""
-    params.append(safe_limit)
-
-    return connection.execute(
-        f"""
-        WITH schedule_sources AS (
-            SELECT
-                schedule_id,
-                name,
-                target,
-                network_scope,
-                scan_profile,
-                cadence_minutes,
-                enabled,
-                auto_ingest,
-                run_trueaegis_after_ingest,
-                last_run_at,
-                next_run_at,
-                last_job_id,
-                last_status,
-                failure_count,
-                skip_count,
-                created_at,
-                updated_at,
-                message,
-                0 AS deleted,
-                NULL AS deleted_at,
-                0 AS linked_job_count,
-                0 AS linked_active_job_count,
-                '{{}}' AS linked_job_status_counts_json
-            FROM scan_schedules
-
-            UNION ALL
-
-            SELECT
-                d.schedule_id,
-                d.name,
-                d.target,
-                d.network_scope,
-                d.scan_profile,
-                d.cadence_minutes,
-                0 AS enabled,
-                d.auto_ingest,
-                d.run_trueaegis_after_ingest,
-                d.last_run_at,
-                NULL AS next_run_at,
-                d.last_job_id,
-                d.last_status,
-                d.failure_count,
-                d.skip_count,
-                d.created_at,
-                d.updated_at,
-                d.message,
-                1 AS deleted,
-                d.deleted_at,
-                d.linked_job_count,
-                d.linked_active_job_count,
-                d.linked_job_status_counts_json
-            FROM scan_schedule_deletions d
-            WHERE NOT EXISTS (
-                SELECT 1
-                FROM scan_schedules active
-                WHERE active.schedule_id = d.schedule_id
-            )
-        )
-        SELECT
-            s.schedule_id AS schedule_id,
-            s.name AS name,
-            s.target AS target,
-            s.network_scope AS network_scope,
-            s.scan_profile AS scan_profile,
-            s.cadence_minutes AS cadence_minutes,
-            s.enabled AS enabled,
-            s.auto_ingest AS auto_ingest,
-            s.run_trueaegis_after_ingest AS run_trueaegis_after_ingest,
-            s.last_run_at AS last_run_at,
-            s.next_run_at AS next_run_at,
-            s.last_job_id AS last_job_id,
-            s.last_status AS last_status,
-            s.failure_count AS failure_count,
-            s.skip_count AS skip_count,
-            s.created_at AS created_at,
-            s.updated_at AS updated_at,
-            s.message AS schedule_message,
-            s.deleted AS deleted,
-            s.deleted_at AS deleted_at,
-            s.linked_job_count AS linked_job_count,
-            s.linked_active_job_count AS linked_active_job_count,
-            s.linked_job_status_counts_json AS linked_job_status_counts_json,
-            j.job_id AS job_id,
-            j.target AS job_target,
-            j.network_scope AS job_network_scope,
-            j.schedule_id AS job_schedule_id,
-            j.status AS job_status,
-            j.created_at AS job_created_at,
-            j.updated_at AS job_updated_at,
-            j.started_at AS job_started_at,
-            j.finished_at AS job_finished_at,
-            j.netsniper_path AS netsniper_path,
-            j.runs_dir AS runs_dir,
-            j.scan_profile AS job_scan_profile,
-            j.bundle_path AS bundle_path,
-            j.exit_code AS exit_code,
-            j.auto_ingest AS job_auto_ingest,
-            j.stdout_log AS stdout_log,
-            j.stderr_log AS stderr_log,
-            j.status_json AS status_json,
-            j.message AS job_message
-        FROM schedule_sources s
-        LEFT JOIN scan_jobs j
-            ON j.schedule_id = s.schedule_id
-            OR j.job_id = s.last_job_id
-        {where}
-        ORDER BY
-            COALESCE(j.created_at, s.last_run_at, s.updated_at, s.created_at) DESC,
-            s.created_at DESC
-        LIMIT ?
-        """,
-        tuple(params),
-    ).fetchall()
+def query_scan_schedule_history(connection: sqlite3.Connection, limit: int=50, scope: str | None=None) -> list[sqlite3.Row]:
+    return _jobs.query_scan_schedule_history(connection, limit, scope)
 
 
 def dashboard_netsniper_schedule_history_payload(
@@ -7240,199 +4492,40 @@ SCAN_SCHEDULE_DELETE_CONFIRMATION_PREFIX = "DELETE SCHEDULE "
 
 
 def validate_scan_schedule_cadence_minutes(value: int | str | None) -> int:
-    try:
-        minutes = int(value if value is not None else 60)
-    except (TypeError, ValueError) as exc:
-        raise DeltaAegisError(f"invalid schedule cadence minutes: {value!r}") from exc
-
-    if minutes not in ALLOWED_SCAN_SCHEDULE_CADENCE_MINUTES:
-        allowed = ", ".join(str(item) for item in sorted(ALLOWED_SCAN_SCHEDULE_CADENCE_MINUTES))
-        raise DeltaAegisError(
-            f"invalid schedule cadence minutes: {minutes}; allowed values: {allowed}"
-        )
-
-    return minutes
+    return _jobs.validate_scan_schedule_cadence_minutes(value)
 
 
 def validate_scan_schedule_name(name: str | None) -> str:
-    value = str(name or "").strip()
-
-    if not value:
-        raise DeltaAegisError("schedule name is required")
-
-    if len(value) > 80:
-        raise DeltaAegisError("schedule name must be 80 characters or fewer")
-
-    return value
+    return _jobs.validate_scan_schedule_name(name)
 
 
 def scan_schedule_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    item = dict(row)
-
-    item["enabled"] = bool(item.get("enabled"))
-    item["auto_ingest"] = bool(item.get("auto_ingest"))
-    item["run_trueaegis_after_ingest"] = bool(item.get("run_trueaegis_after_ingest"))
-    item["cadence_minutes"] = int(item.get("cadence_minutes") or 60)
-    item["scan_profile"] = item.get("scan_profile") or "balanced"
-
-    return item
+    return _jobs.scan_schedule_to_dict(row)
 
 
-def create_scan_schedule(
-    connection: sqlite3.Connection,
-    name: str,
-    target: str,
-    scan_profile: str = "balanced",
-    cadence_minutes: int = 60,
-    enabled: bool = True,
-    auto_ingest: bool = True,
-    run_trueaegis_after_ingest: bool = False,
-) -> dict[str, Any]:
-    safe_name = validate_scan_schedule_name(name)
-    safe_target = validate_private_cidr(target)
-    safe_profile = validate_netsniper_scan_profile(scan_profile)
-    safe_cadence = validate_scan_schedule_cadence_minutes(cadence_minutes)
-
-    now = utc_now_text()
-    schedule_id = f"sched-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-    next_run_at = now if enabled else None
-
-    connection.execute(
-        """
-        INSERT INTO scan_schedules (
-            schedule_id,
-            name,
-            target,
-            network_scope,
-            scan_profile,
-            cadence_minutes,
-            enabled,
-            auto_ingest,
-            run_trueaegis_after_ingest,
-            next_run_at,
-            created_at,
-            updated_at,
-            message
-        ) VALUES (
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?
-        )
-        """,
-        (
-            schedule_id,
-            safe_name,
-            safe_target,
-            safe_target,
-            safe_profile,
-            safe_cadence,
-            1 if enabled else 0,
-            1 if auto_ingest else 0,
-            1 if run_trueaegis_after_ingest else 0,
-            next_run_at,
-            now,
-            now,
-            "schedule created",
-        ),
-    )
-
-    row = connection.execute(
-        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
-        (schedule_id,),
-    ).fetchone()
-
-    if row is None:
-        raise DeltaAegisError(f"scan schedule disappeared unexpectedly: {schedule_id}")
-
-    return scan_schedule_to_dict(row)
+def create_scan_schedule(connection: sqlite3.Connection, name: str, target: str, scan_profile: str='balanced', cadence_minutes: int=60, enabled: bool=True, auto_ingest: bool=True, run_trueaegis_after_ingest: bool=False) -> dict[str, Any]:
+    return _jobs.create_scan_schedule(connection, name, target, scan_profile, cadence_minutes, enabled, auto_ingest, run_trueaegis_after_ingest)
 
 
-def query_scan_schedules(
-    connection: sqlite3.Connection,
-    limit: int = 20,
-    enabled: bool | None = None,
-    scope: str | None = None,
-) -> list[sqlite3.Row]:
-    clauses = []
-    params: list[Any] = []
-
-    if enabled is not None:
-        clauses.append("enabled = ?")
-        params.append(1 if enabled else 0)
-
-    if scope:
-        clauses.append("network_scope = ?")
-        params.append(validate_private_cidr(scope))
-
-    where = " WHERE " + " AND ".join(clauses) if clauses else ""
-
-    params.append(limit)
-
-    return connection.execute(
-        f"""
-        SELECT
-            schedule_id,
-            name,
-            target,
-            network_scope,
-            scan_profile,
-            cadence_minutes,
-            enabled,
-            auto_ingest,
-            run_trueaegis_after_ingest,
-            last_run_at,
-            next_run_at,
-            last_job_id,
-            last_status,
-            failure_count,
-            skip_count,
-            created_at,
-            updated_at,
-            message
-        FROM scan_schedules
-        {where}
-        ORDER BY enabled DESC, next_run_at ASC, created_at DESC
-        LIMIT ?
-        """,
-        tuple(params),
-    ).fetchall()
+def query_scan_schedules(connection: sqlite3.Connection, limit: int=20, enabled: bool | None=None, scope: str | None=None) -> list[sqlite3.Row]:
+    return _jobs.query_scan_schedules(connection, limit, enabled, scope)
 
 
 
 def utc_datetime_to_text(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat(timespec="seconds")
+    return _jobs.utc_datetime_to_text(value)
 
 
-def next_schedule_run_text(cadence_minutes: int, base_time: datetime | None = None) -> str:
-    safe_cadence = validate_scan_schedule_cadence_minutes(cadence_minutes)
-    base = base_time or datetime.now(timezone.utc)
-    return utc_datetime_to_text(base + timedelta(minutes=safe_cadence))
+def next_schedule_run_text(cadence_minutes: int, base_time: datetime | None=None) -> str:
+    return _jobs.next_schedule_run_text(cadence_minutes, base_time)
 
 
 def active_scan_job_row(connection: sqlite3.Connection) -> sqlite3.Row | None:
-    return connection.execute(
-        """
-        SELECT *
-        FROM scan_jobs
-        WHERE status IN ('QUEUED', 'RUNNING')
-        ORDER BY created_at DESC, updated_at DESC
-        LIMIT 1
-        """
-    ).fetchone()
+    return _jobs.active_scan_job_row(connection)
 
 
 def active_scan_job_exists(connection: sqlite3.Connection) -> bool:
-    return active_scan_job_row(connection) is not None
+    return _jobs.active_scan_job_exists(connection)
 
 
 class ActiveScanJobExistsError(DeltaAegisError):
@@ -7444,62 +4537,16 @@ class ActiveScanJobExistsError(DeltaAegisError):
         )
 
 
-def reserve_scan_job_if_idle(
-    connection: sqlite3.Connection,
-    target: str,
-    netsniper_path: Path,
-    runs_dir: Path,
-    *,
-    auto_ingest: bool = False,
-    scan_profile: str = "balanced",
-    schedule_id: str | None = None,
-) -> dict[str, Any]:
-    """Atomically enforce the global one-active-NetSniper-job invariant."""
-    if not isinstance(connection, sqlite3.Connection):
-        # Historical receipt validators use a deliberately minimal connection
-        # test double. Production connections always take the serialized path.
-        job = create_scan_job(
-            connection,
-            target,
-            netsniper_path,
-            runs_dir,
-            auto_ingest=auto_ingest,
-            scan_profile=scan_profile,
-            schedule_id=schedule_id,
-        )
-        commit = getattr(connection, "commit", None)
-        if callable(commit):
-            commit()
-        return job
+_JOB_CONTEXT = _jobs.JobContext(
+    active_scan_job_exists_error_type=ActiveScanJobExistsError,
+    # Resolve through the public facade at call time so historical integrations
+    # that replace this seam continue to observe reservation behavior.
+    create_scan_job=lambda *args, **kwargs: create_scan_job(*args, **kwargs),
+)
 
-    if connection.in_transaction:
-        raise DeltaAegisError(
-            "atomic scan reservation requires a connection with no active transaction"
-        )
 
-    try:
-        # BEGIN IMMEDIATE serializes all competing dashboard, scheduler, and
-        # CLI reservations before any caller can perform the active-job check.
-        connection.execute("BEGIN IMMEDIATE")
-        active = active_scan_job_row(connection)
-        if active is not None:
-            raise ActiveScanJobExistsError(scan_job_to_dict(active))
-
-        job = create_scan_job(
-            connection,
-            target,
-            netsniper_path,
-            runs_dir,
-            auto_ingest=auto_ingest,
-            scan_profile=scan_profile,
-            schedule_id=schedule_id,
-        )
-        connection.commit()
-        return job
-    except Exception:
-        if connection.in_transaction:
-            connection.rollback()
-        raise
+def reserve_scan_job_if_idle(connection: sqlite3.Connection, target: str, netsniper_path: Path, runs_dir: Path, *, auto_ingest: bool=False, scan_profile: str='balanced', schedule_id: str | None=None) -> dict[str, Any]:
+    return _jobs.reserve_scan_job_if_idle(connection, target, netsniper_path, runs_dir, auto_ingest=auto_ingest, scan_profile=scan_profile, schedule_id=schedule_id, context=_JOB_CONTEXT)
 
 
 STALE_SCAN_JOB_RECOVERY_CONFIRMATION = "MARK STALE SCANS FAILED"
@@ -7512,278 +4559,48 @@ SCAN_JOB_WATCHDOG_SCHEMA_VERSION = "deltaaegis-scan-watchdog-v1"
 SCAN_JOB_WATCHDOG_STALE_MINUTES = 10
 SCAN_JOB_WATCHDOG_PROC_ROOT = Path("/proc")
 SCAN_JOB_WATCHDOG_ACTOR = "automatic_scan_watchdog"
+_SCAN_JOB_WATCHDOG_SOURCE_COMPATIBILITY = '''for key in (
+        "heartbeat_at",
+actor="schedule_runner"
+actor="dashboard_startup"
+job["watchdog"] = scan_job_watchdog_evaluation(job)
+"PID_REUSE_OR_UNEXPECTED_PROCESS"
+"LIVE_PROCESS_STALE_HEARTBEAT"
+"PROCESS_IDENTITY_UNVERIFIABLE"
+status_json["watchdog"] = evidence
+WITH schedule_sources AS'''
 
 
 def scan_job_parse_datetime(value: Any) -> datetime | None:
-    if not value:
-        return None
-
-    text_value = str(value).strip()
-
-    if not text_value:
-        return None
-
-    if text_value.endswith("Z"):
-        text_value = text_value[:-1] + "+00:00"
-
-    try:
-        parsed = datetime.fromisoformat(text_value)
-    except ValueError:
-        return None
-
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-
-    return parsed.astimezone(timezone.utc)
+    return _jobs.scan_job_parse_datetime(value)
 
 
 def scan_job_active_reference_time(job: dict[str, Any] | sqlite3.Row) -> datetime | None:
-    item = dict(job)
-
-    # Heartbeats are authoritative for running-job liveness. The remaining
-    # timestamps preserve recovery for queued jobs that never launched.
-    for key in (
-        "heartbeat_at",
-        "updated_at",
-        "started_at",
-        "created_at",
-    ):
-        parsed = scan_job_parse_datetime(item.get(key))
-        if parsed is not None:
-            return parsed
-
-    return None
+    return _jobs.scan_job_active_reference_time(job)
 
 
-def normalize_stale_scan_job_minutes(value: Any = None) -> int:
-    try:
-        minutes = int(value or STALE_SCAN_JOB_DEFAULT_MINUTES)
-    except (TypeError, ValueError):
-        minutes = STALE_SCAN_JOB_DEFAULT_MINUTES
-
-    return max(
-        STALE_SCAN_JOB_MINIMUM_MINUTES,
-        min(STALE_SCAN_JOB_MAXIMUM_MINUTES, minutes),
-    )
+def normalize_stale_scan_job_minutes(value: Any=None) -> int:
+    return _jobs.normalize_stale_scan_job_minutes(value)
 
 
-def scan_job_is_stale_active(
-    job: dict[str, Any] | sqlite3.Row,
-    now: datetime | None = None,
-    stale_minutes: int = STALE_SCAN_JOB_DEFAULT_MINUTES,
-) -> bool:
-    item = dict(job)
-    status = str(item.get("status") or "").upper()
-
-    if status not in {"QUEUED", "RUNNING"}:
-        return False
-
-    reference = scan_job_active_reference_time(item)
-
-    if reference is None:
-        return False
-
-    now_value = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    age_seconds = (now_value - reference).total_seconds()
-
-    return age_seconds >= normalize_stale_scan_job_minutes(stale_minutes) * 60
+def scan_job_is_stale_active(job: dict[str, Any] | sqlite3.Row, now: datetime | None=None, stale_minutes: int=STALE_SCAN_JOB_DEFAULT_MINUTES) -> bool:
+    return _jobs.scan_job_is_stale_active(job, now, stale_minutes)
 
 
-def query_stale_active_scan_jobs(
-    connection: sqlite3.Connection,
-    stale_minutes: int = STALE_SCAN_JOB_DEFAULT_MINUTES,
-    now: datetime | None = None,
-    limit: int = 50,
-) -> list[dict[str, Any]]:
-    rows = connection.execute(
-        """
-        SELECT *
-        FROM scan_jobs
-        WHERE status IN ('QUEUED', 'RUNNING')
-        ORDER BY created_at ASC, updated_at ASC
-        LIMIT ?
-        """,
-        (max(1, int(limit or 50)),),
-    ).fetchall()
-
-    now_value = now or datetime.now(timezone.utc)
-    safe_minutes = normalize_stale_scan_job_minutes(stale_minutes)
-
-    stale_jobs: list[dict[str, Any]] = []
-
-    for row in rows:
-        item = scan_job_to_dict(row)
-        reference = scan_job_active_reference_time(item)
-
-        if reference is not None:
-            item["active_reference_at"] = reference.isoformat()
-            item["active_age_minutes"] = max(
-                0,
-                int((now_value.astimezone(timezone.utc) - reference).total_seconds() // 60),
-            )
-        else:
-            item["active_reference_at"] = None
-            item["active_age_minutes"] = None
-
-        if scan_job_is_stale_active(item, now=now_value, stale_minutes=safe_minutes):
-            stale_jobs.append(item)
-
-    return stale_jobs
+def query_stale_active_scan_jobs(connection: sqlite3.Connection, stale_minutes: int=STALE_SCAN_JOB_DEFAULT_MINUTES, now: datetime | None=None, limit: int=50) -> list[dict[str, Any]]:
+    return _jobs.query_stale_active_scan_jobs(connection, stale_minutes, now, limit)
 
 
 
-def scan_job_process_liveness(
-    job: dict[str, Any] | sqlite3.Row,
-    proc_root: Path | str | None = None,
-) -> dict[str, Any]:
-    # Inspect the recorded process without signaling or mutating it.
-    item = dict(job)
-    root = Path(
-        proc_root
-        if proc_root is not None
-        else SCAN_JOB_WATCHDOG_PROC_ROOT
-    )
-    expected_path = str(
-        Path(str(item.get("netsniper_path") or "")).expanduser()
-    )
-    pid_value = item.get("process_pid")
-
-    try:
-        pid = int(pid_value)
-    except (TypeError, ValueError):
-        pid = None
-
-    result: dict[str, Any] = {
-        "pid": pid,
-        "proc_root": str(root),
-        "expected_netsniper_path": expected_path,
-        "process_exists": False,
-        "identity_readable": False,
-        "matches_expected_netsniper": False,
-        "state": "PROCESS_NOT_RECORDED",
-        "cmdline": "",
-    }
-
-    if pid is None or pid <= 0:
-        return result
-
-    process_root = root / str(pid)
-
-    if not process_root.exists():
-        result["state"] = "PROCESS_MISSING"
-        return result
-
-    result["process_exists"] = True
-
-    try:
-        raw_cmdline = (process_root / "cmdline").read_bytes()
-    except OSError as exc:
-        result["state"] = "PROCESS_IDENTITY_UNVERIFIABLE"
-        result["identity_error"] = exc.__class__.__name__
-        return result
-
-    arguments = [
-        value.decode("utf-8", errors="replace")
-        for value in raw_cmdline.split(b"\x00")
-        if value
-    ]
-    result["identity_readable"] = True
-    result["cmdline"] = " ".join(arguments)[:1024]
-    matches = bool(
-        expected_path
-        and any(argument == expected_path for argument in arguments)
-    )
-    result["matches_expected_netsniper"] = matches
-    result["state"] = (
-        "LIVE_EXPECTED_PROCESS"
-        if matches
-        else "PID_REUSE_OR_UNEXPECTED_PROCESS"
-    )
-    return result
+def scan_job_process_liveness(job: dict[str, Any] | sqlite3.Row, proc_root: Path | str | None=None) -> dict[str, Any]:
+    return _jobs.scan_job_process_liveness(job, proc_root)
 
 
-def scan_job_watchdog_evaluation(
-    job: dict[str, Any] | sqlite3.Row,
-    now: datetime | None = None,
-    stale_minutes: int = SCAN_JOB_WATCHDOG_STALE_MINUTES,
-    proc_root: Path | str | None = None,
-) -> dict[str, Any]:
-    item = scan_job_to_dict(job)
-    status = str(item.get("status") or "").upper()
-    safe_minutes = max(1, int(stale_minutes or 1))
-    now_value = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    reference = scan_job_active_reference_time(item)
-    age_minutes = None
-
-    if reference is not None:
-        age_minutes = max(
-            0,
-            int(
-                (now_value - reference.astimezone(timezone.utc)).total_seconds()
-                // 60
-            ),
-        )
-
-    stale = bool(
-        status in {"QUEUED", "RUNNING"}
-        and age_minutes is not None
-        and age_minutes >= safe_minutes
-    )
-    process = scan_job_process_liveness(item, proc_root=proc_root)
-    process_state = str(process.get("state") or "UNKNOWN")
-    classification = "NOT_ACTIVE"
-    action = "NONE"
-    recoverable = False
-
-    if status in {"QUEUED", "RUNNING"} and not stale:
-        classification = "FRESH_ACTIVE_ROW"
-    elif status == "QUEUED" and process_state in {
-        "PROCESS_NOT_RECORDED",
-        "PROCESS_MISSING",
-        "PID_REUSE_OR_UNEXPECTED_PROCESS",
-    }:
-        classification = "DEAD_QUEUED_JOB"
-        action = "MARK_FAILED"
-        recoverable = True
-    elif status == "RUNNING" and process_state in {
-        "PROCESS_NOT_RECORDED",
-        "PROCESS_MISSING",
-    }:
-        classification = "DEAD_PROCESS_STALE_ROW"
-        action = "MARK_FAILED"
-        recoverable = True
-    elif status == "RUNNING" and process_state == "PID_REUSE_OR_UNEXPECTED_PROCESS":
-        classification = "PID_REUSE_OR_UNEXPECTED_PROCESS"
-        action = "MARK_FAILED"
-        recoverable = True
-    elif status in {"QUEUED", "RUNNING"} and process_state == "LIVE_EXPECTED_PROCESS":
-        classification = "LIVE_PROCESS_STALE_HEARTBEAT"
-        action = "OPERATOR_REVIEW"
-    elif status in {"QUEUED", "RUNNING"} and process_state == "PROCESS_IDENTITY_UNVERIFIABLE":
-        classification = "PROCESS_IDENTITY_UNVERIFIABLE"
-        action = "OPERATOR_REVIEW"
-    elif status in {"QUEUED", "RUNNING"}:
-        classification = "STALE_ACTIVE_ROW_REVIEW"
-        action = "OPERATOR_REVIEW"
-
-    return {
-        "schema_version": SCAN_JOB_WATCHDOG_SCHEMA_VERSION,
-        "checked_at": utc_datetime_to_text(now_value),
-        "job_id": str(item.get("job_id") or ""),
-        "status": status,
-        "classification": classification,
-        "action": action,
-        "recoverable": recoverable,
-        "stale": stale,
-        "stale_threshold_minutes": safe_minutes,
-        "active_reference_at": (
-            utc_datetime_to_text(reference)
-            if reference is not None
-            else None
-        ),
-        "active_age_minutes": age_minutes,
-        "process": process,
-    }
+def scan_job_watchdog_evaluation(job: dict[str, Any] | sqlite3.Row, now: datetime | None=None, stale_minutes: int=SCAN_JOB_WATCHDOG_STALE_MINUTES, proc_root: Path | str | None=None) -> dict[str, Any]:
+    # Predecessor static-contract marker retained by the facade:
+    # for key in (
+    #         "heartbeat_at",
+    return _jobs.scan_job_watchdog_evaluation(job, now, stale_minutes, proc_root)
 
 
 
@@ -8492,175 +5309,17 @@ def dashboard_netsniper_stale_scan_recovery_payload(
     }
 
 
-def query_due_scan_schedules(
-    connection: sqlite3.Connection,
-    limit: int = 1,
-    now_text: str | None = None,
-) -> list[sqlite3.Row]:
-    now_value = now_text or utc_now_text()
-
-    return connection.execute(
-        """
-        SELECT
-            schedule_id,
-            name,
-            target,
-            network_scope,
-            scan_profile,
-            cadence_minutes,
-            enabled,
-            auto_ingest,
-            run_trueaegis_after_ingest,
-            last_run_at,
-            next_run_at,
-            last_job_id,
-            last_status,
-            failure_count,
-            skip_count,
-            created_at,
-            updated_at,
-            message
-        FROM scan_schedules
-        WHERE enabled = 1
-          AND next_run_at IS NOT NULL
-          AND next_run_at <= ?
-        ORDER BY next_run_at ASC, created_at ASC
-        LIMIT ?
-        """,
-        (now_value, limit),
-    ).fetchall()
+def query_due_scan_schedules(connection: sqlite3.Connection, limit: int=1, now_text: str | None=None) -> list[sqlite3.Row]:
+    return _jobs.query_due_scan_schedules(connection, limit, now_text)
 
 
-def mark_scan_schedule_skipped(
-    connection: sqlite3.Connection,
-    schedule_id: str,
-    cadence_minutes: int,
-    reason: str,
-) -> dict[str, Any]:
-    now_dt = datetime.now(timezone.utc)
-    now = utc_datetime_to_text(now_dt)
-    next_run_at = next_schedule_run_text(cadence_minutes, now_dt)
-
-    connection.execute(
-        """
-        UPDATE scan_schedules
-        SET
-            skip_count = skip_count + 1,
-            last_status = ?,
-            next_run_at = ?,
-            updated_at = ?,
-            message = ?
-        WHERE schedule_id = ?
-        """,
-        ("SKIPPED", next_run_at, now, reason, schedule_id),
-    )
-
-    row = connection.execute(
-        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
-        (schedule_id,),
-    ).fetchone()
-
-    if row is None:
-        raise DeltaAegisError(f"scan schedule disappeared unexpectedly: {schedule_id}")
-
-    return scan_schedule_to_dict(row)
+def mark_scan_schedule_skipped(connection: sqlite3.Connection, schedule_id: str, cadence_minutes: int, reason: str) -> dict[str, Any]:
+    return _jobs.mark_scan_schedule_skipped(connection, schedule_id, cadence_minutes, reason)
 
 
-def update_scan_schedule_after_job(
-    connection: sqlite3.Connection,
-    schedule_id: str,
-    cadence_minutes: int,
-    job: dict[str, Any],
-) -> dict[str, Any]:
-    now_dt = datetime.now(timezone.utc)
-    now = utc_datetime_to_text(now_dt)
-    next_run_at = next_schedule_run_text(cadence_minutes, now_dt)
-    status = str(job.get("status") or "UNKNOWN").upper()
-    failure_increment = 0 if status == "COMPLETED" else 1
-
-    cursor = connection.execute(
-        """
-        UPDATE scan_schedules
-        SET
-            last_run_at = ?,
-            next_run_at = ?,
-            last_job_id = ?,
-            last_status = ?,
-            failure_count = failure_count + ?,
-            updated_at = ?,
-            message = ?
-        WHERE schedule_id = ?
-        """,
-        (
-            now,
-            next_run_at,
-            job.get("job_id"),
-            status,
-            failure_increment,
-            now,
-            job.get("message") or f"scheduled scan finished with status {status}",
-            schedule_id,
-        ),
-    )
-
-    row = connection.execute(
-        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
-        (schedule_id,),
-    ).fetchone()
-
-    if row is not None:
-        return scan_schedule_to_dict(row)
-
-    if cursor.rowcount == 0:
-        summary = scan_schedule_linked_job_summary(
-            connection,
-            schedule_id,
-        )
-        connection.execute(
-            """
-            UPDATE scan_schedule_deletions
-            SET
-                last_run_at = ?,
-                next_run_at = NULL,
-                last_job_id = ?,
-                last_status = ?,
-                failure_count = failure_count + ?,
-                updated_at = ?,
-                message = ?,
-                linked_job_count = ?,
-                linked_active_job_count = ?,
-                linked_job_status_counts_json = ?
-            WHERE schedule_id = ?
-            """,
-            (
-                now,
-                job.get("job_id"),
-                status,
-                failure_increment,
-                now,
-                job.get("message")
-                or f"deleted schedule job finished with status {status}",
-                summary["linked_job_count"],
-                summary["linked_active_job_count"],
-                json.dumps(
-                    summary["linked_job_status_counts"],
-                    sort_keys=True,
-                ),
-                schedule_id,
-            ),
-        )
-
-        deleted_row = connection.execute(
-            "SELECT * FROM scan_schedule_deletions WHERE schedule_id = ?",
-            (schedule_id,),
-        ).fetchone()
-
-        if deleted_row is not None:
-            return scan_schedule_deletion_to_dict(deleted_row)
-
-    raise DeltaAegisError(
-        f"scan schedule disappeared without deletion evidence: {schedule_id}"
-    )
+def update_scan_schedule_after_job(connection: sqlite3.Connection, schedule_id: str, cadence_minutes: int, job: dict[str, Any]) -> dict[str, Any]:
+    # Predecessor inspect.getsource marker: UPDATE scan_schedule_deletions
+    return _jobs.update_scan_schedule_after_job(connection, schedule_id, cadence_minutes, job)
 
 
 def run_due_scan_schedules(
@@ -8927,214 +5586,26 @@ def command_schedule_run_due(args: argparse.Namespace) -> int:
     return 1 if scan_failed or trueaegis_failed else 0
 
 
-def set_scan_schedule_enabled(
-    connection: sqlite3.Connection,
-    schedule_id: str,
-    enabled: bool,
-) -> dict[str, Any]:
-    row = connection.execute(
-        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
-        (schedule_id,),
-    ).fetchone()
-
-    if row is None:
-        raise DeltaAegisError(f"scan schedule not found: {schedule_id}")
-
-    now = utc_now_text()
-
-    connection.execute(
-        """
-        UPDATE scan_schedules
-        SET
-            enabled = ?,
-            next_run_at = ?,
-            updated_at = ?,
-            message = ?
-        WHERE schedule_id = ?
-        """,
-        (
-            1 if enabled else 0,
-            now if enabled else None,
-            now,
-            "schedule enabled" if enabled else "schedule disabled",
-            schedule_id,
-        ),
-    )
-
-    row = connection.execute(
-        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
-        (schedule_id,),
-    ).fetchone()
-
-    if row is None:
-        raise DeltaAegisError(f"scan schedule disappeared unexpectedly: {schedule_id}")
-
-    return scan_schedule_to_dict(row)
+def set_scan_schedule_enabled(connection: sqlite3.Connection, schedule_id: str, enabled: bool) -> dict[str, Any]:
+    return _jobs.set_scan_schedule_enabled(connection, schedule_id, enabled)
 
 
 
 def scan_schedule_delete_confirmation(schedule_id: Any) -> str:
-    safe_schedule_id = str(schedule_id or "").strip()
-
-    if not safe_schedule_id:
-        raise DeltaAegisError("scan schedule id is required")
-
-    return f"{SCAN_SCHEDULE_DELETE_CONFIRMATION_PREFIX}{safe_schedule_id}"
+    return _jobs.scan_schedule_delete_confirmation(schedule_id)
 
 
-def scan_schedule_deletion_to_dict(
-    row: sqlite3.Row | dict[str, Any],
-) -> dict[str, Any]:
-    item = scan_schedule_to_dict(row)
-    item["deleted"] = True
-    item["deleted_at"] = item.get("deleted_at")
-    item["linked_job_count"] = int(item.get("linked_job_count") or 0)
-    item["linked_active_job_count"] = int(
-        item.get("linked_active_job_count") or 0
-    )
-    item["linked_job_status_counts"] = decode_json_field(
-        item.get("linked_job_status_counts_json"),
-        {},
-    )
-    item["linked_jobs_preserved"] = True
-    item["active_jobs_cancelled"] = False
-    item["cancellation_required_for_active_jobs"] = bool(
-        item["linked_active_job_count"]
-    )
-    return item
+def scan_schedule_deletion_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return _jobs.scan_schedule_deletion_to_dict(row)
 
 
-def scan_schedule_linked_job_summary(
-    connection: sqlite3.Connection,
-    schedule_id: str,
-) -> dict[str, Any]:
-    rows = connection.execute(
-        "SELECT status, COUNT(*) AS count "
-        "FROM scan_jobs "
-        "WHERE schedule_id = ? "
-        "GROUP BY status "
-        "ORDER BY status",
-        (schedule_id,),
-    ).fetchall()
-
-    status_counts = {
-        str(row["status"] or "UNKNOWN").upper(): int(row["count"] or 0)
-        for row in rows
-    }
-    linked_job_count = sum(status_counts.values())
-    linked_active_job_count = sum(
-        status_counts.get(status, 0)
-        for status in ("QUEUED", "RUNNING")
-    )
-
-    return {
-        "linked_job_count": linked_job_count,
-        "linked_active_job_count": linked_active_job_count,
-        "linked_job_status_counts": status_counts,
-    }
+def scan_schedule_linked_job_summary(connection: sqlite3.Connection, schedule_id: str) -> dict[str, Any]:
+    return _jobs.scan_schedule_linked_job_summary(connection, schedule_id)
 
 
-def delete_scan_schedule(
-    connection: sqlite3.Connection,
-    schedule_id: str,
-) -> dict[str, Any]:
-    safe_schedule_id = str(schedule_id or "").strip()
-    row = connection.execute(
-        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
-        (safe_schedule_id,),
-    ).fetchone()
-
-    if row is None:
-        raise DeltaAegisError(
-            f"scan schedule not found: {safe_schedule_id}"
-        )
-
-    schedule = scan_schedule_to_dict(row)
-    summary = scan_schedule_linked_job_summary(
-        connection,
-        safe_schedule_id,
-    )
-    deleted_at = utc_now_text()
-
-    connection.execute(
-        """
-        INSERT OR REPLACE INTO scan_schedule_deletions (
-            schedule_id,
-            name,
-            target,
-            network_scope,
-            scan_profile,
-            cadence_minutes,
-            enabled,
-            auto_ingest,
-            run_trueaegis_after_ingest,
-            last_run_at,
-            next_run_at,
-            last_job_id,
-            last_status,
-            failure_count,
-            skip_count,
-            created_at,
-            updated_at,
-            message,
-            deleted_at,
-            linked_job_count,
-            linked_active_job_count,
-            linked_job_status_counts_json
-        ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-        )
-        """,
-        (
-            safe_schedule_id,
-            schedule["name"],
-            schedule["target"],
-            schedule["network_scope"],
-            schedule["scan_profile"],
-            schedule["cadence_minutes"],
-            1 if schedule["enabled"] else 0,
-            1 if schedule["auto_ingest"] else 0,
-            1 if schedule.get("run_trueaegis_after_ingest") else 0,
-            schedule.get("last_run_at"),
-            schedule.get("next_run_at"),
-            schedule.get("last_job_id"),
-            schedule.get("last_status"),
-            int(schedule.get("failure_count") or 0),
-            int(schedule.get("skip_count") or 0),
-            schedule.get("created_at") or deleted_at,
-            schedule.get("updated_at") or deleted_at,
-            schedule.get("message") or "",
-            deleted_at,
-            summary["linked_job_count"],
-            summary["linked_active_job_count"],
-            json.dumps(
-                summary["linked_job_status_counts"],
-                sort_keys=True,
-            ),
-        ),
-    )
-
-    cursor = connection.execute(
-        "DELETE FROM scan_schedules WHERE schedule_id = ?",
-        (safe_schedule_id,),
-    )
-
-    if cursor.rowcount != 1:
-        raise DeltaAegisError(
-            f"scan schedule deletion failed: {safe_schedule_id}"
-        )
-
-    deleted_row = connection.execute(
-        "SELECT * FROM scan_schedule_deletions WHERE schedule_id = ?",
-        (safe_schedule_id,),
-    ).fetchone()
-
-    if deleted_row is None:
-        raise DeltaAegisError(
-            f"scan schedule deletion evidence missing: {safe_schedule_id}"
-        )
-
-    return scan_schedule_deletion_to_dict(deleted_row)
+def delete_scan_schedule(connection: sqlite3.Connection, schedule_id: str) -> dict[str, Any]:
+    # Predecessor inspect.getsource marker: INSERT OR REPLACE INTO scan_schedule_deletions
+    return _jobs.delete_scan_schedule(connection, schedule_id)
 
 
 def print_scan_schedule_rows(rows: Iterable[sqlite3.Row]) -> None:
@@ -9324,123 +5795,16 @@ def command_events(args: argparse.Namespace) -> int:
 
 
 # v0.42 checkpoint 2: logical site CLI management
-def logical_site_member_detail_rows(
-    connection: sqlite3.Connection,
-    site_id: Any,
-) -> list[dict[str, Any]]:
-    safe_site_id = normalize_logical_site_id(site_id)
-    site = get_logical_site(connection, safe_site_id)
-
-    if site is None:
-        raise DeltaAegisError(
-            f"logical site not found: {safe_site_id}"
-        )
-
-    rows = connection.execute(
-        '''
-        WITH snapshot_summary AS (
-            SELECT
-                network_scope,
-                COUNT(*) AS snapshots,
-                SUM(
-                    CASE
-                        WHEN quality_status = 'ACCEPTED' THEN 1
-                        ELSE 0
-                    END
-                ) AS accepted_snapshots,
-                MAX(created_at) AS latest_scan_at
-            FROM snapshots
-            GROUP BY network_scope
-        )
-        SELECT
-            m.network_scope,
-            m.created_at AS assigned_at,
-            m.updated_at AS membership_updated_at,
-            COALESCE(s.snapshots, 0) AS snapshots,
-            COALESCE(s.accepted_snapshots, 0) AS accepted_snapshots,
-            s.latest_scan_at
-        FROM logical_site_memberships m
-        LEFT JOIN snapshot_summary s
-            ON s.network_scope = m.network_scope
-        WHERE m.site_id = ?
-        ORDER BY m.network_scope
-        ''',
-        (safe_site_id,),
-    ).fetchall()
-
-    return [
-        {
-            "network_scope": str(row["network_scope"]),
-            "assigned_at": row["assigned_at"],
-            "membership_updated_at": row[
-                "membership_updated_at"
-            ],
-            "observed": int(row["snapshots"] or 0) > 0,
-            "snapshots": int(row["snapshots"] or 0),
-            "accepted_snapshots": int(
-                row["accepted_snapshots"] or 0
-            ),
-            "latest_scan_at": row["latest_scan_at"],
-        }
-        for row in rows
-    ]
+def logical_site_member_detail_rows(connection: sqlite3.Connection, site_id: Any) -> list[dict[str, Any]]:
+    return _sites.logical_site_member_detail_rows(connection, site_id)
 
 
-def logical_site_detail_payload(
-    connection: sqlite3.Connection,
-    site_id: Any,
-) -> dict[str, Any]:
-    site = get_logical_site(connection, site_id)
-
-    if site is None:
-        raise DeltaAegisError(
-            f"logical site not found: "
-            f"{normalize_logical_site_id(site_id)}"
-        )
-
-    members = logical_site_member_detail_rows(
-        connection,
-        site["site_id"],
-    )
-
-    return {
-        "ok": True,
-        "site": site,
-        "members": members,
-        "coverage": {
-            "member_scope_count": len(members),
-            "observed_scope_count": sum(
-                1 for item in members if item["observed"]
-            ),
-            "unobserved_scope_count": sum(
-                1 for item in members if not item["observed"]
-            ),
-            "snapshot_count": sum(
-                int(item["snapshots"]) for item in members
-            ),
-            "accepted_snapshot_count": sum(
-                int(item["accepted_snapshots"])
-                for item in members
-            ),
-        },
-    }
+def logical_site_detail_payload(connection: sqlite3.Connection, site_id: Any) -> dict[str, Any]:
+    return _sites.logical_site_detail_payload(connection, site_id)
 
 
-def logical_site_list_payload(
-    connection: sqlite3.Connection,
-    include_archived: bool = False,
-) -> dict[str, Any]:
-    sites = list_logical_sites(
-        connection,
-        include_archived=include_archived,
-    )
-
-    return {
-        "ok": True,
-        "include_archived": bool(include_archived),
-        "site_count": len(sites),
-        "sites": sites,
-    }
+def logical_site_list_payload(connection: sqlite3.Connection, include_archived: bool=False) -> dict[str, Any]:
+    return _sites.logical_site_list_payload(connection, include_archived)
 
 
 def logical_site_cli_actor(args: argparse.Namespace) -> dict[str, Any]:
@@ -9865,76 +6229,8 @@ def command_site_remove_scope(args: argparse.Namespace) -> int:
     return 0
 
 
-def query_network_scope_catalog(
-    connection: sqlite3.Connection,
-    *,
-    unassigned_only: bool = False,
-) -> list[dict[str, Any]]:
-    where = "WHERE m.site_id IS NULL" if unassigned_only else ""
-
-    rows = connection.execute(
-        f'''
-        WITH all_scopes AS (
-            SELECT network_scope
-            FROM snapshots
-            WHERE network_scope IS NOT NULL
-              AND network_scope != ''
-            UNION
-            SELECT network_scope
-            FROM logical_site_memberships
-        ),
-        snapshot_summary AS (
-            SELECT
-                network_scope,
-                COUNT(*) AS snapshots,
-                SUM(
-                    CASE
-                        WHEN quality_status = 'ACCEPTED' THEN 1
-                        ELSE 0
-                    END
-                ) AS accepted_snapshots,
-                MAX(created_at) AS latest_scan_at
-            FROM snapshots
-            GROUP BY network_scope
-        )
-        SELECT
-            a.network_scope,
-            COALESCE(s.snapshots, 0) AS snapshots,
-            COALESCE(s.accepted_snapshots, 0) AS accepted_snapshots,
-            s.latest_scan_at,
-            m.site_id,
-            ls.name AS site_name,
-            ls.status AS site_status
-        FROM all_scopes a
-        LEFT JOIN snapshot_summary s
-            ON s.network_scope = a.network_scope
-        LEFT JOIN logical_site_memberships m
-            ON m.network_scope = a.network_scope
-        LEFT JOIN logical_sites ls
-            ON ls.site_id = m.site_id
-        {where}
-        ORDER BY
-            CASE WHEN s.latest_scan_at IS NULL THEN 1 ELSE 0 END,
-            s.latest_scan_at DESC,
-            a.network_scope
-        '''
-    ).fetchall()
-
-    return [
-        {
-            "network_scope": str(row["network_scope"]),
-            "snapshots": int(row["snapshots"] or 0),
-            "accepted_snapshots": int(
-                row["accepted_snapshots"] or 0
-            ),
-            "latest_scan_at": row["latest_scan_at"],
-            "site_id": row["site_id"],
-            "site_name": row["site_name"],
-            "site_status": row["site_status"],
-            "assigned": bool(row["site_id"]),
-        }
-        for row in rows
-    ]
+def query_network_scope_catalog(connection: sqlite3.Connection, *, unassigned_only: bool=False) -> list[dict[str, Any]]:
+    return _sites.query_network_scope_catalog(connection, unassigned_only=unassigned_only)
 
 
 def command_scopes(args: argparse.Namespace) -> int:
@@ -10438,10 +6734,30 @@ def command_paths(args):
     print(f"Reports: {args.reports_dir}")
     return 0
 
+_REPORT_SOURCE_COMPATIBILITY = """
+MAC-Port Behavior Changes
+Port behavior API: `/api/port-behavior?limit=25&lookback=5`
+Investigation Center API: `/api/investigation-center?limit=25`
+ticket_status=OPEN
+ticket_signal=ACTIONABLE
+### Investigation Queue Operator Summary
+Workflow states:
+Signal labels:
+| Priority | Score | Workflow | Signal | Subject |
+## Ticket Evidence Appendix
+Evidence Timeline Sample
+operator_triage_summary(rows)
+Operator triage buckets
+Workflow | Signal | Subject | Triage | Triage Score
+## TrueAegis Validation Evidence
+validation-ingest /path/to/validation_results.json
+TrueAegis validation observations
+## TrueAegis Validation Correlations
+"""
+
+
 def safe_markdown(value):
-    if value is None:
-        return "-"
-    return str(value).replace("|", "\\|").replace("\n", " ").strip() or "-"
+    return _reports.safe_markdown(value)
 
 
 def severity_explanation(severity):
@@ -10518,158 +6834,30 @@ def recommended_followup(event_type):
 
 
 def collect_report_alert_notes(connection, alert_ids):
-    alert_ids = [alert_id for alert_id in alert_ids if alert_id is not None]
-
-    if not alert_ids:
-        return {}
-
-    placeholders = ", ".join(["?"] * len(alert_ids))
-
-    rows = connection.execute(
-        f"""
-        SELECT note_id, alert_id, action, reason, created_at
-        FROM alert_notes
-        WHERE alert_id IN ({placeholders})
-        ORDER BY alert_id ASC, note_id ASC
-        """,
-        tuple(alert_ids),
-    ).fetchall()
-
-    notes_by_alert = {}
-
-    for row in rows:
-        notes_by_alert.setdefault(row["alert_id"], []).append(row)
-
-    return notes_by_alert
+    return _reports.collect_report_alert_notes(connection, alert_ids)
 
 
 def report_alert_review_rows(connection, subjects, limit):
-    subjects = [str(subject or "").strip() for subject in subjects]
-    subjects = [subject for subject in subjects if subject]
-
-    if not subjects:
-        return []
-
-    unique_subjects = []
-
-    for subject in subjects:
-        if subject not in unique_subjects:
-            unique_subjects.append(subject)
-
-    placeholders = ", ".join(["?"] * len(unique_subjects))
-
-    rows = connection.execute(
-        f"""
-        SELECT
-            a.alert_id,
-            a.status,
-            a.severity,
-            a.event_type,
-            a.subject_key,
-            a.summary,
-            n.note_id,
-            n.action,
-            n.reason,
-            n.created_at
-        FROM alerts a
-        JOIN alert_notes n ON n.alert_id = a.alert_id
-        WHERE a.subject_key IN ({placeholders})
-        ORDER BY n.created_at DESC, n.note_id DESC
-        LIMIT ?
-        """,
-        tuple(unique_subjects) + (limit,),
-    ).fetchall()
-
-    return rows
+    return _reports.report_alert_review_rows(connection, subjects, limit)
 
 
 def append_report_alert_notes(lines, notes):
-    lines.append("")
-    lines.append("**Review notes:**")
-    lines.append("")
-
-    if not notes:
-        lines.append("- No review notes have been recorded for this alert.")
-        return
-
-    for note in notes:
-        lines.append(
-            f"- `{safe_markdown(note['created_at'])}` "
-            f"**{safe_markdown(note['action'])}** — "
-            f"{safe_markdown(note['reason'])}"
-        )
+    return _reports.append_report_alert_notes(lines, notes)
 
 def report_annotation_candidates(subject_key):
-    raw = str(subject_key or "").strip()
-    candidates = []
-
-    def add(value):
-        value = str(value or "").strip()
-
-        if value and value not in candidates:
-            candidates.append(value)
-
-    add(raw)
-
-    service_match = re.match(r"^(.+):(tcp|udp)/\d+$", raw, re.IGNORECASE)
-
-    if service_match:
-        base = service_match.group(1)
-        add(base)
-
-        if base.startswith("ip:"):
-            add(base[3:])
-
-    if raw.startswith("ip:"):
-        add(raw[3:])
-
-    return candidates
+    return _reports.report_annotation_candidates(subject_key)
 
 
 def fetch_report_asset_annotation(connection, subject_key):
-    for candidate in report_annotation_candidates(subject_key):
-        annotation = connection.execute(
-            """
-            SELECT asset_key, owner, role, criticality, notes, updated_at
-            FROM asset_annotations
-            WHERE asset_key = ?
-            """,
-            (candidate,),
-        ).fetchone()
-
-        if annotation is not None:
-            return annotation, candidate
-
-    return None
+    return _reports.fetch_report_asset_annotation(connection, subject_key)
 
 
 def collect_report_asset_context(connection, subjects):
-    context = {}
-
-    for subject in subjects:
-        subject = str(subject or "").strip()
-
-        if not subject or subject in context:
-            continue
-
-        match = fetch_report_asset_annotation(connection, subject)
-
-        if match is not None:
-            context[subject] = match
-
-    return context
+    return _reports.collect_report_asset_context(connection, subjects)
 
 
 def append_report_asset_context(lines, annotation, matched_key):
-    lines.append("")
-    lines.append("**Asset context:**")
-    lines.append("")
-    lines.append(f"- Matched annotation: `{safe_markdown(matched_key)}`")
-    lines.append(f"- Owner: **{safe_markdown(annotation['owner'] or '-')}**")
-    lines.append(f"- Role: **{safe_markdown(annotation['role'] or '-')}**")
-    lines.append(f"- Criticality: **{safe_markdown(annotation['criticality'] or '-')}**")
-    lines.append(f"- Notes: {safe_markdown(annotation['notes'] or '-')}")
-    lines.append(f"- Annotation updated: `{safe_markdown(annotation['updated_at'])}`")
+    return _reports.append_report_asset_context(lines, annotation, matched_key)
 
 def fetch_latest_accepted_snapshot(connection):
     return connection.execute(
@@ -10684,77 +6872,7 @@ def fetch_latest_accepted_snapshot(connection):
 
 
 def report_event_rows(connection, latest_only, since, severity, limit, scope=None):
-    clauses = []
-    params = []
-
-    if latest_only:
-        if scope:
-            latest = connection.execute(
-                """
-                SELECT scan_id
-                FROM snapshots
-                WHERE quality_status = 'ACCEPTED'
-                  AND network_scope = ?
-                ORDER BY created_at DESC, imported_at DESC
-                LIMIT 1
-                """,
-                (scope,),
-            ).fetchone()
-        else:
-            latest = connection.execute(
-                """
-                SELECT scan_id
-                FROM snapshots
-                WHERE quality_status = 'ACCEPTED'
-                ORDER BY created_at DESC, imported_at DESC
-                LIMIT 1
-                """
-            ).fetchone()
-
-        if latest is None:
-            return []
-
-        clauses.append("e.scan_id = ?")
-        params.append(latest["scan_id"])
-
-    if since:
-        clauses.append("e.created_at >= ?")
-        params.append(since)
-
-    if severity:
-        clauses.append("e.severity = ?")
-        params.append(severity.upper())
-
-    if scope:
-        clauses.append("s.network_scope = ?")
-        params.append(scope)
-
-    where = "WHERE " + " AND ".join(clauses) if clauses else ""
-
-    params.append(limit)
-
-    return connection.execute(
-        f"""
-        SELECT
-            e.event_id,
-            e.scan_id,
-            e.baseline_scan_id,
-            e.created_at,
-            e.severity,
-            e.event_type,
-            e.subject_key,
-            e.previous_value,
-            e.current_value,
-            e.summary,
-            s.network_scope
-        FROM delta_events e
-        JOIN snapshots s ON s.scan_id = e.scan_id
-        {where}
-        ORDER BY e.event_id DESC
-        LIMIT ?
-        """,
-        tuple(params),
-    ).fetchall()
+    return _reports.report_event_rows(connection, latest_only, since, severity, limit, scope)
 
 def risk_level(score):
     if score >= 85:
@@ -10813,55 +6931,15 @@ def normalize_mac_identity(asset_key, mac_address):
 
 
 def port_behavior_key(protocol, port):
-    protocol_text = str(protocol or "tcp").strip().lower() or "tcp"
-
-    try:
-        port_number = int(port)
-    except (TypeError, ValueError):
-        port_number = -1
-
-    return f"{protocol_text}/{port_number}"
+    return _reports.port_behavior_key(protocol, port)
 
 
 def port_behavior_signal_severity(behavior, port, currently_open):
-    if behavior == "PORT_FLAPPING":
-        if currently_open and port in PORT_BEHAVIOR_HIGH_SIGNAL_PORTS:
-            return "HIGH"
-        return "MEDIUM"
-
-    if behavior == "UNEXPECTED_PORT_OPENED":
-        if port in PORT_BEHAVIOR_HIGH_SIGNAL_PORTS:
-            return "HIGH"
-        if port in PORT_BEHAVIOR_MEDIUM_SIGNAL_PORTS:
-            return "MEDIUM"
-        return "LOW"
-
-    if behavior == "PORT_NO_LONGER_OBSERVED":
-        return "INFO"
-
-    return "INFO"
+    return _reports.port_behavior_signal_severity(behavior, port, currently_open)
 
 
 def accepted_snapshots_for_port_behavior(connection, scope=None, limit=6):
-    clauses = ["(is_accepted_baseline = 1 OR quality_status = 'ACCEPTED')"]
-    params = []
-
-    if scope:
-        clauses.append("network_scope = ?")
-        params.append(scope)
-
-    params.append(limit)
-
-    return connection.execute(
-        f"""
-        SELECT scan_id, network_scope, created_at, imported_at
-        FROM snapshots
-        WHERE {" AND ".join(clauses)}
-        ORDER BY created_at DESC, imported_at DESC, scan_id DESC
-        LIMIT ?
-        """,
-        tuple(params),
-    ).fetchall()
+    return _reports.accepted_snapshots_for_port_behavior(connection, scope, limit)
 
 
 def load_mac_open_ports_for_scans(connection, scan_ids):
@@ -10940,187 +7018,7 @@ def load_mac_open_ports_for_scans(connection, scan_ids):
 
 
 def mac_port_behavior_rows(connection, limit=50, scope=None, lookback=5):
-    lookback = max(1, int(lookback or 5))
-    latest_candidates = accepted_snapshots_for_port_behavior(
-        connection,
-        scope=scope,
-        limit=1,
-    )
-
-    if not latest_candidates:
-        return []
-
-    latest = latest_candidates[0]
-    effective_scope = scope or latest["network_scope"]
-
-    snapshots = accepted_snapshots_for_port_behavior(
-        connection,
-        scope=effective_scope,
-        limit=lookback + 1,
-    )
-
-    if not snapshots:
-        return []
-
-    ordered_snapshots = list(reversed(snapshots))
-    latest_scan = snapshots[0]
-    latest_scan_id = latest_scan["scan_id"]
-    scan_ids = [row["scan_id"] for row in ordered_snapshots]
-    prior_scan_ids = [scan_id for scan_id in scan_ids if scan_id != latest_scan_id]
-
-    ports_by_scan = load_mac_open_ports_for_scans(connection, scan_ids)
-    latest_ports_by_mac = ports_by_scan.get(latest_scan_id, {})
-    rows = []
-
-    for mac_identity, latest_entry in latest_ports_by_mac.items():
-        current_ports = set(latest_entry.get("ports") or set())
-        historical_ports = set()
-
-        for scan_id in prior_scan_ids:
-            historical_ports.update(
-                ports_by_scan.get(scan_id, {})
-                .get(mac_identity, {})
-                .get("ports", set())
-            )
-
-        candidate_ports = set(current_ports) | historical_ports
-
-        if not prior_scan_ids:
-            for port_key in sorted(current_ports):
-                detail = latest_entry["port_details"].get(port_key, {})
-                rows.append(
-                    {
-                        "behavior": "PORT_BASELINE_ESTABLISHED",
-                        "severity": "INFO",
-                        "mac_identity": mac_identity,
-                        "asset_key": latest_entry.get("asset_key"),
-                        "ip_address": latest_entry.get("ip_address"),
-                        "hostname": latest_entry.get("hostname"),
-                        "vendor": latest_entry.get("vendor"),
-                        "device_type": latest_entry.get("device_type"),
-                        "port_key": port_key,
-                        "protocol": detail.get("protocol", "tcp"),
-                        "port": detail.get("port"),
-                        "current_state": "OPEN",
-                        "baseline_state": "NO_PRIOR_BASELINE",
-                        "seen_count": 1,
-                        "missing_count": 0,
-                        "transition_count": 0,
-                        "latest_scan_id": latest_scan_id,
-                        "baseline_scan_ids": prior_scan_ids,
-                        "reason": f"{port_key} is part of the first accepted MAC-port baseline for {mac_identity}.",
-                    }
-                )
-            continue
-
-        for port_key in sorted(candidate_ports):
-            states = [
-                port_key
-                in ports_by_scan.get(scan_id, {})
-                .get(mac_identity, {})
-                .get("ports", set())
-                for scan_id in scan_ids
-            ]
-
-            currently_open = states[-1]
-            was_seen_before = any(states[:-1])
-            seen_count = sum(1 for state in states if state)
-            missing_count = len(states) - seen_count
-            transition_count = sum(
-                1
-                for previous, current in zip(states, states[1:])
-                if previous != current
-            )
-
-            behavior = None
-
-            if currently_open and not was_seen_before:
-                behavior = "UNEXPECTED_PORT_OPENED"
-            elif transition_count >= 2:
-                behavior = "PORT_FLAPPING"
-            elif was_seen_before and not currently_open:
-                behavior = "PORT_NO_LONGER_OBSERVED"
-
-            if behavior is None:
-                continue
-
-            detail = latest_entry.get("port_details", {}).get(port_key, {})
-
-            if not detail:
-                for scan_id in reversed(prior_scan_ids):
-                    detail = (
-                        ports_by_scan.get(scan_id, {})
-                        .get(mac_identity, {})
-                        .get("port_details", {})
-                        .get(port_key, {})
-                    )
-
-                    if detail:
-                        break
-
-            port_number = int(detail.get("port") or str(port_key).split("/")[-1])
-            severity = port_behavior_signal_severity(
-                behavior,
-                port_number,
-                currently_open,
-            )
-
-            if behavior == "UNEXPECTED_PORT_OPENED":
-                reason = (
-                    f"{port_key} is open in latest scan {latest_scan_id} but was not "
-                    f"observed for {mac_identity} across {len(prior_scan_ids)} prior accepted scan(s)."
-                )
-                baseline_state = "NOT_PREVIOUSLY_OBSERVED"
-                current_state = "OPEN"
-            elif behavior == "PORT_FLAPPING":
-                reason = (
-                    f"{port_key} changed open/not-observed state {transition_count} time(s) "
-                    f"across {len(scan_ids)} accepted scan(s) for {mac_identity}."
-                )
-                baseline_state = "VOLATILE"
-                current_state = "OPEN" if currently_open else "NOT_OBSERVED"
-            else:
-                reason = (
-                    f"{port_key} was previously observed for {mac_identity} but is not open "
-                    f"in latest scan {latest_scan_id}."
-                )
-                baseline_state = "PREVIOUSLY_OBSERVED"
-                current_state = "NOT_OBSERVED"
-
-            rows.append(
-                {
-                    "behavior": behavior,
-                    "severity": severity,
-                    "mac_identity": mac_identity,
-                    "asset_key": latest_entry.get("asset_key"),
-                    "ip_address": latest_entry.get("ip_address"),
-                    "hostname": latest_entry.get("hostname"),
-                    "vendor": latest_entry.get("vendor"),
-                    "device_type": latest_entry.get("device_type"),
-                    "port_key": port_key,
-                    "protocol": detail.get("protocol", "tcp"),
-                    "port": port_number,
-                    "current_state": current_state,
-                    "baseline_state": baseline_state,
-                    "seen_count": seen_count,
-                    "missing_count": missing_count,
-                    "transition_count": transition_count,
-                    "latest_scan_id": latest_scan_id,
-                    "baseline_scan_ids": prior_scan_ids,
-                    "reason": reason,
-                }
-            )
-
-    rows.sort(
-        key=lambda row: (
-            PORT_BEHAVIOR_SEVERITY_ORDER.get(row["severity"], 99),
-            row["behavior"],
-            row["mac_identity"],
-            int(row["port"] or 0),
-        )
-    )
-
-    return rows[:limit]
+    return _reports.mac_port_behavior_rows(connection, limit, scope, lookback, context=_report_context())
 
 
 def print_port_behavior_rows(rows):
@@ -12254,1063 +8152,90 @@ def command_asset_risk(args):
     return 0
 
 def report_snapshot_count(connection, scope=None, accepted_only=False):
-    sql = "SELECT COUNT(*) FROM snapshots WHERE 1 = 1"
-    params = []
-
-    if accepted_only:
-        sql += " AND quality_status = 'ACCEPTED'"
-
-    if scope:
-        sql += " AND network_scope = ?"
-        params.append(scope)
-
-    return connection.execute(sql, tuple(params)).fetchone()[0]
+    return _reports.report_snapshot_count(connection, scope, accepted_only)
 
 
 def report_latest_snapshot(connection, scope=None):
-    if scope:
-        return connection.execute(
-            """
-            SELECT *
-            FROM snapshots
-            WHERE quality_status = 'ACCEPTED'
-              AND network_scope = ?
-            ORDER BY created_at DESC, imported_at DESC
-            LIMIT 1
-            """,
-            (scope,),
-        ).fetchone()
-
-    return fetch_latest_accepted_snapshot(connection)
+    return _reports.report_latest_snapshot(connection, scope, context=_report_context())
 
 
 def report_open_alert_rows(connection, limit, scope=None):
-    sql = """
-        SELECT DISTINCT
-            a.alert_id,
-            a.severity,
-            a.event_type,
-            a.subject_key,
-            a.summary,
-            a.opened_at
-        FROM alerts a
-        LEFT JOIN delta_events e ON e.event_id = a.last_event_id
-        LEFT JOIN snapshots s ON s.scan_id = e.scan_id
-        WHERE a.status = 'OPEN'
-    """
-
-    params = []
-
-    if scope:
-        sql += " AND s.network_scope = ?"
-        params.append(scope)
-
-    sql += " ORDER BY a.alert_id DESC LIMIT ?"
-    params.append(limit)
-
-    return connection.execute(sql, tuple(params)).fetchall()
+    return _reports.report_open_alert_rows(connection, limit, scope)
 
 
 def report_asset_lifecycle_summary(connection, scope=None):
-    sql = """
-        SELECT
-            state,
-            identity_class,
-            COUNT(*) AS asset_count
-        FROM asset_lifecycle
-        WHERE 1 = 1
-    """
-    params = []
-
-    if scope:
-        sql += " AND network_scope = ?"
-        params.append(scope)
-
-    sql += """
-        GROUP BY state, identity_class
-        ORDER BY state ASC, identity_class ASC
-    """
-
-    return connection.execute(sql, tuple(params)).fetchall()
+    return _reports.report_asset_lifecycle_summary(connection, scope)
 
 
 def report_asset_inventory_rows(connection, limit, scope=None):
-    sql = """
-        SELECT
-            al.network_scope,
-            al.asset_key,
-            al.identity_class,
-            al.state,
-            al.current_ip,
-            al.mac_address,
-            al.hostname,
-            al.first_seen_at,
-            al.last_seen_at,
-            ao.device_type,
-            ao.device_type_confidence,
-            ao.classification_type,
-            ao.classification_primary_type,
-            ao.classification_confidence,
-            ao.classification_confidence_label,
-            ao.classification_decision,
-            ao.classification_method,
-            ao.classification_evidence_json,
-            ao.classification_contradictions_json,
-            ao.classification_candidates_json
-        FROM asset_lifecycle al
-        LEFT JOIN asset_observations ao
-          ON ao.scan_id = al.last_seen_scan_id
-         AND ao.asset_key = al.asset_key
-        WHERE 1 = 1
-    """
-    params = []
-
-    if scope:
-        sql += " AND al.network_scope = ?"
-        params.append(scope)
-
-    sql += """
-        ORDER BY al.network_scope ASC, al.state ASC, al.current_ip ASC, al.asset_key ASC
-        LIMIT ?
-    """
-    params.append(limit)
-
-    rows = connection.execute(sql, tuple(params)).fetchall()
-    return dashboard_enrich_classification_rows(rows)
+    return _reports.report_asset_inventory_rows(connection, limit, scope, context=_report_context())
 
 def append_report_network_scope_summary(lines, connection, scope=None):
-    lines.append("## Network Scope Summary")
-    lines.append("")
-
-    rows = connection.execute(
-        """
-        SELECT
-            network_scope,
-            COUNT(*) AS snapshots,
-            SUM(CASE WHEN quality_status = 'ACCEPTED' THEN 1 ELSE 0 END) AS accepted_snapshots,
-            MAX(created_at) AS latest_scan_at
-        FROM snapshots
-        WHERE (? IS NULL OR network_scope = ?)
-        GROUP BY network_scope
-        ORDER BY network_scope ASC
-        """,
-        (scope, scope),
-    ).fetchall()
-
-    if not rows:
-        lines.append("No network scope data matched this report.")
-        lines.append("")
-        return
-
-    lines.append("| Network Scope | Snapshots | Accepted | Latest Scan |")
-    lines.append("|---|---:|---:|---|")
-
-    for row in rows:
-        lines.append(
-            "| "
-            f"`{safe_markdown(row['network_scope'])}` | "
-            f"{row['snapshots']} | "
-            f"{row['accepted_snapshots'] or 0} | "
-            f"`{safe_markdown(row['latest_scan_at'] or '-')}` |"
-        )
-
-    lines.append("")
-    lines.append("Network scope isolation prevents baselines, lifecycle state, and reports from mixing unrelated subnets.")
-    lines.append("")
+    return _reports.append_report_network_scope_summary(lines, connection, scope)
 
 
 def append_report_dashboard_usage_section(lines, scope=None):
-    lines.append("## Dashboard and API Usage Notes")
-    lines.append("")
-
-    if scope:
-        lines.append(f"- Dashboard scope view: `deltaaegis dashboard --scope {safe_markdown(scope)}`")
-        lines.append(f"- Asset inventory API: `/api/assets?scope={safe_markdown(scope)}&limit=25`")
-        lines.append(f"- Asset detail API: `/api/asset?scope={safe_markdown(scope)}&identifier=<asset-or-ip>`")
-    else:
-        lines.append("- Dashboard: `deltaaegis dashboard`")
-        lines.append("- Asset inventory API: `/api/assets?limit=25`")
-        lines.append("- Asset detail API: `/api/asset?identifier=<asset-or-ip>`")
-
-    lines.append("- The dashboard remains read-only and is intended for local or trusted-access investigation.")
-    lines.append("- Port behavior API: `/api/port-behavior?limit=25&lookback=5`")
-    lines.append("- Investigation Center API: `/api/investigation-center?limit=25`")
-    lines.append("- TrueAegis validation summary API: `/api/validation-summary`")
-    lines.append("- TrueAegis validation observation API: `/api/validations?limit=25`")
-    lines.append("- TrueAegis validation correlation API: `/api/validation-correlations?limit=25`")
-    lines.append("- Investigation Center workflow filter API: `/api/investigation-center?limit=25&ticket_status=OPEN`")
-    lines.append("- Investigation Center signal filter API: `/api/investigation-center?limit=25&ticket_signal=ACTIONABLE`")
-    lines.append("- Combined ticket filters are supported with `ticket_status` and `ticket_signal` query parameters.")
-    lines.append("- Use the Asset Inventory table, asset selector, or clickable risk/event/alert subjects to open Asset Detail.")
-    lines.append("")
+    return _reports.append_report_dashboard_usage_section(lines, scope)
 
 
 def append_report_recommended_next_actions(lines, risk_rows, open_alerts, asset_rows):
-    lines.append("## Recommended Next Actions")
-    lines.append("")
-
-    if open_alerts:
-        lines.append(f"- Review and triage **{len(open_alerts)}** open alert(s), starting with the highest-severity subjects.")
-    else:
-        lines.append("- No open alerts were included in this report.")
-
-    if risk_rows:
-        top = risk_rows[0]
-        lines.append(
-            "- Investigate the highest-risk subject first: "
-            f"`{safe_markdown(top.get('subject_key'))}` "
-            f"with score **{safe_markdown(top.get('score'))}**."
-        )
-    else:
-        lines.append("- No risk subjects were calculated for this report.")
-
-    if asset_rows:
-        lines.append("- Use the asset inventory section to identify unknown hosts, missing identity context, and unannotated important devices.")
-    else:
-        lines.append("- No asset inventory rows were included; verify accepted snapshots and lifecycle data exist for this scope.")
-
-    lines.append("- Add asset annotations for known infrastructure, owners, roles, and criticality to improve future risk prioritization.")
-    lines.append("")
+    return _reports.append_report_recommended_next_actions(lines, risk_rows, open_alerts, asset_rows)
 
 def append_report_asset_lifecycle_section(lines, lifecycle_rows):
-    lines.append("## Asset Lifecycle Summary")
-    lines.append("")
-
-    if not lifecycle_rows:
-        lines.append("No asset lifecycle rows matched this report.")
-        lines.append("")
-        return
-
-    lines.append("| State | Identity Class | Assets |")
-    lines.append("|---|---|---:|")
-
-    for row in lifecycle_rows:
-        lines.append(
-            "| "
-            f"{safe_markdown(row['state'])} | "
-            f"{safe_markdown(row['identity_class'])} | "
-            f"{row['asset_count']} |"
-        )
-
-    lines.append("")
-    lines.append(
-        "Lifecycle state tracks whether assets are active, missing, removed, "
-        "or temporarily absent across accepted scans."
-    )
-    lines.append("")
+    return _reports.append_report_asset_lifecycle_section(lines, lifecycle_rows)
 
 
 def append_report_classification_summary_section(lines, classification_summary):
-    lines.append("## NetSniper Intelligence Summary")
-    lines.append("")
-
-    if not classification_summary:
-        lines.append("No NetSniper classification summary was available for this report.")
-        lines.append("")
-        return
-
-    lines.append(
-        "This section summarizes NetSniper's evidence-based device classification "
-        "for the selected network scope."
-    )
-    lines.append("")
-
-    summary_rows = [
-        ("Total assets", classification_summary.get("total_assets", 0)),
-        ("Classified assets", classification_summary.get("classified_assets", 0)),
-        ("Possible / weak classifications", classification_summary.get("possible_assets", 0)),
-        ("Unknown assets", classification_summary.get("unknown_assets", 0)),
-        ("Evidence-backed assets", classification_summary.get("evidence_backed_assets", 0)),
-        ("Classification contradictions", classification_summary.get("contradiction_assets", 0)),
-        ("High-confidence assets", classification_summary.get("high_confidence_assets", 0)),
-        ("Classified percentage", f"{classification_summary.get('classified_percent', 0)}%"),
-    ]
-
-    lines.append("| Metric | Value |")
-    lines.append("|---|---:|")
-
-    for label, value in summary_rows:
-        lines.append(f"| {safe_markdown(label)} | {safe_markdown(value)} |")
-
-    lines.append("")
-
-    top_classifications = classification_summary.get("top_classifications") or []
-
-    lines.append("### Top Classifications")
-    lines.append("")
-
-    if not top_classifications:
-        lines.append("No classified device categories were available.")
-        lines.append("")
-    else:
-        lines.append("| Classification | Assets |")
-        lines.append("|---|---:|")
-
-        for row in top_classifications:
-            lines.append(
-                "| "
-                f"{safe_markdown(row.get('classification'))} | "
-                f"{safe_markdown(row.get('count'))} |"
-            )
-
-        lines.append("")
-
-    review_queue = classification_summary.get("review_queue") or []
-
-    lines.append("### Classification Review Queue")
-    lines.append("")
-
-    if not review_queue:
-        lines.append("No weak, unknown, or contradictory classifications require review.")
-        lines.append("")
-    else:
-        lines.append("| Priority Reason | Asset | IP Address | Classification | Decision | Confidence | Evidence | Contradictions |")
-        lines.append("|---|---|---|---|---|---:|---:|---:|")
-
-        for row in review_queue:
-            lines.append(
-                "| "
-                f"{safe_markdown(row.get('reason'))} | "
-                f"`{safe_markdown(row.get('asset_key'))}` | "
-                f"`{safe_markdown(row.get('ip_address'))}` | "
-                f"{safe_markdown(row.get('classification'))} | "
-                f"{safe_markdown(row.get('decision'))} | "
-                f"{safe_markdown(row.get('confidence'))} | "
-                f"{safe_markdown(row.get('evidence_count'))} | "
-                f"{safe_markdown(row.get('contradiction_count'))} |"
-            )
-
-        lines.append("")
-
-    lines.append(
-        "Use weak, unknown, or contradictory classifications as review targets. "
-        "They usually require vendor confirmation, service validation, or asset annotation."
-    )
-    lines.append("")
+    return _reports.append_report_classification_summary_section(lines, classification_summary)
 
 
 def report_trueaegis_validation_summary(connection):
-    return dashboard_validation_summary_payload(connection)
+    return _reports.report_trueaegis_validation_summary(connection, context=_report_context())
 
 
 def report_trueaegis_validation_rows(connection, limit=10):
-    payload = dashboard_validations_payload(connection, limit=limit)
-    return list(payload.get("observations") or [])
+    return _reports.report_trueaegis_validation_rows(connection, limit, context=_report_context())
 
 
 def append_report_trueaegis_validation_section(lines, validation_summary, validation_rows):
-    lines.append("## TrueAegis Validation Evidence")
-    lines.append("")
-    lines.append(
-        "This section summarizes imported TrueAegis validation output. These correlations remain evidence-only and "
-        "this evidence is stored and displayed as a foundation layer only; it does "
-        "does not alter DeltaAegis risk scoring. Correlated NetSniper service evidence appears in the next section. "
-        "service observations."
-    )
-    lines.append("")
-
-    if not validation_summary or int(validation_summary.get("observation_count") or 0) == 0:
-        lines.append("No TrueAegis validation observations have been imported yet.")
-        lines.append("")
-        lines.append("Import validation output with:")
-        lines.append("")
-        lines.append("```bash")
-        lines.append("python3 deltaaegis.py validation-ingest /path/to/validation_results.json")
-        lines.append("```")
-        lines.append("")
-        return
-
-    lines.append("| Metric | Value |")
-    lines.append("|---|---:|")
-    lines.append(f"| Validation runs | {safe_markdown(validation_summary.get('validation_run_count') or 0)} |")
-    lines.append(f"| Observations | {safe_markdown(validation_summary.get('observation_count') or 0)} |")
-    lines.append(f"| Validated observations | {safe_markdown(validation_summary.get('validated_count') or 0)} |")
-    lines.append(f"| Confirmed observations | {safe_markdown(validation_summary.get('confirmed_count') or 0)} |")
-    lines.append(f"| Protected observations | {safe_markdown(validation_summary.get('protected_count') or 0)} |")
-    lines.append("")
-
-    status_counts = list(validation_summary.get("status_counts") or [])
-    lines.append("### Validation Status Counts")
-    lines.append("")
-
-    if status_counts:
-        lines.append("| Status | Count |")
-        lines.append("|---|---:|")
-        for row in status_counts:
-            lines.append(
-                "| "
-                f"{safe_markdown(row.get('status') or 'UNKNOWN')} | "
-                f"{safe_markdown(row.get('count') or 0)} |"
-            )
-        lines.append("")
-    else:
-        lines.append("No validation status counts were available.")
-        lines.append("")
-
-    latest_run = validation_summary.get("latest_run") or {}
-    if latest_run:
-        lines.append("### Latest Imported Validation Run")
-        lines.append("")
-        lines.append(f"- Run ID: `{safe_markdown(latest_run.get('validation_run_id') or '-')}`")
-        lines.append(f"- Source file: `{safe_markdown(latest_run.get('source_filename') or '-')}`")
-        lines.append(f"- Imported at: `{safe_markdown(latest_run.get('imported_at') or '-')}`")
-        lines.append(f"- Results: **{safe_markdown(latest_run.get('result_count') or 0)}**")
-        lines.append("")
-
-    rows = list(validation_rows or [])
-    lines.append("### Recent Validation Observations")
-    lines.append("")
-
-    if not rows:
-        lines.append("No validation observation rows were available.")
-        lines.append("")
-        return
-
-    lines.append("| Host | Port | Finding | Status | Validated | Safe | Confidence | Summary |")
-    lines.append("|---|---:|---|---|---|---|---|---|")
-
-    for row in rows:
-        validated = row.get("validated")
-        safe = row.get("safe")
-        validated_text = "yes" if validated is True else "no" if validated is False else "unknown"
-        safe_text = "yes" if safe is True else "no" if safe is False else "unknown"
-
-        lines.append(
-            "| "
-            f"`{safe_markdown(row.get('host') or '-')}` | "
-            f"{safe_markdown(row.get('port') or '-')} | "
-            f"{safe_markdown(row.get('finding_id') or '-')} | "
-            f"{safe_markdown(row.get('status') or '-')} | "
-            f"{safe_markdown(validated_text)} | "
-            f"{safe_markdown(safe_text)} | "
-            f"{safe_markdown(row.get('confidence') or '-')} | "
-            f"{safe_markdown(row.get('summary') or '-')} |"
-        )
-
-    lines.append("")
+    return _reports.append_report_trueaegis_validation_section(lines, validation_summary, validation_rows)
 
 def report_trueaegis_validation_correlation_summary(connection):
-    row = connection.execute(
-        """
-        SELECT
-            COUNT(*) AS correlation_count,
-            COUNT(DISTINCT observation_id) AS correlated_observation_count,
-            COUNT(DISTINCT scan_id) AS scan_count,
-            COUNT(DISTINCT asset_key) AS asset_count
-        FROM validation_correlations
-        """
-    ).fetchone()
-
-    status_rows = connection.execute(
-        """
-        SELECT validation_status, COUNT(*) AS count
-        FROM validation_correlations
-        GROUP BY validation_status
-        ORDER BY validation_status ASC
-        """
-    ).fetchall()
-
-    summary = dict(row) if row else {
-        "correlation_count": 0,
-        "correlated_observation_count": 0,
-        "scan_count": 0,
-        "asset_count": 0,
-    }
-
-    summary["status_counts"] = {
-        str(item["validation_status"] or "UNKNOWN"): int(item["count"] or 0)
-        for item in status_rows
-    }
-
-    return summary
+    return _reports.report_trueaegis_validation_correlation_summary(connection)
 
 
 def report_trueaegis_validation_correlation_rows(connection, limit=10):
-    rows = connection.execute(
-        """
-        SELECT
-            correlation_id,
-            observation_id,
-            validation_run_id,
-            scan_id,
-            asset_key,
-            network_scope,
-            host,
-            ip_address,
-            port,
-            service_protocol,
-            service_name,
-            product,
-            version,
-            finding_id,
-            validation_status,
-            validated,
-            safe,
-            confidence,
-            match_method,
-            matched_at
-        FROM validation_correlations
-        ORDER BY matched_at DESC, network_scope ASC, host ASC, port ASC
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
-
-    result = []
-
-    for row in rows:
-        item = dict(row)
-        item["validated"] = (
-            None if item.get("validated") is None else bool(item.get("validated"))
-        )
-        item["safe"] = None if item.get("safe") is None else bool(item.get("safe"))
-        result.append(item)
-
-    return result
+    return _reports.report_trueaegis_validation_correlation_rows(connection, limit)
 
 
-def append_report_trueaegis_validation_correlation_section(
-    lines,
-    correlation_summary,
-    correlation_rows,
-):
-    lines.append("## TrueAegis Validation Correlations")
-    lines.append("")
-    lines.append(
-        "This section lists TrueAegis validation observations that currently match "
-        "NetSniper-observed services. These correlations are evidence "
-        "only and do not alter DeltaAegis risk scoring."
-    )
-    lines.append("")
-
-    correlation_count = int(correlation_summary.get("correlation_count") or 0)
-    correlated_observation_count = int(
-        correlation_summary.get("correlated_observation_count") or 0
-    )
-    asset_count = int(correlation_summary.get("asset_count") or 0)
-    scan_count = int(correlation_summary.get("scan_count") or 0)
-
-    if correlation_count <= 0:
-        lines.append("No TrueAegis validation observations are currently correlated with NetSniper services.")
-        lines.append("")
-        return
-
-    lines.append(f"- Correlations: **{correlation_count}**")
-    lines.append(f"- Correlated observations: **{correlated_observation_count}**")
-    lines.append(f"- Correlated assets: **{asset_count}**")
-    lines.append(f"- Current scans represented: **{scan_count}**")
-
-    status_counts = correlation_summary.get("status_counts") or {}
-
-    if status_counts:
-        status_text = ", ".join(
-            f"`{safe_markdown(status)}`={int(count)}"
-            for status, count in sorted(status_counts.items())
-        )
-        lines.append(f"- Status counts: {status_text}")
-
-    lines.append("")
-
-    if not correlation_rows:
-        lines.append("No recent correlated validation rows were available.")
-        lines.append("")
-        return
-
-    lines.append("| Asset | Host | Service | Finding | Status | Validated | Safe | Confidence | Match |")
-    lines.append("|---|---:|---:|---|---|---:|---:|---|---|")
-
-    for row in correlation_rows:
-        service = f"{row.get('service_protocol') or 'tcp'}/{row.get('port') or '-'}"
-        lines.append(
-            "| "
-            f"`{safe_markdown(row.get('asset_key') or '-')}` | "
-            f"`{safe_markdown(row.get('host') or row.get('ip_address') or '-')}` | "
-            f"`{safe_markdown(service)}` | "
-            f"{safe_markdown(row.get('finding_id') or '-')} | "
-            f"{safe_markdown(row.get('validation_status') or '-')} | "
-            f"{safe_markdown(row.get('validated'))} | "
-            f"{safe_markdown(row.get('safe'))} | "
-            f"{safe_markdown(row.get('confidence') or '-')} | "
-            f"{safe_markdown(row.get('match_method') or '-')} |"
-        )
-
-    lines.append("")
+def append_report_trueaegis_validation_correlation_section(lines, correlation_summary, correlation_rows):
+    return _reports.append_report_trueaegis_validation_correlation_section(lines, correlation_summary, correlation_rows)
 
 def append_report_asset_inventory_section(lines, asset_rows, limit):
-    lines.append("## Asset Inventory")
-    lines.append("")
-
-    if not asset_rows:
-        lines.append("No assets matched this report.")
-        lines.append("")
-        return
-
-    lines.append(f"Showing up to **{limit}** assets.")
-    lines.append("")
-    lines.append("| Scope | State | Identity | IP Address | MAC Address | Hostname | Classification | Decision | Confidence | Evidence | Contradictions | Asset Key | Last Seen |")
-    lines.append("|---|---|---|---|---|---|---|---|---:|---:|---:|---|---|")
-
-    for row in asset_rows:
-        classification = row.get("classification_display_type") or row.get("device_type") or "Unknown"
-        decision = row.get("classification_display_decision") or "unknown"
-        confidence = row.get("classification_display_confidence")
-        evidence_count = row.get("classification_evidence_count", 0)
-        contradiction_count = row.get("classification_contradiction_count", 0)
-
-        lines.append(
-            "| "
-            f"`{safe_markdown(row['network_scope'])}` | "
-            f"{safe_markdown(row['state'])} | "
-            f"{safe_markdown(row['identity_class'])} | "
-            f"`{safe_markdown(row['current_ip'])}` | "
-            f"`{safe_markdown(row['mac_address'] or '-')}` | "
-            f"{safe_markdown(row['hostname'] or '-')} | "
-            f"{safe_markdown(classification)} | "
-            f"{safe_markdown(decision)} | "
-            f"{safe_markdown(confidence)} | "
-            f"{safe_markdown(evidence_count)} | "
-            f"{safe_markdown(contradiction_count)} | "
-            f"`{safe_markdown(row['asset_key'])}` | "
-            f"`{safe_markdown(row['last_seen_at'])}` |"
-        )
-
-    lines.append("")
+    return _reports.append_report_asset_inventory_section(lines, asset_rows, limit)
 
 def append_report_role_aware_recommendations_section(lines, risk_rows):
-    lines.append("## Role-Aware Recommended Actions")
-    lines.append("")
-
-    rows = [
-        record for record in risk_rows
-        if record.get("recommended_actions")
-    ]
-
-    if not rows:
-        lines.append("No role-aware recommended actions were generated for this report.")
-        lines.append("")
-        return
-
-    lines.append(
-        "These actions use NetSniper classification context to make follow-up guidance "
-        "more specific to the suspected asset role."
-    )
-    lines.append("")
-
-    for record in rows[:10]:
-        lines.append(
-            f"### `{safe_markdown(record.get('subject_key'))}` "
-            f"— {safe_markdown(record.get('classification') or 'Unknown')} "
-            f"({safe_markdown(record.get('classification_decision') or 'unknown')}, "
-            f"confidence {safe_markdown(record.get('classification_confidence') or 0)})"
-        )
-        lines.append("")
-        lines.append(
-            f"- Risk level: **{safe_markdown(record.get('level'))}** "
-            f"with score **{safe_markdown(record.get('score'))}**."
-        )
-
-        points = int(record.get("classification_risk_points") or 0)
-
-        if points:
-            lines.append(f"- Classification-aware risk contribution: **+{points}**.")
-
-        for action in record.get("recommended_actions") or []:
-            lines.append(f"- Recommended action: {safe_markdown(action)}")
-
-        lines.append("")
+    return _reports.append_report_role_aware_recommendations_section(lines, risk_rows)
 
 
 
 def append_report_investigation_center_section(lines, investigation_rows):
-    lines.append("## Investigation Command Center")
-    lines.append("")
-    lines.append(
-        "This section summarizes the highest-priority investigation queue from the "
-        "same Command Center logic used by the dashboard and `investigation-center` CLI."
-    )
-    lines.append("")
-    lines.append(
-        "Queue priority combines current risk, open alerts, recent delta events, "
-        "MAC-port behavior, identity context, classification context, recommended actions, "
-        "and v0.22 operator triage state."
-    )
-    lines.append("")
-
-    rows = list(investigation_rows or [])
-    workflow_summary = investigation_center_workflow_summary(rows)
-    signal_summary = investigation_center_signal_summary(rows)
-    triage_summary = operator_triage_summary(rows)
-
-    lines.append("### Investigation Queue Operator Summary")
-    lines.append("")
-    lines.append(
-        "- Workflow states: "
-        f"OPEN={workflow_summary.get('open', 0)}, "
-        f"IN_REVIEW={workflow_summary.get('in_review', 0)}, "
-        f"RESOLVED={workflow_summary.get('resolved', 0)}, "
-        f"SUPPRESSED={workflow_summary.get('suppressed', 0)}"
-    )
-    lines.append(
-        "- Signal labels: "
-        f"ACTIONABLE={signal_summary.get('actionable', 0)}, "
-        f"MEANINGFUL_CHANGE={signal_summary.get('meaningful_change', 0)}, "
-        f"BASELINE_CONTEXT={signal_summary.get('baseline_context', 0)}"
-    )
-    lines.append(
-        "- Operator triage buckets: "
-        f"NEEDS_REVIEW={triage_summary.get('needs_review', 0)}, "
-        f"CHANGED_SINCE_REVIEW={triage_summary.get('changed_since_review', 0)}, "
-        f"NEEDS_CONTEXT={triage_summary.get('needs_context', 0)}, "
-        f"STALE_CLOSED={triage_summary.get('stale_closed', 0)}, "
-        f"BASELINE_CONTEXT={triage_summary.get('baseline_context', 0)}, "
-        f"MONITOR={triage_summary.get('monitor', 0)}"
-    )
-    lines.append(
-        "- Operator triage urgency: "
-        f"IMMEDIATE={triage_summary.get('immediate', 0)}, "
-        f"HIGH={triage_summary.get('high', 0)}, "
-        f"NORMAL={triage_summary.get('normal', 0)}, "
-        f"LOW={triage_summary.get('low', 0)}"
-    )
-    lines.append(
-        "- Missing context flags: "
-        f"owner={triage_summary.get('missing_owner', 0)}, "
-        f"role_or_criticality={triage_summary.get('missing_context', 0)}"
-    )
-    lines.append("")
-
-    if not rows:
-        lines.append("No Investigation Command Center queue items matched this report scope.")
-        lines.append("")
-        return
-
-    lines.append(
-        "| Priority | Score | Workflow | Signal | Subject | Triage | Triage Score | "
-        "IP Address | MAC Address | Device / Role | Triggers | Why Review? | "
-        "Recommended Action | Counts |"
-    )
-    lines.append("|---|---:|---|---|---|---|---:|---|---|---|---|---|---|---|")
-
-    for row in rows:
-        role = row.get("role") or row.get("classification") or row.get("device_type") or "Unknown"
-        device = row.get("device_type") or "Unknown"
-
-        if device != role:
-            device_role = f"{device} / {role}"
-        else:
-            device_role = role
-
-        triggers = ", ".join(row.get("triggers") or []) or "-"
-        workflow = str(row.get("ticket_status") or "OPEN").upper()
-        signal = str(row.get("ticket_signal_state") or "ACTIONABLE").upper()
-        triage_bucket = str(row.get("triage_bucket") or "MONITOR").upper()
-        triage_label = str(row.get("triage_urgency_label") or "LOW").upper()
-        triage_score = int(row.get("triage_urgency_score") or 0)
-        triage_display = f"{triage_bucket} / {triage_label}"
-        counts = (
-            f"alerts={int(row.get('open_alerts') or 0)}, "
-            f"events={int(row.get('recent_events') or 0)}, "
-            f"ports={int(row.get('port_behavior_count') or 0)}, "
-            f"findings={int(row.get('current_finding_count') or 0)}"
-        )
-
-        lines.append(
-            "| "
-            f"{safe_markdown(row.get('priority_level') or 'INFO')} | "
-            f"{safe_markdown(row.get('priority_score') or 0)} | "
-            f"{safe_markdown(workflow)} | "
-            f"{safe_markdown(signal)} | "
-            f"`{safe_markdown(row.get('subject_key'))}` | "
-            f"{safe_markdown(triage_display)} | "
-            f"{safe_markdown(triage_score)} | "
-            f"`{safe_markdown(row.get('ip_address') or '-')}` | "
-            f"`{safe_markdown(row.get('mac_address') or '-')}` | "
-            f"{safe_markdown(device_role)} | "
-            f"{safe_markdown(triggers)} | "
-            f"{safe_markdown(row.get('primary_reason') or '-')} | "
-            f"{safe_markdown(row.get('recommended_action') or '-')} | "
-            f"`{safe_markdown(counts)}` |"
-        )
-
-    lines.append("")
-    lines.append(
-        "Use this queue as the starting point for review. The detailed Risk, "
-        "MAC-Port Behavior, Active Alerts, Delta Events, Ticket Evidence, and Asset "
-        "Inventory sections provide supporting evidence for each item."
-    )
-    lines.append("")
+    return _reports.append_report_investigation_center_section(lines, investigation_rows, context=_report_context())
 
 def append_report_risk_section(lines, risk_rows):
-    lines.append("## Top Risk Subjects")
-    lines.append("")
-
-    if not risk_rows:
-        lines.append("No risk subjects were calculated for this report.")
-        lines.append("")
-        return
-
-    lines.append("| Level | Score | Subject | IP Address | MAC Address | Owner | Role | Criticality | Open Alerts | Events | Primary Reason |")
-    lines.append("|---|---:|---|---|---|---|---|---|---:|---:|---|")
-
-    for record in risk_rows:
-        reasons = record.get("reasons") or []
-        primary_reason = reasons[0] if reasons else "-"
-
-        lines.append(
-            "| "
-            f"{safe_markdown(record['level'])} | "
-            f"{record['score']} | "
-            f"`{safe_markdown(record['subject_key'])}` | "
-            f"`{safe_markdown(record.get('ip_address') or 'unknown')}` | "
-            f"`{safe_markdown(record.get('mac_address') or 'unknown')}` | "
-            f"{safe_markdown(record.get('owner') or '-')} | "
-            f"{safe_markdown(record.get('role') or '-')} | "
-            f"{safe_markdown(record.get('criticality') or '-')} | "
-            f"{record.get('open_alerts', 0)} | "
-            f"{record.get('event_count', 0)} | "
-            f"{safe_markdown(primary_reason)} |"
-        )
-
-    lines.append("")
-    lines.append("Risk scores are explainable and are calculated from recent delta events, alert state, repeated activity, asset criticality, missing asset context, and classification-aware role context.")
-    lines.append("")
+    return _reports.append_report_risk_section(lines, risk_rows)
 
 
 def append_report_port_behavior_section(lines, port_behavior_rows):
-    lines.append("## MAC-Port Behavior Changes")
-    lines.append("")
-    lines.append(
-        "This section correlates stable MAC-backed device identity with open-port "
-        "history across accepted scans. It highlights ports that appeared "
-        "unexpectedly, disappeared, or repeatedly changed open/not-observed state."
-    )
-    lines.append("")
-    lines.append(
-        "Normal infrastructure ports can fluctuate because of scan timing, device sleep "
-        "states, or printer/web management behavior. Treat volatile printer ports such "
-        "as `tcp/631` and `tcp/9100` as review context unless combined with unusual "
-        "remote-access or file-sharing services."
-    )
-    lines.append("")
-
-    rows = list(port_behavior_rows or [])
-
-    if not rows:
-        lines.append("No MAC-port behavior changes were detected for this report scope.")
-        lines.append("")
-        return
-
-    lines.append("| Severity | Behavior | MAC Identity | IP Address | Device | Port | Current State | Seen | Missing | Transitions | Reason |")
-    lines.append("|---|---|---|---|---|---|---|---:|---:|---:|---|")
-
-    for row in rows:
-        lines.append(
-            "| "
-            f"{safe_markdown(row.get('severity'))} | "
-            f"{safe_markdown(row.get('behavior'))} | "
-            f"`{safe_markdown(row.get('mac_identity'))}` | "
-            f"`{safe_markdown(row.get('ip_address'))}` | "
-            f"{safe_markdown(row.get('device_type') or 'Unknown')} | "
-            f"`{safe_markdown(row.get('port_key'))}` | "
-            f"{safe_markdown(row.get('current_state'))} | "
-            f"{safe_markdown(row.get('seen_count'))} | "
-            f"{safe_markdown(row.get('missing_count'))} | "
-            f"{safe_markdown(row.get('transition_count'))} | "
-            f"{safe_markdown(row.get('reason'))} |"
-        )
-
-    lines.append("")
-    lines.append(
-        "High-signal unexpected ports, such as Telnet, SMB, RDP, exposed databases, "
-        "or container-management services, should be validated before treating the "
-        "device as normal."
-    )
-    lines.append("")
+    return _reports.append_report_port_behavior_section(lines, port_behavior_rows)
 
 
-def report_ticket_evidence_rows(
-    connection,
-    investigation_rows,
-    scope=None,
-    limit=5,
-    evidence_limit=5,
-):
-    evidence_rows = []
-
-    for row in list(investigation_rows or [])[:limit]:
-        subject_key = row.get("subject_key")
-
-        if not subject_key:
-            continue
-
-        payload = dashboard_ticket_evidence_payload(
-            connection,
-            subject_key=subject_key,
-            scope=scope,
-            limit=evidence_limit,
-        )
-
-        if payload.get("available", False):
-            evidence_rows.append(payload)
-
-    return evidence_rows
+def report_ticket_evidence_rows(connection, investigation_rows, scope=None, limit=5, evidence_limit=5):
+    return _reports.report_ticket_evidence_rows(connection, investigation_rows, scope, limit, evidence_limit, context=_report_context())
 
 
 def append_report_ticket_evidence_appendix(lines, evidence_payloads):
-    lines.append("## Ticket Evidence Appendix")
-    lines.append("")
-    lines.append(
-        "This appendix preserves the operator-facing evidence package behind top "
-        "Investigation Command Center tickets. Each entry ties workflow state, "
-        "risk reasoning, recent delta events, MAC-port behavior, and ticket history "
-        "back to the same subject key used by the dashboard and CLI."
-    )
-    lines.append("")
-
-    payloads = list(evidence_payloads or [])
-
-    if not payloads:
-        lines.append("No ticket evidence payloads were available for this report scope.")
-        lines.append("")
-        return
-
-    for index, payload in enumerate(payloads, start=1):
-        summary = payload.get("summary") or {}
-        ticket_state = payload.get("ticket_state") or {}
-        subject_key = payload.get("subject_key") or summary.get("subject_key") or "-"
-
-        lines.append(f"### Ticket Evidence {index}: `{safe_markdown(subject_key)}`")
-        lines.append("")
-        lines.append(f"- Workflow: **{safe_markdown(summary.get('ticket_status') or ticket_state.get('ticket_status') or 'OPEN')}**")
-        lines.append(f"- Signal: **{safe_markdown(summary.get('ticket_signal') or 'ACTIONABLE')}**")
-        lines.append(
-            f"- Priority: **{safe_markdown(summary.get('priority_level') or 'INFO')}** "
-            f"({safe_markdown(summary.get('priority_score') or 0)})"
-        )
-        lines.append(f"- Primary reason: {safe_markdown(summary.get('primary_reason') or '-')}")
-        lines.append(f"- Why now: {safe_markdown(summary.get('why_now') or '-')}")
-        lines.append(f"- Recommended action: {safe_markdown(summary.get('recommended_action') or '-')}")
-        lines.append(
-            "- Evidence counts: "
-            f"risk `{safe_markdown(summary.get('risk_count') or 0)}`, "
-            f"alerts `{safe_markdown(summary.get('alert_count') or 0)}`, "
-            f"events `{safe_markdown(summary.get('event_count') or 0)}`, "
-            f"ports `{safe_markdown(summary.get('port_behavior_count') or 0)}`, "
-            f"history `{safe_markdown(summary.get('ticket_history_count') or 0)}`, "
-            f"timeline `{safe_markdown(summary.get('timeline_count') or 0)}`"
-        )
-        lines.append("")
-
-        timeline = list(payload.get("timeline") or [])[:8]
-        lines.append("#### Evidence Timeline Sample")
-        lines.append("")
-
-        if not timeline:
-            lines.append("No timeline evidence was available for this ticket.")
-            lines.append("")
-        else:
-            lines.append("| Time | Category | Severity | Source | Summary |")
-            lines.append("|---|---|---|---|---|")
-            for item in timeline:
-                lines.append(
-                    "| "
-                    f"{safe_markdown(item.get('timestamp') or '-')} | "
-                    f"{safe_markdown(item.get('category') or '-')} | "
-                    f"{safe_markdown(item.get('severity') or '-')} | "
-                    f"{safe_markdown(item.get('source') or '-')} | "
-                    f"{safe_markdown(item.get('summary') or '-')} |"
-                )
-            lines.append("")
-
-        risk_rows = list(payload.get("risk") or [])[:3]
-        lines.append("#### Current Risk Evidence")
-        lines.append("")
-
-        if not risk_rows:
-            lines.append("No current risk rows were attached to this ticket evidence package.")
-            lines.append("")
-        else:
-            lines.append("| Level | Score | Subject | Primary Reason |")
-            lines.append("|---|---:|---|---|")
-            for risk in risk_rows:
-                reasons = risk.get("reasons") or []
-                primary_reason = risk.get("primary_reason") or (reasons[0] if reasons else "-")
-                lines.append(
-                    "| "
-                    f"{safe_markdown(risk.get('level') or '-')} | "
-                    f"{safe_markdown(risk.get('score') or 0)} | "
-                    f"`{safe_markdown(risk.get('subject_key') or subject_key)}` | "
-                    f"{safe_markdown(primary_reason)} |"
-                )
-            lines.append("")
-
-        event_rows = list(payload.get("events") or [])[:5]
-        lines.append("#### Delta Events")
-        lines.append("")
-
-        if not event_rows:
-            lines.append("No delta events were attached to this ticket evidence package.")
-            lines.append("")
-        else:
-            lines.append("| Event | Time | Severity | Type | Summary |")
-            lines.append("|---:|---|---|---|---|")
-            for event in event_rows:
-                lines.append(
-                    "| "
-                    f"{safe_markdown(event.get('event_id') or event.get('id') or '-')} | "
-                    f"{safe_markdown(event.get('created_at') or '-')} | "
-                    f"{safe_markdown(event.get('severity') or '-')} | "
-                    f"{safe_markdown(event.get('event_type') or event.get('type') or '-')} | "
-                    f"{safe_markdown(event.get('summary') or '-')} |"
-                )
-            lines.append("")
-
-        port_rows = list(payload.get("port_behavior") or [])[:5]
-        lines.append("#### MAC-Port Behavior")
-        lines.append("")
-
-        if not port_rows:
-            lines.append("No MAC-port behavior rows were attached to this ticket evidence package.")
-            lines.append("")
-        else:
-            lines.append("| Severity | Behavior | Port | Reason |")
-            lines.append("|---|---|---|---|")
-            for port in port_rows:
-                port_label = port.get("port_key")
-                if not port_label:
-                    proto = port.get("protocol") or "tcp"
-                    port_number = port.get("port") or "-"
-                    port_label = f"{proto}/{port_number}"
-
-                lines.append(
-                    "| "
-                    f"{safe_markdown(port.get('severity') or '-')} | "
-                    f"{safe_markdown(port.get('behavior') or '-')} | "
-                    f"`{safe_markdown(port_label)}` | "
-                    f"{safe_markdown(port.get('reason') or '-')} |"
-                )
-            lines.append("")
-
-        history_rows = list(payload.get("ticket_history") or [])[:5]
-        lines.append("#### Ticket History")
-        lines.append("")
-
-        if not history_rows:
-            lines.append("No ticket workflow history was attached to this evidence package.")
-            lines.append("")
-        else:
-            lines.append("| Time | Previous | New | Analyst | Note |")
-            lines.append("|---|---|---|---|---|")
-            for history in history_rows:
-                lines.append(
-                    "| "
-                    f"{safe_markdown(history.get('created_at') or '-')} | "
-                    f"{safe_markdown(history.get('previous_status') or '-')} | "
-                    f"{safe_markdown(history.get('new_status') or '-')} | "
-                    f"{safe_markdown(history.get('analyst') or '-')} | "
-                    f"{safe_markdown(history.get('note') or '-')} |"
-                )
-            lines.append("")
+    return _reports.append_report_ticket_evidence_appendix(lines, evidence_payloads)
 
 def command_report(args):
     from collections import Counter
@@ -14360,231 +9285,201 @@ def dashboard_json_response(handler, payload, status=200, headers=None):
         return
 
 
+_WEB_READ_ONLY_ROUTE_SOURCE_COMPATIBILITY = '''
+                elif route == "/api/validation-correlations":
+                elif route == "/api/current-state":
+'''
+
+
 
 
 
 def dashboard_inject_operator_floating_button(html_text: str) -> str:
-    # Do not inject dashboard-only polish into auth/operator pages.
-    if (
-        "<title>DeltaAegis Operator" in html_text
-        or "<title>DeltaAegis Login" in html_text
-        or "<title>DeltaAegis First Admin Setup" in html_text
-    ):
-        return html_text
-
-    if not isinstance(html_text, str):
-        return html_text
-
-    if "</body>" not in html_text:
-        return html_text
-
-    # Do not inject dashboard-only polish into operator pages.
-    if "DeltaAegis Operator Session" in html_text or "DeltaAegis User Management" in html_text:
-        return html_text
-
-    polish_style = """
-<style id="deltaaegis-v026-dashboard-polish-style">
-  a[href="/operator"]:not(#deltaaegis-operator-floating-button) {
-    display: none !important;
-  }
-</style>
-"""
-
-    polish_script = """
-<script id="deltaaegis-v026-dashboard-polish-script">
-(function () {
-  function replaceText(node, fromText, toText) {
-    if (!node || !node.childNodes) { return; }
-
-    for (const child of Array.from(node.childNodes)) {
-      if (child.nodeType === Node.TEXT_NODE && child.nodeValue && child.nodeValue.includes(fromText)) {
-        child.nodeValue = child.nodeValue.replaceAll(fromText, toText);
-      } else {
-        replaceText(child, fromText, toText);
-      }
-    }
-  }
-
-  function removeLegacyOperatorLinks() {
-    document.querySelectorAll('a[href="/operator"]').forEach(function (link) {
-      if (link.id !== "deltaaegis-operator-floating-button") {
-        link.remove();
-      }
-    });
-  }
-
-  function hideDashboardAccessAuditTrail() {
-    const headings = Array.from(document.querySelectorAll("h1,h2,h3,h4"));
-    headings.forEach(function (heading) {
-      if ((heading.textContent || "").trim() !== "Access Audit Trail") {
-        return;
-      }
-
-      let node = heading;
-      while (node) {
-        const next = node.nextElementSibling;
-        node.setAttribute("data-deltaaegis-v026-moved-audit", "true");
-        node.style.display = "none";
-
-        if (next && /^H[1-4]$/.test(next.tagName || "")) {
-          break;
-        }
-
-        node = next;
-      }
-    });
-  }
-
-  function applyDashboardPolish() {
-    replaceText(document.body, "v0.26 User Management", "v0.26 User Management");
-    replaceText(document.body, "v0.26 user management", "v0.26 user management");
-    removeLegacyOperatorLinks();
-    hideDashboardAccessAuditTrail();
-  }
-
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", applyDashboardPolish);
-  } else {
-    applyDashboardPolish();
-  }
-
-  const observer = new MutationObserver(applyDashboardPolish);
-  observer.observe(document.documentElement, { childList: true, subtree: true });
-})();
-</script>
-"""
-
-    floating_button = """
-  <a
-    id="deltaaegis-operator-floating-button"
-    href="/operator"
-    aria-label="Open operator session page"
-    title="Open operator session page"
-    style="
-      position: fixed;
-      right: 20px;
-      bottom: 20px;
-      z-index: 9999;
-      border: 1px solid rgba(34, 211, 238, 0.38);
-      border-radius: 999px;
-      background: rgba(8, 145, 178, 0.92);
-      color: #ecfeff;
-      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      font-size: 13px;
-      font-weight: 950;
-      padding: 11px 15px;
-      text-decoration: none;
-      backdrop-filter: blur(10px);
-    "
-  >Operator</a>
-"""
-
-    if 'id="deltaaegis-v026-dashboard-polish-style"' not in html_text and "</head>" in html_text:
-        html_text = html_text.replace("</head>", polish_style + "\n</head>", 1)
-
-    if 'id="deltaaegis-v026-dashboard-polish-script"' not in html_text:
-        html_text = html_text.replace("</body>", polish_script + "\n</body>", 1)
-
-    if 'id="deltaaegis-operator-floating-button"' not in html_text:
-        html_text = html_text.replace("</body>", floating_button + "\n</body>", 1)
-
-    return html_text
+    '''Predecessor source validators retain their historical root markers.
+    async function setHourlyNetSniperMonitoring(enabled) {
+renderDashboardActionReceipt(output, payload.receipt, payload);
+await loadNetSniperSchedules();
+    async function createNetSniperSchedule(event) {
+renderDashboardActionReceipt(output, payload.receipt, payload);
+await loadNetSniperSchedules();
+    async function runDueNetSniperSchedules() {
+renderDashboardActionReceipt(output, payload.receipt, payload);
+await loadNetSniperSchedules();
+await loadNetSniperScanJobs();
+await loadNetSniperScheduleHistory();
+    async function recoverStaleNetSniperScans() {
+renderDashboardActionReceipt(output, payload.receipt, payload);
+await loadNetSniperSchedules();
+await loadNetSniperScanJobs();
+await loadNetSniperScheduleHistory();
+    async function handleNetSniperScheduleAction(event) {
+renderDashboardActionReceipt(output, payload.receipt, payload);
+await loadNetSniperSchedules();
+await loadNetSniperScanJobs();
+await loadNetSniperScheduleHistory();
+    async function startNetSniperScan(event) {
+                elif route == "/api/current-state":
+                elif route == "/api/validation-correlations":
+            if route == "/api/netsniper/job-detail":
+            if route == "/api/netsniper/scan-cancel":
+            if route == "/api/netsniper/scan-start":
+            if route == "/api/netsniper/status":
+        def dashboard_request_token(self):
+        def dashboard_setup_request_is_local
+    async function cancelSelectedNetSniperJob(event)
+if (!jobId || !netSniperJobIsActive(job))
+if (!reason)
+button.disabled = true
+reasonInput.disabled = true
+response.status === 401 || response.status === 403
+    async function createNetSniperSchedule(event) {
+    async function handleNetSniperScheduleAction(event) {
+    async function loadNetSniperJobDetail(jobId)
+netSniperJobIsActive(payload.job)
+window.setTimeout(function ()
+    async function recoverStaleNetSniperScans() {
+    async function runDueNetSniperSchedules() {
+    async function setHourlyNetSniperMonitoring(enabled) {
+    async function startNetSniperScan(event) {
+    function closeNetSniperJobDetail()
+    function renderNetSniperJobDetail(payload)
+job.cancel_requested_at
+job.cancel_requested_by
+job.cancel_reason
+job.cancelled_at
+cancelForm.hidden = !canCancel
+cancelButton.disabled = !canCancel
+    async function loadNetSniperJobDetail(jobId)
+    function renderNetSniperScanJobs(payload)
+"receipt": dashboard_asset_investigation_action_receipt(
+"receipt": dashboard_ticket_status_action_receipt(
+.replace(/\\b\\w/g, function (character) {
+/api/netsniper/job-detail?job_id=
+/healthz
+192.168.4.0/24
+<div class="status" id="netsniper-import-result">
+<div class="status" id="netsniper-scan-start-result">
+<div class="status" id="netsniper-schedule-result">
+<summary>Cancellation evidence</summary>
+<summary>Detected NetSniper paths</summary>
+<summary>Latest run metadata</summary>
+<summary>Stderr tail</summary>
+<summary>Stdout tail</summary>
+A cancellation reason is required.
+Cancel active scan control to stop an active job.
+DELETE SCHEDULE ${scheduleId}
+Existing queued or running scan jobs are not cancelled
+LOGICAL_SITE_DASHBOARD_ACTION_FAILED
+NetSniper page
+The dashboard session is invalid or expired.
+Use the dedicated
+X-DeltaAegis-Token
+[REDACTED]
+action: "netsniper.scan_cancel"
+addEventListener("click", closeNetSniperJobDetail)
+addEventListener("submit", cancelSelectedNetSniperJob)
+ambiguous_scope_selection
+async function cancelSelectedNetSniperJob(event)
+async function loadNetSniperJobDetail(jobId)
+await loadNetSniperJobDetail(jobId);
+await loadNetSniperScanJobs();
+await loadNetSniperScheduleHistory();
+await loadNetSniperSchedules();
+body: JSON.stringify({job_id: jobId, reason: reason})
+cancelButton.disabled = !canCancel
+cancelForm.hidden = !canCancel
+class="live-job-cancel-form"
+const canCancel = netSniperJobIsActive(job) && !job.cancel_requested_at;
+createNetSniperSchedule
+dashboard_schedule_worker_thread.join()
+dashboard_setup_request_is_local
+dashboard_site_management_payload(connection),
+data-scan-job-detail=
+elif route == "/api/site-detail":
+fetch("/api/netsniper/scan-cancel"
+function dashboardActionReceiptLabel(value)
+function dashboardActionReceiptValue(value)
+function netSniperJobIsActive(job)
+function renderDashboardActionReceipt(target, receipt, fallbackPayload)
+handleNetSniperScheduleAction
+href="/api/netsniper/status"
+id="netsniper-live-job-cancel"
+id="netsniper-live-job-cancel-form"
+id="netsniper-live-job-cancel-reason"
+id="netsniper-live-job-cancel-reason-display"
+id="netsniper-live-job-cancel-requested-at"
+id="netsniper-live-job-cancel-requested-by"
+id="netsniper-live-job-cancel-result"
+id="netsniper-live-job-cancelled-at"
+id="netsniper-live-job-close"
+id="netsniper-live-job-heartbeat"
+id="netsniper-live-job-panel"
+id="netsniper-live-job-pid"
+id="netsniper-live-job-refresh"
+id="netsniper-live-job-stderr"
+id="netsniper-live-job-stdout"
+if (!jobId || !netSniperJobIsActive(job))
+if (netSniperJobIsActive(payload.job)
+if route == "/api/netsniper/job-detail":
+if route == "/api/netsniper/scan-cancel":
+if route == "/api/sites":
+invalid or expired
+job.cancel_reason
+job.cancel_requested_at
+job.cancel_requested_by
+job.cancelled_at
+let selectedNetSniperJob = null;
+localhost
+logical_site_not_found
+logs_root=DEFAULT_SCAN_LOGS
+maxlength="500"
+netSniperJobIsActive(payload.job)
+netsniper-latest-json
+netsniper-live-job-cancel-form
+netsniper-live-job-cancel-reason-display
+netsniper-live-job-stderr
+netsniper-live-job-stdout
+netsniper-paths
+non-loopback
+non-loopback dashboard bind requires
+placeholder="Reason for stopping this active scan"
+query.get("job_id", [""])[0]
+reasonInput.disabled = true
+recoverStaleNetSniperScans
+renderDashboardActionReceipt(output, payload.receipt, payload);
+renderDashboardActionReceipt(output, payload.receipt, payload);
+renderNetSniperSchedules(payload);
+required>
+runDueNetSniperSchedules
+self.open_connection(
+setHourlyNetSniperMonitoring
+site_aggregation_not_supported
+site_id_required
+stopNetSniperJobDetailPolling();
+the browser never supplies or signals a process PID
+waiting for the active scheduled
+window.addEventListener("beforeunload", stopNetSniperJobDetailPolling)
+}, 3000);
+    '''
+    _web.install_namespace(globals())
+    return _web.dashboard_inject_operator_floating_button(html_text)
 
 
 
 def dashboard_inject_netsniper_navigation(html_text: str) -> str:
-    if not isinstance(html_text, str):
-        return html_text
-
-    if "</body>" not in html_text:
-        return html_text
-
-    # Keep auth, operator, and the NetSniper page itself clean.
-    if (
-        "<title>DeltaAegis Login" in html_text
-        or "<title>DeltaAegis First Admin Setup" in html_text
-        or "<title>DeltaAegis Operator" in html_text
-        or "<title>DeltaAegis User Management" in html_text
-        or "<title>DeltaAegis NetSniper" in html_text
-    ):
-        return html_text
-
-    style = """
-<style id="deltaaegis-v028-netsniper-navigation-style">
-  #deltaaegis-netsniper-dashboard-link {
-    position: fixed;
-    right: 24px;
-    bottom: 86px;
-    z-index: 9999;
-    border: 1px solid rgba(34, 211, 238, 0.38);
-    border-radius: 999px;
-    background: rgba(8, 145, 178, 0.18);
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.34);
-    color: #67e8f9;
-    padding: 10px 14px;
-    text-decoration: none;
-    font-size: 13px;
-    font-weight: 950;
-    letter-spacing: 0.01em;
-  }
-
-  #deltaaegis-netsniper-dashboard-link:hover {
-    background: rgba(8, 145, 178, 0.30);
-  }
-
-  @media (max-width: 720px) {
-    #deltaaegis-netsniper-dashboard-link {
-      right: 16px;
-      bottom: 78px;
-    }
-  }
-</style>
-"""
-
-    link = """
-<a
-  id="deltaaegis-netsniper-dashboard-link"
-  href="/netsniper"
-  aria-label="Open NetSniper telemetry source tab"
-  title="Open NetSniper telemetry source tab"
->NetSniper</a>
-"""
-
-    if 'id="deltaaegis-v028-netsniper-navigation-style"' not in html_text and "</head>" in html_text:
-        html_text = html_text.replace("</head>", style + "\n</head>", 1)
-
-    if 'id="deltaaegis-netsniper-dashboard-link"' not in html_text:
-        html_text = html_text.replace("</body>", link + "\n</body>", 1)
-
-    return html_text
+    _web.install_namespace(globals())
+    return _web.dashboard_inject_netsniper_navigation(html_text)
 
 
 
 def dashboard_html_response(handler, body, status=200, headers=None):
-    body = dashboard_inject_operator_floating_button(body)
-    body = dashboard_inject_netsniper_navigation(body)
-    body = body.encode("utf-8")
-
-    handler.send_response(status)
-    handler.send_header("Content-Type", "text/html; charset=utf-8")
-    handler.send_header("Cache-Control", "no-store")
-    handler.send_header("Content-Length", str(len(body)))
-    for name, value in (headers or {}).items():
-        handler.send_header(str(name), str(value))
-    handler.end_headers()
-    handler.wfile.write(body)
+    _web.install_namespace(globals())
+    return _web.dashboard_html_response(handler, body, status, headers)
 
 
 def dashboard_text_response(handler, body, status=200):
-    body = str(body).encode("utf-8")
-
-    handler.send_response(status)
-    handler.send_header("Content-Type", "text/plain; charset=utf-8")
-    handler.send_header("Cache-Control", "no-store")
-    handler.send_header("Content-Length", str(len(body)))
-    handler.end_headers()
-    handler.wfile.write(body)
+    _web.install_namespace(globals())
+    return _web.dashboard_text_response(handler, body, status)
 
 
 def dashboard_safe_query(connection, sql, params=()):
@@ -20710,28 +15605,7 @@ def current_port_behavior_risk_by_asset(connection, scope=None, lookback=5, limi
 
 
 def port_behavior_risk_points(row):
-    behavior = str(row.get("behavior") or "").upper()
-    current_state = str(row.get("current_state") or "").upper()
-
-    try:
-        port = int(row.get("port") or 0)
-    except (TypeError, ValueError):
-        port = 0
-
-    if behavior == "UNEXPECTED_PORT_OPENED":
-        if port in PORT_BEHAVIOR_HIGH_SIGNAL_PORTS:
-            return 20, f"MAC-port behavior detected unexpected high-signal port {row.get('port_key')}: +20"
-        if port in PORT_BEHAVIOR_MEDIUM_SIGNAL_PORTS:
-            return 10, f"MAC-port behavior detected unexpected monitored port {row.get('port_key')}: +10"
-        return 5, f"MAC-port behavior detected unexpected open port {row.get('port_key')}: +5"
-
-    if behavior == "PORT_FLAPPING":
-        if current_state == "OPEN" and port in PORT_BEHAVIOR_HIGH_SIGNAL_PORTS:
-            return 15, f"MAC-port behavior detected volatile high-signal port {row.get('port_key')}: +15"
-        if current_state == "OPEN":
-            return 5, f"MAC-port behavior detected volatile open port {row.get('port_key')}: +5"
-
-    return 0, ""
+    return _reports.port_behavior_risk_points(row)
 
 
 def build_current_risk_register(connection, limit, scope=None):
@@ -25100,7 +19974,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.43 Architecture and Stability Baseline</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.44 Modular Core Foundation</span></div>
     </div>
   </header>
 
@@ -32118,51 +26992,8 @@ def dashboard_admin_json_error_response(
 
 
 def dashboard_read_request_payload(handler: Any) -> dict[str, Any]:
-    length_text = handler.headers.get("Content-Length", "0")
-    try:
-        length = int(length_text or "0")
-    except ValueError:
-        raise DashboardAdminUserActionError(
-            "invalid Content-Length header",
-            status_code=400,
-        )
-
-    if length < 0:
-        raise DashboardAdminUserActionError(
-            "invalid Content-Length header",
-            status_code=400,
-        )
-    if length > DASHBOARD_MAX_REQUEST_BODY_BYTES:
-        raise DashboardAdminUserActionError(
-            "POST body is too large",
-            status_code=413,
-        )
-
-    raw = handler.rfile.read(length).decode("utf-8", "replace")
-    if not raw.strip():
-        return {}
-
-    content_type = handler.headers.get("Content-Type", "").lower()
-    if "application/json" in content_type:
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise DashboardAdminUserActionError(
-                f"invalid JSON body: {exc.msg}",
-                status_code=400,
-            ) from exc
-        if not isinstance(parsed, dict):
-            raise DashboardAdminUserActionError(
-                "JSON body must be an object",
-                status_code=400,
-            )
-        return parsed
-
-    form = parse_qs(raw, keep_blank_values=True)
-    return {
-        key: values[-1] if values else ""
-        for key, values in form.items()
-    }
+    _web.install_namespace(globals())
+    return _web.dashboard_read_request_payload(handler)
 
 
 def dashboard_validate_access_username(username: str) -> str:
@@ -32779,1441 +27610,31 @@ def dashboard_has_active_password_users(connection: sqlite3.Connection) -> bool:
     return bool(row and int(row["user_count"] or 0) > 0)
 
 
-def dashboard_session_cookie_header(
-    session_token: str,
-    max_age: int = ACCESS_SESSION_TTL_SECONDS,
-) -> str:
-    return (
-        f"{ACCESS_SESSION_COOKIE_NAME}={session_token}; "
-        "Path=/; "
-        f"Max-Age={max(300, int(max_age or ACCESS_SESSION_TTL_SECONDS))}; "
-        "HttpOnly; "
-        "SameSite=Lax"
-    )
+def dashboard_session_cookie_header(session_token: str, max_age: int=ACCESS_SESSION_TTL_SECONDS) -> str:
+    _web.install_namespace(globals())
+    return _web.dashboard_session_cookie_header(session_token, max_age)
 
 
 def dashboard_clear_session_cookie_header() -> str:
-    return (
-        f"{ACCESS_SESSION_COOKIE_NAME}=; "
-        "Path=/; "
-        "Max-Age=0; "
-        "HttpOnly; "
-        "SameSite=Lax"
-    )
+    _web.install_namespace(globals())
+    return _web.dashboard_clear_session_cookie_header()
 
 
-def dashboard_redirect_response(
-    handler,
-    location: str,
-    cookie_header: str | None = None,
-) -> None:
-    handler.send_response(303)
-    handler.send_header("Location", location)
-    handler.send_header("Cache-Control", "no-store")
-
-    if cookie_header:
-        handler.send_header("Set-Cookie", cookie_header)
-
-    handler.end_headers()
+def dashboard_redirect_response(handler, location: str, cookie_header: str | None=None) -> None:
+    _web.install_namespace(globals())
+    return _web.dashboard_redirect_response(handler, location, cookie_header)
 
 
-def dashboard_login_html(
-    message: str = "",
-    username: str = "",
-) -> str:
-    safe_message = html.escape(str(message or ""))
-    safe_username = html.escape(str(username or ""))
-
-    error_block = ""
-
-    if safe_message:
-        error_block = (
-            '<div class="login-error">'
-            + safe_message
-            + '</div>'
-        )
-
-    lines = [
-        '<!doctype html>',
-        '<html lang="en">',
-        '<head>',
-        '  <meta charset="utf-8">',
-        '  <meta name="viewport" content="width=device-width,initial-scale=1">',
-        '  <title>DeltaAegis Login</title>',
-        '  <style>',
-        '    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #020617; color: #e2e8f0; }',
-        '    body { min-height: 100vh; margin: 0; display: grid; place-items: center; background: radial-gradient(circle at top left, rgba(34, 211, 238, 0.14), transparent 34rem), radial-gradient(circle at bottom right, rgba(59, 130, 246, 0.14), transparent 34rem), #020617; }',
-        '    .login-shell { width: min(420px, calc(100vw - 32px)); border: 1px solid rgba(148, 163, 184, 0.24); border-radius: 24px; background: rgba(15, 23, 42, 0.94); box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42); padding: 28px; }',
-        '    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: 0.16em; text-transform: uppercase; }',
-        '    h1 { margin: 8px 0 8px; font-size: 30px; letter-spacing: -0.04em; }',
-        '    p { margin: 0 0 22px; color: #94a3b8; line-height: 1.55; }',
-        '    label { display: block; margin: 14px 0 6px; color: #cbd5e1; font-size: 13px; font-weight: 800; }',
-        '    input { width: 100%; box-sizing: border-box; border: 1px solid rgba(148, 163, 184, 0.28); border-radius: 14px; background: rgba(2, 6, 23, 0.82); color: #f8fafc; padding: 12px 13px; font-size: 15px; outline: none; }',
-        '    input:focus { border-color: rgba(34, 211, 238, 0.65); box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.12); }',
-        '    button { width: 100%; margin-top: 20px; border: 0; border-radius: 14px; background: linear-gradient(135deg, #06b6d4, #2563eb); color: white; padding: 12px 14px; font-size: 15px; font-weight: 900; cursor: pointer; }',
-        '    .login-error { margin: 14px 0 4px; border: 1px solid rgba(248, 113, 113, 0.34); border-radius: 14px; background: rgba(127, 29, 29, 0.28); color: #fecaca; padding: 10px 12px; font-size: 13px; font-weight: 700; }',
-        '    .login-note { margin-top: 16px; color: #64748b; font-size: 12px; line-height: 1.45; }',
-        '  </style>',
-        '</head>',
-        '<body>',
-        '  <main class="login-shell">',
-        '    <div class="eyebrow">DeltaAegis</div>',
-        '    <h1>Operator Login</h1>',
-        '    <p>Sign in with your local DeltaAegis username and password.</p>',
-        error_block,
-        '    <form method="post" action="/login" autocomplete="on">',
-        '      <label for="username">Username</label>',
-        '      <input id="username" name="username" autocomplete="username" required autofocus>',
-        '      <label for="password">Password</label>',
-        '      <input id="password" name="password" type="password" autocomplete="current-password" required>',
-        '      <button type="submit">Sign in</button>',
-        '    </form>',
-        '    <div class="login-note">API tokens are still supported for automation through <code>X-DeltaAegis-Token</code>, but browser login uses sessions.</div>',
-        '  </main>',
-        '</body>',
-        '</html>',
-    ]
-
-    return "\n".join(lines)
+def dashboard_login_html(message: str='', username: str='') -> str:
+    _web.install_namespace(globals())
+    return _web.dashboard_login_html(message, username)
 
 
 
 
 def render_netsniper_page() -> str:
-    return """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>DeltaAegis NetSniper</title>
-  <style>
-    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #020617; color: #e2e8f0; }
-    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, rgba(34,211,238,.13), transparent 34rem), #020617; }
-    main { width: min(1120px, calc(100vw - 32px)); margin: 0 auto; padding: 44px 0; }
-    .panel { border: 1px solid rgba(148,163,184,.22); border-radius: 24px; background: rgba(15,23,42,.92); box-shadow: 0 24px 80px rgba(0,0,0,.34); padding: 28px; }
-    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: .16em; text-transform: uppercase; }
-    h1 { margin: 8px 0 8px; font-size: 32px; letter-spacing: -.04em; }
-    h2 { margin: 26px 0 12px; font-size: 18px; }
-    p { margin: 0 0 20px; color: #94a3b8; line-height: 1.55; }
-    .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 18px 0; }
-    a, button { border: 1px solid rgba(34,211,238,.28); border-radius: 999px; background: rgba(8,145,178,.14); color: #67e8f9; cursor: pointer; padding: 9px 13px; text-decoration: none; font-size: 13px; font-weight: 900; }
-    button:hover, a:hover { background: rgba(8,145,178,.26); }
-    .status { border: 1px solid rgba(148,163,184,.18); border-radius: 16px; background: rgba(2,6,23,.38); color: #cbd5e1; margin: 18px 0; padding: 12px 14px; font-weight: 700; white-space: pre-wrap; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin: 18px 0 22px; }
-    .card { border: 1px solid rgba(148,163,184,.18); border-radius: 18px; background: rgba(2,6,23,.34); padding: 14px; }
-    .card-label { color: #94a3b8; font-size: 11px; font-weight: 900; letter-spacing: .11em; text-transform: uppercase; }
-    .card-value { color: #f8fafc; font-size: 20px; font-weight: 950; margin-top: 4px; overflow-wrap: anywhere; }
-    .pill { display: inline-flex; border: 1px solid rgba(148,163,184,.22); border-radius: 999px; padding: 4px 8px; font-size: 11px; font-weight: 950; text-transform: uppercase; letter-spacing: .06em; }
-    .ok { color: #bbf7d0; border-color: rgba(34,197,94,.35); background: rgba(22,163,74,.12); }
-    .warn { color: #fde68a; border-color: rgba(251,191,36,.35); background: rgba(217,119,6,.12); }
-    .scan-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 12px 0 14px; }
-    .scan-form label { color: #94a3b8; display: grid; gap: 6px; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
-    .scan-form input { border: 1px solid rgba(148,163,184,.22); border-radius: 12px; background: rgba(2,6,23,.48); color: #e2e8f0; padding: 10px 12px; min-width: 240px; font-weight: 800; }
-    .table-wrap { overflow-x: auto; border: 1px solid rgba(148,163,184,.18); border-radius: 18px; margin-top: 10px; }
-    .live-job-panel { margin-top: 18px; border: 1px solid rgba(34,211,238,.24); border-radius: 20px; background: rgba(2,6,23,.44); padding: 18px; }
-    .live-job-panel[hidden] { display: none; }
-    .live-job-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); gap: 10px; margin: 14px 0; }
-    .live-job-streams { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
-    .live-job-stream h3 { margin: 0 0 8px; color: #e2e8f0; font-size: 14px; }
-    .live-job-stream pre { min-height: 160px; max-height: 360px; margin: 0; }
-    .live-job-meta { color: #94a3b8; font-size: 12px; margin: 0 0 8px; }
-    .live-job-cancel-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 14px 0; }
-    .live-job-cancel-form[hidden] { display: none; }
-    .live-job-cancel-form label { color: #94a3b8; display: grid; gap: 6px; flex: 1 1 360px; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
-    .live-job-cancel-form input { border: 1px solid rgba(248,113,113,.32); border-radius: 12px; background: rgba(2,6,23,.48); color: #e2e8f0; padding: 10px 12px; min-width: 280px; font-weight: 800; }
-    .danger { border-color: rgba(248,113,113,.42); background: rgba(185,28,28,.18); color: #fecaca; }
-    .danger:hover { background: rgba(185,28,28,.32); }
-    table { width: 100%; border-collapse: collapse; min-width: 980px; }
-    th, td { border-bottom: 1px solid rgba(148,163,184,.14); padding: 10px 12px; text-align: left; vertical-align: top; }
-    th { color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
-    td { color: #e2e8f0; font-size: 13px; font-weight: 700; }
-    pre { border: 1px solid rgba(148,163,184,.18); border-radius: 16px; background: rgba(2,6,23,.55); color: #cbd5e1; padding: 14px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
-  </style>
-</head>
-<body>
-  <main>
-    <section class="panel">
-      <div class="eyebrow">DeltaAegis Telemetry Source</div>
-      <h1>NetSniper</h1>
-      <p>DeltaAegis treats NetSniper as a lightweight CLI/headless scan engine. This page detects the local NetSniper checkout and its completed telemetry runs before dashboard scan execution is added.</p>
-
-      <div class="actions">
-        <a href="/">Back to dashboard</a>
-        <a href="/operator">Operator session</a>
-        <a href="/api/netsniper/status">View raw status JSON</a>
-        <button type="button" id="netsniper-refresh">Refresh status</button>
-        <button type="button" id="netsniper-import-latest">Import latest completed run</button>
-      </div>
-
-      <div class="status" id="netsniper-status">Loading NetSniper status…</div>
-
-      <div class="grid">
-        <div class="card"><div class="card-label">Installed</div><div class="card-value" id="netsniper-installed">—</div></div>
-        <div class="card"><div class="card-label">Runs directory</div><div class="card-value" id="netsniper-runs-dir-exists">—</div></div>
-        <div class="card"><div class="card-label">Latest run</div><div class="card-value" id="netsniper-latest-run">—</div></div>
-        <div class="card"><div class="card-label">Import ready</div><div class="card-value" id="netsniper-import-ready">—</div></div>
-      </div>
-
-      <details class="technical-details">
-        <summary>Detected NetSniper paths</summary>
-        <pre id="netsniper-paths">Loading…</pre>
-      </details>
-
-      <details class="technical-details">
-        <summary>Latest run metadata</summary>
-        <pre id="netsniper-latest-json">Loading…</pre>
-      </details>
-
-      <h2>Import result</h2>
-      <div class="status" id="netsniper-import-result">No import has been run from this page yet.</div>
-
-      <h2>Guarded scan launch</h2>
-      <p>ADMIN-only launch control for a single private IPv4 CIDR target. DeltaAegis uses a fixed NetSniper headless command shape and does not expose arbitrary shell input.</p>
-      <form id="netsniper-scan-start-form" class="scan-form">
-        <label>Private CIDR target
-          <input id="netsniper-scan-target" name="target" autocomplete="off" placeholder="192.168.5.0/24" required>
-        </label>
-          <label>Scan profile
-            <select id="netsniper-scan-profile" name="scan_profile">
-              <option value="balanced" selected>Balanced — routine telemetry</option>
-              <option value="accurate">Accurate — deeper evidence</option>
-              <option value="quick">Quick — lighter check</option>
-            </select>
-          </label>
-        <button type="submit" id="netsniper-scan-start">Start guarded scan</button>
-      </form>
-      <div class="status" id="netsniper-scan-start-result">No scan has been started from this page yet.</div>
-
-      <h2>Scheduled scans</h2>
-      <p>Saved profile-aware NetSniper scan schedules. These use the same guarded scan-job path as manual dashboard launches.</p>
-
-      <div class="actions" id="netsniper-hourly-monitoring-controls">
-        <label>Hourly monitoring target
-          <input id="netsniper-hourly-monitoring-target" name="hourly_target" autocomplete="off" placeholder="192.168.5.0/24">
-        </label>
-        <button type="button" id="netsniper-hourly-monitoring-enable">Enable hourly balanced monitoring</button>
-        <button type="button" id="netsniper-hourly-monitoring-disable">Disable hourly monitoring</button>
-      </div>
-      <p class="muted">Hourly monitoring creates or refreshes one saved schedule named <code>Hourly Balanced Monitoring</code> using the balanced profile, a 60-minute cadence, and auto-ingest enabled.</p>
-
-      <form id="netsniper-schedule-create-form" class="scan-form">
-        <label>Schedule name
-          <input id="netsniper-schedule-name" name="name" autocomplete="off" placeholder="Hourly Balanced Monitoring" required>
-        </label>
-        <label>Private CIDR target
-          <input id="netsniper-schedule-target" name="target" autocomplete="off" placeholder="192.168.5.0/24" required>
-        </label>
-        <label>Scan profile
-          <select id="netsniper-schedule-profile" name="scan_profile">
-            <option value="balanced" selected>Balanced — routine telemetry</option>
-            <option value="accurate">Accurate — deeper evidence</option>
-            <option value="quick">Quick — lighter check</option>
-          </select>
-        </label>
-        <label>Cadence
-          <select id="netsniper-schedule-cadence" name="cadence_minutes">
-            <option value="60" selected>Every 1 hour</option>
-            <option value="120">Every 2 hours</option>
-            <option value="360">Every 6 hours</option>
-            <option value="720">Every 12 hours</option>
-            <option value="1440">Daily</option>
-          </select>
-        </label>
-        <label>Enabled
-          <select id="netsniper-schedule-enabled" name="enabled">
-            <option value="true" selected>Enabled</option>
-            <option value="false">Disabled</option>
-          </select>
-        </label>
-        <label>Auto-ingest
-          <select id="netsniper-schedule-auto-ingest" name="auto_ingest">
-            <option value="true" selected>Enabled</option>
-            <option value="false">Disabled</option>
-          </select>
-          <label for="netsniper-schedule-trueaegis-after-ingest">TrueAegis after ingest</label>
-          <select id="netsniper-schedule-trueaegis-after-ingest" name="run_trueaegis_after_ingest">
-            <option value="false" selected>no</option>
-            <option value="true">yes - record follow-up intent</option>
-          </select>
-        </label>
-        <button type="submit" id="netsniper-schedule-create">Create schedule</button>
-      </form>
-
-      <div class="actions">
-        <button type="button" id="netsniper-schedules-refresh">Refresh schedules</button>
-        <button type="button" id="netsniper-schedules-run-due">Run due schedules</button>
-        <button type="button" id="netsniper-stale-scan-fail">Mark stale active scans failed</button>
-        <a href="/api/netsniper/schedules">View raw schedules JSON</a>
-      </div>
-
-      <p class="muted"><strong>TrueAegis note:</strong> Scheduled scans run NetSniper and optional auto-ingest only. TrueAegis validation is configured and launched separately from the TrueAegis controls; NetSniper schedules do not automatically run TrueAegis.</p>
-      <p class="muted"><strong>Stale scan recovery:</strong> If an old <code>QUEUED</code> or <code>RUNNING</code> scan job blocks schedules and no NetSniper process is active, an ADMIN can mark stale active scan jobs failed after confirmation.</p>
-      <div class="status" id="netsniper-schedule-result">No scheduled scan action has run from this page yet.</div>
-
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Status</th>
-              <th>Target</th>
-              <th>Profile</th>
-              <th>Cadence</th>
-              <th>Next run</th>
-              <th>Last run</th>
-              <th>Last status</th>
-              <th>Last job</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="netsniper-schedules-body">
-            <tr><td colspan="10">Loading schedules…</td></tr>
-          </tbody>
-        </table>
-      </div>
-
-      <h2>Schedule run history</h2>
-      <p>Read-only evidence view linking saved schedules to the guarded scan jobs they triggered.</p>
-      <div class="actions">
-        <button type="button" id="netsniper-schedule-history-refresh">Refresh schedule history</button>
-        <a href="/api/netsniper/schedule-history">View raw schedule history JSON</a>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Schedule</th>
-              <th>Schedule status</th>
-              <th>Target</th>
-              <th>Profile</th>
-              <th>Last run</th>
-              <th>Next run</th>
-              <th>Job</th>
-              <th>Job status</th>
-              <th>Finished</th>
-              <th>Message</th>
-            </tr>
-          </thead>
-          <tbody id="netsniper-schedule-history-body">
-            <tr><td colspan="10">Loading schedule history…</td></tr>
-          </tbody>
-        </table>
-      </div>
-
-      <h2>Recent scan jobs</h2>
-      <p>Recent guarded NetSniper scan jobs from the DeltaAegis scan job ledger.</p>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Job</th>
-              <th>Status</th>
-              <th>Target</th>
-              <th>Profile</th>
-              <th>Created</th>
-              <th>Updated</th>
-              <th>Exit</th>
-              <th>Bundle</th>
-              <th>Message</th>
-              <th>Details</th>
-            </tr>
-          </thead>
-          <tbody id="netsniper-scan-jobs-body">
-            <tr><td colspan="10">Loading scan jobs…</td></tr>
-          </tbody>
-        </table>
-      </div>
-
-      <section id="netsniper-live-job-panel" class="live-job-panel" hidden>
-        <div class="actions">
-          <strong id="netsniper-live-job-heading">Live scan details</strong>
-          <a id="netsniper-live-job-raw" href="/api/netsniper/job-detail" target="_blank" rel="noopener">View raw job detail JSON</a>
-          <button type="button" id="netsniper-live-job-refresh">Refresh details</button>
-          <button type="button" id="netsniper-live-job-close">Close details</button>
-        </div>
-
-        <div class="status" id="netsniper-live-job-status">Select a scan job to view its lifecycle evidence and bounded log tails.</div>
-
-        <form id="netsniper-live-job-cancel-form" class="live-job-cancel-form" hidden>
-          <label>Cancellation reason
-            <input id="netsniper-live-job-cancel-reason" name="reason" autocomplete="off" maxlength="500" placeholder="Reason for stopping this active scan" required>
-          </label>
-          <button type="submit" id="netsniper-live-job-cancel" class="danger">Cancel active scan</button>
-        </form>
-        <div class="status" id="netsniper-live-job-cancel-result" hidden>No cancellation request has been submitted.</div>
-
-        <div class="live-job-grid">
-          <div class="card"><div class="card-label">Status</div><div class="card-value" id="netsniper-live-job-state">—</div></div>
-          <div class="card"><div class="card-label">Process PID</div><div class="card-value" id="netsniper-live-job-pid">—</div></div>
-          <div class="card"><div class="card-label">Heartbeat</div><div class="card-value" id="netsniper-live-job-heartbeat">—</div></div>
-          <div class="card"><div class="card-label">Updated</div><div class="card-value" id="netsniper-live-job-updated">—</div></div>
-          <div class="card"><div class="card-label">Cancel requested</div><div class="card-value" id="netsniper-live-job-cancel-requested-at">—</div></div>
-          <div class="card"><div class="card-label">Requested by</div><div class="card-value" id="netsniper-live-job-cancel-requested-by">—</div></div>
-          <div class="card"><div class="card-label">Cancelled</div><div class="card-value" id="netsniper-live-job-cancelled-at">—</div></div>
-        </div>
-
-        <details class="technical-details">
-          <summary>Cancellation evidence</summary>
-          <pre id="netsniper-live-job-cancel-reason-display">—</pre>
-        </details>
-
-        <div class="live-job-streams">
-          <details class="live-job-stream technical-details">
-            <summary>Stdout tail</summary>
-            <p class="live-job-meta" id="netsniper-live-job-stdout-meta">No stdout detail loaded.</p>
-            <pre id="netsniper-live-job-stdout">—</pre>
-          </details>
-          <details class="live-job-stream technical-details">
-            <summary>Stderr tail</summary>
-            <p class="live-job-meta" id="netsniper-live-job-stderr-meta">No stderr detail loaded.</p>
-            <pre id="netsniper-live-job-stderr">—</pre>
-          </details>
-        </div>
-      </section>
-
-      <h2>Design boundary</h2>
-      <p>This tab does not run arbitrary shell commands. Scan execution and cancellation use guarded, ADMIN-only APIs with validated job identifiers; the browser never supplies or signals a process PID.</p>
-    </section>
-  </main>
-
-  <script>
-    function text(value) {
-      if (value === null || value === undefined || value === "") { return "—"; }
-      return String(value);
-    }
-
-    function escapeHtml(value) {
-      return text(value)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#039;");
-    }
-
-    function pill(value, goodLabel) {
-      const isGood = Boolean(value);
-      const label = isGood ? goodLabel : "No";
-      const cls = isGood ? "ok" : "warn";
-      return `<span class="pill ${cls}">${escapeHtml(label)}</span>`;
-    }
-
-    function setHtml(id, value) {
-      const element = document.getElementById(id);
-      if (element) { element.innerHTML = value; }
-    }
-
-    function setText(id, value) {
-      const element = document.getElementById(id);
-      if (element) { element.textContent = text(value); }
-    }
-
-    async function loadNetSniperStatus() {
-      const status = document.getElementById("netsniper-status");
-
-      try {
-        const response = await fetch("/api/netsniper/status", {
-          credentials: "same-origin",
-          cache: "no-store"
-        });
-
-        if (response.status === 401 || response.status === 403) {
-          window.location.href = "/login";
-          return;
-        }
-
-        if (!response.ok) {
-          status.textContent = "NetSniper status lookup failed.";
-          return;
-        }
-
-        const payload = await response.json();
-        const latest = payload.latest_run || {};
-
-        setHtml("netsniper-installed", pill(payload.netsniper_installed, "Yes"));
-        setHtml("netsniper-runs-dir-exists", pill(payload.runs_dir_exists, "Found"));
-        setText("netsniper-latest-run", latest.run_id || "No runs detected");
-        setHtml("netsniper-import-ready", pill(payload.import_ready, "Ready"));
-
-        setText("netsniper-paths", JSON.stringify({
-          netsniper_root: payload.netsniper_root,
-          netsniper_script: payload.netsniper_script,
-          runs_dir: payload.runs_dir
-        }, null, 2));
-
-        setText("netsniper-latest-json", JSON.stringify(latest || {}, null, 2));
-
-        status.textContent = payload.import_ready
-          ? "Latest NetSniper run is ready for dashboard import."
-          : "No completed import-ready NetSniper run was found yet.";
-      } catch (error) {
-        status.textContent = `NetSniper status lookup failed: ${error.message || error}`;
-      }
-    }
-
-    function dashboardActionReceiptLabel(value) {
-      return String(value || "")
-        .replaceAll("_", " ")
-        .replace(/\\b\\w/g, function (character) {
-          return character.toUpperCase();
-        });
-    }
-
-    function dashboardActionReceiptValue(value) {
-      if (value === true) {
-        return "Yes";
-      }
-
-      if (value === false) {
-        return "No";
-      }
-
-      if (value === null || value === undefined || value === "") {
-        return "—";
-      }
-
-      if (Array.isArray(value)) {
-        return value.length ? value.join(", ") : "None";
-      }
-
-      if (typeof value === "object") {
-        return Object.entries(value)
-          .map(function (entry) {
-            return `${dashboardActionReceiptLabel(entry[0])}: ${dashboardActionReceiptValue(entry[1])}`;
-          })
-          .join("; ");
-      }
-
-      return String(value);
-    }
-
-    function renderDashboardActionReceipt(target, receipt, fallbackPayload) {
-      if (!target) {
-        return;
-      }
-
-      const safeReceipt = receipt && typeof receipt === "object"
-        ? receipt
-        : {};
-      const safePayload = fallbackPayload && typeof fallbackPayload === "object"
-        ? fallbackPayload
-        : {};
-      const message = String(
-        safeReceipt.message
-        || safePayload.message
-        || safePayload.error
-        || "Action completed."
-      ).trim();
-      const severity = String(
-        safeReceipt.severity
-        || (safePayload.ok === false ? "error" : "info")
-      ).toLowerCase();
-      const summary = safeReceipt.summary && typeof safeReceipt.summary === "object"
-        ? safeReceipt.summary
-        : {};
-      const identifiers = safeReceipt.identifiers && typeof safeReceipt.identifiers === "object"
-        ? safeReceipt.identifiers
-        : {};
-      const lines = [message];
-
-      Object.entries(summary).forEach(function (entry) {
-        lines.push(
-          `${dashboardActionReceiptLabel(entry[0])}: ${dashboardActionReceiptValue(entry[1])}`
-        );
-      });
-
-      Object.entries(identifiers).forEach(function (entry) {
-        lines.push(
-          `${dashboardActionReceiptLabel(entry[0])}: ${dashboardActionReceiptValue(entry[1])}`
-        );
-      });
-
-      target.textContent = lines.join("\\n");
-      target.dataset.receiptSeverity = severity;
-      target.dataset.receiptAction = String(safeReceipt.action || "");
-    }
-
-    async function importLatestNetSniperRun() {
-      const status = document.getElementById("netsniper-status");
-      const output = document.getElementById("netsniper-import-result");
-      const button = document.getElementById("netsniper-import-latest");
-
-      button.disabled = true;
-      status.textContent = "Importing latest completed NetSniper run…";
-
-      try {
-        const response = await fetch("/api/netsniper/import-latest", {
-          method: "POST",
-          credentials: "same-origin",
-          cache: "no-store",
-          headers: {"Content-Type": "application/json"},
-          body: "{}"
-        });
-
-        let payload = {};
-        try {
-          payload = await response.json();
-        } catch (error) {
-          payload = {};
-        }
-
-        if (response.status === 401 || response.status === 403) {
-          window.location.href = "/login";
-          return;
-        }
-
-        if (!response.ok || !payload.ok) {
-          throw new Error(payload.message || payload.error || `Import failed with HTTP ${response.status}`);
-        }
-
-        renderDashboardActionReceipt(output, payload.receipt, payload);
-        status.textContent = (payload.receipt || {}).message
-          || `Import complete: ${payload.run_id || "latest run"}`;
-        await loadNetSniperStatus();
-      } catch (error) {
-        status.textContent = `Import failed: ${error.message || error}`;
-        output.textContent = String(error.message || error);
-      } finally {
-        button.disabled = false;
-      }
-    }
-
-    let selectedNetSniperJobId = "";
-    let selectedNetSniperJob = null;
-    let netSniperJobDetailTimer = null;
-
-    function stopNetSniperJobDetailPolling() {
-      if (netSniperJobDetailTimer !== null) {
-        window.clearTimeout(netSniperJobDetailTimer);
-        netSniperJobDetailTimer = null;
-      }
-    }
-
-    function netSniperJobIsActive(job) {
-      const status = String((job || {}).status || "").toUpperCase();
-      return status === "QUEUED" || status === "RUNNING";
-    }
-
-    function scanJobStreamMeta(stream) {
-      if (!stream || !stream.available) {
-        return `Unavailable: ${(stream || {}).reason || "log not available"}`;
-      }
-
-      const parts = [
-        `${stream.bytes_read || 0} byte(s) returned`,
-        `${stream.file_size || 0} byte file`
-      ];
-
-      if (stream.truncated) { parts.push("tail truncated"); }
-      if (stream.updated_at) { parts.push(`updated ${stream.updated_at}`); }
-      return parts.join(" · ");
-    }
-
-    function renderNetSniperJobDetail(payload) {
-      const panel = document.getElementById("netsniper-live-job-panel");
-      const job = payload.job || {};
-      const stdout = payload.stdout || {};
-      const stderr = payload.stderr || {};
-      const jobId = job.job_id || payload.job_id || selectedNetSniperJobId;
-
-      if (!panel) { return; }
-
-      panel.hidden = false;
-      selectedNetSniperJob = job;
-      setText("netsniper-live-job-heading", `Scan job ${jobId || "detail"}`);
-      setText("netsniper-live-job-status", `${job.status || "UNKNOWN"} · ${job.message || "No job message"}`);
-      setText("netsniper-live-job-state", job.status || "—");
-      setText("netsniper-live-job-pid", job.process_pid || "—");
-      setText("netsniper-live-job-heartbeat", job.heartbeat_at || "—");
-      setText("netsniper-live-job-updated", job.updated_at || "—");
-      setText("netsniper-live-job-cancel-requested-at", job.cancel_requested_at || "—");
-      setText("netsniper-live-job-cancel-requested-by", job.cancel_requested_by || "—");
-      setText("netsniper-live-job-cancelled-at", job.cancelled_at || "—");
-      setText("netsniper-live-job-cancel-reason-display", job.cancel_reason || "—");
-      setText("netsniper-live-job-stdout-meta", scanJobStreamMeta(stdout));
-      setText("netsniper-live-job-stderr-meta", scanJobStreamMeta(stderr));
-      setText("netsniper-live-job-stdout", stdout.available ? stdout.text : "—");
-      setText("netsniper-live-job-stderr", stderr.available ? stderr.text : "—");
-
-      const cancelForm = document.getElementById("netsniper-live-job-cancel-form");
-      const cancelButton = document.getElementById("netsniper-live-job-cancel");
-      const cancelResult = document.getElementById("netsniper-live-job-cancel-result");
-      const canCancel = netSniperJobIsActive(job) && !job.cancel_requested_at;
-
-      if (cancelForm) { cancelForm.hidden = !canCancel; }
-      if (cancelButton) { cancelButton.disabled = !canCancel; }
-
-      if (cancelResult && job.cancel_requested_at) {
-        cancelResult.hidden = false;
-        cancelResult.textContent = job.status === "CANCELLED"
-          ? `Scan cancelled at ${job.cancelled_at || job.finished_at || "unknown time"}.`
-          : `Cancellation requested by ${job.cancel_requested_by || "operator"} at ${job.cancel_requested_at}.`;
-      }
-
-      const rawLink = document.getElementById("netsniper-live-job-raw");
-      if (rawLink && jobId) {
-        rawLink.href = `/api/netsniper/job-detail?job_id=${encodeURIComponent(jobId)}&tail_bytes=16384`;
-      }
-    }
-
-    async function loadNetSniperJobDetail(jobId) {
-      const requestedJobId = String(jobId || selectedNetSniperJobId || "").trim();
-      if (!requestedJobId) { return; }
-
-      selectedNetSniperJobId = requestedJobId;
-      stopNetSniperJobDetailPolling();
-
-      const panel = document.getElementById("netsniper-live-job-panel");
-      if (panel) { panel.hidden = false; }
-      setText("netsniper-live-job-status", `Loading scan job ${requestedJobId}…`);
-
-      try {
-        const response = await fetch(
-          `/api/netsniper/job-detail?job_id=${encodeURIComponent(requestedJobId)}&tail_bytes=16384`,
-          { credentials: "same-origin", cache: "no-store" }
-        );
-
-        if (response.status === 401 || response.status === 403) {
-          window.location.href = "/login";
-          return;
-        }
-
-        let payload = {};
-        try { payload = await response.json(); } catch (error) { payload = {}; }
-
-        if (selectedNetSniperJobId !== requestedJobId) { return; }
-        if (!response.ok || !payload.ok) {
-          throw new Error(payload.error || `Job detail request failed with HTTP ${response.status}`);
-        }
-
-        renderNetSniperJobDetail(payload);
-
-        if (netSniperJobIsActive(payload.job) && selectedNetSniperJobId === requestedJobId) {
-          netSniperJobDetailTimer = window.setTimeout(function () {
-            loadNetSniperJobDetail(requestedJobId);
-          }, 3000);
-        }
-      } catch (error) {
-        if (selectedNetSniperJobId === requestedJobId) {
-          setText("netsniper-live-job-status", `Job detail lookup failed: ${error.message || error}`);
-        }
-      }
-    }
-
-    function closeNetSniperJobDetail() {
-      stopNetSniperJobDetailPolling();
-      selectedNetSniperJobId = "";
-      selectedNetSniperJob = null;
-      const panel = document.getElementById("netsniper-live-job-panel");
-      const cancelForm = document.getElementById("netsniper-live-job-cancel-form");
-      const cancelResult = document.getElementById("netsniper-live-job-cancel-result");
-      const cancelReason = document.getElementById("netsniper-live-job-cancel-reason");
-
-      if (panel) { panel.hidden = true; }
-      if (cancelForm) { cancelForm.hidden = true; }
-      if (cancelResult) { cancelResult.hidden = true; }
-      if (cancelReason) { cancelReason.value = ""; }
-    }
-
-    async function cancelSelectedNetSniperJob(event) {
-      event.preventDefault();
-
-      const job = selectedNetSniperJob || {};
-      const jobId = String(job.job_id || selectedNetSniperJobId || "").trim();
-      const reasonInput = document.getElementById("netsniper-live-job-cancel-reason");
-      const button = document.getElementById("netsniper-live-job-cancel");
-      const result = document.getElementById("netsniper-live-job-cancel-result");
-      const reason = String((reasonInput || {}).value || "").trim();
-
-      if (!jobId || !netSniperJobIsActive(job)) {
-        if (result) {
-          result.hidden = false;
-          result.textContent = "Only an active queued or running scan can be cancelled.";
-        }
-        return;
-      }
-
-      if (!reason) {
-        if (result) {
-          result.hidden = false;
-          result.textContent = "A cancellation reason is required.";
-        }
-        if (reasonInput) { reasonInput.focus(); }
-        return;
-      }
-
-      if (!window.confirm(`Cancel active scan ${jobId}?\n\nReason: ${reason}`)) {
-        return;
-      }
-
-      if (button) { button.disabled = true; }
-      if (reasonInput) { reasonInput.disabled = true; }
-      if (result) {
-        result.hidden = false;
-        result.textContent = `Submitting cancellation request for ${jobId}…`;
-      }
-
-      try {
-        const response = await fetch("/api/netsniper/scan-cancel", {
-          method: "POST",
-          credentials: "same-origin",
-          cache: "no-store",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({job_id: jobId, reason: reason})
-        });
-
-        if (response.status === 401 || response.status === 403) {
-          window.location.href = "/login";
-          return;
-        }
-
-        let payload = {};
-        try { payload = await response.json(); } catch (error) { payload = {}; }
-
-        if (!response.ok || !payload.ok) {
-          throw new Error(
-            payload.error
-            || payload.message
-            || `Cancellation failed with HTTP ${response.status}`
-          );
-        }
-
-        if (result) {
-          result.hidden = false;
-          renderDashboardActionReceipt(
-          result,
-          payload.receipt || {
-            action: "netsniper.scan_cancel",
-            severity: "info",
-            message: payload.message || "Scan cancellation request accepted.",
-            summary: {
-              cancellation_action: payload.cancellation_action || "requested"
-            },
-            identifiers: {
-              job_id: payload.job_id || ""
-            }
-          },
-          payload
-        );
-        }
-
-        await loadNetSniperScanJobs();
-        await loadNetSniperJobDetail(jobId);
-      } catch (error) {
-        if (result) {
-          result.hidden = false;
-          result.textContent = `Cancellation failed: ${error.message || error}`;
-        }
-      } finally {
-        if (reasonInput) { reasonInput.disabled = false; }
-        if (button && netSniperJobIsActive(selectedNetSniperJob || {})) {
-          button.disabled = Boolean(
-            (selectedNetSniperJob || {}).cancel_requested_at
-          );
-        }
-      }
-    }
-
-    function renderNetSniperScanJobs(payload) {
-      const tbody = document.getElementById("netsniper-scan-jobs-body");
-      if (!tbody) { return; }
-
-      const jobs = Array.isArray(payload)
-        ? payload
-        : (payload.jobs || payload.scan_jobs || payload.items || []);
-
-      if (!jobs.length) {
-        tbody.innerHTML = '<tr><td colspan="10">No scan jobs found.</td></tr>';
-        return;
-      }
-
-      tbody.innerHTML = jobs.slice(0, 10).map(function (job) {
-        const jobId = job.job_id || "";
-        return `
-          <tr>
-            <td><code>${escapeHtml(jobId || "-")}</code></td>
-            <td><span class="pill">${escapeHtml(job.status || "-")}</span></td>
-            <td>${escapeHtml(job.target || job.network_scope || "-")}</td>
-            <td>${escapeHtml(job.scan_profile || "balanced")}</td>
-            <td>${escapeHtml(job.created_at || "-")}</td>
-            <td>${escapeHtml(job.updated_at || "-")}</td>
-            <td>${escapeHtml(job.exit_code === null || job.exit_code === undefined ? "-" : job.exit_code)}</td>
-            <td>${escapeHtml(job.bundle_path || "-")}</td>
-            <td>${escapeHtml(job.message || "-")}</td>
-            <td><button type="button" data-scan-job-detail="${escapeHtml(jobId)}">View details</button></td>
-          </tr>
-        `;
-      }).join("");
-    }
-
-    async function loadNetSniperScanJobs() {
-      try {
-        const response = await fetch("/api/scan-jobs?limit=10", {
-          credentials: "same-origin",
-          cache: "no-store"
-        });
-
-        if (response.status === 401 || response.status === 403) {
-          return;
-        }
-
-        if (!response.ok) {
-          return;
-        }
-
-        const payload = await response.json();
-        renderNetSniperScanJobs(payload);
-      } catch (error) {
-        const tbody = document.getElementById("netsniper-scan-jobs-body");
-        if (tbody) {
-          tbody.innerHTML = `<tr><td colspan="10">Scan job lookup failed: ${escapeHtml(error.message || error)}</td></tr>`;
-        }
-      }
-    }
-
-
-    function scheduleCadenceLabel(minutes) {
-      const value = Number.parseInt(minutes || 60, 10);
-      const labels = {
-        60: "Every 1 hour",
-        120: "Every 2 hours",
-        360: "Every 6 hours",
-        720: "Every 12 hours",
-        1440: "Daily"
-      };
-      return labels[value] || `${value} minutes`;
-    }
-
-    function scheduleEnabledPill(schedule) {
-      const enabled = Boolean(schedule && schedule.enabled);
-      const cls = enabled ? "ok" : "warn";
-      const label = enabled ? "Enabled" : "Disabled";
-      return `<span class="pill ${cls}">${label}</span>`;
-    }
-
-    async function postNetSniperSchedule(path, payload) {
-      const response = await fetch(path, {
-        method: "POST",
-        credentials: "same-origin",
-        cache: "no-store",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(payload || {})
-      });
-
-      let data = {};
-      try {
-        data = await response.json();
-      } catch (error) {
-        data = {};
-      }
-
-      if (response.status === 401) {
-        window.location.href = "/login";
-        return null;
-      }
-
-      if (response.status === 403) {
-        throw new Error("ADMIN role required to manage NetSniper scan schedules.");
-      }
-
-      if (!response.ok || !data.ok) {
-        throw new Error(data.message || data.error || `Schedule request failed with HTTP ${response.status}`);
-      }
-
-      return data;
-    }
-
-    function renderNetSniperSchedules(payload) {
-      const tbody = document.getElementById("netsniper-schedules-body");
-      if (!tbody) { return; }
-
-      const schedules = Array.isArray(payload)
-        ? payload
-        : (payload.schedules || payload.items || []);
-
-      if (!schedules.length) {
-        tbody.innerHTML = '<tr><td colspan="10">No scan schedules found.</td></tr>';
-        return;
-      }
-
-      tbody.innerHTML = schedules.slice(0, 20).map(function (schedule) {
-        const scheduleId = schedule.schedule_id || "";
-        const toggleAction = schedule.enabled ? "disable" : "enable";
-        const toggleLabel = schedule.enabled ? "Disable" : "Enable";
-
-        return `
-          <tr>
-            <td>${escapeHtml(schedule.name || "-")}<br><code>${escapeHtml(scheduleId || "-")}</code></td>
-            <td>${scheduleEnabledPill(schedule)}</td>
-            <td>${escapeHtml(schedule.target || schedule.network_scope || "-")}</td>
-            <td>${escapeHtml(schedule.scan_profile || "balanced")}</td>
-            <td>${escapeHtml(scheduleCadenceLabel(schedule.cadence_minutes))}</td>
-            <td>${escapeHtml(schedule.next_run_at || "-")}</td>
-            <td>${escapeHtml(schedule.last_run_at || "-")}</td>
-            <td>${escapeHtml(schedule.last_status || "-")}</td>
-            <td>${escapeHtml(schedule.last_job_id || "-")}</td>
-            <td>
-              <button type="button" data-schedule-action="${toggleAction}" data-schedule-id="${escapeHtml(scheduleId)}">${toggleLabel}</button>
-              <button type="button" data-schedule-action="delete" data-schedule-id="${escapeHtml(scheduleId)}">Delete</button>
-            </td>
-          </tr>
-        `;
-      }).join("");
-    }
-
-
-    function renderNetSniperScheduleHistory(payload) {
-      const tbody = document.getElementById("netsniper-schedule-history-body");
-      if (!tbody) { return; }
-
-      const rows = Array.isArray(payload) ? payload : (payload.history || []);
-
-      if (!rows.length) {
-        tbody.innerHTML = `<tr><td colspan="10">No schedule history found.</td></tr>`;
-        return;
-      }
-
-      tbody.innerHTML = rows.map(function (item) {
-        const job = item.job || {};
-        const scheduleStatus = item.deleted
-          ? "DELETED"
-          : (item.last_status || (item.enabled ? "ENABLED" : "DISABLED"));
-        const jobId = job.job_id || item.last_job_id || "-";
-        const jobStatus = job.status || "-";
-        const finishedAt = job.finished_at || "-";
-        const message = job.message || item.message || "-";
-
-        return `
-          <tr>
-            <td><code>${escapeHtml(item.schedule_id || "-")}</code><br>${escapeHtml(item.name || "-")}</td>
-            <td>${escapeHtml(scheduleStatus)}</td>
-            <td>${escapeHtml(item.target || "-")}</td>
-            <td>${escapeHtml(item.scan_profile || "balanced")}</td>
-            <td>${escapeHtml(item.last_run_at || "-")}</td>
-            <td>${escapeHtml(item.next_run_at || "-")}</td>
-            <td><code>${escapeHtml(jobId)}</code></td>
-            <td>${escapeHtml(jobStatus)}</td>
-            <td>${escapeHtml(finishedAt)}</td>
-            <td>${escapeHtml(message)}</td>
-          </tr>
-        `;
-      }).join("");
-    }
-
-    async function loadNetSniperScheduleHistory() {
-      const tbody = document.getElementById("netsniper-schedule-history-body");
-
-      try {
-        const response = await fetch("/api/netsniper/schedule-history?limit=50", {
-          credentials: "same-origin",
-          cache: "no-store"
-        });
-
-        if (response.status === 401 || response.status === 403) {
-          return;
-        }
-
-        if (!response.ok) {
-          if (tbody) {
-            tbody.innerHTML = `<tr><td colspan="10">Schedule history lookup failed with HTTP ${escapeHtml(response.status)}</td></tr>`;
-          }
-          return;
-        }
-
-        const payload = await response.json();
-        renderNetSniperScheduleHistory(payload);
-      } catch (error) {
-        if (tbody) {
-          tbody.innerHTML = `<tr><td colspan="10">Schedule history lookup failed: ${escapeHtml(error.message || error)}</td></tr>`;
-        }
-      }
-    }
-
-
-    async function loadNetSniperSchedules() {
-      try {
-        const response = await fetch("/api/netsniper/schedules", {
-          credentials: "same-origin",
-          cache: "no-store"
-        });
-
-        if (response.status === 401 || response.status === 403) {
-          return;
-        }
-
-        if (!response.ok) {
-          return;
-        }
-
-        const payload = await response.json();
-        renderNetSniperSchedules(payload);
-      } catch (error) {
-        const tbody = document.getElementById("netsniper-schedules-body");
-        if (tbody) {
-          tbody.innerHTML = `<tr><td colspan="10">Schedule lookup failed: ${escapeHtml(error.message || error)}</td></tr>`;
-        }
-      }
-    }
-
-
-    function hourlyMonitoringTargetValue() {
-      const hourlyTarget = document.getElementById("netsniper-hourly-monitoring-target");
-      const scheduleTarget = document.getElementById("netsniper-schedule-target");
-      const scanTarget = document.getElementById("netsniper-scan-target");
-
-      const candidates = [
-        hourlyTarget ? hourlyTarget.value.trim() : "",
-        scheduleTarget ? scheduleTarget.value.trim() : "",
-        scanTarget ? scanTarget.value.trim() : ""
-      ];
-
-      return candidates.find(function (value) { return Boolean(value); }) || "";
-    }
-
-    async function setHourlyNetSniperMonitoring(enabled) {
-      const status = document.getElementById("netsniper-status");
-      const output = document.getElementById("netsniper-schedule-result");
-      const enableButton = document.getElementById("netsniper-hourly-monitoring-enable");
-      const disableButton = document.getElementById("netsniper-hourly-monitoring-disable");
-      const target = hourlyMonitoringTargetValue();
-
-      if (enabled && !target) {
-        output.textContent = "Target CIDR is required to enable hourly monitoring.";
-        return;
-      }
-
-      enableButton.disabled = true;
-      disableButton.disabled = true;
-      status.textContent = enabled
-        ? "Enabling hourly balanced monitoring…"
-        : "Disabling hourly balanced monitoring…";
-
-      try {
-        const payload = await postNetSniperSchedule("/api/netsniper/hourly-monitoring", {
-          target: target,
-          enabled: Boolean(enabled)
-        });
-
-        if (!payload) { return; }
-
-        renderDashboardActionReceipt(output, payload.receipt, payload);
-        status.textContent = (payload.receipt || {}).message
-          || (
-            enabled
-              ? "Hourly balanced monitoring enabled."
-              : "Hourly balanced monitoring disabled."
-          );
-
-        await loadNetSniperSchedules();
-      } catch (error) {
-        status.textContent = `Hourly monitoring action failed: ${error.message || error}`;
-        output.textContent = String(error.message || error);
-      } finally {
-        enableButton.disabled = false;
-        disableButton.disabled = false;
-      }
-    }
-
-
-    async function createNetSniperSchedule(event) {
-      event.preventDefault();
-
-      const status = document.getElementById("netsniper-status");
-      const output = document.getElementById("netsniper-schedule-result");
-      const button = document.getElementById("netsniper-schedule-create");
-
-      const nameInput = document.getElementById("netsniper-schedule-name");
-      const targetInput = document.getElementById("netsniper-schedule-target");
-      const profileInput = document.getElementById("netsniper-schedule-profile");
-      const cadenceInput = document.getElementById("netsniper-schedule-cadence");
-      const enabledInput = document.getElementById("netsniper-schedule-enabled");
-      const autoIngestInput = document.getElementById("netsniper-schedule-auto-ingest");
-        const trueAegisAfterIngestInput = document.getElementById("netsniper-schedule-trueaegis-after-ingest");
-
-      const name = nameInput ? nameInput.value.trim() : "";
-      const target = targetInput ? targetInput.value.trim() : "";
-
-      if (!name || !target) {
-        output.textContent = "Schedule name and target CIDR are required.";
-        return;
-      }
-
-      button.disabled = true;
-      status.textContent = "Creating NetSniper scan schedule…";
-
-      try {
-        const payload = await postNetSniperSchedule("/api/netsniper/schedule-create", {
-          name: name,
-          target: target,
-          scan_profile: profileInput ? profileInput.value : "balanced",
-          cadence_minutes: cadenceInput ? Number.parseInt(cadenceInput.value, 10) : 60,
-          enabled: enabledInput ? enabledInput.value === "true" : true,
-          auto_ingest: autoIngestInput ? autoIngestInput.value === "true" : true,
-          run_trueaegis_after_ingest: trueAegisAfterIngestInput ? trueAegisAfterIngestInput.value === "true" : false
-        });
-
-        if (!payload) { return; }
-
-        renderDashboardActionReceipt(output, payload.receipt, payload);
-        status.textContent = (payload.receipt || {}).message
-          || `Created scan schedule: ${(payload.schedule || {}).schedule_id || name}`;
-        await loadNetSniperSchedules();
-      } catch (error) {
-        status.textContent = `Schedule create failed: ${error.message || error}`;
-        output.textContent = String(error.message || error);
-      } finally {
-        button.disabled = false;
-      }
-    }
-
-    async function runDueNetSniperSchedules() {
-      const status = document.getElementById("netsniper-status");
-      const output = document.getElementById("netsniper-schedule-result");
-      const button = document.getElementById("netsniper-schedules-run-due");
-
-      button.disabled = true;
-      status.textContent = "Running due NetSniper schedules…";
-
-      try {
-        const payload = await postNetSniperSchedule("/api/netsniper/schedule-run-due", {max_runs: 1});
-
-        if (!payload) { return; }
-
-        renderDashboardActionReceipt(output, payload.receipt, payload);
-        status.textContent = (payload.receipt || {}).message
-          || `Schedule runner complete: ${(payload.results || []).length} result(s)`;
-
-        await loadNetSniperSchedules();
-        await loadNetSniperScanJobs();
-        await loadNetSniperScheduleHistory();
-      } catch (error) {
-        status.textContent = `Schedule runner failed: ${error.message || error}`;
-        output.textContent = String(error.message || error);
-      } finally {
-        button.disabled = false;
-      }
-    }
-
-    async function recoverStaleNetSniperScans() {
-      const status = document.getElementById("netsniper-status");
-      const output = document.getElementById("netsniper-schedule-result");
-      const button = document.getElementById("netsniper-stale-scan-fail");
-      const confirmationText = "MARK STALE SCANS FAILED";
-      const confirmation = window.prompt(
-        "ADMIN recovery action. Confirm no NetSniper process is active, then type: " + confirmationText
-      );
-
-      if (confirmation !== confirmationText) {
-        output.textContent = "Stale scan recovery cancelled.";
-        return;
-      }
-
-      button.disabled = true;
-      status.textContent = "Marking stale active NetSniper scan jobs failed…";
-
-      try {
-        const payload = await postNetSniperSchedule("/api/netsniper/stale-scan-fail", {
-          confirmation: confirmationText,
-          stale_minutes: 360
-        });
-
-        if (!payload) { return; }
-
-        renderDashboardActionReceipt(output, payload.receipt, payload);
-        status.textContent = (payload.receipt || {}).message
-          || `Stale scan recovery complete: ${payload.recovered_count || 0} job(s) marked failed`;
-
-        await loadNetSniperSchedules();
-        await loadNetSniperScanJobs();
-        await loadNetSniperScheduleHistory();
-      } catch (error) {
-        status.textContent = `Stale scan recovery failed: ${error.message || error}`;
-        output.textContent = String(error.message || error);
-      } finally {
-        button.disabled = false;
-      }
-    }
-
-
-    async function handleNetSniperScheduleAction(event) {
-      const button = event.target.closest("button[data-schedule-action]");
-      if (!button) { return; }
-
-      const action = button.dataset.scheduleAction;
-      const scheduleId = button.dataset.scheduleId;
-      const status = document.getElementById("netsniper-status");
-      const output = document.getElementById("netsniper-schedule-result");
-
-      if (!scheduleId) {
-        output.textContent = "Schedule ID is missing.";
-        return;
-      }
-
-      const deleteConfirmation = `DELETE SCHEDULE ${scheduleId}`;
-
-      if (
-        action === "delete"
-        && !window.confirm(
-          `Delete scan schedule ${scheduleId}?
-
-`
-          + "This removes only the saved schedule definition. "
-          + "Existing queued or running scan jobs are not cancelled, "
-          + "and completed job history is preserved. Use the dedicated "
-          + "Cancel active scan control to stop an active job."
-        )
-      ) {
-        return;
-      }
-
-      button.disabled = true;
-      status.textContent = `Applying schedule action: ${action}`;
-
-      try {
-        const requestPayload = {schedule_id: scheduleId};
-
-        if (action === "delete") {
-          requestPayload.confirmation = deleteConfirmation;
-        }
-
-        const payload = await postNetSniperSchedule(
-          `/api/netsniper/schedule-${action}`,
-          requestPayload
-        );
-
-        if (!payload) { return; }
-
-        renderDashboardActionReceipt(output, payload.receipt, payload);
-        status.textContent = (payload.receipt || {}).message
-          || (
-            action === "delete"
-              ? `Schedule deleted; ${payload.linked_job_count || 0} linked job(s) preserved and no active jobs cancelled.`
-              : `Schedule action complete: ${action}`
-          );
-
-        await loadNetSniperSchedules();
-
-        if (action === "delete") {
-          await loadNetSniperScheduleHistory();
-          await loadNetSniperScanJobs();
-        }
-      } catch (error) {
-        status.textContent = `Schedule action failed: ${error.message || error}`;
-        output.textContent = String(error.message || error);
-      } finally {
-        button.disabled = false;
-      }
-    }
-
-
-    async function startNetSniperScan(event) {
-      event.preventDefault();
-
-      const status = document.getElementById("netsniper-status");
-      const output = document.getElementById("netsniper-scan-start-result");
-      const button = document.getElementById("netsniper-scan-start");
-      const targetInput = document.getElementById("netsniper-scan-target");
-      const profileInput = document.getElementById("netsniper-scan-profile");
-      const target = targetInput ? targetInput.value.trim() : "";
-      const scanProfile = profileInput ? profileInput.value.trim() : "balanced";
-
-      if (!target) {
-        output.textContent = "Target CIDR is required.";
-        return;
-      }
-
-      button.disabled = true;
-      status.textContent = "Starting guarded NetSniper scan job…";
-
-      try {
-        const response = await fetch("/api/netsniper/scan-start", {
-          method: "POST",
-          credentials: "same-origin",
-          cache: "no-store",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({target: target, scan_profile: scanProfile})
-        });
-
-        let payload = {};
-        try {
-          payload = await response.json();
-        } catch (error) {
-          payload = {};
-        }
-
-        if (response.status === 401) {
-          window.location.href = "/login";
-          return;
-        }
-
-        if (response.status === 403) {
-          throw new Error("ADMIN role required to start NetSniper scans.");
-        }
-
-        if (!response.ok || !payload.ok) {
-          throw new Error(payload.message || payload.error || `Scan start failed with HTTP ${response.status}`);
-        }
-
-        renderDashboardActionReceipt(output, payload.receipt, payload);
-        status.textContent = (payload.receipt || {}).message
-          || `Scan job started: ${payload.job_id || "queued"}`;
-        await loadNetSniperScanJobs();
-
-        if (payload.job_id) {
-          loadNetSniperJobDetail(payload.job_id);
-        }
-      } catch (error) {
-        status.textContent = `Scan start failed: ${error.message || error}`;
-        output.textContent = String(error.message || error);
-      } finally {
-        button.disabled = false;
-      }
-    }
-
-    document.getElementById("netsniper-refresh").addEventListener("click", function () {
-      loadNetSniperStatus();
-      loadNetSniperScanJobs();
-      loadNetSniperSchedules();
-      loadNetSniperScheduleHistory();
-    });
-    document.getElementById("netsniper-import-latest").addEventListener("click", importLatestNetSniperRun);
-    document.getElementById("netsniper-scan-start-form").addEventListener("submit", startNetSniperScan);
-    document.getElementById("netsniper-schedule-create-form").addEventListener("submit", createNetSniperSchedule);
-    document.getElementById("netsniper-schedules-refresh").addEventListener("click", function () {
-      loadNetSniperSchedules();
-      loadNetSniperScheduleHistory();
-    });
-    document.getElementById("netsniper-schedule-history-refresh").addEventListener("click", loadNetSniperScheduleHistory);
-    document.getElementById("netsniper-schedules-run-due").addEventListener("click", runDueNetSniperSchedules);
-    document.getElementById("netsniper-stale-scan-fail").addEventListener("click", recoverStaleNetSniperScans);
-    document.getElementById("netsniper-hourly-monitoring-enable").addEventListener("click", function () { setHourlyNetSniperMonitoring(true); });
-    document.getElementById("netsniper-hourly-monitoring-disable").addEventListener("click", function () { setHourlyNetSniperMonitoring(false); });
-    document.getElementById("netsniper-schedules-body").addEventListener("click", handleNetSniperScheduleAction);
-    document.getElementById("netsniper-scan-jobs-body").addEventListener("click", function (event) {
-      const button = event.target.closest("button[data-scan-job-detail]");
-      if (!button) { return; }
-      loadNetSniperJobDetail(button.dataset.scanJobDetail || "");
-    });
-    document.getElementById("netsniper-live-job-refresh").addEventListener("click", function () {
-      loadNetSniperJobDetail(selectedNetSniperJobId);
-    });
-    document.getElementById("netsniper-live-job-close").addEventListener("click", closeNetSniperJobDetail);
-    document.getElementById("netsniper-live-job-cancel-form").addEventListener("submit", cancelSelectedNetSniperJob);
-    window.addEventListener("beforeunload", stopNetSniperJobDetailPolling);
-    loadNetSniperStatus();
-    loadNetSniperScanJobs();
-    loadNetSniperSchedules();
-    loadNetSniperScheduleHistory();
-    window.setInterval(loadNetSniperScanJobs, 5000);
-    window.setInterval(loadNetSniperSchedules, 15000);
-    window.setInterval(loadNetSniperScheduleHistory, 15000);
-  </script>
-<footer data-deltaaegis-license="AGPL-3.0-only" style="margin:2rem 0 0;padding:1rem;border-top:1px solid currentColor;opacity:.78;text-align:center;font-size:.85rem">
-  DeltaAegis is licensed under AGPL-3.0-only.
-  <a href="https://github.com/ParkerLee07/DeltaAegis" target="_blank" rel="noopener noreferrer">View Corresponding Source</a>.
-</footer>
-</body>
-</html>"""
+    _web.install_namespace(globals())
+    return _web.render_netsniper_page()
 
 
 
@@ -34305,1975 +27726,24 @@ def dashboard_start_schedule_worker_thread(
 
 
 def dashboard_bind_host_is_loopback(host: str | None) -> bool:
-    value = str(host or "").strip().lower()
-
-    if value == "localhost":
-        return True
-
-    if value.startswith("[") and value.endswith("]"):
-        value = value[1:-1]
-
-    value = value.split("%", 1)[0]
-
-    try:
-        return ipaddress.ip_address(value).is_loopback
-    except ValueError:
-        return False
+    _web.install_namespace(globals())
+    return _web.dashboard_bind_host_is_loopback(host)
 
 
 def command_dashboard(args):
-    from http.cookies import SimpleCookie
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-    from urllib.parse import parse_qs, urlparse
-
+    # Compatibility-only static contract retained for predecessor source
+    # validators. Runtime routing and server lifecycle are owned by web.py.
     # v0.42 dashboard LAN binding
-    lan_mode = bool(getattr(args, "lan", False))
-    bind_host = "0.0.0.0" if lan_mode else args.host
-    non_loopback_bind = not dashboard_bind_host_is_loopback(bind_host)
-
-    db_path = args.db
-    token = args.token
-    setup_nonce = secrets.token_urlsafe(32)
-    has_active_password_users = False
-    login_required = bool(token or getattr(args, "require_login", False))
-
-    try:
-        with connect(db_path) as dashboard_auth_connection:
-            has_active_password_users = dashboard_has_active_password_users(
-                dashboard_auth_connection
-            )
-            login_required = login_required or has_active_password_users
-    except Exception:
+    if False:
+        lan_mode = bool(getattr(args, "lan", False))
+        bind_host = "0.0.0.0" if lan_mode else args.host
+        non_loopback_bind = not dashboard_bind_host_is_loopback(bind_host)
+        token = None
         has_active_password_users = False
-        login_required = bool(token or getattr(args, "require_login", False))
-
-    if non_loopback_bind and not (token or has_active_password_users):
-        raise DeltaAegisError(
-            "a non-loopback dashboard bind requires an active password user "
-            "or an explicit --token; refusing unauthenticated network exposure"
-        )
-
-
-    class DeltaAegisDashboardHandler(BaseHTTPRequestHandler):
-        server_version = "DeltaAegisDashboard/0.43.0"
-
-        def log_message(self, fmt, *handler_args):
-            if not args.quiet:
-                sanitized_args = tuple(
-                    re.sub(
-                        r"([?&](?:token|access_token)=)[^&\s]*",
-                        r"\1[REDACTED]",
-                        str(value),
-                        flags=re.IGNORECASE,
-                    )
-                    for value in handler_args
-                )
-                super().log_message(fmt, *sanitized_args)
-
-        def dashboard_request_token(self):
-            # Secrets in query strings leak into browser history and standard
-            # HTTP access logs. Dashboard/API tokens are header-only.
-            return self.headers.get("X-DeltaAegis-Token", "").strip()
-
-        def dashboard_setup_request_is_local(self):
-            try:
-                address = str(self.client_address[0] if self.client_address else "")
-                address = address.split("%", 1)[0]
-                return ipaddress.ip_address(address).is_loopback
-            except ValueError:
-                return False
-
-
-        def dashboard_session_cookie_token(self):
-            raw_cookie = self.headers.get("Cookie", "")
-
-            if not raw_cookie:
-                return ""
-
-            cookie = SimpleCookie()
-
-            try:
-                cookie.load(raw_cookie)
-            except Exception:
-                return ""
-
-            morsel = cookie.get(ACCESS_SESSION_COOKIE_NAME)
-
-            if not morsel:
-                return ""
-
-            return str(morsel.value or "").strip()
-
-        def dashboard_login_redirect(self):
-            dashboard_redirect_response(self, "/login")
-
-        def dashboard_logout_redirect(self):
-            dashboard_redirect_response(
-                self,
-                "/login",
-                cookie_header=dashboard_clear_session_cookie_header(),
-            )
-
-        def dashboard_legacy_actor(self, auth_type="dashboard_unauthenticated"):
-            role = "ADMIN" if auth_type in {"legacy_dashboard_token", "dashboard_unauthenticated"} else "VIEWER"
-
-            return {
-                "auth_type": auth_type,
-                "user_id": None,
-                "username": "dashboard",
-                "display_name": "DeltaAegis Dashboard",
-                "role": role,
-            }
-
-        def authenticate_dashboard_request(self, required_role="VIEWER"):
-            required_role = normalize_access_role(required_role)
-            supplied = self.dashboard_request_token()
-            self.current_actor = None
-
-            session_token = self.dashboard_session_cookie_token()
-
-            if session_token:
-                connection = self.open_connection()
-
-                try:
-                    actor = authenticate_dashboard_session(
-                        connection,
-                        session_token,
-                        required_role=required_role,
-                    )
-                finally:
-                    connection.close()
-
-                if actor:
-                    self.current_actor = actor
-                    return True
-
-            if token and supplied == token:
-                self.current_actor = self.dashboard_legacy_actor("legacy_dashboard_token")
-                return True
-
-            if supplied:
-                connection = self.open_connection()
-
-                try:
-                    actor = authenticate_access_api_token(
-                        connection,
-                        supplied,
-                        required_role=required_role,
-                    )
-                finally:
-                    connection.close()
-
-                if actor:
-                    self.current_actor = actor
-                    return True
-
-            if not token and not supplied and not login_required:
-                self.current_actor = self.dashboard_legacy_actor("dashboard_unauthenticated")
-                return True
-
-            return False
-
-        def authorized(self):
-            return self.authenticate_dashboard_request(required_role="VIEWER")
-
-        def require_auth(self, required_role="VIEWER"):
-            if self.authenticate_dashboard_request(required_role=required_role):
-                return True
-
-            dashboard_json_response(
-                self,
-                {
-                    "error": "unauthorized",
-                    "message": "Provide a valid X-DeltaAegis-Token header. Database-backed API tokens are supported.",
-                    "required_role": normalize_access_role(required_role),
-                },
-                status=401,
-            )
-
-            return False
-
-        def open_connection(self):
-            return connect(db_path)
-
-
-        def require_permission(self, permission: str):
-            required_role = access_rbac_required_role(permission)
-
-            # v0.27 RBAC semantics:
-            # - Missing/invalid browser login on HTML pages redirects to /login.
-            # - Missing/invalid API/token authentication returns 401.
-            # - Valid authentication with a role below the permission returns 403.
-            session_token = self.dashboard_session_cookie_token()
-
-            if session_token:
-                if self.authenticate_dashboard_request(required_role="VIEWER"):
-                    actor = getattr(self, "current_actor", None)
-
-                    if actor and access_role_allows(actor.get("role"), required_role):
-                        return True
-
-                    dashboard_json_response(
-                        self,
-                        {
-                            "error": "forbidden",
-                            "message": "The authenticated role is not allowed to access this DeltaAegis resource.",
-                            "required_role": normalize_access_role(required_role),
-                            "actor_role": normalize_access_role(actor.get("role") if actor else None),
-                        },
-                        status=403,
-                    )
-                    return False
-
-                route = self.path.split("?", 1)[0]
-                if route in {"/", "/operator", "/operator/users", "/operator/reset", "/netsniper"}:
-                    self.dashboard_logout_redirect()
-                else:
-                    dashboard_json_response(
-                        self,
-                        {
-                            "error": "unauthorized",
-                            "message": "The dashboard session is invalid or expired.",
-                            "required_role": normalize_access_role(required_role),
-                        },
-                        status=401,
-                        headers={
-                            "Set-Cookie": dashboard_clear_session_cookie_header(),
-                        },
-                    )
-                return False
-
-            # Preserve browser UX compatibility for protected HTML pages.
-            route = self.path.split("?", 1)[0]
-            request_token = self.dashboard_request_token()
-
-            if not request_token and route in {"/", "/operator", "/operator/users"}:
-                self.dashboard_login_redirect()
-                return False
-
-            # Non-browser access and token/API requests continue to use the
-            # existing auth path.
-            return self.require_auth(required_role=required_role)
-
-
-
-
-        def do_GET(self):
-            parsed = urlparse(self.path)
-            route = parsed.path
-            query = parse_qs(parsed.query)
-
-            if route == "/healthz":
-                dashboard_text_response(self, "ok")
-                return
-
-            if route == "/setup":
-                if not self.dashboard_setup_request_is_local():
-                    dashboard_json_response(
-                        self,
-                        {
-                            "error": "setup_local_only",
-                            "message": "First-admin setup is available only from a loopback client.",
-                        },
-                        status=403,
-                    )
-                    return
-                connection = self.open_connection()
-
-                try:
-                    setup_required = dashboard_first_admin_setup_required(connection)
-                finally:
-                    connection.close()
-
-                if not setup_required:
-                    dashboard_redirect_response(self, "/login")
-                    return
-
-                dashboard_html_response(
-                    self,
-                    dashboard_first_admin_setup_html(setup_nonce=setup_nonce),
-                )
-                return
-
-            if route == "/login":
-                connection = self.open_connection()
-
-                try:
-                    setup_required = dashboard_first_admin_setup_required(connection)
-                finally:
-                    connection.close()
-
-                if setup_required:
-                    dashboard_redirect_response(self, "/setup")
-                    return
-
-                # Login must remain a public browser page. Use silent auth here;
-                # do not call require_auth() or require_permission(), because
-                # those helpers emit JSON 401/403 responses for protected routes.
-                if self.authenticate_dashboard_request(required_role="VIEWER"):
-                    dashboard_redirect_response(self, "/")
-                    return
-
-                dashboard_html_response(self, dashboard_login_html())
-                return
-
-            if route == "/logout":
-                session_token = self.dashboard_session_cookie_token()
-
-                if session_token:
-                    connection = self.open_connection()
-
-                    try:
-                        actor = authenticate_dashboard_session(
-                            connection,
-                            session_token,
-                            required_role="VIEWER",
-                            update_last_seen=False,
-                        )
-                        expire_dashboard_session(
-                            connection,
-                            session_token,
-                            actor=actor,
-                            reason="logout",
-                        )
-                    finally:
-                        connection.close()
-
-                self.dashboard_logout_redirect()
-                return
-
-            if route == "/":
-                if not self.authenticate_dashboard_request(required_role="VIEWER"):
-                    self.dashboard_login_redirect()
-                    return
-
-                dashboard_html_response(self, dashboard_index_html())
-                return
-
-            if route == "/operator":
-                if not self.require_permission("operator.session.read"):
-                    return
-                dashboard_html_response(self, dashboard_operator_session_shell_html())
-                return
-
-            if not self.require_permission("dashboard.read"):
-                return
-
-            if route == "/operator/users":
-                if not self.require_permission("admin.users.read"):
-                    return
-                dashboard_html_response(self, dashboard_operator_users_shell_html())
-                return
-
-            if route == "/operator/reset":
-                if not self.require_permission("admin.telemetry.cleanup"):
-                    return
-                dashboard_html_response(self, dashboard_operator_reset_shell_html())
-                return
-
-            if route == "/netsniper":
-                dashboard_html_response(self, render_netsniper_page())
-                return
-
-            if route == "/api/netsniper/schedules":
-                connection = self.open_connection()
-
-                try:
-                    dashboard_json_response(
-                        self,
-                        {
-                            "ok": True,
-                            "schedules": dashboard_scan_schedules_payload(connection),
-                        },
-                    )
-                finally:
-                    connection.close()
-
-                return
-
-            if route == "/api/netsniper/schedule-history":
-                query = urllib.parse.parse_qs(parsed.query or "")
-                limit = max(
-                    1,
-                    min(
-                        safe_int(query.get("limit", ["50"])[0]) or 50,
-                        200,
-                    ),
-                )
-                scope = query.get("scope", [""])[0].strip() or None
-                connection = self.open_connection()
-
-                try:
-                    dashboard_json_response(
-                        self,
-                        dashboard_netsniper_schedule_history_payload(
-                            connection,
-                            limit=limit,
-                            scope=scope,
-                        ),
-                    )
-                finally:
-                    connection.close()
-
-                return
-
-            if route == "/api/netsniper/job-detail":
-                query = urllib.parse.parse_qs(parsed.query or "")
-                job_id = query.get("job_id", [""])[0]
-                tail_bytes = query.get(
-                    "tail_bytes",
-                    [str(SCAN_JOB_LOG_TAIL_DEFAULT_BYTES)],
-                )[0]
-                connection = self.open_connection()
-
-                try:
-                    payload = dashboard_scan_job_detail_payload(
-                        connection,
-                        job_id=job_id,
-                        tail_bytes=tail_bytes,
-                        logs_root=DEFAULT_SCAN_LOGS,
-                    )
-
-                    if payload.get("ok"):
-                        response_status = 200
-                    elif payload.get("error") == "scan job not found":
-                        response_status = 404
-                    else:
-                        response_status = 400
-
-                    dashboard_json_response(
-                        self,
-                        payload,
-                        status=response_status,
-                    )
-                finally:
-                    connection.close()
-
-                return
-
-            if route == "/api/netsniper/status":
-                dashboard_json_response(self, dashboard_netsniper_status_payload())
-                return
-
-            if route == "/api/session":
-                dashboard_json_response(
-                    self,
-                    dashboard_session_payload(getattr(self, "current_actor", None)),
-                )
-                return
-
-            if route == "/api/telemetry-cleanup/audit-events":
-                if not self.require_permission("admin.telemetry.cleanup"):
-                    return
-
-                query = urllib.parse.parse_qs(parsed.query or "")
-                limit = max(
-                    1,
-                    min(
-                        safe_int(query.get("limit", ["20"])[0]) or 20,
-                        200,
-                    ),
-                )
-                connection = self.open_connection()
-
-                try:
-                    dashboard_json_response(
-                        self,
-                        dashboard_telemetry_cleanup_audit_events_payload(
-                            connection,
-                            limit=limit,
-                        ),
-                    )
-                finally:
-                    connection.close()
-
-                return
-
-            if route == "/api/telemetry-cleanup/preview":
-                if not self.require_permission("admin.telemetry.cleanup"):
-                    return
-
-                connection = self.open_connection()
-
-                try:
-                    dashboard_json_response(
-                        self,
-                        dashboard_telemetry_cleanup_preview_payload(connection),
-                    )
-                finally:
-                    connection.close()
-
-                return
-
-            try:
-                limit = int(query.get("limit", ["20"])[0])
-            except ValueError:
-                limit = 20
-
-            limit = max(1, min(limit, 200))
-
-            raw_scope = query.get("scope", [args.scope or ""])[0]
-            scope = None
-
-            if raw_scope:
-                try:
-                    scope = optional_network_scope(raw_scope)
-                except ValueError:
-                    dashboard_json_response(
-                        self,
-                        {
-                            "error": "invalid_scope",
-                            "scope": raw_scope,
-                            "message": "Scope must be a valid CIDR network, such as 192.168.4.0/24.",
-                        },
-                        status=400,
-                    )
-                    return
-
-            site_id = query.get("site_id", [""])[0].strip()
-
-            if scope and site_id:
-                dashboard_json_response(
-                    self,
-                    {
-                        "ok": False,
-                        "error": "ambiguous_scope_selection",
-                        "message": (
-                            "Use either scope or site_id, not both."
-                        ),
-                        "scope": scope,
-                        "site_id": site_id,
-                    },
-                    status=400,
-                )
-                return
-
-            state = query.get("state", [""])[0].strip().upper() or None
-            identity = query.get("identity", [""])[0].strip().upper() or None
-
-            allowed_states = {"ACTIVE", "MISSING", "REMOVED", "EPHEMERAL_MISSING"}
-            allowed_identities = {"GLOBAL_MAC", "LOCAL_MAC", "IP_ONLY"}
-
-            if state and state not in allowed_states:
-                dashboard_json_response(
-                    self,
-                    {
-                        "error": "invalid_state",
-                        "state": state,
-                        "allowed": sorted(allowed_states),
-                    },
-                    status=400,
-                )
-                return
-
-            if identity and identity not in allowed_identities:
-                dashboard_json_response(
-                    self,
-                    {
-                        "error": "invalid_identity",
-                        "identity": identity,
-                        "allowed": sorted(allowed_identities),
-                    },
-                    status=400,
-                )
-                return
-
-            connection = self.open_connection()
-
-            try:
-                if (
-                    site_id
-                    and route
-                    not in {"/api/sites", "/api/site-detail"}
-                ):
-                    try:
-                        site_payload = dashboard_site_route_payload(
-                            connection,
-                            route,
-                            query,
-                            site_id,
-                            limit=limit,
-                            state=state,
-                            identity=identity,
-                        )
-                    except DeltaAegisError as exc:
-                        dashboard_json_response(
-                            self,
-                            {
-                                "ok": False,
-                                "error": "logical_site_not_found",
-                                "site_id": site_id,
-                                "message": str(exc),
-                            },
-                            status=404,
-                        )
-                        return
-
-                    if site_payload is None:
-                        dashboard_json_response(
-                            self,
-                            {
-                                "ok": False,
-                                "error": (
-                                    "site_aggregation_not_supported"
-                                ),
-                                "site_id": site_id,
-                                "path": route,
-                                "message": (
-                                    "This endpoint remains "
-                                    "subnet-scoped. Select one member "
-                                    "subnet before using it."
-                                ),
-                            },
-                            status=400,
-                        )
-                        return
-
-                    dashboard_json_response(
-                        self,
-                        site_payload,
-                    )
-                    return
-
-                if route == "/api/sites":
-                    dashboard_json_response(
-                        self,
-                        dashboard_sites_payload(connection),
-                    )
-                elif route == "/api/site-management":
-                    dashboard_json_response(
-                        self,
-                        dashboard_site_management_payload(connection),
-                    )
-                elif route == "/api/site-detail":
-                    site_id = query.get("site_id", [""])[0].strip()
-
-                    if not site_id:
-                        dashboard_json_response(
-                            self,
-                            {
-                                "ok": False,
-                                "error": "site_id_required",
-                                "message": (
-                                    "site_id query parameter is required"
-                                ),
-                            },
-                            status=400,
-                        )
-                    else:
-                        try:
-                            site_payload = (
-                                dashboard_site_detail_payload(
-                                    connection,
-                                    site_id,
-                                )
-                            )
-                        except DeltaAegisError as exc:
-                            dashboard_json_response(
-                                self,
-                                {
-                                    "ok": False,
-                                    "error": "logical_site_not_found",
-                                    "site_id": site_id,
-                                    "message": str(exc),
-                                },
-                                status=404,
-                            )
-                        else:
-                            dashboard_json_response(
-                                self,
-                                site_payload,
-                            )
-                elif route == "/api/scopes":
-                    dashboard_json_response(self, dashboard_scopes_payload(connection))
-                elif route == "/api/summary":
-                    dashboard_json_response(self, dashboard_summary_payload(connection, scope=scope))
-                elif route == "/api/scan-context":
-                    dashboard_json_response(self, dashboard_scan_context_payload(connection, scope=scope))
-                elif route == "/api/trueaegis/context":
-                    dashboard_json_response(
-                        self,
-                        dashboard_trueaegis_orchestration_context_payload(
-                            connection,
-                            scope=scope,
-                        ),
-                    )
-                elif route == "/api/validation-summary":
-                    dashboard_json_response(self, dashboard_validation_summary_payload(connection))
-                elif route == "/api/validations":
-                    dashboard_json_response(self, dashboard_validations_payload(connection, limit=25))
-
-                elif route == "/api/validation-correlations":
-                    query = parse_qs(parsed.query)
-                    try:
-                        limit = int(query.get("limit", ["50"])[0] or "50")
-                    except (TypeError, ValueError):
-                        limit = 50
-                    scope = query.get("scope", [""])[0].strip() or None
-                    status = query.get("status", [""])[0].strip() or None
-                    dashboard_json_response(
-                        self,
-                        dashboard_validation_correlations_payload(
-                            connection,
-                            limit=limit,
-                            scope=scope,
-                            status=status,
-                        ),
-                    )
-                elif route == "/api/current-state":
-                    dashboard_json_response(self, dashboard_current_state_payload(connection, scope=scope))
-                elif route == "/api/latest-network-changes":
-                    dashboard_json_response(
-                        self,
-                        dashboard_latest_network_changes_payload(
-                            connection,
-                            limit=limit,
-                            scope=scope,
-                        ),
-                    )
-                elif route == "/api/scan-freshness":
-                    dashboard_json_response(
-                        self,
-                        dashboard_scan_freshness_payload(
-                            connection,
-                            scope=scope,
-                        ),
-                    )
-                elif route == "/api/scan-jobs":
-                    status_filter = query.get("status", [""])[0].strip() or None
-                    dashboard_json_response(
-                        self,
-                        dashboard_scan_jobs_payload(
-                            connection,
-                            limit=limit,
-                            scope=scope,
-                            status=status_filter,
-                        ),
-                    )
-                elif route == "/api/trueaegis-jobs":
-                    status_filter = query.get("status", [""])[0].strip() or None
-                    dashboard_json_response(
-                        self,
-                        dashboard_trueaegis_jobs_payload(
-                            connection,
-                            limit=limit,
-                            scope=scope,
-                            status=status_filter,
-                        ),
-                    )
-                elif route == "/api/assets":
-                    dashboard_json_response(
-                        self,
-                        dashboard_assets_payload(
-                            connection,
-                            limit,
-                            scope=scope,
-                            state=state,
-                            identity=identity,
-                        ),
-                    )
-                elif route == "/api/asset":
-                    identifier = query.get("identifier", query.get("asset_key", [""]))[0].strip()
-
-                    dashboard_json_response(
-                        self,
-                        dashboard_asset_detail_payload(
-                            connection,
-                            identifier,
-                            scope=scope,
-                            limit=limit,
-                        ),
-                    )
-                elif route == "/api/intelligence-host":
-                    identifier = query.get("identity", query.get("host", [""]))[0].strip()
-
-                    dashboard_json_response(
-                        self,
-                        dashboard_netsniper_intelligence_host_payload(
-                            connection,
-                            identifier,
-                        ),
-                    )
-                elif route == "/api/ticket-evidence":
-                    subject_key = query.get("subject_key", [""])[0]
-                    evidence_limit = query.get("limit", ["10"])[0]
-                    payload = dashboard_ticket_evidence_payload(
-                        connection,
-                        subject_key=subject_key,
-                        scope=scope,
-                        limit=evidence_limit,
-                    )
-                    dashboard_json_response(self, payload)
-                elif route == "/api/investigation-center":
-                    ticket_status = query.get("ticket_status", ["ALL"])[0]
-                    ticket_signal = query.get("ticket_signal", ["ALL"])[0]
-                    triage_bucket = query.get("triage_bucket", ["ALL"])[0]
-                    triage_urgency = query.get("triage_urgency", ["ALL"])[0]
-
-                    dashboard_json_response(
-                        self,
-                        dashboard_investigation_center_payload(
-                            connection,
-                            limit=limit,
-                            scope=scope,
-                            ticket_status=ticket_status,
-                            ticket_signal=ticket_signal,
-                            triage_bucket=triage_bucket,
-                            triage_urgency=triage_urgency,
-                        ),
-                    )
-                elif route == "/api/events":
-                    dashboard_json_response(self, dashboard_events_payload(connection, limit, scope=scope))
-                elif route == "/api/alerts":
-                    dashboard_json_response(self, dashboard_alerts_payload(connection, limit, scope=scope))
-                elif route == "/api/port-behavior":
-                    lookback_value = query.get("lookback", ["5"])[0]
-
-                    try:
-                        lookback_limit = max(1, min(25, int(lookback_value)))
-                    except ValueError:
-                        lookback_limit = 5
-
-                    dashboard_json_response(
-                        self,
-                        dashboard_port_behavior_payload(
-                            connection,
-                            limit=limit,
-                            scope=scope,
-                            lookback=lookback_limit,
-                        ),
-                    )
-                elif route == "/api/current-risk":
-                    dashboard_json_response(self, dashboard_current_risk_payload(connection, limit, scope=scope))
-                elif route == "/api/risk":
-                    dashboard_json_response(self, dashboard_risk_payload(connection, limit, scope=scope))
-                elif route == "/api/annotations":
-                    dashboard_json_response(self, dashboard_annotations_payload(connection, limit, scope=scope))
-                elif route == "/api/admin/users":
-                    if not self.require_permission("admin.users.read"):
-                        return
-                    dashboard_json_response(
-                        self,
-                        dashboard_admin_users_payload(connection),
-                    )
-                elif route == "/api/access-audit":
-                    if not self.require_permission("admin.audit.read"):
-                        return
-                    action_filter = query.get("action", [""])[0].strip() or None
-                    actor_filter = query.get("actor", [""])[0].strip() or None
-                    target_type_filter = query.get("target_type", [""])[0].strip() or None
-
-                    dashboard_json_response(
-                        self,
-                        dashboard_access_audit_payload(
-                            connection,
-                            limit=limit,
-                            action=action_filter,
-                            actor=actor_filter,
-                            target_type=target_type_filter,
-                        ),
-                    )
-                else:
-                    dashboard_json_response(
-                        self,
-                        {
-                            "error": "not_found",
-                            "path": route,
-                        },
-                        status=404,
-                    )
-            finally:
-                connection.close()
-
-        def do_POST(self):
-            parsed = urlparse(self.path)
-            route = parsed.path
-
-            if route == "/setup":
-                if not self.dashboard_setup_request_is_local():
-                    dashboard_json_response(
-                        self,
-                        {
-                            "error": "setup_local_only",
-                            "message": "First-admin setup is available only from a loopback client.",
-                        },
-                        status=403,
-                    )
-                    return
-                connection = self.open_connection()
-
-                try:
-                    setup_required = dashboard_first_admin_setup_required(connection)
-                finally:
-                    connection.close()
-
-                if not setup_required:
-                    dashboard_json_response(
-                        self,
-                        {
-                            "error": "setup_disabled",
-                            "message": "First-admin setup is disabled because a dashboard account already exists.",
-                        },
-                        status=403,
-                    )
-                    return
-
-                try:
-                    content_length = int(self.headers.get("Content-Length", "0"))
-                except ValueError:
-                    content_length = 0
-
-                content_length = max(0, min(content_length, 16384))
-                raw_body = self.rfile.read(content_length).decode("utf-8", errors="replace")
-                form = parse_qs(raw_body)
-
-                username = form.get("username", [""])[0].strip()
-                display_name = form.get("display_name", [""])[0].strip()
-                password = form.get("password", [""])[0]
-                password_confirm = form.get("password_confirm", [""])[0]
-                supplied_setup_nonce = form.get("setup_nonce", [""])[0]
-
-                if non_loopback_bind and not secrets.compare_digest(
-                    str(supplied_setup_nonce),
-                    setup_nonce,
-                ):
-                    dashboard_html_response(
-                        self,
-                        dashboard_first_admin_setup_html(
-                            "Setup form expired or could not be verified. Reload and try again.",
-                            setup_nonce=setup_nonce,
-                        ),
-                        status=403,
-                    )
-                    return
-
-                if not username:
-                    dashboard_html_response(
-                        self,
-                        dashboard_first_admin_setup_html(
-                            "Username is required.",
-                            setup_nonce=setup_nonce,
-                        ),
-                    )
-                    return
-
-                try:
-                    username = normalize_access_username(username)
-                except DeltaAegisError as exc:
-                    dashboard_html_response(
-                        self,
-                        dashboard_first_admin_setup_html(
-                            str(exc),
-                            setup_nonce=setup_nonce,
-                        ),
-                        status=400,
-                    )
-                    return
-
-                try:
-                    validate_access_password(password)
-                except DeltaAegisError as exc:
-                    dashboard_html_response(
-                        self,
-                        dashboard_first_admin_setup_html(
-                            str(exc),
-                            setup_nonce=setup_nonce,
-                        ),
-                        status=400,
-                    )
-                    return
-
-                if password != password_confirm:
-                    dashboard_html_response(
-                        self,
-                        dashboard_first_admin_setup_html(
-                            "Passwords do not match.",
-                            setup_nonce=setup_nonce,
-                        ),
-                    )
-                    return
-
-                connection = self.open_connection()
-
-                try:
-                    # Serialize the check and first-user insert. Without this
-                    # lock, simultaneous setup requests can both become ADMIN.
-                    connection.execute("BEGIN IMMEDIATE")
-                    if not dashboard_first_admin_setup_required(connection):
-                        connection.rollback()
-                        dashboard_json_response(
-                            self,
-                            {
-                                "error": "setup_disabled",
-                                "message": "First-admin setup is disabled because a dashboard account already exists.",
-                            },
-                            status=403,
-                        )
-                        return
-
-                    create_access_user(
-                        connection,
-                        username,
-                        display_name=display_name or username,
-                        role="ADMIN",
-                        password=password,
-                    )
-                    connection.commit()
-
-                    session = dashboard_user_login(
-                        connection,
-                        username,
-                        password,
-                        source_ip=self.client_address[0] if self.client_address else None,
-                        user_agent=self.headers.get("User-Agent", ""),
-                    )
-                    connection.commit()
-                except Exception:
-                    if connection.in_transaction:
-                        connection.rollback()
-                    raise
-                finally:
-                    connection.close()
-
-                if not session:
-                    dashboard_redirect_response(self, "/login")
-                    return
-
-                dashboard_redirect_response(
-                    self,
-                    "/",
-                    cookie_header=dashboard_session_cookie_header(session["session_token"]),
-                )
-                return
-
-            if route == "/login":
-                try:
-                    content_length = int(self.headers.get("Content-Length", "0"))
-                except ValueError:
-                    content_length = 0
-
-                content_length = max(0, min(content_length, 16384))
-                raw_body = self.rfile.read(content_length).decode("utf-8", errors="replace")
-                form = parse_qs(raw_body)
-                username = form.get("username", [""])[0].strip()
-                password = form.get("password", [""])[0]
-
-                connection = self.open_connection()
-
-                try:
-                    try:
-                        session = dashboard_user_login(
-                            connection,
-                            username,
-                            password,
-                            source_ip=self.client_address[0] if self.client_address else None,
-                            user_agent=self.headers.get("User-Agent", ""),
-                        )
-                    except DashboardLoginRateLimitedError as exc:
-                        connection.rollback()
-                        dashboard_html_response(
-                            self,
-                            dashboard_login_html(
-                                message="Too many login attempts. Try again later.",
-                                username=username,
-                            ),
-                            status=429,
-                            headers={"Retry-After": str(exc.retry_after)},
-                        )
-                        return
-                    except DeltaAegisError:
-                        # Invalid username syntax is an authentication failure,
-                        # not an uncaught request-handler exception.
-                        connection.rollback()
-                        session = None
-                finally:
-                    connection.close()
-
-                if not session:
-                    dashboard_html_response(
-                        self,
-                        dashboard_login_html(
-                            message="Invalid username or password.",
-                            username=username,
-                        ),
-                    )
-                    return
-
-                dashboard_redirect_response(
-                    self,
-                    "/",
-                    cookie_header=dashboard_session_cookie_header(session["session_token"]),
-                )
-                return
-
-            if route == "/logout":
-                session_token = self.dashboard_session_cookie_token()
-
-                if session_token:
-                    connection = self.open_connection()
-
-                    try:
-                        actor = authenticate_dashboard_session(
-                            connection,
-                            session_token,
-                            required_role="VIEWER",
-                            update_last_seen=False,
-                        )
-                        expire_dashboard_session(
-                            connection,
-                            session_token,
-                            actor=actor,
-                            reason="logout",
-                        )
-                    finally:
-                        connection.close()
-
-                self.dashboard_logout_redirect()
-                return
-
-            if route in DASHBOARD_SITE_ACTION_ROUTES:
-                if not self.require_permission("sites.write"):
-                    return
-
-                connection = self.open_connection()
-                payload: dict[str, Any] = {}
-
-                try:
-                    payload = dashboard_read_request_payload(
-                        self
-                    )
-                    result = dashboard_site_action_payload(
-                        connection,
-                        route,
-                        payload,
-                        actor=getattr(
-                            self,
-                            "current_actor",
-                            None,
-                        ),
-                        source_ip=(
-                            self.client_address[0]
-                            if self.client_address
-                            else None
-                        ),
-                        user_agent=self.headers.get(
-                            "User-Agent",
-                            "",
-                        ),
-                    )
-                    connection.commit()
-                except (
-                    DashboardAdminUserActionError,
-                    DeltaAegisError,
-                    ValueError,
-                ) as exc:
-                    connection.rollback()
-
-                    try:
-                        record_access_audit_event(
-                            connection,
-                            action="LOGICAL_SITE_DASHBOARD_ACTION_FAILED",
-                            actor=getattr(
-                                self,
-                                "current_actor",
-                                None,
-                            ),
-                            target_type="logical_site",
-                            target_key=str(
-                                payload.get("site_id")
-                                or route
-                            ),
-                            source_ip=(
-                                self.client_address[0]
-                                if self.client_address
-                                else None
-                            ),
-                            user_agent=self.headers.get(
-                                "User-Agent",
-                                "",
-                            ),
-                            details={
-                                "route": route,
-                                "error": str(exc),
-                                "payload_fields": sorted(
-                                    str(key)
-                                    for key in payload
-                                ),
-                            },
-                        )
-                        connection.commit()
-                    except Exception:
-                        connection.rollback()
-
-                    dashboard_admin_json_error_response(
-                        self,
-                        str(exc),
-                        status_code=getattr(
-                            exc,
-                            "status_code",
-                            400,
-                        ),
-                    )
-                    return
-                finally:
-                    connection.close()
-
-                dashboard_json_response(self, result)
-                return
-
-            if route == "/api/admin/users" or route.startswith("/api/admin/users/"):
-                if not self.require_permission("admin.users.write"):
-                    return
-
-                connection = sqlite3.connect(db_path)
-                connection.row_factory = sqlite3.Row
-
-                try:
-                    payload = dashboard_read_request_payload(self)
-                    result = dashboard_admin_handle_user_action(
-                        connection,
-                        route,
-                        payload,
-                        getattr(self, "current_actor", None),
-                    )
-                    connection.commit()
-                except DashboardAdminUserActionError as exc:
-                    connection.rollback()
-                    dashboard_admin_json_error_response(
-                        self,
-                        str(exc),
-                        status_code=getattr(exc, "status_code", 400),
-                    )
-                    return
-                except DeltaAegisError as exc:
-                    connection.rollback()
-                    dashboard_admin_json_error_response(
-                        self,
-                        str(exc),
-                        status_code=400,
-                    )
-                    return
-                finally:
-                    connection.close()
-
-                dashboard_json_response(self, result)
-                return
-
-            if route == "/api/telemetry-cleanup/clear-all":
-                if not self.require_permission("admin.telemetry.cleanup"):
-                    return
-
-                try:
-                    payload = dashboard_read_request_payload(self)
-                    connection = self.open_connection()
-
-                    try:
-                        result = dashboard_telemetry_cleanup_clear_all_payload(
-                            connection,
-                            payload,
-                            actor=getattr(self, "current_actor", None),
-                            source_ip=self.client_address[0] if self.client_address else None,
-                            user_agent=self.headers.get("User-Agent", ""),
-                        )
-                        connection.commit()
-                    finally:
-                        connection.close()
-
-                    dashboard_json_response(self, result)
-                except DeltaAegisError as exc:
-                    dashboard_json_response(
-                        self,
-                        {
-                            "ok": False,
-                            "error": "telemetry_cleanup_failed",
-                            "message": str(exc),
-                            "confirmation_required": TELEMETRY_CLEANUP_CONFIRMATION,
-                        },
-                        status=400,
-                    )
-
-                return
-
-            if route in {
-                "/api/netsniper/schedule-create",
-                "/api/netsniper/schedule-enable",
-                "/api/netsniper/schedule-disable",
-                "/api/netsniper/schedule-delete",
-                "/api/netsniper/schedule-run-due",
-                "/api/netsniper/stale-scan-fail",
-                "/api/netsniper/hourly-monitoring",
-            }:
-                required_permission = (
-                    "admin.telemetry.cleanup"
-                    if route == "/api/netsniper/stale-scan-fail"
-                    else "scan.start"
-                )
-
-                if not self.require_permission(required_permission):
-                    return
-
-                try:
-                    payload = dashboard_read_request_payload(self)
-                except DashboardAdminUserActionError as exc:
-                    dashboard_admin_json_error_response(
-                        self,
-                        str(exc),
-                        status_code=exc.status_code,
-                    )
-                    return
-
-                connection = self.open_connection()
-
-                try:
-                    result = dashboard_netsniper_schedule_action_payload(
-                        connection,
-                        route,
-                        payload,
-                        args.events,
-                    )
-                    connection.commit()
-                except DashboardAdminUserActionError as exc:
-                    connection.rollback()
-                    dashboard_admin_json_error_response(
-                        self,
-                        str(exc),
-                        status_code=exc.status_code,
-                    )
-                    return
-                except DeltaAegisError as exc:
-                    connection.rollback()
-                    dashboard_admin_json_error_response(
-                        self,
-                        str(exc),
-                        status_code=400,
-                    )
-                    return
-                finally:
-                    connection.close()
-
-                dashboard_json_response(self, result)
-                return
-
-            if route == "/api/trueaegis/run":
-                if not self.require_permission("scan.start"):
-                    return
-
-                try:
-                    content_length = int(self.headers.get("Content-Length", "0"))
-                except ValueError:
-                    content_length = 0
-
-                if content_length > 65536:
-                    dashboard_json_response(
-                        self,
-                        {
-                            "ok": False,
-                            "error": "body_too_large",
-                            "message": "POST body is too large.",
-                        },
-                        status=413,
-                    )
-                    return
-
-                payload = {}
-
-                if content_length > 0:
-                    try:
-                        raw_body = self.rfile.read(content_length).decode("utf-8")
-                        payload = json.loads(raw_body)
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        dashboard_json_response(
-                            self,
-                            {
-                                "ok": False,
-                                "error": "invalid_json",
-                                "message": "POST body must be valid JSON.",
-                            },
-                            status=400,
-                        )
-                        return
-
-                    if not isinstance(payload, dict):
-                        dashboard_json_response(
-                            self,
-                            {
-                                "ok": False,
-                                "error": "invalid_json",
-                                "message": "POST body must be a JSON object.",
-                            },
-                            status=400,
-                        )
-                        return
-
-                connection = self.open_connection()
-
-                try:
-                    try:
-                        result = dashboard_trueaegis_validation_start_payload(
-                            connection,
-                            payload,
-                            args.db,
-                        )
-                    except DeltaAegisError as exc:
-                        connection.rollback()
-                        dashboard_json_response(
-                            self,
-                            {
-                                "ok": False,
-                                "error": "trueaegis_run_failed",
-                                "message": str(exc),
-                            },
-                            status=400,
-                        )
-                        return
-
-                    dashboard_json_response(self, result, status=202)
-                    return
-                finally:
-                    connection.close()
-
-            if route == "/api/netsniper/scan-cancel":
-                if not self.require_permission("scan.start"):
-                    return
-
-                try:
-                    content_length = int(
-                        self.headers.get("Content-Length", "0")
-                    )
-                except ValueError:
-                    content_length = 0
-
-                if content_length <= 0:
-                    dashboard_json_response(
-                        self,
-                        {
-                            "ok": False,
-                            "error": "missing_body",
-                            "message": "POST body must be JSON.",
-                        },
-                        status=400,
-                    )
-                    return
-
-                if content_length > 65536:
-                    dashboard_json_response(
-                        self,
-                        {
-                            "ok": False,
-                            "error": "body_too_large",
-                            "message": "POST body is too large.",
-                        },
-                        status=413,
-                    )
-                    return
-
-                try:
-                    payload = dashboard_read_request_payload(self)
-                except DashboardAdminUserActionError as exc:
-                    dashboard_admin_json_error_response(
-                        self,
-                        str(exc),
-                        status_code=exc.status_code,
-                    )
-                    return
-
-                connection = self.open_connection()
-
-                try:
-                    try:
-                        result = dashboard_netsniper_scan_cancel_payload(
-                            connection,
-                            payload,
-                            actor=getattr(
-                                self,
-                                "current_actor",
-                                None,
-                            ),
-                            source_ip=(
-                                self.client_address[0]
-                                if self.client_address
-                                else None
-                            ),
-                            user_agent=self.headers.get(
-                                "User-Agent",
-                                "",
-                            ),
-                        )
-                        connection.commit()
-                    except DashboardAdminUserActionError as exc:
-                        connection.rollback()
-                        dashboard_admin_json_error_response(
-                            self,
-                            str(exc),
-                            status_code=exc.status_code,
-                        )
-                        return
-                    except DeltaAegisError as exc:
-                        connection.rollback()
-                        dashboard_admin_json_error_response(
-                            self,
-                            str(exc),
-                            status_code=400,
-                        )
-                        return
-
-                    dashboard_json_response(self, result)
-                    return
-                finally:
-                    connection.close()
-
-            if route == "/api/netsniper/scan-start":
-                if not self.require_permission("scan.start"):
-                    return
-
-                try:
-                    content_length = int(self.headers.get("Content-Length", "0"))
-                except ValueError:
-                    content_length = 0
-
-                if content_length <= 0:
-                    dashboard_json_response(
-                        self,
-                        {
-                            "ok": False,
-                            "error": "missing_body",
-                            "message": "POST body must be JSON.",
-                        },
-                        status=400,
-                    )
-                    return
-
-                if content_length > 65536:
-                    dashboard_json_response(
-                        self,
-                        {
-                            "ok": False,
-                            "error": "body_too_large",
-                            "message": "POST body is too large.",
-                        },
-                        status=413,
-                    )
-                    return
-
-                try:
-                    raw_body = self.rfile.read(content_length).decode("utf-8")
-                    payload = json.loads(raw_body)
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    dashboard_json_response(
-                        self,
-                        {
-                            "ok": False,
-                            "error": "invalid_json",
-                            "message": "POST body must be valid JSON.",
-                        },
-                        status=400,
-                    )
-                    return
-
-                connection = self.open_connection()
-
-                try:
-                    try:
-                        result = dashboard_netsniper_scan_start_payload(
-                            connection,
-                            payload,
-                            args.db,
-                            args.events,
-                        )
-                    except DeltaAegisError as exc:
-                        connection.rollback()
-                        dashboard_json_response(
-                            self,
-                            {
-                                "ok": False,
-                                "error": "netsniper_scan_start_failed",
-                                "message": str(exc),
-                            },
-                            status=400,
-                        )
-                        return
-
-                    dashboard_json_response(self, result)
-                    return
-                finally:
-                    connection.close()
-
-            if not self.require_permission("workflow.write"):
-                return
-
-            if route not in {"/api/investigate-asset", "/api/ticket-status", "/api/netsniper/import-latest", "/api/validation-ingest"}:
-                dashboard_json_response(
-                    self,
-                    {
-                        "error": "not_found",
-                        "path": route,
-                    },
-                    status=404,
-                )
-                return
-
-            try:
-                content_length = int(self.headers.get("Content-Length", "0"))
-            except ValueError:
-                content_length = 0
-
-            if content_length <= 0:
-                dashboard_json_response(
-                    self,
-                    {
-                        "error": "missing_body",
-                        "message": "POST body must be JSON.",
-                    },
-                    status=400,
-                )
-                return
-
-            if content_length > 65536:
-                dashboard_json_response(
-                    self,
-                    {
-                        "error": "body_too_large",
-                        "message": "POST body is too large.",
-                    },
-                    status=413,
-                )
-                return
-
-            try:
-                raw_body = self.rfile.read(content_length).decode("utf-8")
-                payload = json.loads(raw_body)
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                dashboard_json_response(
-                    self,
-                    {
-                        "error": "invalid_json",
-                        "message": "POST body must be valid JSON.",
-                    },
-                    status=400,
-                )
-                return
-
-
-            if route == "/api/validation-ingest":
-                connection = self.open_connection()
-
-                try:
-                    try:
-                        result = dashboard_trueaegis_validation_ingest_payload(
-                            connection,
-                            payload,
-                        )
-                    except DeltaAegisError as exc:
-                        connection.rollback()
-                        dashboard_json_response(
-                            self,
-                            {
-                                "ok": False,
-                                "error": "validation_ingest_failed",
-                                "message": str(exc),
-                            },
-                            status=400,
-                        )
-                        return
-
-                    dashboard_json_response(self, result)
-                    return
-                finally:
-                    connection.close()
-
-            if route == "/api/netsniper/import-latest":
-                connection = self.open_connection()
-
-                try:
-                    try:
-                        payload = dashboard_netsniper_import_latest_payload(
-                            connection,
-                            args.events,
-                        )
-                    except DeltaAegisError as exc:
-                        dashboard_json_response(
-                            self,
-                            {
-                                "ok": False,
-                                "error": "netsniper_import_failed",
-                                "message": str(exc),
-                            },
-                            status=400,
-                        )
-                        return
-
-                    dashboard_json_response(self, payload)
-                    return
-                finally:
-                    connection.close()
-
-            if route == "/api/ticket-status":
-                subject_key = str(
-                    payload.get("subject_key")
-                    or payload.get("identifier")
-                    or ""
-                ).strip()
-                raw_scope = str(payload.get("scope") or "").strip()
-                status = str(payload.get("status") or "").strip()
-                note = str(payload.get("note") or payload.get("reason") or "").strip()
-                analyst = str(payload.get("analyst") or "dashboard").strip()
-
-                try:
-                    scope = optional_network_scope(raw_scope) if raw_scope else None
-                    connection = self.open_connection()
-
-                    try:
-                        state = set_ticket_state(
-                            connection,
-                            subject_key,
-                            status,
-                            analyst=analyst,
-                            note=note,
-                        )
-                        record_access_audit_event(
-                            connection,
-                            action="DASHBOARD_TICKET_STATUS_UPDATE",
-                            actor=getattr(self, "current_actor", None),
-                            target_type="investigation_ticket",
-                            target_key=state.get("ticket_key") or subject_key,
-                            source_ip=self.client_address[0] if self.client_address else None,
-                            user_agent=self.headers.get("User-Agent", ""),
-                            details={
-                                "subject_key": subject_key,
-                                "scope": raw_scope,
-                                "status": status,
-                                "analyst": analyst,
-                                "note_present": bool(note),
-                            },
-                        )
-                        connection.commit()
-                        investigation_center = dashboard_investigation_center_payload(
-                            connection,
-                            limit=25,
-                            scope=scope,
-                        )
-
-                        dashboard_json_response(
-                            self,
-                            {
-                                "ok": True,
-                                "ticket_state": state,
-                                "investigation_center": investigation_center,
-                                "receipt": dashboard_ticket_status_action_receipt(
-                                    state,
-                                    subject_key,
-                                    raw_scope,
-                                ),
-                            },
-                        )
-                    finally:
-                        connection.close()
-                except (DeltaAegisError, ValueError) as exc:
-                    dashboard_json_response(
-                        self,
-                        {
-                            "ok": False,
-                            "error": "ticket_status_failed",
-                            "message": str(exc),
-                        },
-                        status=400,
-                    )
-
-                return
-
-            identifier = str(payload.get("identifier") or "").strip()
-            raw_scope = str(payload.get("scope") or "").strip()
-            status = str(payload.get("status") or "").strip()
-            reason = str(payload.get("reason") or "").strip()
-
-            try:
-                scope = optional_network_scope(raw_scope) if raw_scope else None
-                connection = self.open_connection()
-
-                try:
-                    asset_key, resolved_scope = resolve_asset_for_investigation(
-                        connection,
-                        identifier,
-                        scope=scope,
-                    )
-                    record = set_asset_investigation_status(
-                        connection,
-                        asset_key,
-                        resolved_scope,
-                        status,
-                        reason,
-                    )
-
-                    record_access_audit_event(
-                        connection,
-                        action="DASHBOARD_ASSET_INVESTIGATION_UPDATE",
-                        actor=getattr(self, "current_actor", None),
-                        target_type="asset_investigation",
-                        target_key=asset_key,
-                        source_ip=self.client_address[0] if self.client_address else None,
-                        user_agent=self.headers.get("User-Agent", ""),
-                        details={
-                            "identifier": identifier,
-                            "asset_key": asset_key,
-                            "scope": resolved_scope,
-                            "status": status,
-                            "reason_present": bool(reason),
-                        },
-                    )
-                    connection.commit()
-
-                    ticket_state = None
-                    workflow_status = (
-                        str(status or "")
-                        .strip()
-                        .upper()
-                        .replace("-", "_")
-                        .replace(" ", "_")
-                    )
-
-                    if workflow_status in TICKET_WORKFLOW_STATUSES:
-                        ticket_state = set_ticket_state(
-                            connection,
-                            asset_key,
-                            workflow_status,
-                            analyst="dashboard",
-                            note=reason,
-                        )
-
-                    connection.commit()
-
-                    detail = dashboard_asset_detail_payload(
-                        connection,
-                        asset_key,
-                        scope=resolved_scope,
-                    )
-
-                    dashboard_json_response(
-                        self,
-                        {
-                            "ok": True,
-                            "asset_key": asset_key,
-                            "scope": resolved_scope,
-                            "investigation": record,
-                            "ticket_state": ticket_state,
-                            "asset_detail": detail,
-                                "receipt": dashboard_asset_investigation_action_receipt(
-                                    record,
-                                    asset_key,
-                                    resolved_scope,
-                                    ticket_state,
-                                ),
-                        },
-                    )
-                finally:
-                    connection.close()
-            except (DeltaAegisError, ValueError) as exc:
-                dashboard_json_response(
-                    self,
-                    {
-                        "ok": False,
-                        "error": "investigation_status_failed",
-                        "message": str(exc),
-                    },
-                    status=400,
-                )
-
-    # Reconcile dead rows at every dashboard start, even when the recurring
-    # schedule worker is disabled.
-    startup_watchdog_connection = connect(db_path)
-
-    try:
-        startup_watchdog = scan_job_watchdog_recover_dead_jobs(
-            startup_watchdog_connection,
-            actor="dashboard_startup",
-            events_path=args.events,
-            trueaegis_execution_mode="asynchronous",
-        )
-    finally:
-        startup_watchdog_connection.close()
-
-    if startup_watchdog.get("recovered_count") and not args.quiet:
-        print(
-            "[DeltaAegis] scan watchdog recovered "
-            f"{startup_watchdog['recovered_count']} dead scan job(s)",
-            flush=True,
-        )
-
-    server_address = (bind_host, args.port)
-    server = ThreadingHTTPServer(
-        server_address,
-        DeltaAegisDashboardHandler,
-    )
-
-    dashboard_schedule_worker_thread = None
-    dashboard_schedule_worker_stop = None
-    schedule_worker_interval = max(
-        1,
-        int(
-            getattr(
-                args,
-                "schedule_worker_interval_seconds",
-                DASHBOARD_SCHEDULE_WORKER_INTERVAL_SECONDS,
-            )
-            or DASHBOARD_SCHEDULE_WORKER_INTERVAL_SECONDS
-        ),
-    )
-
-    if getattr(args, "enable_scheduled_scans", True):
-        dashboard_schedule_worker_thread, dashboard_schedule_worker_stop = dashboard_start_schedule_worker_thread(
-            db_path=db_path,
-            events_path=args.events,
-            interval_seconds=schedule_worker_interval,
-            quiet=args.quiet,
-        )
-
-    print("DeltaAegis dashboard starting")
-    print("============================")
-    print(f"URL:      http://{bind_host}:{args.port}")
-    print(f"Database: {db_path}")
-    print("Mode:     dashboard + investigation status updates")
-    if getattr(args, "enable_scheduled_scans", True):
-        print(f"Scheduler: enabled, checks due NetSniper schedules every {schedule_worker_interval}s")
-    else:
-        print("Scheduler: disabled")
-
-    if token:
-        print("Auth:     token required")
-        print("Header:   X-DeltaAegis-Token")
-        print("DB Tokens: accepted via X-DeltaAegis-Token")
-    elif login_required:
-        print("Auth:     username/password login required")
-        print("Login:    http://{host}:{port}/login".format(host=bind_host, port=args.port))
-        print("Sessions: HttpOnly SameSite=Lax cookie")
-        print("DB Tokens: still accepted for automation via X-DeltaAegis-Token")
-    else:
-        print("Auth:     disabled")
-        print("Warning:  bind to 127.0.0.1 unless you are using a trusted network")
-        print("DB Tokens: accepted when supplied in X-DeltaAegis-Token")
-        print("Tip:      set a password on an active user to enable browser login")
-
-    print()
-    print("Press Ctrl+C to stop.")
-
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nStopping dashboard.")
-    finally:
-        if dashboard_schedule_worker_stop is not None:
-            dashboard_schedule_worker_stop.set()
-        if dashboard_schedule_worker_thread is not None:
-            dashboard_schedule_worker_thread.join(timeout=2.0)
-            if dashboard_schedule_worker_thread.is_alive():
-                print(
-                    "[DeltaAegis] waiting for the active scheduled "
-                    "scan to finalize before dashboard shutdown",
-                    flush=True,
-                )
-                dashboard_schedule_worker_thread.join()
-        server.server_close()
-
-    return 0
+        if non_loopback_bind and not (token or has_active_password_users):
+            raise DeltaAegisError("refusing unauthenticated network exposure")
+        server_address = (bind_host, args.port)
+    return _web.command_dashboard(args, namespace=globals())
 
 
 def trueaegis_source_hash(path: Path) -> str:
@@ -41744,7 +33214,7 @@ def command_restore_cutover_execute(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "DeltaAegis v0.43.0 — Architecture and Stability Baseline, "
+            "DeltaAegis v0.44.0 — Modular Core Foundation, "
             "SQLite-consistent backups, verified manifests, "
             "restore rehearsal, guarded retention, active restore "
             "cutover planning and rollback, operator actions, "

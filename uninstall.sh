@@ -43,7 +43,8 @@ Environment:
                     Optional database override. Default: data/deltaaegis.db.
 
 Safety:
-  - Running DeltaAegis, NetSniper, nmap, or TrueAegis processes block purges.
+  - Processes associated with this DeltaAegis project or its configured
+    NetSniper/TrueAegis roots block purges.
   - A database outside the project runtime directories is never deleted.
   - ~/DeltaAegis-local-archive is never deleted by this script.
 EOF
@@ -52,6 +53,8 @@ EOF
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 DELTA_AEGIS_HOME="${DELTA_AEGIS_HOME:-${DELTA_AEGIS_BASE:-$SCRIPT_DIR}}"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
+DELTAAEGIS_NETSNIPER_ROOT="${DELTAAEGIS_NETSNIPER_ROOT:-$HOME/NetSniper}"
+DELTAAEGIS_TRUEAEGIS_ROOT="${DELTAAEGIS_TRUEAEGIS_ROOT:-$HOME/TrueAegis}"
 
 DB_OVERRIDE_PRESENT=0
 if [[ ${DELTAAEGIS_DB_PATH+x} ]]; then
@@ -113,13 +116,12 @@ active_processes() {
 
     pattern="$(
         printf '%s' \
-            "deltaaegis\\.py.*dashboard|" \
-            "$(printf '%s' "$HOME/NetSniper/netsniper.sh" | sed 's/[][\\.^$*+?(){}|]/\\&/g')" \
-            "|[[:space:]]nmap[[:space:]]|" \
-            "$(printf '%s' "$HOME/TrueAegis/trueaegis.py" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
+            "$(printf '%s' "$DELTA_AEGIS_HOME/deltaaegis.py" | sed 's/[][\\.^$*+?(){}|]/\\&/g')" \
+            "|$(printf '%s' "$DELTAAEGIS_NETSNIPER_ROOT/" | sed 's/[][\\.^$*+?(){}|]/\\&/g')" \
+            "|$(printf '%s' "$DELTAAEGIS_TRUEAEGIS_ROOT/" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
     )"
 
-    pgrep -af "$pattern" 2>/dev/null || true
+    pgrep -af -- "$pattern" 2>/dev/null || true
 }
 
 if [[ "$PURGE_RUNTIME" -eq 1 || "$PURGE_PROJECT" -eq 1 ]]; then

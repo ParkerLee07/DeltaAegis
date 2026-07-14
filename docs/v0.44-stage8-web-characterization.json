@@ -1,0 +1,42 @@
+{
+  "format": "deltaaegis-v0.44-stage8-web-characterization-v1",
+  "source_checkpoint_tree": "0ef3bdacb5bfdd19653c5abf7ce0288b601e28e0",
+  "schema_change": false,
+  "runtime_version_change": false,
+  "stable_api_introduced": false,
+  "module": "deltaaegis_core/web.py",
+  "responsibility": "dashboard HTTP routing, response boundaries, rendering, authentication transport, and server lifecycle",
+  "root_compatibility_exceptions": [
+    "dashboard_json_response retains its narrow root implementation for the v0.40 AST security validator",
+    "command_dashboard retains unreachable source-contract markers for the v0.42 LAN-binding validator",
+    "historical rendered-page and route markers remain in the root facade for predecessor source validators"
+  ],
+  "facade_functions": [
+    "dashboard_inject_operator_floating_button",
+    "dashboard_inject_netsniper_navigation",
+    "dashboard_html_response",
+    "dashboard_text_response",
+    "dashboard_read_request_payload",
+    "dashboard_session_cookie_header",
+    "dashboard_clear_session_cookie_header",
+    "dashboard_redirect_response",
+    "dashboard_login_html",
+    "render_netsniper_page",
+    "dashboard_bind_host_is_loopback",
+    "command_dashboard"
+  ],
+  "render_fingerprints": {
+    "dashboard_login_html": {
+      "bytes": 2819,
+      "sha256": "033137d78f220e2b88f275544cf1e2a5fda0b7729fcc76976e53de5a6d999e4e"
+    },
+    "render_netsniper_page": {
+      "bytes": 55960,
+      "sha256": "101b14dd7141a9936d9c6c4d7c297a72e21ab4bd5fc30076a2b414f1d048258b"
+    }
+  },
+  "route_inventory": {
+    "count": 57,
+    "sha256": "c554108958f1312b3306b9bd48fc8f3c80d01fb242b104567d7906ad0a8bc23a"
+  }
+}

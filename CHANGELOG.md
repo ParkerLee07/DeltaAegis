@@ -1,3 +1,21 @@
+## DeltaAegis v0.44.0 — Modular Core Foundation
+
+- Added the non-conflicting `deltaaegis_core` implementation package while retaining the repository-root `deltaaegis.py` executable and import compatibility facade.
+- Extracted configuration defaults and low-level SQLite connection policy into `deltaaegis_core/config.py` and `deltaaegis_core/db.py` without changing the database schema.
+- Extracted authentication, users, passwords, sessions, API tokens, RBAC, and access-audit behavior into `deltaaegis_core/auth.py`.
+- Extracted NetSniper bundle trust, path confinement, normalization, scope filtering, and ingest helpers into `deltaaegis_core/ingest.py`.
+- Extracted logical-site persistence and scope aggregation into `deltaaegis_core/sites.py`.
+- Extracted durable scan, TrueAegis, schedule, cancellation, watchdog, and recovery policy into `deltaaegis_core/jobs.py`; fixed-argument child-process orchestration remains facade-owned.
+- Extracted report queries and deterministic Markdown section generation into `deltaaegis_core/reports.py`; final file output and backup behavior remain facade-owned.
+- Extracted dashboard routing, HTTP responses, rendered pages, authentication transport, LAN/loopback policy, and server lifecycle into `deltaaegis_core/web.py`.
+- Preserved root-level public names and signatures, rendered page fingerprints, authenticated route inventory, ingest receipts, schema, CLI behavior, and predecessor contracts through frozen characterization evidence.
+- Added exact AST-based dependency and cycle validation so internal modules cannot import the root facade or create circular core dependencies.
+- Added a deterministic v0.44 repository audit that inventories the facade, core modules, dependency graph, commands, routes, schema tables, validators, stale documents, and remaining architecture debt.
+- Added focused v0.44 architecture, documentation, and release-metadata validators plus a flat feature/`main` release gate.
+- Preserved v0.43/v0.42 security and component behavior, v0.40 operator actions, v0.39 scan lifecycle behavior, the v0.42.2 database schema, and NetSniper v2.0.0 compatibility.
+- Introduced no stable `/api/v1`, migration ledger, detection redesign, or new operator workflow; those remain owned by later roadmap releases.
+- Retained `AGPL-3.0-only`, corresponding-source notices, the prior MIT-copy boundary, and separately written commercial-licensing policy.
+
 ## DeltaAegis v0.43.0 — Architecture and Stability Baseline
 
 - Defined the v1.0 product promises, exclusions, supported deployment shape, scope-change policy, and release definition of done.

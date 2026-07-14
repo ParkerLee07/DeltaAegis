@@ -109,6 +109,15 @@ BASE="$(cd -- "$BASE" 2>/dev/null && pwd -P)" \
 
 required_files=(
     "deltaaegis.py"
+    "deltaaegis_core/__init__.py"
+    "deltaaegis_core/auth.py"
+    "deltaaegis_core/config.py"
+    "deltaaegis_core/db.py"
+    "deltaaegis_core/ingest.py"
+    "deltaaegis_core/jobs.py"
+    "deltaaegis_core/reports.py"
+    "deltaaegis_core/sites.py"
+    "deltaaegis_core/web.py"
     "uninstall.sh"
     "tools/bootstrap_first_admin.py"
     "tools/reset_dashboard_admin.py"
@@ -302,6 +311,15 @@ import sys
 root = Path(sys.argv[1])
 for relative in (
     "deltaaegis.py",
+    "deltaaegis_core/__init__.py",
+    "deltaaegis_core/auth.py",
+    "deltaaegis_core/config.py",
+    "deltaaegis_core/db.py",
+    "deltaaegis_core/ingest.py",
+    "deltaaegis_core/jobs.py",
+    "deltaaegis_core/reports.py",
+    "deltaaegis_core/sites.py",
+    "deltaaegis_core/web.py",
     "tools/bootstrap_first_admin.py",
     "tools/reset_dashboard_admin.py",
     "tools/deltaaegis_troubleshooter.py",
