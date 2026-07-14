@@ -33,6 +33,12 @@ grep -Fq 'tools/bootstrap_first_admin.py' install.sh \
     || fail "install.sh does not invoke bootstrap_first_admin.py"
 grep -Fq 'mkdir -p -- "$(dirname "$RESOLVED_DB_PATH")"' install.sh \
     || fail "install.sh does not create the resolved database parent"
+grep -Fq 'replace_launcher_atomically()' install.sh \
+    || fail "install.sh does not define exact-target launcher replacement"
+grep -Fq 'mv -fT -- "$temporary" "$target"' install.sh \
+    || fail "install.sh does not use exact-target atomic launcher moves"
+grep -Fq 'Refusing to replace unmanaged launcher' install.sh \
+    || fail "install.sh does not revalidate launcher destinations"
 grep -Fq -- '--dry-run' install.sh \
     || fail "install.sh does not expose dry-run mode"
 grep -Fq -- '--purge-runtime' uninstall.sh \
@@ -234,6 +240,30 @@ BIN_DIR="$bin_dir" \
     || fail "runtime purge deleted an external database"
 
 pass "external database preservation"
+
+echo "[install lifecycle] launcher destination confinement"
+conflict_bin="$tmp_root/conflict-bin"
+mkdir -p "$conflict_bin/deltaaegis"
+printf 'directory sentinel\n' > "$conflict_bin/deltaaegis/KEEP"
+
+if HOME="$tmp_root" \
+    DELTA_AEGIS_BASE="$project" \
+    BIN_DIR="$conflict_bin" \
+        "$project/install.sh" --skip-health-check </dev/null \
+        >"$tmp_root/conflict-install.stdout" \
+        2>"$tmp_root/conflict-install.stderr"
+then
+    fail "installer replaced an unmanaged launcher directory"
+fi
+
+grep -Fq 'Refusing to replace unmanaged launcher' \
+    "$tmp_root/conflict-install.stderr" \
+    || fail "launcher-directory refusal was not explicit"
+[[ -f "$conflict_bin/deltaaegis/KEEP" ]] \
+    || fail "launcher conflict handling mutated the unmanaged directory"
+[[ ! -e "$conflict_bin/deltaaegis-troubleshooter" ]] \
+    || fail "launcher conflict handling partially installed another launcher"
+pass "launcher destination confinement and atomic replacement"
 
 echo "[uninstall lifecycle] project purge confirmation"
 HOME="$tmp_root" \

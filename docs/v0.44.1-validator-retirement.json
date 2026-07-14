@@ -1,8 +1,8 @@
 {
   "archive_tag": "v0.44.0",
-  "current_release_gate": "tools/validate_v0_44_release_gate.sh",
-  "expected_retained_validator_count": 81,
-  "expected_shell_validator_count": 61,
+  "current_release_gate": "tools/validate_v0_44_1_release_gate.sh",
+  "expected_retained_validator_count": 84,
+  "expected_shell_validator_count": 62,
   "format": "deltaaegis-validator-retirement-v1",
   "maintenance_release": "0.44.1",
   "replaced_stage_contracts": [
@@ -16,8 +16,10 @@
   "retained_compatibility_floor": [
     "v0.39 functional behavior",
     "v0.40 operator actions",
+    "v0.41 data durability and recovery",
     "v0.42 security/components/install/license",
-    "v0.44 modular core"
+    "v0.44 modular core",
+    "v0.44.1 repository hygiene and validation retention"
   ],
   "retired_bytes": 761170,
   "retired_file_count": 201,

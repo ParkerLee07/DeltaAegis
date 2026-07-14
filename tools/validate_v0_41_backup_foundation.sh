@@ -29,7 +29,11 @@ echo "[v0.41 checkpoint 1] static backup contract"
 python3 - <<'PY'
 from pathlib import Path
 
-text = Path("deltaaegis.py").read_text(encoding="utf-8")
+text = (
+    Path("deltaaegis.py").read_text(encoding="utf-8")
+    + "\n"
+    + Path("deltaaegis_core/config.py").read_text(encoding="utf-8")
+)
 
 required = (
     "DEFAULT_BACKUPS =",

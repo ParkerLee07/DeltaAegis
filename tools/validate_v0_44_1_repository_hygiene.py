@@ -45,7 +45,7 @@ def main() -> int:
     print("PASS: one authoritative architecture document")
 
     scope = read("V1_SCOPE.md")
-    required_scope = "Status: approved at v0.43.0 and current through DeltaAegis v0.44.0"
+    required_scope = "Status: approved at v0.43.0 and current through DeltaAegis v0.44.1"
     if required_scope not in scope:
         fail("V1_SCOPE.md does not identify its current planning status")
     print("PASS: v1.0 scope status is current without rewriting the approved baseline")
@@ -136,8 +136,8 @@ def main() -> int:
     payload = json.loads(completed.stdout)
     if payload.get("format") != "deltaaegis-repository-troubleshooter-v4":
         fail("troubleshooter self-check format changed")
-    if payload.get("current_release_gate") != "tools/validate_v0_44_release_gate.sh":
-        fail("troubleshooter does not select the v0.44 release gate")
+    if payload.get("current_release_gate") != "tools/validate_v0_44_1_release_gate.sh":
+        fail("troubleshooter does not select the v0.44.1 release gate")
     manifest = json.loads(read("docs/v0.44.1-validator-retirement.json"))
     expected_shell = manifest.get("expected_shell_validator_count")
     if payload.get("validator_count") != expected_shell or payload.get("integrity_ok") is not True:
@@ -178,9 +178,9 @@ def main() -> int:
         "current",
         "--list",
     ])
-    if listed.returncode or "tools/validate_v0_44_release_gate.sh" not in listed.stdout:
+    if listed.returncode or "tools/validate_v0_44_1_release_gate.sh" not in listed.stdout:
         fail("current release gate is absent from troubleshooter listing")
-    print("PASS: repository-aware troubleshooter selects current v0.44 diagnostics")
+    print("PASS: repository-aware troubleshooter selects current v0.44.1 diagnostics")
 
     readme = read("README.md")
     trouble_doc = read("docs/TROUBLESHOOTER.md")
@@ -206,6 +206,9 @@ def main() -> int:
         "tools/validate_v0_44_1_repository_hygiene.py",
         "tools/validate_v0_44_1_report_contracts.py",
         "tools/validate_v0_44_1_validator_retirement.py",
+        "tools/validate_v0_44_1_data_durability_compatibility.py",
+        "tools/validate_v0_44_1_release_metadata.py",
+        "tools/validate_v0_44_1_release_gate.sh",
         "python3 -m unittest discover -s tests -p 'test*.py' -v",
     ):
         if marker not in ci:
@@ -215,6 +218,24 @@ def main() -> int:
     install = read("install.sh")
     if "Running non-mutating syntax and troubleshooter checks" not in install:
         fail("install.sh still describes the old embedded bundle check")
+    for marker in (
+        "replace_launcher_atomically()",
+        '[[ -e "$target" || -L "$target" ]]',
+        'mv -fT -- "$temporary" "$target"',
+        "Some overlay filesystems can transiently report",
+        'Refusing to replace unmanaged launcher: $target',
+    ):
+        if marker not in install:
+            fail(f"install.sh is missing atomic launcher marker: {marker}")
+    lifecycle = read("tools/validate_v0_42_install_uninstall_lifecycle.sh")
+    for marker in (
+        "launcher destination confinement",
+        "installer replaced an unmanaged launcher directory",
+        "launcher destination confinement and atomic replacement",
+    ):
+        if marker not in lifecycle:
+            fail(f"install lifecycle is missing launcher hardening coverage: {marker}")
+    print("PASS: managed launchers use exact-target atomic replacement")
 
     audit = run([sys.executable, "tools/audit_v0_44_repository.py", "--check"])
     if audit.returncode:

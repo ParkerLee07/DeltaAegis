@@ -13,8 +13,10 @@ The retained automated floor covers:
 
 - v0.39 scan lifecycle, HTTP, cancellation, and schedule behavior;
 - v0.40 operator-action behavior;
-- v0.42 security, logical-site, installation, and license contracts; and
-- the complete v0.44 modular-core release gate.
+- v0.41 data-durability, backup, retention, restore-rehearsal, and guarded-cutover behavior;
+- v0.42 security, logical-site, installation, and license contracts;
+- the complete v0.44 modular-core boundary suite; and
+- the v0.44.1 repository-hygiene and retention release gate.
 
 The v0.44.1 report-contract validator replaces the five pre-v0.39 report roots
 formerly called by `tools/validate_v0_44_stage5_7_all.sh`:
@@ -58,8 +60,9 @@ git worktree remove --force "$temporary"
 
 ## Further retirement
 
-Later cleanup may remove additional v0.39-v0.43 release-only scaffolding, but
-only after the current release gate, staged wrappers, troubleshooter graph, CI,
-and deterministic audit prove that no executable dependency remains. Every
+Later cleanup may remove additional v0.40-v0.43 release-only scaffolding, but
+only after the v0.44.1 release gate, retained functional compatibility suites,
+troubleshooter graph, CI, and deterministic audit prove that no executable
+dependency remains. Every
 retirement change must update the manifest and preserve the prior tree in an
 immutable release tag.

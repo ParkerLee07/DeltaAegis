@@ -275,13 +275,13 @@ def build_audit(root: Path) -> dict[str, Any]:
     inventory = source_inventory(root, files)
     return {
         "schema_version": SCHEMA_VERSION,
-        "scope": "DeltaAegis v0.44.0 Modular Core Foundation release candidate",
+        "scope": "DeltaAegis v0.44.1 Repository Hygiene and Validation Retention maintenance candidate",
         "inventory": inventory,
         "findings": findings(inventory),
         "constraints": [
             "The audit is read-only except when explicitly writing its deterministic Markdown report.",
             "Counts use Git cached and non-ignored untracked candidate files and exclude runtime data roots and the generated report.",
-            "v0.44 changes module ownership but does not change the database schema or introduce a stable API.",
+            "v0.44.1 retains the v0.44 module boundaries and introduces no database-schema or stable-API change.",
             "Historical validator retirement is allowed only when exact prior bytes remain verified at an immutable release tag, current behavior has replacement-contract evidence, and the retained execution graph is complete.",
         ],
     }
@@ -294,9 +294,9 @@ def markdown_list(values: list[str]) -> str:
 def render_markdown(audit: dict[str, Any]) -> str:
     inv = audit["inventory"]
     lines = [
-        "# DeltaAegis v0.44 Repository Audit", "",
+        "# DeltaAegis v0.44.1 Repository Audit", "",
         f"Schema: `{audit['schema_version']}`", "",
-        "This deterministic inventory describes the v0.44.0 Modular Core Foundation release candidate. Regenerate it with `python3 tools/audit_v0_44_repository.py --write`.", "",
+        "This deterministic inventory describes the v0.44.1 Repository Hygiene and Validation Retention maintenance candidate. Regenerate it with `python3 tools/audit_v0_44_repository.py --write`.", "",
         "## Inventory summary", "", "| Measure | Count |", "|---|---:|",
         f"| Repository files in audit scope | {inv['file_count']} |",
         f"| `deltaaegis.py` lines | {inv['source_lines']} |",
