@@ -114,6 +114,9 @@ required_files=(
     "deltaaegis_core/config.py"
     "deltaaegis_core/db.py"
     "deltaaegis_core/ingest.py"
+    "deltaaegis_core/jobs.py"
+    "deltaaegis_core/reports.py"
+    "deltaaegis_core/sites.py"
     "uninstall.sh"
     "tools/bootstrap_first_admin.py"
     "tools/reset_dashboard_admin.py"
@@ -312,6 +315,9 @@ for relative in (
     "deltaaegis_core/config.py",
     "deltaaegis_core/db.py",
     "deltaaegis_core/ingest.py",
+    "deltaaegis_core/jobs.py",
+    "deltaaegis_core/reports.py",
+    "deltaaegis_core/sites.py",
     "tools/bootstrap_first_admin.py",
     "tools/reset_dashboard_admin.py",
     "tools/deltaaegis_troubleshooter.py",

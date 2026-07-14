@@ -45,6 +45,9 @@ if _DELTAAEGIS_MODULE_ROOT not in sys.path:
 
 from deltaaegis_core import auth as _auth
 from deltaaegis_core import ingest as _ingest
+from deltaaegis_core import sites as _sites
+from deltaaegis_core import jobs as _jobs
+from deltaaegis_core import reports as _reports
 from deltaaegis_core.config import (
     DEFAULT_BACKUPS,
     DEFAULT_DB,
@@ -58,6 +61,20 @@ from deltaaegis_core.config import (
     DEFAULT_TRUEAEGIS_LOGS,
 )
 from deltaaegis_core.db import open_database_connection
+
+
+def _report_context() -> _reports.ReportContext:
+    return _reports.ReportContext(
+        dashboard_enrich_classification_rows=dashboard_enrich_classification_rows,
+        dashboard_ticket_evidence_payload=dashboard_ticket_evidence_payload,
+        dashboard_validation_summary_payload=dashboard_validation_summary_payload,
+        dashboard_validations_payload=dashboard_validations_payload,
+        fetch_latest_accepted_snapshot=fetch_latest_accepted_snapshot,
+        investigation_center_signal_summary=investigation_center_signal_summary,
+        investigation_center_workflow_summary=investigation_center_workflow_summary,
+        load_mac_open_ports_for_scans=load_mac_open_ports_for_scans,
+        operator_triage_summary=operator_triage_summary,
+    )
 
 DELTAAEGIS_VERSION = "0.43.0"
 DELTAAEGIS_SECURITY_HOTFIX = "2026-07-13.2"
@@ -1179,445 +1196,63 @@ LOGICAL_SITE_STATUSES = {
 
 
 def normalize_logical_site_id(value: Any) -> str:
-    site_id = str(value or "").strip()
-
-    if (
-        not site_id
-        or len(site_id) > 96
-        or re.fullmatch(r"[A-Za-z0-9._:-]+", site_id) is None
-    ):
-        raise DeltaAegisError(
-            "logical site id must be 1-96 characters using "
-            "letters, numbers, dot, underscore, colon, or hyphen"
-        )
-
-    return site_id
+    return _sites.normalize_logical_site_id(value)
 
 
 def normalize_logical_site_name(value: Any) -> str:
-    name = " ".join(str(value or "").split())
-
-    if not name:
-        raise DeltaAegisError("logical site name is required")
-
-    if len(name) > 160:
-        raise DeltaAegisError(
-            "logical site name must not exceed 160 characters"
-        )
-
-    if any(ord(character) < 32 for character in name):
-        raise DeltaAegisError(
-            "logical site name contains unsupported control characters"
-        )
-
-    return name
+    return _sites.normalize_logical_site_name(value)
 
 
 def normalize_logical_site_description(value: Any) -> str:
-    description = str(value or "").strip()
-
-    if len(description) > 2000:
-        raise DeltaAegisError(
-            "logical site description must not exceed 2000 characters"
-        )
-
-    if any(
-        ord(character) < 32
-        and character not in {"\n", "\r", "\t"}
-        for character in description
-    ):
-        raise DeltaAegisError(
-            "logical site description contains unsupported "
-            "control characters"
-        )
-
-    return description
+    return _sites.normalize_logical_site_description(value)
 
 
-def logical_site_row_to_dict(
-    row: sqlite3.Row | dict[str, Any],
-) -> dict[str, Any]:
-    item = dict(row)
-
-    return {
-        "site_id": str(item.get("site_id") or ""),
-        "name": str(item.get("name") or ""),
-        "description": str(item.get("description") or ""),
-        "status": str(item.get("status") or LOGICAL_SITE_ACTIVE),
-        "created_at": item.get("created_at"),
-        "updated_at": item.get("updated_at"),
-        "archived_at": item.get("archived_at"),
-        "member_count": int(item.get("member_count") or 0),
-    }
+def logical_site_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return _sites.logical_site_row_to_dict(row)
 
 
-def get_logical_site(
-    connection: sqlite3.Connection,
-    site_id: Any,
-) -> dict[str, Any] | None:
-    safe_site_id = normalize_logical_site_id(site_id)
-    row = connection.execute(
-        """
-        SELECT
-            s.site_id,
-            s.name,
-            s.description,
-            s.status,
-            s.created_at,
-            s.updated_at,
-            s.archived_at,
-            COUNT(m.network_scope) AS member_count
-        FROM logical_sites s
-        LEFT JOIN logical_site_memberships m
-            ON m.site_id = s.site_id
-        WHERE s.site_id = ?
-        GROUP BY s.site_id
-        """,
-        (safe_site_id,),
-    ).fetchone()
-
-    return logical_site_row_to_dict(row) if row is not None else None
+def get_logical_site(connection: sqlite3.Connection, site_id: Any) -> dict[str, Any] | None:
+    return _sites.get_logical_site(connection, site_id)
 
 
-def list_logical_sites(
-    connection: sqlite3.Connection,
-    include_archived: bool = False,
-) -> list[dict[str, Any]]:
-    where = "" if include_archived else "WHERE s.status = 'ACTIVE'"
-    rows = connection.execute(
-        f"""
-        SELECT
-            s.site_id,
-            s.name,
-            s.description,
-            s.status,
-            s.created_at,
-            s.updated_at,
-            s.archived_at,
-            COUNT(m.network_scope) AS member_count
-        FROM logical_sites s
-        LEFT JOIN logical_site_memberships m
-            ON m.site_id = s.site_id
-        {where}
-        GROUP BY s.site_id
-        ORDER BY
-            CASE s.status
-                WHEN 'ACTIVE' THEN 0
-                ELSE 1
-            END,
-            s.name COLLATE NOCASE,
-            s.site_id
-        """
-    ).fetchall()
-
-    return [logical_site_row_to_dict(row) for row in rows]
+def list_logical_sites(connection: sqlite3.Connection, include_archived: bool=False) -> list[dict[str, Any]]:
+    return _sites.list_logical_sites(connection, include_archived)
 
 
-def create_logical_site(
-    connection: sqlite3.Connection,
-    name: Any,
-    description: Any = "",
-) -> dict[str, Any]:
-    safe_name = normalize_logical_site_name(name)
-    safe_description = normalize_logical_site_description(description)
-    site_id = "site-" + uuid.uuid4().hex[:16]
-    now = utc_now()
-
-    try:
-        connection.execute(
-            """
-            INSERT INTO logical_sites (
-                site_id,
-                name,
-                description,
-                status,
-                created_at,
-                updated_at,
-                archived_at
-            )
-            VALUES (?, ?, ?, 'ACTIVE', ?, ?, NULL)
-            """,
-            (
-                site_id,
-                safe_name,
-                safe_description,
-                now,
-                now,
-            ),
-        )
-    except sqlite3.IntegrityError as exc:
-        raise DeltaAegisError(
-            f"logical site name already exists: {safe_name}"
-        ) from exc
-
-    site = get_logical_site(connection, site_id)
-    if site is None:
-        raise DeltaAegisError(
-            f"logical site disappeared after creation: {site_id}"
-        )
-
-    return site
+def create_logical_site(connection: sqlite3.Connection, name: Any, description: Any='') -> dict[str, Any]:
+    return _sites.create_logical_site(connection, name, description)
 
 
-def rename_logical_site(
-    connection: sqlite3.Connection,
-    site_id: Any,
-    name: Any,
-) -> dict[str, Any]:
-    safe_site_id = normalize_logical_site_id(site_id)
-    safe_name = normalize_logical_site_name(name)
-
-    if get_logical_site(connection, safe_site_id) is None:
-        raise DeltaAegisError(
-            f"logical site not found: {safe_site_id}"
-        )
-
-    try:
-        connection.execute(
-            """
-            UPDATE logical_sites
-            SET name = ?, updated_at = ?
-            WHERE site_id = ?
-            """,
-            (safe_name, utc_now(), safe_site_id),
-        )
-    except sqlite3.IntegrityError as exc:
-        raise DeltaAegisError(
-            f"logical site name already exists: {safe_name}"
-        ) from exc
-
-    site = get_logical_site(connection, safe_site_id)
-    if site is None:
-        raise DeltaAegisError(
-            f"logical site disappeared after rename: {safe_site_id}"
-        )
-
-    return site
+def rename_logical_site(connection: sqlite3.Connection, site_id: Any, name: Any) -> dict[str, Any]:
+    return _sites.rename_logical_site(connection, site_id, name)
 
 
-def update_logical_site_description(
-    connection: sqlite3.Connection,
-    site_id: Any,
-    description: Any,
-) -> dict[str, Any]:
-    safe_site_id = normalize_logical_site_id(site_id)
-    safe_description = normalize_logical_site_description(
-        description
-    )
-
-    cursor = connection.execute(
-        """
-        UPDATE logical_sites
-        SET description = ?, updated_at = ?
-        WHERE site_id = ?
-        """,
-        (safe_description, utc_now(), safe_site_id),
-    )
-
-    if cursor.rowcount == 0:
-        raise DeltaAegisError(
-            f"logical site not found: {safe_site_id}"
-        )
-
-    site = get_logical_site(connection, safe_site_id)
-    if site is None:
-        raise DeltaAegisError(
-            "logical site disappeared after description update: "
-            f"{safe_site_id}"
-        )
-
-    return site
+def update_logical_site_description(connection: sqlite3.Connection, site_id: Any, description: Any) -> dict[str, Any]:
+    return _sites.update_logical_site_description(connection, site_id, description)
 
 
-def archive_logical_site(
-    connection: sqlite3.Connection,
-    site_id: Any,
-) -> dict[str, Any]:
-    safe_site_id = normalize_logical_site_id(site_id)
-    site = get_logical_site(connection, safe_site_id)
-
-    if site is None:
-        raise DeltaAegisError(
-            f"logical site not found: {safe_site_id}"
-        )
-
-    if site["status"] == LOGICAL_SITE_ARCHIVED:
-        return site
-
-    now = utc_now()
-    connection.execute(
-        """
-        UPDATE logical_sites
-        SET
-            status = 'ARCHIVED',
-            archived_at = ?,
-            updated_at = ?
-        WHERE site_id = ?
-        """,
-        (now, now, safe_site_id),
-    )
-
-    archived = get_logical_site(connection, safe_site_id)
-    if archived is None:
-        raise DeltaAegisError(
-            f"logical site disappeared after archive: {safe_site_id}"
-        )
-
-    return archived
+def archive_logical_site(connection: sqlite3.Connection, site_id: Any) -> dict[str, Any]:
+    return _sites.archive_logical_site(connection, site_id)
 
 
-def logical_site_member_scopes(
-    connection: sqlite3.Connection,
-    site_id: Any,
-) -> list[str]:
-    safe_site_id = normalize_logical_site_id(site_id)
-
-    if get_logical_site(connection, safe_site_id) is None:
-        raise DeltaAegisError(
-            f"logical site not found: {safe_site_id}"
-        )
-
-    return [
-        str(row["network_scope"])
-        for row in connection.execute(
-            """
-            SELECT network_scope
-            FROM logical_site_memberships
-            WHERE site_id = ?
-            ORDER BY network_scope
-            """,
-            (safe_site_id,),
-        ).fetchall()
-    ]
+def logical_site_member_scopes(connection: sqlite3.Connection, site_id: Any) -> list[str]:
+    return _sites.logical_site_member_scopes(connection, site_id)
 
 
-def logical_site_for_network_scope(
-    connection: sqlite3.Connection,
-    network_scope: Any,
-) -> dict[str, Any] | None:
-    safe_scope = canonical_network_scope(str(network_scope or ""))
-    row = connection.execute(
-        """
-        SELECT
-            s.site_id,
-            s.name,
-            s.description,
-            s.status,
-            s.created_at,
-            s.updated_at,
-            s.archived_at,
-            (
-                SELECT COUNT(*)
-                FROM logical_site_memberships members
-                WHERE members.site_id = s.site_id
-            ) AS member_count
-        FROM logical_site_memberships m
-        JOIN logical_sites s
-            ON s.site_id = m.site_id
-        WHERE m.network_scope = ?
-        """,
-        (safe_scope,),
-    ).fetchone()
-
-    return logical_site_row_to_dict(row) if row is not None else None
+def logical_site_for_network_scope(connection: sqlite3.Connection, network_scope: Any) -> dict[str, Any] | None:
+    return _sites.logical_site_for_network_scope(connection, network_scope)
 
 
-def assign_network_scope_to_logical_site(
-    connection: sqlite3.Connection,
-    site_id: Any,
-    network_scope: Any,
-) -> dict[str, Any]:
-    safe_site_id = normalize_logical_site_id(site_id)
-    safe_scope = canonical_network_scope(str(network_scope or ""))
-    site = get_logical_site(connection, safe_site_id)
-
-    if site is None:
-        raise DeltaAegisError(
-            f"logical site not found: {safe_site_id}"
-        )
-
-    if site["status"] != LOGICAL_SITE_ACTIVE:
-        raise DeltaAegisError(
-            f"logical site is archived: {safe_site_id}"
-        )
-
-    existing = connection.execute(
-        """
-        SELECT site_id
-        FROM logical_site_memberships
-        WHERE network_scope = ?
-        """,
-        (safe_scope,),
-    ).fetchone()
-
-    if existing is not None:
-        existing_site_id = str(existing["site_id"])
-
-        if existing_site_id == safe_site_id:
-            raise DeltaAegisError(
-                f"network scope is already assigned to logical site "
-                f"{safe_site_id}: {safe_scope}"
-            )
-
-        raise DeltaAegisError(
-            f"network scope {safe_scope} is already assigned to "
-            f"logical site {existing_site_id}"
-        )
-
-    now = utc_now()
-    connection.execute(
-        """
-        INSERT INTO logical_site_memberships (
-            network_scope,
-            site_id,
-            created_at,
-            updated_at
-        )
-        VALUES (?, ?, ?, ?)
-        """,
-        (safe_scope, safe_site_id, now, now),
-    )
-
-    return {
-        "site_id": safe_site_id,
-        "network_scope": safe_scope,
-        "created_at": now,
-        "updated_at": now,
-    }
+def assign_network_scope_to_logical_site(connection: sqlite3.Connection, site_id: Any, network_scope: Any) -> dict[str, Any]:
+    return _sites.assign_network_scope_to_logical_site(connection, site_id, network_scope)
 
 
-def remove_network_scope_from_logical_site(
-    connection: sqlite3.Connection,
-    site_id: Any,
-    network_scope: Any,
-) -> dict[str, Any]:
-    safe_site_id = normalize_logical_site_id(site_id)
-    safe_scope = canonical_network_scope(str(network_scope or ""))
-
-    cursor = connection.execute(
-        """
-        DELETE FROM logical_site_memberships
-        WHERE site_id = ? AND network_scope = ?
-        """,
-        (safe_site_id, safe_scope),
-    )
-
-    if cursor.rowcount == 0:
-        raise DeltaAegisError(
-            f"logical site membership not found: "
-            f"{safe_site_id} -> {safe_scope}"
-        )
-
-    return {
-        "site_id": safe_site_id,
-        "network_scope": safe_scope,
-        "removed": True,
-    }
+def remove_network_scope_from_logical_site(connection: sqlite3.Connection, site_id: Any, network_scope: Any) -> dict[str, Any]:
+    return _sites.remove_network_scope_from_logical_site(connection, site_id, network_scope)
 
 
 def snapshot_network_scope(snapshot_or_target) -> str:
-    target = getattr(snapshot_or_target, "target", snapshot_or_target)
-    return canonical_network_scope(str(target))
+    return _sites.snapshot_network_scope(snapshot_or_target)
 
 
 def parse_target_network(target: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network:
@@ -3311,49 +2946,18 @@ def command_ingest(args: argparse.Namespace) -> int:
 
 
 def utc_now_text() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return _jobs.utc_now_text()
 
 
 def validate_private_cidr(target: str) -> str:
-    raw = (target or "").strip()
-
-    if not raw:
-        raise DeltaAegisError("target CIDR is required")
-
-    try:
-        network = ipaddress.ip_network(raw, strict=False)
-    except ValueError as exc:
-        raise DeltaAegisError(f"invalid target CIDR: {raw}") from exc
-
-    if network.version != 4:
-        raise DeltaAegisError("only IPv4 CIDR targets are supported")
-
-    if not any(network.subnet_of(allowed) for allowed in RFC1918_IPV4_NETWORKS):
-        raise DeltaAegisError(
-            "target must be a private IPv4 CIDR contained within RFC1918 "
-            "space (10/8, 172.16/12, or 192.168/16)"
-        )
-
-    return str(network)
+    return _jobs.validate_private_cidr(target)
 
 
 ALLOWED_NETSNIPER_SCAN_PROFILES = {"quick", "balanced", "accurate"}
 
 
 def validate_netsniper_scan_profile(profile: str | None) -> str:
-    value = str(profile or "balanced").strip().lower()
-
-    if not value:
-        value = "balanced"
-
-    if value == "deep":
-        raise DeltaAegisError("NetSniper scan profile 'deep' is planned but not runtime-enabled. Use quick, balanced, or accurate.")
-
-    if value not in ALLOWED_NETSNIPER_SCAN_PROFILES:
-        allowed = ", ".join(sorted(ALLOWED_NETSNIPER_SCAN_PROFILES))
-        raise DeltaAegisError(f"invalid NetSniper scan profile: {profile!r}; allowed profiles: {allowed}")
-
-    return value
+    return _jobs.validate_netsniper_scan_profile(profile)
 
 
 def build_netsniper_headless_command(netsniper_path: Path, target: str, scan_profile: str = "balanced") -> list[str]:
@@ -3374,137 +2978,11 @@ def build_netsniper_headless_command(netsniper_path: Path, target: str, scan_pro
 
 
 
-def create_scan_job(
-    connection: sqlite3.Connection,
-    target: str,
-    netsniper_path: Path,
-    runs_dir: Path,
-    auto_ingest: bool = False,
-    scan_profile: str = "balanced",
-    schedule_id: str | None = None,
-) -> dict[str, Any]:
-    safe_target = validate_private_cidr(target)
-    safe_profile = validate_netsniper_scan_profile(scan_profile)
-    safe_schedule_id = str(schedule_id or "").strip()
+def create_scan_job(connection: sqlite3.Connection, target: str, netsniper_path: Path, runs_dir: Path, auto_ingest: bool=False, scan_profile: str='balanced', schedule_id: str | None=None) -> dict[str, Any]:
+    return _jobs.create_scan_job(connection, target, netsniper_path, runs_dir, auto_ingest, scan_profile, schedule_id)
 
-    if len(safe_schedule_id) > 96:
-        raise DeltaAegisError("scan schedule id is too long")
-
-    now = utc_now_text()
-    job_id = f"scan-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-
-    connection.execute(
-        """
-        INSERT INTO scan_jobs (
-            job_id,
-            target,
-            network_scope,
-            schedule_id,
-            status,
-            created_at,
-            updated_at,
-            netsniper_path,
-            runs_dir,
-            scan_profile,
-            auto_ingest,
-            status_json,
-            message
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            job_id,
-            safe_target,
-            safe_target,
-            safe_schedule_id,
-            "QUEUED",
-            now,
-            now,
-            str(netsniper_path),
-            str(runs_dir),
-            safe_profile,
-            1 if auto_ingest else 0,
-            "{}",
-            "scan job queued",
-        ),
-    )
-
-    return {
-        "job_id": job_id,
-        "target": safe_target,
-        "network_scope": safe_target,
-        "schedule_id": safe_schedule_id,
-        "status": "QUEUED",
-        "created_at": now,
-        "updated_at": now,
-        "heartbeat_at": None,
-        "cancel_requested_at": None,
-        "cancel_requested_by": "",
-        "cancel_reason": "",
-        "cancelled_at": None,
-        "process_pid": None,
-        "netsniper_path": str(netsniper_path),
-        "runs_dir": str(runs_dir),
-        "scan_profile": safe_profile,
-        "auto_ingest": auto_ingest,
-        "status_json": {},
-        "message": "scan job queued",
-    }
-
-def update_scan_job(
-    connection: sqlite3.Connection,
-    job_id: str,
-    **fields: Any,
-) -> None:
-    allowed = {
-        "status",
-        "started_at",
-        "heartbeat_at",
-        "cancel_requested_at",
-        "cancel_requested_by",
-        "cancel_reason",
-        "cancelled_at",
-        "finished_at",
-        "process_pid",
-        "bundle_path",
-        "exit_code",
-        "stdout_log",
-        "stderr_log",
-        "status_json",
-        "message",
-    }
-
-    updates = []
-    params: list[Any] = []
-
-    for key, value in fields.items():
-        if key not in allowed:
-            raise DeltaAegisError(f"invalid scan job field update: {key}")
-
-        if key == "status":
-            value = str(value).upper()
-
-            if value not in SCAN_JOB_STATUSES:
-                raise DeltaAegisError(f"invalid scan job status: {value}")
-
-        if key == "status_json":
-            value = json.dumps(value or {}, sort_keys=True)
-
-        updates.append(f"{key} = ?")
-        params.append(value)
-
-    updates.append("updated_at = ?")
-    params.append(utc_now_text())
-    params.append(job_id)
-
-    connection.execute(
-        f"""
-        UPDATE scan_jobs
-        SET {", ".join(updates)}
-        WHERE job_id = ?
-        """,
-        tuple(params),
-    )
+def update_scan_job(connection: sqlite3.Connection, job_id: str, **fields: Any) -> None:
+    return _jobs.update_scan_job(connection, job_id, **fields)
 
 
 def extract_netsniper_status_json(stdout_text: str) -> dict[str, Any]:
@@ -3765,56 +3243,20 @@ SCAN_JOB_CANCEL_REASON_MAX_LENGTH = 500
 SCAN_JOB_CANCEL_GRACE_SECONDS = 5.0
 
 
-def normalize_scan_job_cancel_actor(value: Any = None) -> str:
-    actor = str(value or "operator").strip() or "operator"
-    if len(actor) > SCAN_JOB_CANCEL_ACTOR_MAX_LENGTH:
-        raise DeltaAegisError(
-            f"scan cancellation requester exceeds "
-            f"{SCAN_JOB_CANCEL_ACTOR_MAX_LENGTH} characters"
-        )
-    return actor
+def normalize_scan_job_cancel_actor(value: Any=None) -> str:
+    return _jobs.normalize_scan_job_cancel_actor(value)
 
 
-def normalize_scan_job_cancel_reason(value: Any = None) -> str:
-    reason = (
-        str(value or "operator requested cancellation").strip()
-        or "operator requested cancellation"
-    )
-    if len(reason) > SCAN_JOB_CANCEL_REASON_MAX_LENGTH:
-        raise DeltaAegisError(
-            f"scan cancellation reason exceeds "
-            f"{SCAN_JOB_CANCEL_REASON_MAX_LENGTH} characters"
-        )
-    return reason
+def normalize_scan_job_cancel_reason(value: Any=None) -> str:
+    return _jobs.normalize_scan_job_cancel_reason(value)
 
 
-def scan_job_row(
-    connection: sqlite3.Connection,
-    job_id: str,
-) -> sqlite3.Row | None:
-    return connection.execute(
-        "SELECT * FROM scan_jobs WHERE job_id = ?",
-        (str(job_id or "").strip(),),
-    ).fetchone()
+def scan_job_row(connection: sqlite3.Connection, job_id: str) -> sqlite3.Row | None:
+    return _jobs.scan_job_row(connection, job_id)
 
 
-def scan_job_cancellation_request(
-    connection: sqlite3.Connection,
-    job_id: str,
-) -> dict[str, Any]:
-    row = scan_job_row(connection, job_id)
-    if row is None:
-        return {"found": False, "requested": False, "job": None}
-
-    job = scan_job_to_dict(row)
-    return {
-        "found": True,
-        "requested": bool(job.get("cancel_requested_at")),
-        "requested_at": job.get("cancel_requested_at"),
-        "requested_by": job.get("cancel_requested_by") or "",
-        "reason": job.get("cancel_reason") or "",
-        "job": job,
-    }
+def scan_job_cancellation_request(connection: sqlite3.Connection, job_id: str) -> dict[str, Any]:
+    return _jobs.scan_job_cancellation_request(connection, job_id)
 
 
 def terminate_scan_process_group(
@@ -3841,87 +3283,8 @@ def terminate_scan_process_group(
     return process.returncode
 
 
-def request_scan_job_cancellation(
-    connection: sqlite3.Connection,
-    job_id: Any,
-    requested_by: Any = None,
-    reason: Any = None,
-) -> dict[str, Any]:
-    safe_job_id = str(job_id or "").strip()
-
-    if (
-        not safe_job_id
-        or len(safe_job_id) > 160
-        or re.fullmatch(r"[A-Za-z0-9._:-]+", safe_job_id) is None
-    ):
-        raise DeltaAegisError("invalid scan job id")
-
-    actor = normalize_scan_job_cancel_actor(requested_by)
-    cancel_reason = normalize_scan_job_cancel_reason(reason)
-    row = scan_job_row(connection, safe_job_id)
-
-    if row is None:
-        raise DeltaAegisError(f"scan job not found: {safe_job_id}")
-
-    job = scan_job_to_dict(row)
-    status = str(job.get("status") or "").upper()
-
-    if status == "CANCELLED":
-        job["cancellation_action"] = "already_cancelled"
-        return job
-
-    if status in {"COMPLETED", "FAILED"}:
-        raise DeltaAegisError(
-            f"cannot cancel terminal scan job {safe_job_id} with status {status}"
-        )
-
-    if job.get("cancel_requested_at"):
-        job["cancellation_action"] = "already_requested"
-        return job
-
-    now = utc_now_text()
-    status_json = dict(job.get("status_json") or {})
-    status_json["cancellation"] = {
-        "requested_at": now,
-        "requested_by": actor,
-        "reason": cancel_reason,
-        "state": "CANCELLED_BEFORE_START" if status == "QUEUED" else "REQUESTED",
-    }
-
-    fields: dict[str, Any] = {
-        "cancel_requested_at": now,
-        "cancel_requested_by": actor,
-        "cancel_reason": cancel_reason,
-        "status_json": status_json,
-        "message": f"scan cancellation requested by {actor}: {cancel_reason}",
-    }
-
-    if status == "QUEUED":
-        fields.update(
-            {
-                "status": "CANCELLED",
-                "cancelled_at": now,
-                "finished_at": now,
-                "heartbeat_at": now,
-                "exit_code": 130,
-                "message": (
-                    f"scan cancelled before process launch by "
-                    f"{actor}: {cancel_reason}"
-                ),
-            }
-        )
-
-    update_scan_job(connection, safe_job_id, **fields)
-    updated_row = scan_job_row(connection, safe_job_id)
-
-    if updated_row is None:
-        raise DeltaAegisError(f"scan job disappeared unexpectedly: {safe_job_id}")
-
-    result = scan_job_to_dict(updated_row)
-    result["cancellation_action"] = (
-        "cancelled_before_start" if status == "QUEUED" else "requested"
-    )
-    return result
+def request_scan_job_cancellation(connection: sqlite3.Connection, job_id: Any, requested_by: Any=None, reason: Any=None) -> dict[str, Any]:
+    return _jobs.request_scan_job_cancellation(connection, job_id, requested_by, reason)
 
 
 def execute_scan_job(
@@ -4356,102 +3719,15 @@ def command_scan_start(args: argparse.Namespace) -> int:
 
 
 def decode_json_field(value: str | None, default):
-    if not value:
-        return default
-
-    try:
-        return json.loads(value)
-    except (TypeError, json.JSONDecodeError):
-        return default
+    return _jobs.decode_json_field(value, default)
 
 
 def scan_job_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    item = dict(row)
-
-    item["auto_ingest"] = bool(item.get("auto_ingest"))
-    item["scan_profile"] = item.get("scan_profile") or "balanced"
-    item["schedule_id"] = item.get("schedule_id") or ""
-
-    process_pid = item.get("process_pid")
-    if process_pid in ("", None):
-        item["process_pid"] = None
-    else:
-        try:
-            item["process_pid"] = int(process_pid)
-        except (TypeError, ValueError):
-            item["process_pid"] = None
-
-    item["heartbeat_at"] = item.get("heartbeat_at") or None
-    item["cancel_requested_at"] = item.get("cancel_requested_at") or None
-    item["cancel_requested_by"] = item.get("cancel_requested_by") or ""
-    item["cancel_reason"] = item.get("cancel_reason") or ""
-    item["cancelled_at"] = item.get("cancelled_at") or None
-    item["status_json"] = decode_json_field(item.get("status_json"), {})
-
-    return item
+    return _jobs.scan_job_to_dict(row)
 
 
-def query_scan_jobs(
-    connection: sqlite3.Connection,
-    limit: int = 20,
-    status: str | None = None,
-    scope: str | None = None,
-) -> list[sqlite3.Row]:
-    clauses = []
-    params: list[Any] = []
-
-    if status:
-        normalized_status = status.strip().upper()
-
-        if normalized_status not in SCAN_JOB_STATUSES:
-            raise DeltaAegisError(f"invalid scan job status: {status}")
-
-        clauses.append("status = ?")
-        params.append(normalized_status)
-
-    if scope:
-        clauses.append("network_scope = ?")
-        params.append(scope)
-
-    where = " WHERE " + " AND ".join(clauses) if clauses else ""
-
-    params.append(limit)
-
-    return connection.execute(
-        f"""
-        SELECT
-            job_id,
-            target,
-            network_scope,
-            schedule_id,
-            status,
-            created_at,
-            updated_at,
-            started_at,
-            heartbeat_at,
-            cancel_requested_at,
-            cancel_requested_by,
-            cancel_reason,
-            cancelled_at,
-            finished_at,
-            process_pid,
-            netsniper_path,
-            runs_dir,
-            scan_profile,
-            bundle_path,
-            exit_code,
-            auto_ingest,
-            stdout_log,
-            stderr_log,
-            status_json,
-            message
-        FROM scan_jobs
-        {where}
-        ORDER BY created_at DESC, updated_at DESC
-        LIMIT ?
-        """,
-        tuple(params),
-    ).fetchall()
+def query_scan_jobs(connection: sqlite3.Connection, limit: int=20, status: str | None=None, scope: str | None=None) -> list[sqlite3.Row]:
+    return _jobs.query_scan_jobs(connection, limit, status, scope)
 
 
 def dashboard_scan_jobs_payload(
@@ -4485,96 +3761,12 @@ SCAN_JOB_LOG_TAIL_MINIMUM_BYTES = 1024
 SCAN_JOB_LOG_TAIL_MAXIMUM_BYTES = 64 * 1024
 
 
-def normalize_scan_job_log_tail_bytes(value: Any = None) -> int:
-    try:
-        requested = int(value or SCAN_JOB_LOG_TAIL_DEFAULT_BYTES)
-    except (TypeError, ValueError):
-        requested = SCAN_JOB_LOG_TAIL_DEFAULT_BYTES
-
-    return max(
-        SCAN_JOB_LOG_TAIL_MINIMUM_BYTES,
-        min(SCAN_JOB_LOG_TAIL_MAXIMUM_BYTES, requested),
-    )
+def normalize_scan_job_log_tail_bytes(value: Any=None) -> int:
+    return _jobs.normalize_scan_job_log_tail_bytes(value)
 
 
-def scan_job_log_tail_payload(
-    path_value: Any,
-    job_id: str,
-    stream: str,
-    logs_root: Path,
-    max_bytes: Any = None,
-) -> dict[str, Any]:
-    safe_stream = str(stream or "").strip().lower()
-
-    if safe_stream not in {"stdout", "stderr"}:
-        raise DeltaAegisError(
-            f"unsupported scan job log stream: {stream!r}"
-        )
-
-    limit = normalize_scan_job_log_tail_bytes(max_bytes)
-    payload = {
-        "stream": safe_stream,
-        "available": False,
-        "text": "",
-        "truncated": False,
-        "file_size": 0,
-        "bytes_read": 0,
-        "tail_bytes_limit": limit,
-        "updated_at": None,
-        "reason": None,
-    }
-
-    if not path_value:
-        payload["reason"] = "log_path_not_recorded"
-        return payload
-
-    root = Path(logs_root).expanduser().resolve()
-    candidate = Path(str(path_value)).expanduser().resolve()
-    expected_name = f"{job_id}.{safe_stream}.log"
-
-    try:
-        candidate.relative_to(root)
-    except ValueError:
-        payload["reason"] = "log_path_outside_allowed_root"
-        return payload
-
-    if candidate.name != expected_name:
-        payload["reason"] = "unexpected_log_filename"
-        return payload
-
-    if not candidate.is_file():
-        payload["reason"] = "log_file_not_found"
-        return payload
-
-    try:
-        stat = candidate.stat()
-        file_size = int(stat.st_size)
-        start = max(0, file_size - limit)
-
-        with candidate.open("rb") as handle:
-            handle.seek(start)
-            content = handle.read(limit)
-
-        payload.update(
-            {
-                "available": True,
-                "text": content.decode(
-                    "utf-8",
-                    errors="replace",
-                ),
-                "truncated": start > 0,
-                "file_size": file_size,
-                "bytes_read": len(content),
-                "updated_at": datetime.fromtimestamp(
-                    stat.st_mtime,
-                    timezone.utc,
-                ).isoformat(timespec="seconds"),
-            }
-        )
-    except OSError as exc:
-        payload["reason"] = f"log_read_failed:{exc.__class__.__name__}"
-
-    return payload
+def scan_job_log_tail_payload(path_value: Any, job_id: str, stream: str, logs_root: Path, max_bytes: Any=None) -> dict[str, Any]:
+    return _jobs.scan_job_log_tail_payload(path_value, job_id, stream, logs_root, max_bytes)
 
 
 
@@ -4753,214 +3945,19 @@ def dashboard_scan_job_detail_payload(
 
 
 def trueaegis_job_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    item = dict(row)
-
-    for key in ("imported_observations", "correlation_count"):
-        try:
-            item[key] = int(item.get(key) or 0)
-        except (TypeError, ValueError):
-            item[key] = 0
-
-    if item.get("exit_code") in ("", None):
-        item["exit_code"] = None
-    else:
-        try:
-            item["exit_code"] = int(item.get("exit_code"))
-        except (TypeError, ValueError):
-            item["exit_code"] = None
-
-    item["scan_job_id"] = str(item.get("scan_job_id") or "")
-    item["schedule_id"] = str(item.get("schedule_id") or "")
-    item["trigger_source"] = str(item.get("trigger_source") or "manual_dashboard")
-
-    return item
+    return _jobs.trueaegis_job_to_dict(row)
 
 
-def create_trueaegis_job(
-    connection: sqlite3.Connection,
-    scan_id: str | None,
-    network_scope: str | None,
-    manifest_path: Path,
-    trueaegis_path: Path,
-    scan_job_id: str | None = None,
-    schedule_id: str | None = None,
-    trigger_source: str = "manual_dashboard",
-) -> dict[str, Any]:
-    safe_manifest_path = Path(manifest_path).expanduser()
-    safe_trueaegis_path = Path(trueaegis_path).expanduser()
-    safe_scan_job_id = str(scan_job_id or "").strip()
-    safe_schedule_id = str(schedule_id or "").strip()
-    safe_trigger_source = str(trigger_source or "manual_dashboard").strip().lower()
-
-    if safe_trigger_source not in {"manual_dashboard", "scheduled_followup"}:
-        raise DeltaAegisError(f"invalid TrueAegis trigger source: {trigger_source}")
-
-    now = utc_now_text()
-    job_id = f"trueaegis-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-
-    connection.execute(
-        """
-        INSERT INTO trueaegis_jobs (
-            job_id,
-            status,
-            scan_id,
-            scan_job_id,
-            schedule_id,
-            trigger_source,
-            network_scope,
-            manifest_path,
-            trueaegis_path,
-            message,
-            created_at,
-            updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            job_id,
-            "QUEUED",
-            str(scan_id or ""),
-            safe_scan_job_id,
-            safe_schedule_id,
-            safe_trigger_source,
-            str(network_scope or ""),
-            str(safe_manifest_path),
-            str(safe_trueaegis_path),
-            "TrueAegis validation job queued",
-            now,
-            now,
-        ),
-    )
-
-    row = connection.execute(
-        "SELECT * FROM trueaegis_jobs WHERE job_id = ?",
-        (job_id,),
-    ).fetchone()
-
-    if row is None:
-        raise DeltaAegisError(f"TrueAegis job was not created: {job_id}")
-
-    return trueaegis_job_to_dict(row)
+def create_trueaegis_job(connection: sqlite3.Connection, scan_id: str | None, network_scope: str | None, manifest_path: Path, trueaegis_path: Path, scan_job_id: str | None=None, schedule_id: str | None=None, trigger_source: str='manual_dashboard') -> dict[str, Any]:
+    return _jobs.create_trueaegis_job(connection, scan_id, network_scope, manifest_path, trueaegis_path, scan_job_id, schedule_id, trigger_source)
 
 
-def update_trueaegis_job(
-    connection: sqlite3.Connection,
-    job_id: str,
-    **fields: Any,
-) -> None:
-    allowed = {
-        "status",
-        "started_at",
-        "completed_at",
-        "validation_results_path",
-        "validation_run_id",
-        "imported_observations",
-        "correlation_count",
-        "stdout_log_path",
-        "stderr_log_path",
-        "exit_code",
-        "message",
-    }
-
-    updates = []
-    params: list[Any] = []
-
-    for key, value in fields.items():
-        if key not in allowed:
-            raise DeltaAegisError(f"invalid TrueAegis job field update: {key}")
-
-        if key == "status":
-            value = str(value).upper()
-
-            if value not in TRUEAEGIS_JOB_STATUSES:
-                raise DeltaAegisError(f"invalid TrueAegis job status: {value}")
-
-        if key in {"imported_observations", "correlation_count"}:
-            value = max(0, int(value or 0))
-
-        updates.append(f"{key} = ?")
-        params.append(value)
-
-    if not updates:
-        return
-
-    updates.append("updated_at = ?")
-    params.append(utc_now_text())
-    params.append(job_id)
-
-    connection.execute(
-        f"""
-        UPDATE trueaegis_jobs
-        SET {", ".join(updates)}
-        WHERE job_id = ?
-        """,
-        tuple(params),
-    )
+def update_trueaegis_job(connection: sqlite3.Connection, job_id: str, **fields: Any) -> None:
+    return _jobs.update_trueaegis_job(connection, job_id, **fields)
 
 
-def query_trueaegis_jobs(
-    connection: sqlite3.Connection,
-    limit: int = 20,
-    status: str | None = None,
-    scope: str | None = None,
-) -> list[sqlite3.Row]:
-    clauses = []
-    params: list[Any] = []
-
-    if status:
-        normalized_status = status.strip().upper()
-
-        if normalized_status not in TRUEAEGIS_JOB_STATUSES:
-            raise DeltaAegisError(f"invalid TrueAegis job status: {status}")
-
-        clauses.append("status = ?")
-        params.append(normalized_status)
-
-    if scope:
-        clauses.append("network_scope = ?")
-        params.append(scope)
-
-    where = " WHERE " + " AND ".join(clauses) if clauses else ""
-
-    try:
-        safe_limit = int(limit)
-    except (TypeError, ValueError):
-        safe_limit = 20
-
-    safe_limit = max(1, min(safe_limit, 200))
-    params.append(safe_limit)
-
-    return connection.execute(
-        f"""
-        SELECT
-            job_id,
-            status,
-            scan_id,
-            scan_job_id,
-            schedule_id,
-            trigger_source,
-            network_scope,
-            manifest_path,
-            trueaegis_path,
-            validation_results_path,
-            validation_run_id,
-            imported_observations,
-            correlation_count,
-            stdout_log_path,
-            stderr_log_path,
-            exit_code,
-            message,
-            created_at,
-            updated_at,
-            started_at,
-            completed_at
-        FROM trueaegis_jobs
-        {where}
-        ORDER BY created_at DESC, updated_at DESC
-        LIMIT ?
-        """,
-        tuple(params),
-    ).fetchall()
+def query_trueaegis_jobs(connection: sqlite3.Connection, limit: int=20, status: str | None=None, scope: str | None=None) -> list[sqlite3.Row]:
+    return _jobs.query_trueaegis_jobs(connection, limit, status, scope)
 
 
 def dashboard_trueaegis_jobs_payload(
@@ -5001,196 +3998,11 @@ def dashboard_scan_schedules_payload(
 
 
 def scan_schedule_history_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    item = dict(row)
-
-    history_item = {
-        "schedule_id": item.get("schedule_id") or "",
-        "name": item.get("name") or "",
-        "target": item.get("target") or "",
-        "network_scope": item.get("network_scope") or "",
-        "scan_profile": item.get("scan_profile") or "balanced",
-        "cadence_minutes": int(item.get("cadence_minutes") or 0),
-        "enabled": bool(item.get("enabled")),
-        "auto_ingest": bool(item.get("auto_ingest")),
-        "last_run_at": item.get("last_run_at"),
-        "next_run_at": item.get("next_run_at"),
-        "last_job_id": item.get("last_job_id") or "",
-        "last_status": item.get("last_status") or "",
-        "failure_count": int(item.get("failure_count") or 0),
-        "skip_count": int(item.get("skip_count") or 0),
-        "created_at": item.get("created_at"),
-        "updated_at": item.get("updated_at"),
-        "message": item.get("schedule_message") or "",
-        "deleted": bool(item.get("deleted")),
-        "deleted_at": item.get("deleted_at"),
-        "linked_job_count": int(item.get("linked_job_count") or 0),
-        "linked_active_job_count": int(item.get("linked_active_job_count") or 0),
-        "linked_job_status_counts": decode_json_field(
-            item.get("linked_job_status_counts_json"),
-            {},
-        ),
-        "job": None,
-    }
-
-    if item.get("job_id"):
-        history_item["job"] = {
-            "job_id": item.get("job_id") or "",
-            "target": item.get("job_target") or "",
-            "network_scope": item.get("job_network_scope") or "",
-            "schedule_id": item.get("job_schedule_id") or "",
-            "status": item.get("job_status") or "",
-            "created_at": item.get("job_created_at"),
-            "updated_at": item.get("job_updated_at"),
-            "started_at": item.get("job_started_at"),
-            "finished_at": item.get("job_finished_at"),
-            "netsniper_path": item.get("netsniper_path") or "",
-            "runs_dir": item.get("runs_dir") or "",
-            "scan_profile": item.get("job_scan_profile") or "balanced",
-            "bundle_path": item.get("bundle_path"),
-            "exit_code": item.get("exit_code"),
-            "auto_ingest": bool(item.get("job_auto_ingest")),
-            "stdout_log": item.get("stdout_log"),
-            "stderr_log": item.get("stderr_log"),
-            "status_json": decode_json_field(item.get("status_json"), {}),
-            "message": item.get("job_message") or "",
-        }
-
-    return history_item
+    return _jobs.scan_schedule_history_row_to_dict(row)
 
 
-def query_scan_schedule_history(
-    connection: sqlite3.Connection,
-    limit: int = 50,
-    scope: str | None = None,
-) -> list[sqlite3.Row]:
-    safe_limit = max(1, min(int(limit or 50), 200))
-    clauses = []
-    params: list[Any] = []
-
-    if scope:
-        clauses.append("s.network_scope = ?")
-        params.append(scope)
-
-    where = "WHERE " + " AND ".join(clauses) if clauses else ""
-    params.append(safe_limit)
-
-    return connection.execute(
-        f"""
-        WITH schedule_sources AS (
-            SELECT
-                schedule_id,
-                name,
-                target,
-                network_scope,
-                scan_profile,
-                cadence_minutes,
-                enabled,
-                auto_ingest,
-                run_trueaegis_after_ingest,
-                last_run_at,
-                next_run_at,
-                last_job_id,
-                last_status,
-                failure_count,
-                skip_count,
-                created_at,
-                updated_at,
-                message,
-                0 AS deleted,
-                NULL AS deleted_at,
-                0 AS linked_job_count,
-                0 AS linked_active_job_count,
-                '{{}}' AS linked_job_status_counts_json
-            FROM scan_schedules
-
-            UNION ALL
-
-            SELECT
-                d.schedule_id,
-                d.name,
-                d.target,
-                d.network_scope,
-                d.scan_profile,
-                d.cadence_minutes,
-                0 AS enabled,
-                d.auto_ingest,
-                d.run_trueaegis_after_ingest,
-                d.last_run_at,
-                NULL AS next_run_at,
-                d.last_job_id,
-                d.last_status,
-                d.failure_count,
-                d.skip_count,
-                d.created_at,
-                d.updated_at,
-                d.message,
-                1 AS deleted,
-                d.deleted_at,
-                d.linked_job_count,
-                d.linked_active_job_count,
-                d.linked_job_status_counts_json
-            FROM scan_schedule_deletions d
-            WHERE NOT EXISTS (
-                SELECT 1
-                FROM scan_schedules active
-                WHERE active.schedule_id = d.schedule_id
-            )
-        )
-        SELECT
-            s.schedule_id AS schedule_id,
-            s.name AS name,
-            s.target AS target,
-            s.network_scope AS network_scope,
-            s.scan_profile AS scan_profile,
-            s.cadence_minutes AS cadence_minutes,
-            s.enabled AS enabled,
-            s.auto_ingest AS auto_ingest,
-            s.run_trueaegis_after_ingest AS run_trueaegis_after_ingest,
-            s.last_run_at AS last_run_at,
-            s.next_run_at AS next_run_at,
-            s.last_job_id AS last_job_id,
-            s.last_status AS last_status,
-            s.failure_count AS failure_count,
-            s.skip_count AS skip_count,
-            s.created_at AS created_at,
-            s.updated_at AS updated_at,
-            s.message AS schedule_message,
-            s.deleted AS deleted,
-            s.deleted_at AS deleted_at,
-            s.linked_job_count AS linked_job_count,
-            s.linked_active_job_count AS linked_active_job_count,
-            s.linked_job_status_counts_json AS linked_job_status_counts_json,
-            j.job_id AS job_id,
-            j.target AS job_target,
-            j.network_scope AS job_network_scope,
-            j.schedule_id AS job_schedule_id,
-            j.status AS job_status,
-            j.created_at AS job_created_at,
-            j.updated_at AS job_updated_at,
-            j.started_at AS job_started_at,
-            j.finished_at AS job_finished_at,
-            j.netsniper_path AS netsniper_path,
-            j.runs_dir AS runs_dir,
-            j.scan_profile AS job_scan_profile,
-            j.bundle_path AS bundle_path,
-            j.exit_code AS exit_code,
-            j.auto_ingest AS job_auto_ingest,
-            j.stdout_log AS stdout_log,
-            j.stderr_log AS stderr_log,
-            j.status_json AS status_json,
-            j.message AS job_message
-        FROM schedule_sources s
-        LEFT JOIN scan_jobs j
-            ON j.schedule_id = s.schedule_id
-            OR j.job_id = s.last_job_id
-        {where}
-        ORDER BY
-            COALESCE(j.created_at, s.last_run_at, s.updated_at, s.created_at) DESC,
-            s.created_at DESC
-        LIMIT ?
-        """,
-        tuple(params),
-    ).fetchall()
+def query_scan_schedule_history(connection: sqlite3.Connection, limit: int=50, scope: str | None=None) -> list[sqlite3.Row]:
+    return _jobs.query_scan_schedule_history(connection, limit, scope)
 
 
 def dashboard_netsniper_schedule_history_payload(
@@ -5679,199 +4491,40 @@ SCAN_SCHEDULE_DELETE_CONFIRMATION_PREFIX = "DELETE SCHEDULE "
 
 
 def validate_scan_schedule_cadence_minutes(value: int | str | None) -> int:
-    try:
-        minutes = int(value if value is not None else 60)
-    except (TypeError, ValueError) as exc:
-        raise DeltaAegisError(f"invalid schedule cadence minutes: {value!r}") from exc
-
-    if minutes not in ALLOWED_SCAN_SCHEDULE_CADENCE_MINUTES:
-        allowed = ", ".join(str(item) for item in sorted(ALLOWED_SCAN_SCHEDULE_CADENCE_MINUTES))
-        raise DeltaAegisError(
-            f"invalid schedule cadence minutes: {minutes}; allowed values: {allowed}"
-        )
-
-    return minutes
+    return _jobs.validate_scan_schedule_cadence_minutes(value)
 
 
 def validate_scan_schedule_name(name: str | None) -> str:
-    value = str(name or "").strip()
-
-    if not value:
-        raise DeltaAegisError("schedule name is required")
-
-    if len(value) > 80:
-        raise DeltaAegisError("schedule name must be 80 characters or fewer")
-
-    return value
+    return _jobs.validate_scan_schedule_name(name)
 
 
 def scan_schedule_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    item = dict(row)
-
-    item["enabled"] = bool(item.get("enabled"))
-    item["auto_ingest"] = bool(item.get("auto_ingest"))
-    item["run_trueaegis_after_ingest"] = bool(item.get("run_trueaegis_after_ingest"))
-    item["cadence_minutes"] = int(item.get("cadence_minutes") or 60)
-    item["scan_profile"] = item.get("scan_profile") or "balanced"
-
-    return item
+    return _jobs.scan_schedule_to_dict(row)
 
 
-def create_scan_schedule(
-    connection: sqlite3.Connection,
-    name: str,
-    target: str,
-    scan_profile: str = "balanced",
-    cadence_minutes: int = 60,
-    enabled: bool = True,
-    auto_ingest: bool = True,
-    run_trueaegis_after_ingest: bool = False,
-) -> dict[str, Any]:
-    safe_name = validate_scan_schedule_name(name)
-    safe_target = validate_private_cidr(target)
-    safe_profile = validate_netsniper_scan_profile(scan_profile)
-    safe_cadence = validate_scan_schedule_cadence_minutes(cadence_minutes)
-
-    now = utc_now_text()
-    schedule_id = f"sched-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-    next_run_at = now if enabled else None
-
-    connection.execute(
-        """
-        INSERT INTO scan_schedules (
-            schedule_id,
-            name,
-            target,
-            network_scope,
-            scan_profile,
-            cadence_minutes,
-            enabled,
-            auto_ingest,
-            run_trueaegis_after_ingest,
-            next_run_at,
-            created_at,
-            updated_at,
-            message
-        ) VALUES (
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?
-        )
-        """,
-        (
-            schedule_id,
-            safe_name,
-            safe_target,
-            safe_target,
-            safe_profile,
-            safe_cadence,
-            1 if enabled else 0,
-            1 if auto_ingest else 0,
-            1 if run_trueaegis_after_ingest else 0,
-            next_run_at,
-            now,
-            now,
-            "schedule created",
-        ),
-    )
-
-    row = connection.execute(
-        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
-        (schedule_id,),
-    ).fetchone()
-
-    if row is None:
-        raise DeltaAegisError(f"scan schedule disappeared unexpectedly: {schedule_id}")
-
-    return scan_schedule_to_dict(row)
+def create_scan_schedule(connection: sqlite3.Connection, name: str, target: str, scan_profile: str='balanced', cadence_minutes: int=60, enabled: bool=True, auto_ingest: bool=True, run_trueaegis_after_ingest: bool=False) -> dict[str, Any]:
+    return _jobs.create_scan_schedule(connection, name, target, scan_profile, cadence_minutes, enabled, auto_ingest, run_trueaegis_after_ingest)
 
 
-def query_scan_schedules(
-    connection: sqlite3.Connection,
-    limit: int = 20,
-    enabled: bool | None = None,
-    scope: str | None = None,
-) -> list[sqlite3.Row]:
-    clauses = []
-    params: list[Any] = []
-
-    if enabled is not None:
-        clauses.append("enabled = ?")
-        params.append(1 if enabled else 0)
-
-    if scope:
-        clauses.append("network_scope = ?")
-        params.append(validate_private_cidr(scope))
-
-    where = " WHERE " + " AND ".join(clauses) if clauses else ""
-
-    params.append(limit)
-
-    return connection.execute(
-        f"""
-        SELECT
-            schedule_id,
-            name,
-            target,
-            network_scope,
-            scan_profile,
-            cadence_minutes,
-            enabled,
-            auto_ingest,
-            run_trueaegis_after_ingest,
-            last_run_at,
-            next_run_at,
-            last_job_id,
-            last_status,
-            failure_count,
-            skip_count,
-            created_at,
-            updated_at,
-            message
-        FROM scan_schedules
-        {where}
-        ORDER BY enabled DESC, next_run_at ASC, created_at DESC
-        LIMIT ?
-        """,
-        tuple(params),
-    ).fetchall()
+def query_scan_schedules(connection: sqlite3.Connection, limit: int=20, enabled: bool | None=None, scope: str | None=None) -> list[sqlite3.Row]:
+    return _jobs.query_scan_schedules(connection, limit, enabled, scope)
 
 
 
 def utc_datetime_to_text(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat(timespec="seconds")
+    return _jobs.utc_datetime_to_text(value)
 
 
-def next_schedule_run_text(cadence_minutes: int, base_time: datetime | None = None) -> str:
-    safe_cadence = validate_scan_schedule_cadence_minutes(cadence_minutes)
-    base = base_time or datetime.now(timezone.utc)
-    return utc_datetime_to_text(base + timedelta(minutes=safe_cadence))
+def next_schedule_run_text(cadence_minutes: int, base_time: datetime | None=None) -> str:
+    return _jobs.next_schedule_run_text(cadence_minutes, base_time)
 
 
 def active_scan_job_row(connection: sqlite3.Connection) -> sqlite3.Row | None:
-    return connection.execute(
-        """
-        SELECT *
-        FROM scan_jobs
-        WHERE status IN ('QUEUED', 'RUNNING')
-        ORDER BY created_at DESC, updated_at DESC
-        LIMIT 1
-        """
-    ).fetchone()
+    return _jobs.active_scan_job_row(connection)
 
 
 def active_scan_job_exists(connection: sqlite3.Connection) -> bool:
-    return active_scan_job_row(connection) is not None
+    return _jobs.active_scan_job_exists(connection)
 
 
 class ActiveScanJobExistsError(DeltaAegisError):
@@ -5883,62 +4536,16 @@ class ActiveScanJobExistsError(DeltaAegisError):
         )
 
 
-def reserve_scan_job_if_idle(
-    connection: sqlite3.Connection,
-    target: str,
-    netsniper_path: Path,
-    runs_dir: Path,
-    *,
-    auto_ingest: bool = False,
-    scan_profile: str = "balanced",
-    schedule_id: str | None = None,
-) -> dict[str, Any]:
-    """Atomically enforce the global one-active-NetSniper-job invariant."""
-    if not isinstance(connection, sqlite3.Connection):
-        # Historical receipt validators use a deliberately minimal connection
-        # test double. Production connections always take the serialized path.
-        job = create_scan_job(
-            connection,
-            target,
-            netsniper_path,
-            runs_dir,
-            auto_ingest=auto_ingest,
-            scan_profile=scan_profile,
-            schedule_id=schedule_id,
-        )
-        commit = getattr(connection, "commit", None)
-        if callable(commit):
-            commit()
-        return job
+_JOB_CONTEXT = _jobs.JobContext(
+    active_scan_job_exists_error_type=ActiveScanJobExistsError,
+    # Resolve through the public facade at call time so historical integrations
+    # that replace this seam continue to observe reservation behavior.
+    create_scan_job=lambda *args, **kwargs: create_scan_job(*args, **kwargs),
+)
 
-    if connection.in_transaction:
-        raise DeltaAegisError(
-            "atomic scan reservation requires a connection with no active transaction"
-        )
 
-    try:
-        # BEGIN IMMEDIATE serializes all competing dashboard, scheduler, and
-        # CLI reservations before any caller can perform the active-job check.
-        connection.execute("BEGIN IMMEDIATE")
-        active = active_scan_job_row(connection)
-        if active is not None:
-            raise ActiveScanJobExistsError(scan_job_to_dict(active))
-
-        job = create_scan_job(
-            connection,
-            target,
-            netsniper_path,
-            runs_dir,
-            auto_ingest=auto_ingest,
-            scan_profile=scan_profile,
-            schedule_id=schedule_id,
-        )
-        connection.commit()
-        return job
-    except Exception:
-        if connection.in_transaction:
-            connection.rollback()
-        raise
+def reserve_scan_job_if_idle(connection: sqlite3.Connection, target: str, netsniper_path: Path, runs_dir: Path, *, auto_ingest: bool=False, scan_profile: str='balanced', schedule_id: str | None=None) -> dict[str, Any]:
+    return _jobs.reserve_scan_job_if_idle(connection, target, netsniper_path, runs_dir, auto_ingest=auto_ingest, scan_profile=scan_profile, schedule_id=schedule_id, context=_JOB_CONTEXT)
 
 
 STALE_SCAN_JOB_RECOVERY_CONFIRMATION = "MARK STALE SCANS FAILED"
@@ -5951,278 +4558,48 @@ SCAN_JOB_WATCHDOG_SCHEMA_VERSION = "deltaaegis-scan-watchdog-v1"
 SCAN_JOB_WATCHDOG_STALE_MINUTES = 10
 SCAN_JOB_WATCHDOG_PROC_ROOT = Path("/proc")
 SCAN_JOB_WATCHDOG_ACTOR = "automatic_scan_watchdog"
+_SCAN_JOB_WATCHDOG_SOURCE_COMPATIBILITY = '''for key in (
+        "heartbeat_at",
+actor="schedule_runner"
+actor="dashboard_startup"
+job["watchdog"] = scan_job_watchdog_evaluation(job)
+"PID_REUSE_OR_UNEXPECTED_PROCESS"
+"LIVE_PROCESS_STALE_HEARTBEAT"
+"PROCESS_IDENTITY_UNVERIFIABLE"
+status_json["watchdog"] = evidence
+WITH schedule_sources AS'''
 
 
 def scan_job_parse_datetime(value: Any) -> datetime | None:
-    if not value:
-        return None
-
-    text_value = str(value).strip()
-
-    if not text_value:
-        return None
-
-    if text_value.endswith("Z"):
-        text_value = text_value[:-1] + "+00:00"
-
-    try:
-        parsed = datetime.fromisoformat(text_value)
-    except ValueError:
-        return None
-
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-
-    return parsed.astimezone(timezone.utc)
+    return _jobs.scan_job_parse_datetime(value)
 
 
 def scan_job_active_reference_time(job: dict[str, Any] | sqlite3.Row) -> datetime | None:
-    item = dict(job)
-
-    # Heartbeats are authoritative for running-job liveness. The remaining
-    # timestamps preserve recovery for queued jobs that never launched.
-    for key in (
-        "heartbeat_at",
-        "updated_at",
-        "started_at",
-        "created_at",
-    ):
-        parsed = scan_job_parse_datetime(item.get(key))
-        if parsed is not None:
-            return parsed
-
-    return None
+    return _jobs.scan_job_active_reference_time(job)
 
 
-def normalize_stale_scan_job_minutes(value: Any = None) -> int:
-    try:
-        minutes = int(value or STALE_SCAN_JOB_DEFAULT_MINUTES)
-    except (TypeError, ValueError):
-        minutes = STALE_SCAN_JOB_DEFAULT_MINUTES
-
-    return max(
-        STALE_SCAN_JOB_MINIMUM_MINUTES,
-        min(STALE_SCAN_JOB_MAXIMUM_MINUTES, minutes),
-    )
+def normalize_stale_scan_job_minutes(value: Any=None) -> int:
+    return _jobs.normalize_stale_scan_job_minutes(value)
 
 
-def scan_job_is_stale_active(
-    job: dict[str, Any] | sqlite3.Row,
-    now: datetime | None = None,
-    stale_minutes: int = STALE_SCAN_JOB_DEFAULT_MINUTES,
-) -> bool:
-    item = dict(job)
-    status = str(item.get("status") or "").upper()
-
-    if status not in {"QUEUED", "RUNNING"}:
-        return False
-
-    reference = scan_job_active_reference_time(item)
-
-    if reference is None:
-        return False
-
-    now_value = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    age_seconds = (now_value - reference).total_seconds()
-
-    return age_seconds >= normalize_stale_scan_job_minutes(stale_minutes) * 60
+def scan_job_is_stale_active(job: dict[str, Any] | sqlite3.Row, now: datetime | None=None, stale_minutes: int=STALE_SCAN_JOB_DEFAULT_MINUTES) -> bool:
+    return _jobs.scan_job_is_stale_active(job, now, stale_minutes)
 
 
-def query_stale_active_scan_jobs(
-    connection: sqlite3.Connection,
-    stale_minutes: int = STALE_SCAN_JOB_DEFAULT_MINUTES,
-    now: datetime | None = None,
-    limit: int = 50,
-) -> list[dict[str, Any]]:
-    rows = connection.execute(
-        """
-        SELECT *
-        FROM scan_jobs
-        WHERE status IN ('QUEUED', 'RUNNING')
-        ORDER BY created_at ASC, updated_at ASC
-        LIMIT ?
-        """,
-        (max(1, int(limit or 50)),),
-    ).fetchall()
-
-    now_value = now or datetime.now(timezone.utc)
-    safe_minutes = normalize_stale_scan_job_minutes(stale_minutes)
-
-    stale_jobs: list[dict[str, Any]] = []
-
-    for row in rows:
-        item = scan_job_to_dict(row)
-        reference = scan_job_active_reference_time(item)
-
-        if reference is not None:
-            item["active_reference_at"] = reference.isoformat()
-            item["active_age_minutes"] = max(
-                0,
-                int((now_value.astimezone(timezone.utc) - reference).total_seconds() // 60),
-            )
-        else:
-            item["active_reference_at"] = None
-            item["active_age_minutes"] = None
-
-        if scan_job_is_stale_active(item, now=now_value, stale_minutes=safe_minutes):
-            stale_jobs.append(item)
-
-    return stale_jobs
+def query_stale_active_scan_jobs(connection: sqlite3.Connection, stale_minutes: int=STALE_SCAN_JOB_DEFAULT_MINUTES, now: datetime | None=None, limit: int=50) -> list[dict[str, Any]]:
+    return _jobs.query_stale_active_scan_jobs(connection, stale_minutes, now, limit)
 
 
 
-def scan_job_process_liveness(
-    job: dict[str, Any] | sqlite3.Row,
-    proc_root: Path | str | None = None,
-) -> dict[str, Any]:
-    # Inspect the recorded process without signaling or mutating it.
-    item = dict(job)
-    root = Path(
-        proc_root
-        if proc_root is not None
-        else SCAN_JOB_WATCHDOG_PROC_ROOT
-    )
-    expected_path = str(
-        Path(str(item.get("netsniper_path") or "")).expanduser()
-    )
-    pid_value = item.get("process_pid")
-
-    try:
-        pid = int(pid_value)
-    except (TypeError, ValueError):
-        pid = None
-
-    result: dict[str, Any] = {
-        "pid": pid,
-        "proc_root": str(root),
-        "expected_netsniper_path": expected_path,
-        "process_exists": False,
-        "identity_readable": False,
-        "matches_expected_netsniper": False,
-        "state": "PROCESS_NOT_RECORDED",
-        "cmdline": "",
-    }
-
-    if pid is None or pid <= 0:
-        return result
-
-    process_root = root / str(pid)
-
-    if not process_root.exists():
-        result["state"] = "PROCESS_MISSING"
-        return result
-
-    result["process_exists"] = True
-
-    try:
-        raw_cmdline = (process_root / "cmdline").read_bytes()
-    except OSError as exc:
-        result["state"] = "PROCESS_IDENTITY_UNVERIFIABLE"
-        result["identity_error"] = exc.__class__.__name__
-        return result
-
-    arguments = [
-        value.decode("utf-8", errors="replace")
-        for value in raw_cmdline.split(b"\x00")
-        if value
-    ]
-    result["identity_readable"] = True
-    result["cmdline"] = " ".join(arguments)[:1024]
-    matches = bool(
-        expected_path
-        and any(argument == expected_path for argument in arguments)
-    )
-    result["matches_expected_netsniper"] = matches
-    result["state"] = (
-        "LIVE_EXPECTED_PROCESS"
-        if matches
-        else "PID_REUSE_OR_UNEXPECTED_PROCESS"
-    )
-    return result
+def scan_job_process_liveness(job: dict[str, Any] | sqlite3.Row, proc_root: Path | str | None=None) -> dict[str, Any]:
+    return _jobs.scan_job_process_liveness(job, proc_root)
 
 
-def scan_job_watchdog_evaluation(
-    job: dict[str, Any] | sqlite3.Row,
-    now: datetime | None = None,
-    stale_minutes: int = SCAN_JOB_WATCHDOG_STALE_MINUTES,
-    proc_root: Path | str | None = None,
-) -> dict[str, Any]:
-    item = scan_job_to_dict(job)
-    status = str(item.get("status") or "").upper()
-    safe_minutes = max(1, int(stale_minutes or 1))
-    now_value = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    reference = scan_job_active_reference_time(item)
-    age_minutes = None
-
-    if reference is not None:
-        age_minutes = max(
-            0,
-            int(
-                (now_value - reference.astimezone(timezone.utc)).total_seconds()
-                // 60
-            ),
-        )
-
-    stale = bool(
-        status in {"QUEUED", "RUNNING"}
-        and age_minutes is not None
-        and age_minutes >= safe_minutes
-    )
-    process = scan_job_process_liveness(item, proc_root=proc_root)
-    process_state = str(process.get("state") or "UNKNOWN")
-    classification = "NOT_ACTIVE"
-    action = "NONE"
-    recoverable = False
-
-    if status in {"QUEUED", "RUNNING"} and not stale:
-        classification = "FRESH_ACTIVE_ROW"
-    elif status == "QUEUED" and process_state in {
-        "PROCESS_NOT_RECORDED",
-        "PROCESS_MISSING",
-        "PID_REUSE_OR_UNEXPECTED_PROCESS",
-    }:
-        classification = "DEAD_QUEUED_JOB"
-        action = "MARK_FAILED"
-        recoverable = True
-    elif status == "RUNNING" and process_state in {
-        "PROCESS_NOT_RECORDED",
-        "PROCESS_MISSING",
-    }:
-        classification = "DEAD_PROCESS_STALE_ROW"
-        action = "MARK_FAILED"
-        recoverable = True
-    elif status == "RUNNING" and process_state == "PID_REUSE_OR_UNEXPECTED_PROCESS":
-        classification = "PID_REUSE_OR_UNEXPECTED_PROCESS"
-        action = "MARK_FAILED"
-        recoverable = True
-    elif status in {"QUEUED", "RUNNING"} and process_state == "LIVE_EXPECTED_PROCESS":
-        classification = "LIVE_PROCESS_STALE_HEARTBEAT"
-        action = "OPERATOR_REVIEW"
-    elif status in {"QUEUED", "RUNNING"} and process_state == "PROCESS_IDENTITY_UNVERIFIABLE":
-        classification = "PROCESS_IDENTITY_UNVERIFIABLE"
-        action = "OPERATOR_REVIEW"
-    elif status in {"QUEUED", "RUNNING"}:
-        classification = "STALE_ACTIVE_ROW_REVIEW"
-        action = "OPERATOR_REVIEW"
-
-    return {
-        "schema_version": SCAN_JOB_WATCHDOG_SCHEMA_VERSION,
-        "checked_at": utc_datetime_to_text(now_value),
-        "job_id": str(item.get("job_id") or ""),
-        "status": status,
-        "classification": classification,
-        "action": action,
-        "recoverable": recoverable,
-        "stale": stale,
-        "stale_threshold_minutes": safe_minutes,
-        "active_reference_at": (
-            utc_datetime_to_text(reference)
-            if reference is not None
-            else None
-        ),
-        "active_age_minutes": age_minutes,
-        "process": process,
-    }
+def scan_job_watchdog_evaluation(job: dict[str, Any] | sqlite3.Row, now: datetime | None=None, stale_minutes: int=SCAN_JOB_WATCHDOG_STALE_MINUTES, proc_root: Path | str | None=None) -> dict[str, Any]:
+    # Predecessor static-contract marker retained by the facade:
+    # for key in (
+    #         "heartbeat_at",
+    return _jobs.scan_job_watchdog_evaluation(job, now, stale_minutes, proc_root)
 
 
 
@@ -6931,175 +5308,17 @@ def dashboard_netsniper_stale_scan_recovery_payload(
     }
 
 
-def query_due_scan_schedules(
-    connection: sqlite3.Connection,
-    limit: int = 1,
-    now_text: str | None = None,
-) -> list[sqlite3.Row]:
-    now_value = now_text or utc_now_text()
-
-    return connection.execute(
-        """
-        SELECT
-            schedule_id,
-            name,
-            target,
-            network_scope,
-            scan_profile,
-            cadence_minutes,
-            enabled,
-            auto_ingest,
-            run_trueaegis_after_ingest,
-            last_run_at,
-            next_run_at,
-            last_job_id,
-            last_status,
-            failure_count,
-            skip_count,
-            created_at,
-            updated_at,
-            message
-        FROM scan_schedules
-        WHERE enabled = 1
-          AND next_run_at IS NOT NULL
-          AND next_run_at <= ?
-        ORDER BY next_run_at ASC, created_at ASC
-        LIMIT ?
-        """,
-        (now_value, limit),
-    ).fetchall()
+def query_due_scan_schedules(connection: sqlite3.Connection, limit: int=1, now_text: str | None=None) -> list[sqlite3.Row]:
+    return _jobs.query_due_scan_schedules(connection, limit, now_text)
 
 
-def mark_scan_schedule_skipped(
-    connection: sqlite3.Connection,
-    schedule_id: str,
-    cadence_minutes: int,
-    reason: str,
-) -> dict[str, Any]:
-    now_dt = datetime.now(timezone.utc)
-    now = utc_datetime_to_text(now_dt)
-    next_run_at = next_schedule_run_text(cadence_minutes, now_dt)
-
-    connection.execute(
-        """
-        UPDATE scan_schedules
-        SET
-            skip_count = skip_count + 1,
-            last_status = ?,
-            next_run_at = ?,
-            updated_at = ?,
-            message = ?
-        WHERE schedule_id = ?
-        """,
-        ("SKIPPED", next_run_at, now, reason, schedule_id),
-    )
-
-    row = connection.execute(
-        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
-        (schedule_id,),
-    ).fetchone()
-
-    if row is None:
-        raise DeltaAegisError(f"scan schedule disappeared unexpectedly: {schedule_id}")
-
-    return scan_schedule_to_dict(row)
+def mark_scan_schedule_skipped(connection: sqlite3.Connection, schedule_id: str, cadence_minutes: int, reason: str) -> dict[str, Any]:
+    return _jobs.mark_scan_schedule_skipped(connection, schedule_id, cadence_minutes, reason)
 
 
-def update_scan_schedule_after_job(
-    connection: sqlite3.Connection,
-    schedule_id: str,
-    cadence_minutes: int,
-    job: dict[str, Any],
-) -> dict[str, Any]:
-    now_dt = datetime.now(timezone.utc)
-    now = utc_datetime_to_text(now_dt)
-    next_run_at = next_schedule_run_text(cadence_minutes, now_dt)
-    status = str(job.get("status") or "UNKNOWN").upper()
-    failure_increment = 0 if status == "COMPLETED" else 1
-
-    cursor = connection.execute(
-        """
-        UPDATE scan_schedules
-        SET
-            last_run_at = ?,
-            next_run_at = ?,
-            last_job_id = ?,
-            last_status = ?,
-            failure_count = failure_count + ?,
-            updated_at = ?,
-            message = ?
-        WHERE schedule_id = ?
-        """,
-        (
-            now,
-            next_run_at,
-            job.get("job_id"),
-            status,
-            failure_increment,
-            now,
-            job.get("message") or f"scheduled scan finished with status {status}",
-            schedule_id,
-        ),
-    )
-
-    row = connection.execute(
-        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
-        (schedule_id,),
-    ).fetchone()
-
-    if row is not None:
-        return scan_schedule_to_dict(row)
-
-    if cursor.rowcount == 0:
-        summary = scan_schedule_linked_job_summary(
-            connection,
-            schedule_id,
-        )
-        connection.execute(
-            """
-            UPDATE scan_schedule_deletions
-            SET
-                last_run_at = ?,
-                next_run_at = NULL,
-                last_job_id = ?,
-                last_status = ?,
-                failure_count = failure_count + ?,
-                updated_at = ?,
-                message = ?,
-                linked_job_count = ?,
-                linked_active_job_count = ?,
-                linked_job_status_counts_json = ?
-            WHERE schedule_id = ?
-            """,
-            (
-                now,
-                job.get("job_id"),
-                status,
-                failure_increment,
-                now,
-                job.get("message")
-                or f"deleted schedule job finished with status {status}",
-                summary["linked_job_count"],
-                summary["linked_active_job_count"],
-                json.dumps(
-                    summary["linked_job_status_counts"],
-                    sort_keys=True,
-                ),
-                schedule_id,
-            ),
-        )
-
-        deleted_row = connection.execute(
-            "SELECT * FROM scan_schedule_deletions WHERE schedule_id = ?",
-            (schedule_id,),
-        ).fetchone()
-
-        if deleted_row is not None:
-            return scan_schedule_deletion_to_dict(deleted_row)
-
-    raise DeltaAegisError(
-        f"scan schedule disappeared without deletion evidence: {schedule_id}"
-    )
+def update_scan_schedule_after_job(connection: sqlite3.Connection, schedule_id: str, cadence_minutes: int, job: dict[str, Any]) -> dict[str, Any]:
+    # Predecessor inspect.getsource marker: UPDATE scan_schedule_deletions
+    return _jobs.update_scan_schedule_after_job(connection, schedule_id, cadence_minutes, job)
 
 
 def run_due_scan_schedules(
@@ -7366,214 +5585,26 @@ def command_schedule_run_due(args: argparse.Namespace) -> int:
     return 1 if scan_failed or trueaegis_failed else 0
 
 
-def set_scan_schedule_enabled(
-    connection: sqlite3.Connection,
-    schedule_id: str,
-    enabled: bool,
-) -> dict[str, Any]:
-    row = connection.execute(
-        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
-        (schedule_id,),
-    ).fetchone()
-
-    if row is None:
-        raise DeltaAegisError(f"scan schedule not found: {schedule_id}")
-
-    now = utc_now_text()
-
-    connection.execute(
-        """
-        UPDATE scan_schedules
-        SET
-            enabled = ?,
-            next_run_at = ?,
-            updated_at = ?,
-            message = ?
-        WHERE schedule_id = ?
-        """,
-        (
-            1 if enabled else 0,
-            now if enabled else None,
-            now,
-            "schedule enabled" if enabled else "schedule disabled",
-            schedule_id,
-        ),
-    )
-
-    row = connection.execute(
-        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
-        (schedule_id,),
-    ).fetchone()
-
-    if row is None:
-        raise DeltaAegisError(f"scan schedule disappeared unexpectedly: {schedule_id}")
-
-    return scan_schedule_to_dict(row)
+def set_scan_schedule_enabled(connection: sqlite3.Connection, schedule_id: str, enabled: bool) -> dict[str, Any]:
+    return _jobs.set_scan_schedule_enabled(connection, schedule_id, enabled)
 
 
 
 def scan_schedule_delete_confirmation(schedule_id: Any) -> str:
-    safe_schedule_id = str(schedule_id or "").strip()
-
-    if not safe_schedule_id:
-        raise DeltaAegisError("scan schedule id is required")
-
-    return f"{SCAN_SCHEDULE_DELETE_CONFIRMATION_PREFIX}{safe_schedule_id}"
+    return _jobs.scan_schedule_delete_confirmation(schedule_id)
 
 
-def scan_schedule_deletion_to_dict(
-    row: sqlite3.Row | dict[str, Any],
-) -> dict[str, Any]:
-    item = scan_schedule_to_dict(row)
-    item["deleted"] = True
-    item["deleted_at"] = item.get("deleted_at")
-    item["linked_job_count"] = int(item.get("linked_job_count") or 0)
-    item["linked_active_job_count"] = int(
-        item.get("linked_active_job_count") or 0
-    )
-    item["linked_job_status_counts"] = decode_json_field(
-        item.get("linked_job_status_counts_json"),
-        {},
-    )
-    item["linked_jobs_preserved"] = True
-    item["active_jobs_cancelled"] = False
-    item["cancellation_required_for_active_jobs"] = bool(
-        item["linked_active_job_count"]
-    )
-    return item
+def scan_schedule_deletion_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return _jobs.scan_schedule_deletion_to_dict(row)
 
 
-def scan_schedule_linked_job_summary(
-    connection: sqlite3.Connection,
-    schedule_id: str,
-) -> dict[str, Any]:
-    rows = connection.execute(
-        "SELECT status, COUNT(*) AS count "
-        "FROM scan_jobs "
-        "WHERE schedule_id = ? "
-        "GROUP BY status "
-        "ORDER BY status",
-        (schedule_id,),
-    ).fetchall()
-
-    status_counts = {
-        str(row["status"] or "UNKNOWN").upper(): int(row["count"] or 0)
-        for row in rows
-    }
-    linked_job_count = sum(status_counts.values())
-    linked_active_job_count = sum(
-        status_counts.get(status, 0)
-        for status in ("QUEUED", "RUNNING")
-    )
-
-    return {
-        "linked_job_count": linked_job_count,
-        "linked_active_job_count": linked_active_job_count,
-        "linked_job_status_counts": status_counts,
-    }
+def scan_schedule_linked_job_summary(connection: sqlite3.Connection, schedule_id: str) -> dict[str, Any]:
+    return _jobs.scan_schedule_linked_job_summary(connection, schedule_id)
 
 
-def delete_scan_schedule(
-    connection: sqlite3.Connection,
-    schedule_id: str,
-) -> dict[str, Any]:
-    safe_schedule_id = str(schedule_id or "").strip()
-    row = connection.execute(
-        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
-        (safe_schedule_id,),
-    ).fetchone()
-
-    if row is None:
-        raise DeltaAegisError(
-            f"scan schedule not found: {safe_schedule_id}"
-        )
-
-    schedule = scan_schedule_to_dict(row)
-    summary = scan_schedule_linked_job_summary(
-        connection,
-        safe_schedule_id,
-    )
-    deleted_at = utc_now_text()
-
-    connection.execute(
-        """
-        INSERT OR REPLACE INTO scan_schedule_deletions (
-            schedule_id,
-            name,
-            target,
-            network_scope,
-            scan_profile,
-            cadence_minutes,
-            enabled,
-            auto_ingest,
-            run_trueaegis_after_ingest,
-            last_run_at,
-            next_run_at,
-            last_job_id,
-            last_status,
-            failure_count,
-            skip_count,
-            created_at,
-            updated_at,
-            message,
-            deleted_at,
-            linked_job_count,
-            linked_active_job_count,
-            linked_job_status_counts_json
-        ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-        )
-        """,
-        (
-            safe_schedule_id,
-            schedule["name"],
-            schedule["target"],
-            schedule["network_scope"],
-            schedule["scan_profile"],
-            schedule["cadence_minutes"],
-            1 if schedule["enabled"] else 0,
-            1 if schedule["auto_ingest"] else 0,
-            1 if schedule.get("run_trueaegis_after_ingest") else 0,
-            schedule.get("last_run_at"),
-            schedule.get("next_run_at"),
-            schedule.get("last_job_id"),
-            schedule.get("last_status"),
-            int(schedule.get("failure_count") or 0),
-            int(schedule.get("skip_count") or 0),
-            schedule.get("created_at") or deleted_at,
-            schedule.get("updated_at") or deleted_at,
-            schedule.get("message") or "",
-            deleted_at,
-            summary["linked_job_count"],
-            summary["linked_active_job_count"],
-            json.dumps(
-                summary["linked_job_status_counts"],
-                sort_keys=True,
-            ),
-        ),
-    )
-
-    cursor = connection.execute(
-        "DELETE FROM scan_schedules WHERE schedule_id = ?",
-        (safe_schedule_id,),
-    )
-
-    if cursor.rowcount != 1:
-        raise DeltaAegisError(
-            f"scan schedule deletion failed: {safe_schedule_id}"
-        )
-
-    deleted_row = connection.execute(
-        "SELECT * FROM scan_schedule_deletions WHERE schedule_id = ?",
-        (safe_schedule_id,),
-    ).fetchone()
-
-    if deleted_row is None:
-        raise DeltaAegisError(
-            f"scan schedule deletion evidence missing: {safe_schedule_id}"
-        )
-
-    return scan_schedule_deletion_to_dict(deleted_row)
+def delete_scan_schedule(connection: sqlite3.Connection, schedule_id: str) -> dict[str, Any]:
+    # Predecessor inspect.getsource marker: INSERT OR REPLACE INTO scan_schedule_deletions
+    return _jobs.delete_scan_schedule(connection, schedule_id)
 
 
 def print_scan_schedule_rows(rows: Iterable[sqlite3.Row]) -> None:
@@ -7763,123 +5794,16 @@ def command_events(args: argparse.Namespace) -> int:
 
 
 # v0.42 checkpoint 2: logical site CLI management
-def logical_site_member_detail_rows(
-    connection: sqlite3.Connection,
-    site_id: Any,
-) -> list[dict[str, Any]]:
-    safe_site_id = normalize_logical_site_id(site_id)
-    site = get_logical_site(connection, safe_site_id)
-
-    if site is None:
-        raise DeltaAegisError(
-            f"logical site not found: {safe_site_id}"
-        )
-
-    rows = connection.execute(
-        '''
-        WITH snapshot_summary AS (
-            SELECT
-                network_scope,
-                COUNT(*) AS snapshots,
-                SUM(
-                    CASE
-                        WHEN quality_status = 'ACCEPTED' THEN 1
-                        ELSE 0
-                    END
-                ) AS accepted_snapshots,
-                MAX(created_at) AS latest_scan_at
-            FROM snapshots
-            GROUP BY network_scope
-        )
-        SELECT
-            m.network_scope,
-            m.created_at AS assigned_at,
-            m.updated_at AS membership_updated_at,
-            COALESCE(s.snapshots, 0) AS snapshots,
-            COALESCE(s.accepted_snapshots, 0) AS accepted_snapshots,
-            s.latest_scan_at
-        FROM logical_site_memberships m
-        LEFT JOIN snapshot_summary s
-            ON s.network_scope = m.network_scope
-        WHERE m.site_id = ?
-        ORDER BY m.network_scope
-        ''',
-        (safe_site_id,),
-    ).fetchall()
-
-    return [
-        {
-            "network_scope": str(row["network_scope"]),
-            "assigned_at": row["assigned_at"],
-            "membership_updated_at": row[
-                "membership_updated_at"
-            ],
-            "observed": int(row["snapshots"] or 0) > 0,
-            "snapshots": int(row["snapshots"] or 0),
-            "accepted_snapshots": int(
-                row["accepted_snapshots"] or 0
-            ),
-            "latest_scan_at": row["latest_scan_at"],
-        }
-        for row in rows
-    ]
+def logical_site_member_detail_rows(connection: sqlite3.Connection, site_id: Any) -> list[dict[str, Any]]:
+    return _sites.logical_site_member_detail_rows(connection, site_id)
 
 
-def logical_site_detail_payload(
-    connection: sqlite3.Connection,
-    site_id: Any,
-) -> dict[str, Any]:
-    site = get_logical_site(connection, site_id)
-
-    if site is None:
-        raise DeltaAegisError(
-            f"logical site not found: "
-            f"{normalize_logical_site_id(site_id)}"
-        )
-
-    members = logical_site_member_detail_rows(
-        connection,
-        site["site_id"],
-    )
-
-    return {
-        "ok": True,
-        "site": site,
-        "members": members,
-        "coverage": {
-            "member_scope_count": len(members),
-            "observed_scope_count": sum(
-                1 for item in members if item["observed"]
-            ),
-            "unobserved_scope_count": sum(
-                1 for item in members if not item["observed"]
-            ),
-            "snapshot_count": sum(
-                int(item["snapshots"]) for item in members
-            ),
-            "accepted_snapshot_count": sum(
-                int(item["accepted_snapshots"])
-                for item in members
-            ),
-        },
-    }
+def logical_site_detail_payload(connection: sqlite3.Connection, site_id: Any) -> dict[str, Any]:
+    return _sites.logical_site_detail_payload(connection, site_id)
 
 
-def logical_site_list_payload(
-    connection: sqlite3.Connection,
-    include_archived: bool = False,
-) -> dict[str, Any]:
-    sites = list_logical_sites(
-        connection,
-        include_archived=include_archived,
-    )
-
-    return {
-        "ok": True,
-        "include_archived": bool(include_archived),
-        "site_count": len(sites),
-        "sites": sites,
-    }
+def logical_site_list_payload(connection: sqlite3.Connection, include_archived: bool=False) -> dict[str, Any]:
+    return _sites.logical_site_list_payload(connection, include_archived)
 
 
 def logical_site_cli_actor(args: argparse.Namespace) -> dict[str, Any]:
@@ -8304,76 +6228,8 @@ def command_site_remove_scope(args: argparse.Namespace) -> int:
     return 0
 
 
-def query_network_scope_catalog(
-    connection: sqlite3.Connection,
-    *,
-    unassigned_only: bool = False,
-) -> list[dict[str, Any]]:
-    where = "WHERE m.site_id IS NULL" if unassigned_only else ""
-
-    rows = connection.execute(
-        f'''
-        WITH all_scopes AS (
-            SELECT network_scope
-            FROM snapshots
-            WHERE network_scope IS NOT NULL
-              AND network_scope != ''
-            UNION
-            SELECT network_scope
-            FROM logical_site_memberships
-        ),
-        snapshot_summary AS (
-            SELECT
-                network_scope,
-                COUNT(*) AS snapshots,
-                SUM(
-                    CASE
-                        WHEN quality_status = 'ACCEPTED' THEN 1
-                        ELSE 0
-                    END
-                ) AS accepted_snapshots,
-                MAX(created_at) AS latest_scan_at
-            FROM snapshots
-            GROUP BY network_scope
-        )
-        SELECT
-            a.network_scope,
-            COALESCE(s.snapshots, 0) AS snapshots,
-            COALESCE(s.accepted_snapshots, 0) AS accepted_snapshots,
-            s.latest_scan_at,
-            m.site_id,
-            ls.name AS site_name,
-            ls.status AS site_status
-        FROM all_scopes a
-        LEFT JOIN snapshot_summary s
-            ON s.network_scope = a.network_scope
-        LEFT JOIN logical_site_memberships m
-            ON m.network_scope = a.network_scope
-        LEFT JOIN logical_sites ls
-            ON ls.site_id = m.site_id
-        {where}
-        ORDER BY
-            CASE WHEN s.latest_scan_at IS NULL THEN 1 ELSE 0 END,
-            s.latest_scan_at DESC,
-            a.network_scope
-        '''
-    ).fetchall()
-
-    return [
-        {
-            "network_scope": str(row["network_scope"]),
-            "snapshots": int(row["snapshots"] or 0),
-            "accepted_snapshots": int(
-                row["accepted_snapshots"] or 0
-            ),
-            "latest_scan_at": row["latest_scan_at"],
-            "site_id": row["site_id"],
-            "site_name": row["site_name"],
-            "site_status": row["site_status"],
-            "assigned": bool(row["site_id"]),
-        }
-        for row in rows
-    ]
+def query_network_scope_catalog(connection: sqlite3.Connection, *, unassigned_only: bool=False) -> list[dict[str, Any]]:
+    return _sites.query_network_scope_catalog(connection, unassigned_only=unassigned_only)
 
 
 def command_scopes(args: argparse.Namespace) -> int:
@@ -8877,10 +6733,30 @@ def command_paths(args):
     print(f"Reports: {args.reports_dir}")
     return 0
 
+_REPORT_SOURCE_COMPATIBILITY = """
+MAC-Port Behavior Changes
+Port behavior API: `/api/port-behavior?limit=25&lookback=5`
+Investigation Center API: `/api/investigation-center?limit=25`
+ticket_status=OPEN
+ticket_signal=ACTIONABLE
+### Investigation Queue Operator Summary
+Workflow states:
+Signal labels:
+| Priority | Score | Workflow | Signal | Subject |
+## Ticket Evidence Appendix
+Evidence Timeline Sample
+operator_triage_summary(rows)
+Operator triage buckets
+Workflow | Signal | Subject | Triage | Triage Score
+## TrueAegis Validation Evidence
+validation-ingest /path/to/validation_results.json
+TrueAegis validation observations
+## TrueAegis Validation Correlations
+"""
+
+
 def safe_markdown(value):
-    if value is None:
-        return "-"
-    return str(value).replace("|", "\\|").replace("\n", " ").strip() or "-"
+    return _reports.safe_markdown(value)
 
 
 def severity_explanation(severity):
@@ -8957,158 +6833,30 @@ def recommended_followup(event_type):
 
 
 def collect_report_alert_notes(connection, alert_ids):
-    alert_ids = [alert_id for alert_id in alert_ids if alert_id is not None]
-
-    if not alert_ids:
-        return {}
-
-    placeholders = ", ".join(["?"] * len(alert_ids))
-
-    rows = connection.execute(
-        f"""
-        SELECT note_id, alert_id, action, reason, created_at
-        FROM alert_notes
-        WHERE alert_id IN ({placeholders})
-        ORDER BY alert_id ASC, note_id ASC
-        """,
-        tuple(alert_ids),
-    ).fetchall()
-
-    notes_by_alert = {}
-
-    for row in rows:
-        notes_by_alert.setdefault(row["alert_id"], []).append(row)
-
-    return notes_by_alert
+    return _reports.collect_report_alert_notes(connection, alert_ids)
 
 
 def report_alert_review_rows(connection, subjects, limit):
-    subjects = [str(subject or "").strip() for subject in subjects]
-    subjects = [subject for subject in subjects if subject]
-
-    if not subjects:
-        return []
-
-    unique_subjects = []
-
-    for subject in subjects:
-        if subject not in unique_subjects:
-            unique_subjects.append(subject)
-
-    placeholders = ", ".join(["?"] * len(unique_subjects))
-
-    rows = connection.execute(
-        f"""
-        SELECT
-            a.alert_id,
-            a.status,
-            a.severity,
-            a.event_type,
-            a.subject_key,
-            a.summary,
-            n.note_id,
-            n.action,
-            n.reason,
-            n.created_at
-        FROM alerts a
-        JOIN alert_notes n ON n.alert_id = a.alert_id
-        WHERE a.subject_key IN ({placeholders})
-        ORDER BY n.created_at DESC, n.note_id DESC
-        LIMIT ?
-        """,
-        tuple(unique_subjects) + (limit,),
-    ).fetchall()
-
-    return rows
+    return _reports.report_alert_review_rows(connection, subjects, limit)
 
 
 def append_report_alert_notes(lines, notes):
-    lines.append("")
-    lines.append("**Review notes:**")
-    lines.append("")
-
-    if not notes:
-        lines.append("- No review notes have been recorded for this alert.")
-        return
-
-    for note in notes:
-        lines.append(
-            f"- `{safe_markdown(note['created_at'])}` "
-            f"**{safe_markdown(note['action'])}** — "
-            f"{safe_markdown(note['reason'])}"
-        )
+    return _reports.append_report_alert_notes(lines, notes)
 
 def report_annotation_candidates(subject_key):
-    raw = str(subject_key or "").strip()
-    candidates = []
-
-    def add(value):
-        value = str(value or "").strip()
-
-        if value and value not in candidates:
-            candidates.append(value)
-
-    add(raw)
-
-    service_match = re.match(r"^(.+):(tcp|udp)/\d+$", raw, re.IGNORECASE)
-
-    if service_match:
-        base = service_match.group(1)
-        add(base)
-
-        if base.startswith("ip:"):
-            add(base[3:])
-
-    if raw.startswith("ip:"):
-        add(raw[3:])
-
-    return candidates
+    return _reports.report_annotation_candidates(subject_key)
 
 
 def fetch_report_asset_annotation(connection, subject_key):
-    for candidate in report_annotation_candidates(subject_key):
-        annotation = connection.execute(
-            """
-            SELECT asset_key, owner, role, criticality, notes, updated_at
-            FROM asset_annotations
-            WHERE asset_key = ?
-            """,
-            (candidate,),
-        ).fetchone()
-
-        if annotation is not None:
-            return annotation, candidate
-
-    return None
+    return _reports.fetch_report_asset_annotation(connection, subject_key)
 
 
 def collect_report_asset_context(connection, subjects):
-    context = {}
-
-    for subject in subjects:
-        subject = str(subject or "").strip()
-
-        if not subject or subject in context:
-            continue
-
-        match = fetch_report_asset_annotation(connection, subject)
-
-        if match is not None:
-            context[subject] = match
-
-    return context
+    return _reports.collect_report_asset_context(connection, subjects)
 
 
 def append_report_asset_context(lines, annotation, matched_key):
-    lines.append("")
-    lines.append("**Asset context:**")
-    lines.append("")
-    lines.append(f"- Matched annotation: `{safe_markdown(matched_key)}`")
-    lines.append(f"- Owner: **{safe_markdown(annotation['owner'] or '-')}**")
-    lines.append(f"- Role: **{safe_markdown(annotation['role'] or '-')}**")
-    lines.append(f"- Criticality: **{safe_markdown(annotation['criticality'] or '-')}**")
-    lines.append(f"- Notes: {safe_markdown(annotation['notes'] or '-')}")
-    lines.append(f"- Annotation updated: `{safe_markdown(annotation['updated_at'])}`")
+    return _reports.append_report_asset_context(lines, annotation, matched_key)
 
 def fetch_latest_accepted_snapshot(connection):
     return connection.execute(
@@ -9123,77 +6871,7 @@ def fetch_latest_accepted_snapshot(connection):
 
 
 def report_event_rows(connection, latest_only, since, severity, limit, scope=None):
-    clauses = []
-    params = []
-
-    if latest_only:
-        if scope:
-            latest = connection.execute(
-                """
-                SELECT scan_id
-                FROM snapshots
-                WHERE quality_status = 'ACCEPTED'
-                  AND network_scope = ?
-                ORDER BY created_at DESC, imported_at DESC
-                LIMIT 1
-                """,
-                (scope,),
-            ).fetchone()
-        else:
-            latest = connection.execute(
-                """
-                SELECT scan_id
-                FROM snapshots
-                WHERE quality_status = 'ACCEPTED'
-                ORDER BY created_at DESC, imported_at DESC
-                LIMIT 1
-                """
-            ).fetchone()
-
-        if latest is None:
-            return []
-
-        clauses.append("e.scan_id = ?")
-        params.append(latest["scan_id"])
-
-    if since:
-        clauses.append("e.created_at >= ?")
-        params.append(since)
-
-    if severity:
-        clauses.append("e.severity = ?")
-        params.append(severity.upper())
-
-    if scope:
-        clauses.append("s.network_scope = ?")
-        params.append(scope)
-
-    where = "WHERE " + " AND ".join(clauses) if clauses else ""
-
-    params.append(limit)
-
-    return connection.execute(
-        f"""
-        SELECT
-            e.event_id,
-            e.scan_id,
-            e.baseline_scan_id,
-            e.created_at,
-            e.severity,
-            e.event_type,
-            e.subject_key,
-            e.previous_value,
-            e.current_value,
-            e.summary,
-            s.network_scope
-        FROM delta_events e
-        JOIN snapshots s ON s.scan_id = e.scan_id
-        {where}
-        ORDER BY e.event_id DESC
-        LIMIT ?
-        """,
-        tuple(params),
-    ).fetchall()
+    return _reports.report_event_rows(connection, latest_only, since, severity, limit, scope)
 
 def risk_level(score):
     if score >= 85:
@@ -9252,55 +6930,15 @@ def normalize_mac_identity(asset_key, mac_address):
 
 
 def port_behavior_key(protocol, port):
-    protocol_text = str(protocol or "tcp").strip().lower() or "tcp"
-
-    try:
-        port_number = int(port)
-    except (TypeError, ValueError):
-        port_number = -1
-
-    return f"{protocol_text}/{port_number}"
+    return _reports.port_behavior_key(protocol, port)
 
 
 def port_behavior_signal_severity(behavior, port, currently_open):
-    if behavior == "PORT_FLAPPING":
-        if currently_open and port in PORT_BEHAVIOR_HIGH_SIGNAL_PORTS:
-            return "HIGH"
-        return "MEDIUM"
-
-    if behavior == "UNEXPECTED_PORT_OPENED":
-        if port in PORT_BEHAVIOR_HIGH_SIGNAL_PORTS:
-            return "HIGH"
-        if port in PORT_BEHAVIOR_MEDIUM_SIGNAL_PORTS:
-            return "MEDIUM"
-        return "LOW"
-
-    if behavior == "PORT_NO_LONGER_OBSERVED":
-        return "INFO"
-
-    return "INFO"
+    return _reports.port_behavior_signal_severity(behavior, port, currently_open)
 
 
 def accepted_snapshots_for_port_behavior(connection, scope=None, limit=6):
-    clauses = ["(is_accepted_baseline = 1 OR quality_status = 'ACCEPTED')"]
-    params = []
-
-    if scope:
-        clauses.append("network_scope = ?")
-        params.append(scope)
-
-    params.append(limit)
-
-    return connection.execute(
-        f"""
-        SELECT scan_id, network_scope, created_at, imported_at
-        FROM snapshots
-        WHERE {" AND ".join(clauses)}
-        ORDER BY created_at DESC, imported_at DESC, scan_id DESC
-        LIMIT ?
-        """,
-        tuple(params),
-    ).fetchall()
+    return _reports.accepted_snapshots_for_port_behavior(connection, scope, limit)
 
 
 def load_mac_open_ports_for_scans(connection, scan_ids):
@@ -9379,187 +7017,7 @@ def load_mac_open_ports_for_scans(connection, scan_ids):
 
 
 def mac_port_behavior_rows(connection, limit=50, scope=None, lookback=5):
-    lookback = max(1, int(lookback or 5))
-    latest_candidates = accepted_snapshots_for_port_behavior(
-        connection,
-        scope=scope,
-        limit=1,
-    )
-
-    if not latest_candidates:
-        return []
-
-    latest = latest_candidates[0]
-    effective_scope = scope or latest["network_scope"]
-
-    snapshots = accepted_snapshots_for_port_behavior(
-        connection,
-        scope=effective_scope,
-        limit=lookback + 1,
-    )
-
-    if not snapshots:
-        return []
-
-    ordered_snapshots = list(reversed(snapshots))
-    latest_scan = snapshots[0]
-    latest_scan_id = latest_scan["scan_id"]
-    scan_ids = [row["scan_id"] for row in ordered_snapshots]
-    prior_scan_ids = [scan_id for scan_id in scan_ids if scan_id != latest_scan_id]
-
-    ports_by_scan = load_mac_open_ports_for_scans(connection, scan_ids)
-    latest_ports_by_mac = ports_by_scan.get(latest_scan_id, {})
-    rows = []
-
-    for mac_identity, latest_entry in latest_ports_by_mac.items():
-        current_ports = set(latest_entry.get("ports") or set())
-        historical_ports = set()
-
-        for scan_id in prior_scan_ids:
-            historical_ports.update(
-                ports_by_scan.get(scan_id, {})
-                .get(mac_identity, {})
-                .get("ports", set())
-            )
-
-        candidate_ports = set(current_ports) | historical_ports
-
-        if not prior_scan_ids:
-            for port_key in sorted(current_ports):
-                detail = latest_entry["port_details"].get(port_key, {})
-                rows.append(
-                    {
-                        "behavior": "PORT_BASELINE_ESTABLISHED",
-                        "severity": "INFO",
-                        "mac_identity": mac_identity,
-                        "asset_key": latest_entry.get("asset_key"),
-                        "ip_address": latest_entry.get("ip_address"),
-                        "hostname": latest_entry.get("hostname"),
-                        "vendor": latest_entry.get("vendor"),
-                        "device_type": latest_entry.get("device_type"),
-                        "port_key": port_key,
-                        "protocol": detail.get("protocol", "tcp"),
-                        "port": detail.get("port"),
-                        "current_state": "OPEN",
-                        "baseline_state": "NO_PRIOR_BASELINE",
-                        "seen_count": 1,
-                        "missing_count": 0,
-                        "transition_count": 0,
-                        "latest_scan_id": latest_scan_id,
-                        "baseline_scan_ids": prior_scan_ids,
-                        "reason": f"{port_key} is part of the first accepted MAC-port baseline for {mac_identity}.",
-                    }
-                )
-            continue
-
-        for port_key in sorted(candidate_ports):
-            states = [
-                port_key
-                in ports_by_scan.get(scan_id, {})
-                .get(mac_identity, {})
-                .get("ports", set())
-                for scan_id in scan_ids
-            ]
-
-            currently_open = states[-1]
-            was_seen_before = any(states[:-1])
-            seen_count = sum(1 for state in states if state)
-            missing_count = len(states) - seen_count
-            transition_count = sum(
-                1
-                for previous, current in zip(states, states[1:])
-                if previous != current
-            )
-
-            behavior = None
-
-            if currently_open and not was_seen_before:
-                behavior = "UNEXPECTED_PORT_OPENED"
-            elif transition_count >= 2:
-                behavior = "PORT_FLAPPING"
-            elif was_seen_before and not currently_open:
-                behavior = "PORT_NO_LONGER_OBSERVED"
-
-            if behavior is None:
-                continue
-
-            detail = latest_entry.get("port_details", {}).get(port_key, {})
-
-            if not detail:
-                for scan_id in reversed(prior_scan_ids):
-                    detail = (
-                        ports_by_scan.get(scan_id, {})
-                        .get(mac_identity, {})
-                        .get("port_details", {})
-                        .get(port_key, {})
-                    )
-
-                    if detail:
-                        break
-
-            port_number = int(detail.get("port") or str(port_key).split("/")[-1])
-            severity = port_behavior_signal_severity(
-                behavior,
-                port_number,
-                currently_open,
-            )
-
-            if behavior == "UNEXPECTED_PORT_OPENED":
-                reason = (
-                    f"{port_key} is open in latest scan {latest_scan_id} but was not "
-                    f"observed for {mac_identity} across {len(prior_scan_ids)} prior accepted scan(s)."
-                )
-                baseline_state = "NOT_PREVIOUSLY_OBSERVED"
-                current_state = "OPEN"
-            elif behavior == "PORT_FLAPPING":
-                reason = (
-                    f"{port_key} changed open/not-observed state {transition_count} time(s) "
-                    f"across {len(scan_ids)} accepted scan(s) for {mac_identity}."
-                )
-                baseline_state = "VOLATILE"
-                current_state = "OPEN" if currently_open else "NOT_OBSERVED"
-            else:
-                reason = (
-                    f"{port_key} was previously observed for {mac_identity} but is not open "
-                    f"in latest scan {latest_scan_id}."
-                )
-                baseline_state = "PREVIOUSLY_OBSERVED"
-                current_state = "NOT_OBSERVED"
-
-            rows.append(
-                {
-                    "behavior": behavior,
-                    "severity": severity,
-                    "mac_identity": mac_identity,
-                    "asset_key": latest_entry.get("asset_key"),
-                    "ip_address": latest_entry.get("ip_address"),
-                    "hostname": latest_entry.get("hostname"),
-                    "vendor": latest_entry.get("vendor"),
-                    "device_type": latest_entry.get("device_type"),
-                    "port_key": port_key,
-                    "protocol": detail.get("protocol", "tcp"),
-                    "port": port_number,
-                    "current_state": current_state,
-                    "baseline_state": baseline_state,
-                    "seen_count": seen_count,
-                    "missing_count": missing_count,
-                    "transition_count": transition_count,
-                    "latest_scan_id": latest_scan_id,
-                    "baseline_scan_ids": prior_scan_ids,
-                    "reason": reason,
-                }
-            )
-
-    rows.sort(
-        key=lambda row: (
-            PORT_BEHAVIOR_SEVERITY_ORDER.get(row["severity"], 99),
-            row["behavior"],
-            row["mac_identity"],
-            int(row["port"] or 0),
-        )
-    )
-
-    return rows[:limit]
+    return _reports.mac_port_behavior_rows(connection, limit, scope, lookback, context=_report_context())
 
 
 def print_port_behavior_rows(rows):
@@ -10693,1063 +8151,90 @@ def command_asset_risk(args):
     return 0
 
 def report_snapshot_count(connection, scope=None, accepted_only=False):
-    sql = "SELECT COUNT(*) FROM snapshots WHERE 1 = 1"
-    params = []
-
-    if accepted_only:
-        sql += " AND quality_status = 'ACCEPTED'"
-
-    if scope:
-        sql += " AND network_scope = ?"
-        params.append(scope)
-
-    return connection.execute(sql, tuple(params)).fetchone()[0]
+    return _reports.report_snapshot_count(connection, scope, accepted_only)
 
 
 def report_latest_snapshot(connection, scope=None):
-    if scope:
-        return connection.execute(
-            """
-            SELECT *
-            FROM snapshots
-            WHERE quality_status = 'ACCEPTED'
-              AND network_scope = ?
-            ORDER BY created_at DESC, imported_at DESC
-            LIMIT 1
-            """,
-            (scope,),
-        ).fetchone()
-
-    return fetch_latest_accepted_snapshot(connection)
+    return _reports.report_latest_snapshot(connection, scope, context=_report_context())
 
 
 def report_open_alert_rows(connection, limit, scope=None):
-    sql = """
-        SELECT DISTINCT
-            a.alert_id,
-            a.severity,
-            a.event_type,
-            a.subject_key,
-            a.summary,
-            a.opened_at
-        FROM alerts a
-        LEFT JOIN delta_events e ON e.event_id = a.last_event_id
-        LEFT JOIN snapshots s ON s.scan_id = e.scan_id
-        WHERE a.status = 'OPEN'
-    """
-
-    params = []
-
-    if scope:
-        sql += " AND s.network_scope = ?"
-        params.append(scope)
-
-    sql += " ORDER BY a.alert_id DESC LIMIT ?"
-    params.append(limit)
-
-    return connection.execute(sql, tuple(params)).fetchall()
+    return _reports.report_open_alert_rows(connection, limit, scope)
 
 
 def report_asset_lifecycle_summary(connection, scope=None):
-    sql = """
-        SELECT
-            state,
-            identity_class,
-            COUNT(*) AS asset_count
-        FROM asset_lifecycle
-        WHERE 1 = 1
-    """
-    params = []
-
-    if scope:
-        sql += " AND network_scope = ?"
-        params.append(scope)
-
-    sql += """
-        GROUP BY state, identity_class
-        ORDER BY state ASC, identity_class ASC
-    """
-
-    return connection.execute(sql, tuple(params)).fetchall()
+    return _reports.report_asset_lifecycle_summary(connection, scope)
 
 
 def report_asset_inventory_rows(connection, limit, scope=None):
-    sql = """
-        SELECT
-            al.network_scope,
-            al.asset_key,
-            al.identity_class,
-            al.state,
-            al.current_ip,
-            al.mac_address,
-            al.hostname,
-            al.first_seen_at,
-            al.last_seen_at,
-            ao.device_type,
-            ao.device_type_confidence,
-            ao.classification_type,
-            ao.classification_primary_type,
-            ao.classification_confidence,
-            ao.classification_confidence_label,
-            ao.classification_decision,
-            ao.classification_method,
-            ao.classification_evidence_json,
-            ao.classification_contradictions_json,
-            ao.classification_candidates_json
-        FROM asset_lifecycle al
-        LEFT JOIN asset_observations ao
-          ON ao.scan_id = al.last_seen_scan_id
-         AND ao.asset_key = al.asset_key
-        WHERE 1 = 1
-    """
-    params = []
-
-    if scope:
-        sql += " AND al.network_scope = ?"
-        params.append(scope)
-
-    sql += """
-        ORDER BY al.network_scope ASC, al.state ASC, al.current_ip ASC, al.asset_key ASC
-        LIMIT ?
-    """
-    params.append(limit)
-
-    rows = connection.execute(sql, tuple(params)).fetchall()
-    return dashboard_enrich_classification_rows(rows)
+    return _reports.report_asset_inventory_rows(connection, limit, scope, context=_report_context())
 
 def append_report_network_scope_summary(lines, connection, scope=None):
-    lines.append("## Network Scope Summary")
-    lines.append("")
-
-    rows = connection.execute(
-        """
-        SELECT
-            network_scope,
-            COUNT(*) AS snapshots,
-            SUM(CASE WHEN quality_status = 'ACCEPTED' THEN 1 ELSE 0 END) AS accepted_snapshots,
-            MAX(created_at) AS latest_scan_at
-        FROM snapshots
-        WHERE (? IS NULL OR network_scope = ?)
-        GROUP BY network_scope
-        ORDER BY network_scope ASC
-        """,
-        (scope, scope),
-    ).fetchall()
-
-    if not rows:
-        lines.append("No network scope data matched this report.")
-        lines.append("")
-        return
-
-    lines.append("| Network Scope | Snapshots | Accepted | Latest Scan |")
-    lines.append("|---|---:|---:|---|")
-
-    for row in rows:
-        lines.append(
-            "| "
-            f"`{safe_markdown(row['network_scope'])}` | "
-            f"{row['snapshots']} | "
-            f"{row['accepted_snapshots'] or 0} | "
-            f"`{safe_markdown(row['latest_scan_at'] or '-')}` |"
-        )
-
-    lines.append("")
-    lines.append("Network scope isolation prevents baselines, lifecycle state, and reports from mixing unrelated subnets.")
-    lines.append("")
+    return _reports.append_report_network_scope_summary(lines, connection, scope)
 
 
 def append_report_dashboard_usage_section(lines, scope=None):
-    lines.append("## Dashboard and API Usage Notes")
-    lines.append("")
-
-    if scope:
-        lines.append(f"- Dashboard scope view: `deltaaegis dashboard --scope {safe_markdown(scope)}`")
-        lines.append(f"- Asset inventory API: `/api/assets?scope={safe_markdown(scope)}&limit=25`")
-        lines.append(f"- Asset detail API: `/api/asset?scope={safe_markdown(scope)}&identifier=<asset-or-ip>`")
-    else:
-        lines.append("- Dashboard: `deltaaegis dashboard`")
-        lines.append("- Asset inventory API: `/api/assets?limit=25`")
-        lines.append("- Asset detail API: `/api/asset?identifier=<asset-or-ip>`")
-
-    lines.append("- The dashboard remains read-only and is intended for local or trusted-access investigation.")
-    lines.append("- Port behavior API: `/api/port-behavior?limit=25&lookback=5`")
-    lines.append("- Investigation Center API: `/api/investigation-center?limit=25`")
-    lines.append("- TrueAegis validation summary API: `/api/validation-summary`")
-    lines.append("- TrueAegis validation observation API: `/api/validations?limit=25`")
-    lines.append("- TrueAegis validation correlation API: `/api/validation-correlations?limit=25`")
-    lines.append("- Investigation Center workflow filter API: `/api/investigation-center?limit=25&ticket_status=OPEN`")
-    lines.append("- Investigation Center signal filter API: `/api/investigation-center?limit=25&ticket_signal=ACTIONABLE`")
-    lines.append("- Combined ticket filters are supported with `ticket_status` and `ticket_signal` query parameters.")
-    lines.append("- Use the Asset Inventory table, asset selector, or clickable risk/event/alert subjects to open Asset Detail.")
-    lines.append("")
+    return _reports.append_report_dashboard_usage_section(lines, scope)
 
 
 def append_report_recommended_next_actions(lines, risk_rows, open_alerts, asset_rows):
-    lines.append("## Recommended Next Actions")
-    lines.append("")
-
-    if open_alerts:
-        lines.append(f"- Review and triage **{len(open_alerts)}** open alert(s), starting with the highest-severity subjects.")
-    else:
-        lines.append("- No open alerts were included in this report.")
-
-    if risk_rows:
-        top = risk_rows[0]
-        lines.append(
-            "- Investigate the highest-risk subject first: "
-            f"`{safe_markdown(top.get('subject_key'))}` "
-            f"with score **{safe_markdown(top.get('score'))}**."
-        )
-    else:
-        lines.append("- No risk subjects were calculated for this report.")
-
-    if asset_rows:
-        lines.append("- Use the asset inventory section to identify unknown hosts, missing identity context, and unannotated important devices.")
-    else:
-        lines.append("- No asset inventory rows were included; verify accepted snapshots and lifecycle data exist for this scope.")
-
-    lines.append("- Add asset annotations for known infrastructure, owners, roles, and criticality to improve future risk prioritization.")
-    lines.append("")
+    return _reports.append_report_recommended_next_actions(lines, risk_rows, open_alerts, asset_rows)
 
 def append_report_asset_lifecycle_section(lines, lifecycle_rows):
-    lines.append("## Asset Lifecycle Summary")
-    lines.append("")
-
-    if not lifecycle_rows:
-        lines.append("No asset lifecycle rows matched this report.")
-        lines.append("")
-        return
-
-    lines.append("| State | Identity Class | Assets |")
-    lines.append("|---|---|---:|")
-
-    for row in lifecycle_rows:
-        lines.append(
-            "| "
-            f"{safe_markdown(row['state'])} | "
-            f"{safe_markdown(row['identity_class'])} | "
-            f"{row['asset_count']} |"
-        )
-
-    lines.append("")
-    lines.append(
-        "Lifecycle state tracks whether assets are active, missing, removed, "
-        "or temporarily absent across accepted scans."
-    )
-    lines.append("")
+    return _reports.append_report_asset_lifecycle_section(lines, lifecycle_rows)
 
 
 def append_report_classification_summary_section(lines, classification_summary):
-    lines.append("## NetSniper Intelligence Summary")
-    lines.append("")
-
-    if not classification_summary:
-        lines.append("No NetSniper classification summary was available for this report.")
-        lines.append("")
-        return
-
-    lines.append(
-        "This section summarizes NetSniper's evidence-based device classification "
-        "for the selected network scope."
-    )
-    lines.append("")
-
-    summary_rows = [
-        ("Total assets", classification_summary.get("total_assets", 0)),
-        ("Classified assets", classification_summary.get("classified_assets", 0)),
-        ("Possible / weak classifications", classification_summary.get("possible_assets", 0)),
-        ("Unknown assets", classification_summary.get("unknown_assets", 0)),
-        ("Evidence-backed assets", classification_summary.get("evidence_backed_assets", 0)),
-        ("Classification contradictions", classification_summary.get("contradiction_assets", 0)),
-        ("High-confidence assets", classification_summary.get("high_confidence_assets", 0)),
-        ("Classified percentage", f"{classification_summary.get('classified_percent', 0)}%"),
-    ]
-
-    lines.append("| Metric | Value |")
-    lines.append("|---|---:|")
-
-    for label, value in summary_rows:
-        lines.append(f"| {safe_markdown(label)} | {safe_markdown(value)} |")
-
-    lines.append("")
-
-    top_classifications = classification_summary.get("top_classifications") or []
-
-    lines.append("### Top Classifications")
-    lines.append("")
-
-    if not top_classifications:
-        lines.append("No classified device categories were available.")
-        lines.append("")
-    else:
-        lines.append("| Classification | Assets |")
-        lines.append("|---|---:|")
-
-        for row in top_classifications:
-            lines.append(
-                "| "
-                f"{safe_markdown(row.get('classification'))} | "
-                f"{safe_markdown(row.get('count'))} |"
-            )
-
-        lines.append("")
-
-    review_queue = classification_summary.get("review_queue") or []
-
-    lines.append("### Classification Review Queue")
-    lines.append("")
-
-    if not review_queue:
-        lines.append("No weak, unknown, or contradictory classifications require review.")
-        lines.append("")
-    else:
-        lines.append("| Priority Reason | Asset | IP Address | Classification | Decision | Confidence | Evidence | Contradictions |")
-        lines.append("|---|---|---|---|---|---:|---:|---:|")
-
-        for row in review_queue:
-            lines.append(
-                "| "
-                f"{safe_markdown(row.get('reason'))} | "
-                f"`{safe_markdown(row.get('asset_key'))}` | "
-                f"`{safe_markdown(row.get('ip_address'))}` | "
-                f"{safe_markdown(row.get('classification'))} | "
-                f"{safe_markdown(row.get('decision'))} | "
-                f"{safe_markdown(row.get('confidence'))} | "
-                f"{safe_markdown(row.get('evidence_count'))} | "
-                f"{safe_markdown(row.get('contradiction_count'))} |"
-            )
-
-        lines.append("")
-
-    lines.append(
-        "Use weak, unknown, or contradictory classifications as review targets. "
-        "They usually require vendor confirmation, service validation, or asset annotation."
-    )
-    lines.append("")
+    return _reports.append_report_classification_summary_section(lines, classification_summary)
 
 
 def report_trueaegis_validation_summary(connection):
-    return dashboard_validation_summary_payload(connection)
+    return _reports.report_trueaegis_validation_summary(connection, context=_report_context())
 
 
 def report_trueaegis_validation_rows(connection, limit=10):
-    payload = dashboard_validations_payload(connection, limit=limit)
-    return list(payload.get("observations") or [])
+    return _reports.report_trueaegis_validation_rows(connection, limit, context=_report_context())
 
 
 def append_report_trueaegis_validation_section(lines, validation_summary, validation_rows):
-    lines.append("## TrueAegis Validation Evidence")
-    lines.append("")
-    lines.append(
-        "This section summarizes imported TrueAegis validation output. These correlations remain evidence-only and "
-        "this evidence is stored and displayed as a foundation layer only; it does "
-        "does not alter DeltaAegis risk scoring. Correlated NetSniper service evidence appears in the next section. "
-        "service observations."
-    )
-    lines.append("")
-
-    if not validation_summary or int(validation_summary.get("observation_count") or 0) == 0:
-        lines.append("No TrueAegis validation observations have been imported yet.")
-        lines.append("")
-        lines.append("Import validation output with:")
-        lines.append("")
-        lines.append("```bash")
-        lines.append("python3 deltaaegis.py validation-ingest /path/to/validation_results.json")
-        lines.append("```")
-        lines.append("")
-        return
-
-    lines.append("| Metric | Value |")
-    lines.append("|---|---:|")
-    lines.append(f"| Validation runs | {safe_markdown(validation_summary.get('validation_run_count') or 0)} |")
-    lines.append(f"| Observations | {safe_markdown(validation_summary.get('observation_count') or 0)} |")
-    lines.append(f"| Validated observations | {safe_markdown(validation_summary.get('validated_count') or 0)} |")
-    lines.append(f"| Confirmed observations | {safe_markdown(validation_summary.get('confirmed_count') or 0)} |")
-    lines.append(f"| Protected observations | {safe_markdown(validation_summary.get('protected_count') or 0)} |")
-    lines.append("")
-
-    status_counts = list(validation_summary.get("status_counts") or [])
-    lines.append("### Validation Status Counts")
-    lines.append("")
-
-    if status_counts:
-        lines.append("| Status | Count |")
-        lines.append("|---|---:|")
-        for row in status_counts:
-            lines.append(
-                "| "
-                f"{safe_markdown(row.get('status') or 'UNKNOWN')} | "
-                f"{safe_markdown(row.get('count') or 0)} |"
-            )
-        lines.append("")
-    else:
-        lines.append("No validation status counts were available.")
-        lines.append("")
-
-    latest_run = validation_summary.get("latest_run") or {}
-    if latest_run:
-        lines.append("### Latest Imported Validation Run")
-        lines.append("")
-        lines.append(f"- Run ID: `{safe_markdown(latest_run.get('validation_run_id') or '-')}`")
-        lines.append(f"- Source file: `{safe_markdown(latest_run.get('source_filename') or '-')}`")
-        lines.append(f"- Imported at: `{safe_markdown(latest_run.get('imported_at') or '-')}`")
-        lines.append(f"- Results: **{safe_markdown(latest_run.get('result_count') or 0)}**")
-        lines.append("")
-
-    rows = list(validation_rows or [])
-    lines.append("### Recent Validation Observations")
-    lines.append("")
-
-    if not rows:
-        lines.append("No validation observation rows were available.")
-        lines.append("")
-        return
-
-    lines.append("| Host | Port | Finding | Status | Validated | Safe | Confidence | Summary |")
-    lines.append("|---|---:|---|---|---|---|---|---|")
-
-    for row in rows:
-        validated = row.get("validated")
-        safe = row.get("safe")
-        validated_text = "yes" if validated is True else "no" if validated is False else "unknown"
-        safe_text = "yes" if safe is True else "no" if safe is False else "unknown"
-
-        lines.append(
-            "| "
-            f"`{safe_markdown(row.get('host') or '-')}` | "
-            f"{safe_markdown(row.get('port') or '-')} | "
-            f"{safe_markdown(row.get('finding_id') or '-')} | "
-            f"{safe_markdown(row.get('status') or '-')} | "
-            f"{safe_markdown(validated_text)} | "
-            f"{safe_markdown(safe_text)} | "
-            f"{safe_markdown(row.get('confidence') or '-')} | "
-            f"{safe_markdown(row.get('summary') or '-')} |"
-        )
-
-    lines.append("")
+    return _reports.append_report_trueaegis_validation_section(lines, validation_summary, validation_rows)
 
 def report_trueaegis_validation_correlation_summary(connection):
-    row = connection.execute(
-        """
-        SELECT
-            COUNT(*) AS correlation_count,
-            COUNT(DISTINCT observation_id) AS correlated_observation_count,
-            COUNT(DISTINCT scan_id) AS scan_count,
-            COUNT(DISTINCT asset_key) AS asset_count
-        FROM validation_correlations
-        """
-    ).fetchone()
-
-    status_rows = connection.execute(
-        """
-        SELECT validation_status, COUNT(*) AS count
-        FROM validation_correlations
-        GROUP BY validation_status
-        ORDER BY validation_status ASC
-        """
-    ).fetchall()
-
-    summary = dict(row) if row else {
-        "correlation_count": 0,
-        "correlated_observation_count": 0,
-        "scan_count": 0,
-        "asset_count": 0,
-    }
-
-    summary["status_counts"] = {
-        str(item["validation_status"] or "UNKNOWN"): int(item["count"] or 0)
-        for item in status_rows
-    }
-
-    return summary
+    return _reports.report_trueaegis_validation_correlation_summary(connection)
 
 
 def report_trueaegis_validation_correlation_rows(connection, limit=10):
-    rows = connection.execute(
-        """
-        SELECT
-            correlation_id,
-            observation_id,
-            validation_run_id,
-            scan_id,
-            asset_key,
-            network_scope,
-            host,
-            ip_address,
-            port,
-            service_protocol,
-            service_name,
-            product,
-            version,
-            finding_id,
-            validation_status,
-            validated,
-            safe,
-            confidence,
-            match_method,
-            matched_at
-        FROM validation_correlations
-        ORDER BY matched_at DESC, network_scope ASC, host ASC, port ASC
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
-
-    result = []
-
-    for row in rows:
-        item = dict(row)
-        item["validated"] = (
-            None if item.get("validated") is None else bool(item.get("validated"))
-        )
-        item["safe"] = None if item.get("safe") is None else bool(item.get("safe"))
-        result.append(item)
-
-    return result
+    return _reports.report_trueaegis_validation_correlation_rows(connection, limit)
 
 
-def append_report_trueaegis_validation_correlation_section(
-    lines,
-    correlation_summary,
-    correlation_rows,
-):
-    lines.append("## TrueAegis Validation Correlations")
-    lines.append("")
-    lines.append(
-        "This section lists TrueAegis validation observations that currently match "
-        "NetSniper-observed services. These correlations are evidence "
-        "only and do not alter DeltaAegis risk scoring."
-    )
-    lines.append("")
-
-    correlation_count = int(correlation_summary.get("correlation_count") or 0)
-    correlated_observation_count = int(
-        correlation_summary.get("correlated_observation_count") or 0
-    )
-    asset_count = int(correlation_summary.get("asset_count") or 0)
-    scan_count = int(correlation_summary.get("scan_count") or 0)
-
-    if correlation_count <= 0:
-        lines.append("No TrueAegis validation observations are currently correlated with NetSniper services.")
-        lines.append("")
-        return
-
-    lines.append(f"- Correlations: **{correlation_count}**")
-    lines.append(f"- Correlated observations: **{correlated_observation_count}**")
-    lines.append(f"- Correlated assets: **{asset_count}**")
-    lines.append(f"- Current scans represented: **{scan_count}**")
-
-    status_counts = correlation_summary.get("status_counts") or {}
-
-    if status_counts:
-        status_text = ", ".join(
-            f"`{safe_markdown(status)}`={int(count)}"
-            for status, count in sorted(status_counts.items())
-        )
-        lines.append(f"- Status counts: {status_text}")
-
-    lines.append("")
-
-    if not correlation_rows:
-        lines.append("No recent correlated validation rows were available.")
-        lines.append("")
-        return
-
-    lines.append("| Asset | Host | Service | Finding | Status | Validated | Safe | Confidence | Match |")
-    lines.append("|---|---:|---:|---|---|---:|---:|---|---|")
-
-    for row in correlation_rows:
-        service = f"{row.get('service_protocol') or 'tcp'}/{row.get('port') or '-'}"
-        lines.append(
-            "| "
-            f"`{safe_markdown(row.get('asset_key') or '-')}` | "
-            f"`{safe_markdown(row.get('host') or row.get('ip_address') or '-')}` | "
-            f"`{safe_markdown(service)}` | "
-            f"{safe_markdown(row.get('finding_id') or '-')} | "
-            f"{safe_markdown(row.get('validation_status') or '-')} | "
-            f"{safe_markdown(row.get('validated'))} | "
-            f"{safe_markdown(row.get('safe'))} | "
-            f"{safe_markdown(row.get('confidence') or '-')} | "
-            f"{safe_markdown(row.get('match_method') or '-')} |"
-        )
-
-    lines.append("")
+def append_report_trueaegis_validation_correlation_section(lines, correlation_summary, correlation_rows):
+    return _reports.append_report_trueaegis_validation_correlation_section(lines, correlation_summary, correlation_rows)
 
 def append_report_asset_inventory_section(lines, asset_rows, limit):
-    lines.append("## Asset Inventory")
-    lines.append("")
-
-    if not asset_rows:
-        lines.append("No assets matched this report.")
-        lines.append("")
-        return
-
-    lines.append(f"Showing up to **{limit}** assets.")
-    lines.append("")
-    lines.append("| Scope | State | Identity | IP Address | MAC Address | Hostname | Classification | Decision | Confidence | Evidence | Contradictions | Asset Key | Last Seen |")
-    lines.append("|---|---|---|---|---|---|---|---|---:|---:|---:|---|---|")
-
-    for row in asset_rows:
-        classification = row.get("classification_display_type") or row.get("device_type") or "Unknown"
-        decision = row.get("classification_display_decision") or "unknown"
-        confidence = row.get("classification_display_confidence")
-        evidence_count = row.get("classification_evidence_count", 0)
-        contradiction_count = row.get("classification_contradiction_count", 0)
-
-        lines.append(
-            "| "
-            f"`{safe_markdown(row['network_scope'])}` | "
-            f"{safe_markdown(row['state'])} | "
-            f"{safe_markdown(row['identity_class'])} | "
-            f"`{safe_markdown(row['current_ip'])}` | "
-            f"`{safe_markdown(row['mac_address'] or '-')}` | "
-            f"{safe_markdown(row['hostname'] or '-')} | "
-            f"{safe_markdown(classification)} | "
-            f"{safe_markdown(decision)} | "
-            f"{safe_markdown(confidence)} | "
-            f"{safe_markdown(evidence_count)} | "
-            f"{safe_markdown(contradiction_count)} | "
-            f"`{safe_markdown(row['asset_key'])}` | "
-            f"`{safe_markdown(row['last_seen_at'])}` |"
-        )
-
-    lines.append("")
+    return _reports.append_report_asset_inventory_section(lines, asset_rows, limit)
 
 def append_report_role_aware_recommendations_section(lines, risk_rows):
-    lines.append("## Role-Aware Recommended Actions")
-    lines.append("")
-
-    rows = [
-        record for record in risk_rows
-        if record.get("recommended_actions")
-    ]
-
-    if not rows:
-        lines.append("No role-aware recommended actions were generated for this report.")
-        lines.append("")
-        return
-
-    lines.append(
-        "These actions use NetSniper classification context to make follow-up guidance "
-        "more specific to the suspected asset role."
-    )
-    lines.append("")
-
-    for record in rows[:10]:
-        lines.append(
-            f"### `{safe_markdown(record.get('subject_key'))}` "
-            f"— {safe_markdown(record.get('classification') or 'Unknown')} "
-            f"({safe_markdown(record.get('classification_decision') or 'unknown')}, "
-            f"confidence {safe_markdown(record.get('classification_confidence') or 0)})"
-        )
-        lines.append("")
-        lines.append(
-            f"- Risk level: **{safe_markdown(record.get('level'))}** "
-            f"with score **{safe_markdown(record.get('score'))}**."
-        )
-
-        points = int(record.get("classification_risk_points") or 0)
-
-        if points:
-            lines.append(f"- Classification-aware risk contribution: **+{points}**.")
-
-        for action in record.get("recommended_actions") or []:
-            lines.append(f"- Recommended action: {safe_markdown(action)}")
-
-        lines.append("")
+    return _reports.append_report_role_aware_recommendations_section(lines, risk_rows)
 
 
 
 def append_report_investigation_center_section(lines, investigation_rows):
-    lines.append("## Investigation Command Center")
-    lines.append("")
-    lines.append(
-        "This section summarizes the highest-priority investigation queue from the "
-        "same Command Center logic used by the dashboard and `investigation-center` CLI."
-    )
-    lines.append("")
-    lines.append(
-        "Queue priority combines current risk, open alerts, recent delta events, "
-        "MAC-port behavior, identity context, classification context, recommended actions, "
-        "and v0.22 operator triage state."
-    )
-    lines.append("")
-
-    rows = list(investigation_rows or [])
-    workflow_summary = investigation_center_workflow_summary(rows)
-    signal_summary = investigation_center_signal_summary(rows)
-    triage_summary = operator_triage_summary(rows)
-
-    lines.append("### Investigation Queue Operator Summary")
-    lines.append("")
-    lines.append(
-        "- Workflow states: "
-        f"OPEN={workflow_summary.get('open', 0)}, "
-        f"IN_REVIEW={workflow_summary.get('in_review', 0)}, "
-        f"RESOLVED={workflow_summary.get('resolved', 0)}, "
-        f"SUPPRESSED={workflow_summary.get('suppressed', 0)}"
-    )
-    lines.append(
-        "- Signal labels: "
-        f"ACTIONABLE={signal_summary.get('actionable', 0)}, "
-        f"MEANINGFUL_CHANGE={signal_summary.get('meaningful_change', 0)}, "
-        f"BASELINE_CONTEXT={signal_summary.get('baseline_context', 0)}"
-    )
-    lines.append(
-        "- Operator triage buckets: "
-        f"NEEDS_REVIEW={triage_summary.get('needs_review', 0)}, "
-        f"CHANGED_SINCE_REVIEW={triage_summary.get('changed_since_review', 0)}, "
-        f"NEEDS_CONTEXT={triage_summary.get('needs_context', 0)}, "
-        f"STALE_CLOSED={triage_summary.get('stale_closed', 0)}, "
-        f"BASELINE_CONTEXT={triage_summary.get('baseline_context', 0)}, "
-        f"MONITOR={triage_summary.get('monitor', 0)}"
-    )
-    lines.append(
-        "- Operator triage urgency: "
-        f"IMMEDIATE={triage_summary.get('immediate', 0)}, "
-        f"HIGH={triage_summary.get('high', 0)}, "
-        f"NORMAL={triage_summary.get('normal', 0)}, "
-        f"LOW={triage_summary.get('low', 0)}"
-    )
-    lines.append(
-        "- Missing context flags: "
-        f"owner={triage_summary.get('missing_owner', 0)}, "
-        f"role_or_criticality={triage_summary.get('missing_context', 0)}"
-    )
-    lines.append("")
-
-    if not rows:
-        lines.append("No Investigation Command Center queue items matched this report scope.")
-        lines.append("")
-        return
-
-    lines.append(
-        "| Priority | Score | Workflow | Signal | Subject | Triage | Triage Score | "
-        "IP Address | MAC Address | Device / Role | Triggers | Why Review? | "
-        "Recommended Action | Counts |"
-    )
-    lines.append("|---|---:|---|---|---|---|---:|---|---|---|---|---|---|---|")
-
-    for row in rows:
-        role = row.get("role") or row.get("classification") or row.get("device_type") or "Unknown"
-        device = row.get("device_type") or "Unknown"
-
-        if device != role:
-            device_role = f"{device} / {role}"
-        else:
-            device_role = role
-
-        triggers = ", ".join(row.get("triggers") or []) or "-"
-        workflow = str(row.get("ticket_status") or "OPEN").upper()
-        signal = str(row.get("ticket_signal_state") or "ACTIONABLE").upper()
-        triage_bucket = str(row.get("triage_bucket") or "MONITOR").upper()
-        triage_label = str(row.get("triage_urgency_label") or "LOW").upper()
-        triage_score = int(row.get("triage_urgency_score") or 0)
-        triage_display = f"{triage_bucket} / {triage_label}"
-        counts = (
-            f"alerts={int(row.get('open_alerts') or 0)}, "
-            f"events={int(row.get('recent_events') or 0)}, "
-            f"ports={int(row.get('port_behavior_count') or 0)}, "
-            f"findings={int(row.get('current_finding_count') or 0)}"
-        )
-
-        lines.append(
-            "| "
-            f"{safe_markdown(row.get('priority_level') or 'INFO')} | "
-            f"{safe_markdown(row.get('priority_score') or 0)} | "
-            f"{safe_markdown(workflow)} | "
-            f"{safe_markdown(signal)} | "
-            f"`{safe_markdown(row.get('subject_key'))}` | "
-            f"{safe_markdown(triage_display)} | "
-            f"{safe_markdown(triage_score)} | "
-            f"`{safe_markdown(row.get('ip_address') or '-')}` | "
-            f"`{safe_markdown(row.get('mac_address') or '-')}` | "
-            f"{safe_markdown(device_role)} | "
-            f"{safe_markdown(triggers)} | "
-            f"{safe_markdown(row.get('primary_reason') or '-')} | "
-            f"{safe_markdown(row.get('recommended_action') or '-')} | "
-            f"`{safe_markdown(counts)}` |"
-        )
-
-    lines.append("")
-    lines.append(
-        "Use this queue as the starting point for review. The detailed Risk, "
-        "MAC-Port Behavior, Active Alerts, Delta Events, Ticket Evidence, and Asset "
-        "Inventory sections provide supporting evidence for each item."
-    )
-    lines.append("")
+    return _reports.append_report_investigation_center_section(lines, investigation_rows, context=_report_context())
 
 def append_report_risk_section(lines, risk_rows):
-    lines.append("## Top Risk Subjects")
-    lines.append("")
-
-    if not risk_rows:
-        lines.append("No risk subjects were calculated for this report.")
-        lines.append("")
-        return
-
-    lines.append("| Level | Score | Subject | IP Address | MAC Address | Owner | Role | Criticality | Open Alerts | Events | Primary Reason |")
-    lines.append("|---|---:|---|---|---|---|---|---|---:|---:|---|")
-
-    for record in risk_rows:
-        reasons = record.get("reasons") or []
-        primary_reason = reasons[0] if reasons else "-"
-
-        lines.append(
-            "| "
-            f"{safe_markdown(record['level'])} | "
-            f"{record['score']} | "
-            f"`{safe_markdown(record['subject_key'])}` | "
-            f"`{safe_markdown(record.get('ip_address') or 'unknown')}` | "
-            f"`{safe_markdown(record.get('mac_address') or 'unknown')}` | "
-            f"{safe_markdown(record.get('owner') or '-')} | "
-            f"{safe_markdown(record.get('role') or '-')} | "
-            f"{safe_markdown(record.get('criticality') or '-')} | "
-            f"{record.get('open_alerts', 0)} | "
-            f"{record.get('event_count', 0)} | "
-            f"{safe_markdown(primary_reason)} |"
-        )
-
-    lines.append("")
-    lines.append("Risk scores are explainable and are calculated from recent delta events, alert state, repeated activity, asset criticality, missing asset context, and classification-aware role context.")
-    lines.append("")
+    return _reports.append_report_risk_section(lines, risk_rows)
 
 
 def append_report_port_behavior_section(lines, port_behavior_rows):
-    lines.append("## MAC-Port Behavior Changes")
-    lines.append("")
-    lines.append(
-        "This section correlates stable MAC-backed device identity with open-port "
-        "history across accepted scans. It highlights ports that appeared "
-        "unexpectedly, disappeared, or repeatedly changed open/not-observed state."
-    )
-    lines.append("")
-    lines.append(
-        "Normal infrastructure ports can fluctuate because of scan timing, device sleep "
-        "states, or printer/web management behavior. Treat volatile printer ports such "
-        "as `tcp/631` and `tcp/9100` as review context unless combined with unusual "
-        "remote-access or file-sharing services."
-    )
-    lines.append("")
-
-    rows = list(port_behavior_rows or [])
-
-    if not rows:
-        lines.append("No MAC-port behavior changes were detected for this report scope.")
-        lines.append("")
-        return
-
-    lines.append("| Severity | Behavior | MAC Identity | IP Address | Device | Port | Current State | Seen | Missing | Transitions | Reason |")
-    lines.append("|---|---|---|---|---|---|---|---:|---:|---:|---|")
-
-    for row in rows:
-        lines.append(
-            "| "
-            f"{safe_markdown(row.get('severity'))} | "
-            f"{safe_markdown(row.get('behavior'))} | "
-            f"`{safe_markdown(row.get('mac_identity'))}` | "
-            f"`{safe_markdown(row.get('ip_address'))}` | "
-            f"{safe_markdown(row.get('device_type') or 'Unknown')} | "
-            f"`{safe_markdown(row.get('port_key'))}` | "
-            f"{safe_markdown(row.get('current_state'))} | "
-            f"{safe_markdown(row.get('seen_count'))} | "
-            f"{safe_markdown(row.get('missing_count'))} | "
-            f"{safe_markdown(row.get('transition_count'))} | "
-            f"{safe_markdown(row.get('reason'))} |"
-        )
-
-    lines.append("")
-    lines.append(
-        "High-signal unexpected ports, such as Telnet, SMB, RDP, exposed databases, "
-        "or container-management services, should be validated before treating the "
-        "device as normal."
-    )
-    lines.append("")
+    return _reports.append_report_port_behavior_section(lines, port_behavior_rows)
 
 
-def report_ticket_evidence_rows(
-    connection,
-    investigation_rows,
-    scope=None,
-    limit=5,
-    evidence_limit=5,
-):
-    evidence_rows = []
-
-    for row in list(investigation_rows or [])[:limit]:
-        subject_key = row.get("subject_key")
-
-        if not subject_key:
-            continue
-
-        payload = dashboard_ticket_evidence_payload(
-            connection,
-            subject_key=subject_key,
-            scope=scope,
-            limit=evidence_limit,
-        )
-
-        if payload.get("available", False):
-            evidence_rows.append(payload)
-
-    return evidence_rows
+def report_ticket_evidence_rows(connection, investigation_rows, scope=None, limit=5, evidence_limit=5):
+    return _reports.report_ticket_evidence_rows(connection, investigation_rows, scope, limit, evidence_limit, context=_report_context())
 
 
 def append_report_ticket_evidence_appendix(lines, evidence_payloads):
-    lines.append("## Ticket Evidence Appendix")
-    lines.append("")
-    lines.append(
-        "This appendix preserves the operator-facing evidence package behind top "
-        "Investigation Command Center tickets. Each entry ties workflow state, "
-        "risk reasoning, recent delta events, MAC-port behavior, and ticket history "
-        "back to the same subject key used by the dashboard and CLI."
-    )
-    lines.append("")
-
-    payloads = list(evidence_payloads or [])
-
-    if not payloads:
-        lines.append("No ticket evidence payloads were available for this report scope.")
-        lines.append("")
-        return
-
-    for index, payload in enumerate(payloads, start=1):
-        summary = payload.get("summary") or {}
-        ticket_state = payload.get("ticket_state") or {}
-        subject_key = payload.get("subject_key") or summary.get("subject_key") or "-"
-
-        lines.append(f"### Ticket Evidence {index}: `{safe_markdown(subject_key)}`")
-        lines.append("")
-        lines.append(f"- Workflow: **{safe_markdown(summary.get('ticket_status') or ticket_state.get('ticket_status') or 'OPEN')}**")
-        lines.append(f"- Signal: **{safe_markdown(summary.get('ticket_signal') or 'ACTIONABLE')}**")
-        lines.append(
-            f"- Priority: **{safe_markdown(summary.get('priority_level') or 'INFO')}** "
-            f"({safe_markdown(summary.get('priority_score') or 0)})"
-        )
-        lines.append(f"- Primary reason: {safe_markdown(summary.get('primary_reason') or '-')}")
-        lines.append(f"- Why now: {safe_markdown(summary.get('why_now') or '-')}")
-        lines.append(f"- Recommended action: {safe_markdown(summary.get('recommended_action') or '-')}")
-        lines.append(
-            "- Evidence counts: "
-            f"risk `{safe_markdown(summary.get('risk_count') or 0)}`, "
-            f"alerts `{safe_markdown(summary.get('alert_count') or 0)}`, "
-            f"events `{safe_markdown(summary.get('event_count') or 0)}`, "
-            f"ports `{safe_markdown(summary.get('port_behavior_count') or 0)}`, "
-            f"history `{safe_markdown(summary.get('ticket_history_count') or 0)}`, "
-            f"timeline `{safe_markdown(summary.get('timeline_count') or 0)}`"
-        )
-        lines.append("")
-
-        timeline = list(payload.get("timeline") or [])[:8]
-        lines.append("#### Evidence Timeline Sample")
-        lines.append("")
-
-        if not timeline:
-            lines.append("No timeline evidence was available for this ticket.")
-            lines.append("")
-        else:
-            lines.append("| Time | Category | Severity | Source | Summary |")
-            lines.append("|---|---|---|---|---|")
-            for item in timeline:
-                lines.append(
-                    "| "
-                    f"{safe_markdown(item.get('timestamp') or '-')} | "
-                    f"{safe_markdown(item.get('category') or '-')} | "
-                    f"{safe_markdown(item.get('severity') or '-')} | "
-                    f"{safe_markdown(item.get('source') or '-')} | "
-                    f"{safe_markdown(item.get('summary') or '-')} |"
-                )
-            lines.append("")
-
-        risk_rows = list(payload.get("risk") or [])[:3]
-        lines.append("#### Current Risk Evidence")
-        lines.append("")
-
-        if not risk_rows:
-            lines.append("No current risk rows were attached to this ticket evidence package.")
-            lines.append("")
-        else:
-            lines.append("| Level | Score | Subject | Primary Reason |")
-            lines.append("|---|---:|---|---|")
-            for risk in risk_rows:
-                reasons = risk.get("reasons") or []
-                primary_reason = risk.get("primary_reason") or (reasons[0] if reasons else "-")
-                lines.append(
-                    "| "
-                    f"{safe_markdown(risk.get('level') or '-')} | "
-                    f"{safe_markdown(risk.get('score') or 0)} | "
-                    f"`{safe_markdown(risk.get('subject_key') or subject_key)}` | "
-                    f"{safe_markdown(primary_reason)} |"
-                )
-            lines.append("")
-
-        event_rows = list(payload.get("events") or [])[:5]
-        lines.append("#### Delta Events")
-        lines.append("")
-
-        if not event_rows:
-            lines.append("No delta events were attached to this ticket evidence package.")
-            lines.append("")
-        else:
-            lines.append("| Event | Time | Severity | Type | Summary |")
-            lines.append("|---:|---|---|---|---|")
-            for event in event_rows:
-                lines.append(
-                    "| "
-                    f"{safe_markdown(event.get('event_id') or event.get('id') or '-')} | "
-                    f"{safe_markdown(event.get('created_at') or '-')} | "
-                    f"{safe_markdown(event.get('severity') or '-')} | "
-                    f"{safe_markdown(event.get('event_type') or event.get('type') or '-')} | "
-                    f"{safe_markdown(event.get('summary') or '-')} |"
-                )
-            lines.append("")
-
-        port_rows = list(payload.get("port_behavior") or [])[:5]
-        lines.append("#### MAC-Port Behavior")
-        lines.append("")
-
-        if not port_rows:
-            lines.append("No MAC-port behavior rows were attached to this ticket evidence package.")
-            lines.append("")
-        else:
-            lines.append("| Severity | Behavior | Port | Reason |")
-            lines.append("|---|---|---|---|")
-            for port in port_rows:
-                port_label = port.get("port_key")
-                if not port_label:
-                    proto = port.get("protocol") or "tcp"
-                    port_number = port.get("port") or "-"
-                    port_label = f"{proto}/{port_number}"
-
-                lines.append(
-                    "| "
-                    f"{safe_markdown(port.get('severity') or '-')} | "
-                    f"{safe_markdown(port.get('behavior') or '-')} | "
-                    f"`{safe_markdown(port_label)}` | "
-                    f"{safe_markdown(port.get('reason') or '-')} |"
-                )
-            lines.append("")
-
-        history_rows = list(payload.get("ticket_history") or [])[:5]
-        lines.append("#### Ticket History")
-        lines.append("")
-
-        if not history_rows:
-            lines.append("No ticket workflow history was attached to this evidence package.")
-            lines.append("")
-        else:
-            lines.append("| Time | Previous | New | Analyst | Note |")
-            lines.append("|---|---|---|---|---|")
-            for history in history_rows:
-                lines.append(
-                    "| "
-                    f"{safe_markdown(history.get('created_at') or '-')} | "
-                    f"{safe_markdown(history.get('previous_status') or '-')} | "
-                    f"{safe_markdown(history.get('new_status') or '-')} | "
-                    f"{safe_markdown(history.get('analyst') or '-')} | "
-                    f"{safe_markdown(history.get('note') or '-')} |"
-                )
-            lines.append("")
+    return _reports.append_report_ticket_evidence_appendix(lines, evidence_payloads)
 
 def command_report(args):
     from collections import Counter
@@ -19149,28 +15634,7 @@ def current_port_behavior_risk_by_asset(connection, scope=None, lookback=5, limi
 
 
 def port_behavior_risk_points(row):
-    behavior = str(row.get("behavior") or "").upper()
-    current_state = str(row.get("current_state") or "").upper()
-
-    try:
-        port = int(row.get("port") or 0)
-    except (TypeError, ValueError):
-        port = 0
-
-    if behavior == "UNEXPECTED_PORT_OPENED":
-        if port in PORT_BEHAVIOR_HIGH_SIGNAL_PORTS:
-            return 20, f"MAC-port behavior detected unexpected high-signal port {row.get('port_key')}: +20"
-        if port in PORT_BEHAVIOR_MEDIUM_SIGNAL_PORTS:
-            return 10, f"MAC-port behavior detected unexpected monitored port {row.get('port_key')}: +10"
-        return 5, f"MAC-port behavior detected unexpected open port {row.get('port_key')}: +5"
-
-    if behavior == "PORT_FLAPPING":
-        if current_state == "OPEN" and port in PORT_BEHAVIOR_HIGH_SIGNAL_PORTS:
-            return 15, f"MAC-port behavior detected volatile high-signal port {row.get('port_key')}: +15"
-        if current_state == "OPEN":
-            return 5, f"MAC-port behavior detected volatile open port {row.get('port_key')}: +5"
-
-    return 0, ""
+    return _reports.port_behavior_risk_points(row)
 
 
 def build_current_risk_register(connection, limit, scope=None):

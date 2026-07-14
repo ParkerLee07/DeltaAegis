@@ -68,6 +68,9 @@ cp -p \
     deltaaegis_core/config.py \
     deltaaegis_core/db.py \
     deltaaegis_core/ingest.py \
+    deltaaegis_core/jobs.py \
+    deltaaegis_core/reports.py \
+    deltaaegis_core/sites.py \
     "$project/deltaaegis_core/"
 
 cp -p \
