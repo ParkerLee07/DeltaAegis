@@ -29,7 +29,7 @@ flowchart TD
 | Sites and scope aggregation | `deltaaegis_core/sites.py` behind the root facade | Logical groupings and site-wide read aggregation | Replacing technical scope identity |
 | Authentication and authorization | `deltaaegis_core/auth.py` behind the root facade | Users, passwords, sessions, tokens, RBAC, access audit | Browser-supplied actor or privilege |
 | Jobs and schedules | `deltaaegis_core/jobs.py` for durable policy; root facade for process orchestration | Durable state, fixed-argv process launch, cancellation, watchdog, recovery | Direct browser PID signaling or arbitrary command strings |
-| Dashboard HTTP/UI | `deltaaegis.py` | Local HTTP server, HTML/JS, JSON handlers, operator workflows | A stable public API until `/api/v1` is introduced |
+| Dashboard HTTP/UI | `deltaaegis_core/web.py` behind the root facade | Local HTTP server, HTML/JS, JSON handlers, operator workflows | A stable public API until `/api/v1` is introduced |
 | Reports and backups | `deltaaegis_core/reports.py` for queries/Markdown; root facade for file output and backups | Markdown reports, SQLite backups, manifests, rehearsal, cutover | Silent overwrite or unverified restore |
 | Troubleshooter | `tools/deltaaegis_troubleshooter.py` | Read-mostly diagnostics and bounded repair guidance | Hidden mutation of active evidence |
 | Validation estate | `tools/validate_*` | Release contracts and predecessor compatibility | Unowned duplicate execution graphs |
@@ -107,8 +107,8 @@ named `deltaaegis` while that facade exists.
 
 No extraction should mix functional redesign with file movement. A moved responsibility retains its existing validator coverage before cleanup begins.
 
-Stages 1–7 now implement the configuration, connection-policy, authentication,
-NetSniper ingest, Sites, durable Jobs policy, and Reports boundaries shown above. The root module intentionally retains
+Stages 1–8 now implement the configuration, connection-policy, authentication,
+NetSniper ingest, Sites, durable Jobs policy, Reports, and dashboard web boundaries shown above. The root module intentionally retains
 thin functions with the established names and signatures; downstream imports
 and historical validators therefore continue to use the same public surface.
 

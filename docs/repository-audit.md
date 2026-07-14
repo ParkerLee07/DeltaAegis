@@ -8,27 +8,27 @@ This is a deterministic, read-only inventory of the v0.43.0 release candidate an
 
 | Measure | Count |
 |---|---:|
-| Repository files in audit scope | 332 |
-| `deltaaegis.py` lines | 37449 |
+| Repository files in audit scope | 336 |
+| `deltaaegis.py` lines | 34016 |
 | Top-level functions | 662 |
 | Top-level classes | 6 |
 | Distinct CLI commands | 67 |
-| Distinct `/api` route literals | 57 |
+| Distinct `/api` route literals | 53 |
 | Declared schema tables | 26 |
-| Validator scripts | 272 |
+| Validator scripts | 274 |
 | Validator version groups | 39 |
 
-Source SHA-256: `0b9409587c0cae0c2f0f109e629ffa434d24bdac10d214f8183ea24259b388b3`
+Source SHA-256: `628584689f86c76acde428531eae17f9c0731326877cfc60d4ff68f64fd4cd44`
 
 ## Findings and disposition
 
 | ID | Severity | Area | Evidence | Planned disposition |
 |---|---|---|---|---|
-| DA043-001 | HIGH | module boundaries | deltaaegis.py has 37449 lines and 662 top-level functions. | Map and incrementally extract responsibilities in v0.44; do not perform a broad v0.43 rewrite. |
+| DA043-001 | HIGH | module boundaries | deltaaegis.py has 34016 lines and 662 top-level functions. | Map and incrementally extract responsibilities in v0.44; do not perform a broad v0.43 rewrite. |
 | DA043-002 | HIGH | source-order coupling | Repeated top-level function names: dashboard_assets_payload, dashboard_index_html, dashboard_operator_session_shell_html. | Preserve behavior with characterization tests, then remove late overrides during owned v0.44 extractions. |
 | DA043-003 | MEDIUM | storage ownership | 26 table names are declared from the monolithic source bootstrap/migration path. | Introduce the migration ledger in v0.45 after the v0.44 database boundary is extracted. |
-| DA043-004 | MEDIUM | HTTP/API ownership | 57 distinct /api route literals occur in the application source. | Inventory current routes now; introduce the stable /api/v1 contract in v0.46. |
-| DA043-005 | MEDIUM | validation estate | 272 validator scripts span 39 version groups. | Record contract ownership before retiring any validator; the v0.43 gate must compose focused validators exactly once. |
+| DA043-004 | MEDIUM | HTTP/API ownership | 53 distinct /api route literals occur in the application source. | Inventory current routes now; introduce the stable /api/v1 contract in v0.46. |
+| DA043-005 | MEDIUM | validation estate | 274 validator scripts span 39 version groups. | Record contract ownership before retiring any validator; the v0.43 gate must compose focused validators exactly once. |
 | DA043-006 | MEDIUM | documentation | 1 known stale current-architecture document was identified. | Use docs/architecture/overview.md as current authority and reconcile historical prose during v0.44. |
 | DA043-007 | MEDIUM | TrueAegis compatibility | TrueAegis is enforced by an execution/output contract but has no pinned semantic-version range in the current repository. | Publish or pin a TrueAegis semantic version and fixture contract before DeltaAegis v1.0. |
 
@@ -36,9 +36,9 @@ Source SHA-256: `0b9409587c0cae0c2f0f109e629ffa434d24bdac10d214f8183ea24259b388b
 
 | Name | Definition lines |
 |---|---|
-| `dashboard_assets_payload` | 14621, 37430 |
-| `dashboard_index_html` | 25008, 25034, 25193, 25311, 26309 |
-| `dashboard_operator_session_shell_html` | 26333, 26471, 26965 |
+| `dashboard_assets_payload` | 14592, 33997 |
+| `dashboard_index_html` | 24979, 25005, 25164, 25282, 26280 |
+| `dashboard_operator_session_shell_html` | 26304, 26442, 26936 |
 
 These definitions are classified as source-order coupling. The audit does not assume that the earlier definitions are unreachable or safe to delete.
 
@@ -48,9 +48,9 @@ These definitions are classified as source-order coupling. The audit does not as
 
 `access-audit`, `ack`, `alert-detail`, `alert-notes`, `alerts`, `annotate-asset`, `api-token-create`, `api-tokens`, `approve`, `asset`, `asset-annotations`, `asset-notes`, `asset-risk`, `asset-timeline`, `assets`, `backup`, `backup-catalog`, `backup-retention-execute`, `backup-retention-preview`, `backup-verify`, `dashboard`, `events`, `health`, `ingest`, `intelligence`, `intelligence-host`, `intelligence-hosts`, `investigate-asset`, `investigation-center`, `latest`, `menu`, `paths`, `port-behavior`, `report`, `restore-cutover-execute`, `restore-cutover-preview`, `restore-rehearsal`, `risk`, `scan-jobs`, `scan-start`, `schedule-create`, `schedule-delete`, `schedule-disable`, `schedule-enable`, `schedule-list`, `schedule-run-due`, `scopes`, `site-archive`, `site-assign-scope`, `site-create`, `site-description`, `site-list`, `site-remove-scope`, `site-rename`, `site-show`, `snapshots`, `summary`, `suppress`, `ticket-evidence`, `ticket-history`, `ticket-list`, `ticket-status`, `user-create`, `user-password`, `users`, `validation-ingest`, `validations`
 
-### API route literals (57)
+### API route literals (53)
 
-`/api/access-audit`, `/api/admin/users`, `/api/alerts`, `/api/annotations`, `/api/asset`, `/api/assets`, `/api/current-risk`, `/api/current-state`, `/api/events`, `/api/intelligence-host`, `/api/investigate-asset`, `/api/investigation-center`, `/api/latest-network-changes`, `/api/netsniper/hourly-monitoring`, `/api/netsniper/import-latest`, `/api/netsniper/job-detail`, `/api/netsniper/scan-cancel`, `/api/netsniper/scan-start`, `/api/netsniper/schedule-`, `/api/netsniper/schedule-create`, `/api/netsniper/schedule-delete`, `/api/netsniper/schedule-disable`, `/api/netsniper/schedule-enable`, `/api/netsniper/schedule-history`, `/api/netsniper/schedule-run-due`, `/api/netsniper/schedules`, `/api/netsniper/stale-scan-fail`, `/api/netsniper/status`, `/api/port-behavior`, `/api/risk`, `/api/scan-context`, `/api/scan-freshness`, `/api/scan-jobs`, `/api/scopes`, `/api/session`, `/api/site-archive`, `/api/site-assign-scope`, `/api/site-create`, `/api/site-description`, `/api/site-detail`, `/api/site-management`, `/api/site-remove-scope`, `/api/site-rename`, `/api/sites`, `/api/summary`, `/api/telemetry-cleanup/audit-events`, `/api/telemetry-cleanup/clear-all`, `/api/telemetry-cleanup/preview`, `/api/ticket-evidence`, `/api/ticket-status`, `/api/trueaegis-jobs`, `/api/trueaegis/context`, `/api/trueaegis/run`, `/api/validation-correlations`, `/api/validation-ingest`, `/api/validation-summary`, `/api/validations`
+`/api/access-audit`, `/api/admin/users`, `/api/alerts`, `/api/annotations`, `/api/asset`, `/api/assets`, `/api/current-risk`, `/api/current-state`, `/api/events`, `/api/intelligence-host`, `/api/investigate-asset`, `/api/investigation-center`, `/api/latest-network-changes`, `/api/netsniper/hourly-monitoring`, `/api/netsniper/job-detail`, `/api/netsniper/scan-cancel`, `/api/netsniper/scan-start`, `/api/netsniper/schedule-create`, `/api/netsniper/schedule-delete`, `/api/netsniper/schedule-disable`, `/api/netsniper/schedule-enable`, `/api/netsniper/schedule-run-due`, `/api/netsniper/stale-scan-fail`, `/api/netsniper/status`, `/api/port-behavior`, `/api/risk`, `/api/scan-context`, `/api/scan-freshness`, `/api/scan-jobs`, `/api/scopes`, `/api/session`, `/api/site-archive`, `/api/site-assign-scope`, `/api/site-create`, `/api/site-description`, `/api/site-detail`, `/api/site-management`, `/api/site-remove-scope`, `/api/site-rename`, `/api/sites`, `/api/summary`, `/api/telemetry-cleanup/audit-events`, `/api/telemetry-cleanup/clear-all`, `/api/telemetry-cleanup/preview`, `/api/ticket-evidence`, `/api/ticket-status`, `/api/trueaegis-jobs`, `/api/trueaegis/context`, `/api/trueaegis/run`, `/api/validation-correlations`, `/api/validation-ingest`, `/api/validation-summary`, `/api/validations`
 
 ### Schema tables (26)
 
@@ -95,7 +95,7 @@ These definitions are classified as source-order coupling. The audit does not as
 | v0.41 | 12 |
 | v0.42 | 18 |
 | v0.43 | 6 |
-| v0.44 | 8 |
+| v0.44 | 10 |
 | v0.7 | 3 |
 | v0.8 | 11 |
 | v0.9 | 6 |

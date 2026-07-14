@@ -43,11 +43,30 @@ grep -Fq 'data/deltaaegis.db' uninstall.sh \
     || fail "uninstall.sh does not document the default database"
 grep -Fq 'DeltaAegis-local-archive' uninstall.sh \
     || fail "uninstall.sh does not protect the local archive"
+grep -Fq '$DELTA_AEGIS_HOME/deltaaegis.py' uninstall.sh \
+    || fail "uninstall.sh does not scope process checks to the selected project"
+grep -Fq '$DELTAAEGIS_NETSNIPER_ROOT/' uninstall.sh \
+    || fail "uninstall.sh does not scope NetSniper process checks"
+grep -Fq '$DELTAAEGIS_TRUEAEGIS_ROOT/' uninstall.sh \
+    || fail "uninstall.sh does not scope TrueAegis process checks"
+if grep -Fq '|[[:space:]]nmap[[:space:]]|' uninstall.sh; then
+    fail "uninstall.sh still blocks unrelated system-wide nmap processes"
+fi
 pass "static lifecycle safety contract"
 
 echo "[install lifecycle] temporary installation"
 tmp_root="$(mktemp -d)"
-trap 'rm -rf -- "$tmp_root"' EXIT
+cleanup() {
+    local pid
+    for pid in "${unrelated_dashboard_pid:-}" "${unrelated_nmap_pid:-}"; do
+        if [[ -n "$pid" ]]; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
+    rm -rf -- "$tmp_root"
+}
+trap cleanup EXIT
 
 project="$tmp_root/DeltaAegis"
 bin_dir="$tmp_root/bin"
@@ -71,6 +90,7 @@ cp -p \
     deltaaegis_core/jobs.py \
     deltaaegis_core/reports.py \
     deltaaegis_core/sites.py \
+    deltaaegis_core/web.py \
     "$project/deltaaegis_core/"
 
 cp -p \
@@ -159,10 +179,23 @@ printf 'database sentinel\n' > "$project/data/deltaaegis.db"
 printf 'event sentinel\n' > "$project/events/events.jsonl"
 printf 'report sentinel\n' > "$project/reports/report.md"
 
+# A purge of the disposable fixture must not be blocked by processes belonging
+# to another installation. This reproduces the v0.44 Stage 8 release-gate
+# failure seen when an operator had a live dashboard and NetSniper scan.
+bash -c 'exec -a "python3 /opt/unrelated/DeltaAegis/deltaaegis.py dashboard" sleep 60' &
+unrelated_dashboard_pid=$!
+bash -c 'exec -a "timeout 900s nmap -iL /opt/unrelated/NetSniper/targets/hosts.txt" sleep 60' &
+unrelated_nmap_pid=$!
+
 HOME="$tmp_root" \
 DELTA_AEGIS_HOME="$project" \
 BIN_DIR="$bin_dir" \
     "$project/uninstall.sh" --purge-runtime
+
+kill "$unrelated_dashboard_pid" "$unrelated_nmap_pid" 2>/dev/null || true
+wait "$unrelated_dashboard_pid" "$unrelated_nmap_pid" 2>/dev/null || true
+unrelated_dashboard_pid=""
+unrelated_nmap_pid=""
 
 for path in \
     "$project/data" \
