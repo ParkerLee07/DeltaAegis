@@ -187,6 +187,11 @@ def source_inventory(root: Path, files: list[Path]) -> dict[str, Any]:
         match = re.search(r"validate_v(\d+)_(\d+)", Path(name).name)
         validator_versions[f"v{match.group(1)}.{match.group(2)}" if match else "unversioned"] += 1
 
+    retirement: dict[str, Any] | None = None
+    retirement_path = root / "docs/v0.44.1-validator-retirement.json"
+    if retirement_path.is_file():
+        retirement = json.loads(retirement_path.read_text(encoding="utf-8"))
+
     stale_docs: list[dict[str, str]] = []
     legacy_arch = root / "docs/architecture.md"
     if legacy_arch.is_file() and "v0.8.5" in legacy_arch.read_text(encoding="utf-8", errors="replace"):
@@ -213,6 +218,7 @@ def source_inventory(root: Path, files: list[Path]) -> dict[str, Any]:
         "text_line_counts": dict(sorted(line_counts.items())),
         "validator_files": validators,
         "validator_versions": dict(sorted(validator_versions.items())),
+        "validator_retirement": retirement,
         "stale_documents": stale_docs,
     }
 
@@ -242,9 +248,14 @@ def findings(inventory: dict[str, Any]) -> list[dict[str, str]]:
             "disposition": "Introduce /api/v1, OpenAPI, CSRF, and deprecation policy implementation in v0.46.",
         },
         {
-            "id": "DA044-005", "severity": "MEDIUM", "area": "validation estate",
-            "evidence": f"{len(inventory['validator_files'])} validator scripts span {len(inventory['validator_versions'])} version groups.",
-            "disposition": "Keep flat release composition and retire historical validators only with replacement-contract evidence.",
+            "id": "DA044-005", "severity": "LOW", "area": "validation estate",
+            "evidence": (
+                f"{len(inventory['validator_files'])} validator scripts span "
+                f"{len(inventory['validator_versions'])} version groups; "
+                f"{(inventory.get('validator_retirement') or {}).get('retired_validator_count', 0)} "
+                "historical validators are preserved by a byte-verified retirement manifest."
+            ),
+            "disposition": "Retain the current compatibility floor and require manifest-backed replacement evidence for any further validator retirement.",
         },
         {
             "id": "DA044-006", "severity": "MEDIUM", "area": "TrueAegis compatibility",
@@ -264,14 +275,14 @@ def build_audit(root: Path) -> dict[str, Any]:
     inventory = source_inventory(root, files)
     return {
         "schema_version": SCHEMA_VERSION,
-        "scope": "DeltaAegis v0.44.0 Modular Core Foundation release candidate",
+        "scope": "DeltaAegis v0.44.1 Repository Hygiene and Validation Retention maintenance candidate",
         "inventory": inventory,
         "findings": findings(inventory),
         "constraints": [
             "The audit is read-only except when explicitly writing its deterministic Markdown report.",
             "Counts use Git cached and non-ignored untracked candidate files and exclude runtime data roots and the generated report.",
-            "v0.44 changes module ownership but does not change the database schema or introduce a stable API.",
-            "No historical validator is removed without replacement-contract evidence.",
+            "v0.44.1 retains the v0.44 module boundaries and introduces no database-schema or stable-API change.",
+            "Historical validator retirement is allowed only when exact prior bytes remain verified at an immutable release tag, current behavior has replacement-contract evidence, and the retained execution graph is complete.",
         ],
     }
 
@@ -283,9 +294,9 @@ def markdown_list(values: list[str]) -> str:
 def render_markdown(audit: dict[str, Any]) -> str:
     inv = audit["inventory"]
     lines = [
-        "# DeltaAegis v0.44 Repository Audit", "",
+        "# DeltaAegis v0.44.1 Repository Audit", "",
         f"Schema: `{audit['schema_version']}`", "",
-        "This deterministic inventory describes the v0.44.0 Modular Core Foundation release candidate. Regenerate it with `python3 tools/audit_v0_44_repository.py --write`.", "",
+        "This deterministic inventory describes the v0.44.1 Repository Hygiene and Validation Retention maintenance candidate. Regenerate it with `python3 tools/audit_v0_44_repository.py --write`.", "",
         "## Inventory summary", "", "| Measure | Count |", "|---|---:|",
         f"| Repository files in audit scope | {inv['file_count']} |",
         f"| `deltaaegis.py` lines | {inv['source_lines']} |",
@@ -329,6 +340,22 @@ def render_markdown(audit: dict[str, Any]) -> str:
     ])
     for version, count in inv["validator_versions"].items():
         lines.append(f"| {version} | {count} |")
+
+    retirement = inv.get("validator_retirement")
+    lines.extend(["", "## Validator retirement evidence", ""])
+    if retirement:
+        lines.extend([
+            "- Manifest: `docs/v0.44.1-validator-retirement.json`",
+            f"- Archive tag: `{retirement.get('archive_tag')}`",
+            f"- Retired tool files: {retirement.get('retired_file_count')}",
+            f"- Retired validator scripts: {retirement.get('retired_validator_count')}",
+            f"- Retained validator scripts: {retirement.get('expected_retained_validator_count')}",
+            f"- Retained shell-validator inventory: {retirement.get('expected_shell_validator_count')}",
+            f"- Replacement report contract: `{retirement.get('replacement_contract')}`",
+            "- Policy: `docs/validation-retention-policy.md`",
+        ])
+    else:
+        lines.append("No validator-retirement manifest is present.")
 
     lines.extend(["", "## Stale and historical documents", ""])
     if inv["stale_documents"]:

@@ -1,25 +1,25 @@
-# DeltaAegis v0.44 Repository Audit
+# DeltaAegis v0.44.1 Repository Audit
 
 Schema: `deltaaegis-repository-audit-v2`
 
-This deterministic inventory describes the v0.44.0 Modular Core Foundation release candidate. Regenerate it with `python3 tools/audit_v0_44_repository.py --write`.
+This deterministic inventory describes the v0.44.1 Repository Hygiene and Validation Retention maintenance candidate. Regenerate it with `python3 tools/audit_v0_44_repository.py --write`.
 
 ## Inventory summary
 
 | Measure | Count |
 |---|---:|
-| Repository files in audit scope | 342 |
-| `deltaaegis.py` lines | 34016 |
-| Root top-level functions | 662 |
+| Repository files in audit scope | 130 |
+| `deltaaegis.py` lines | 33843 |
+| Root top-level functions | 661 |
 | Root top-level classes | 6 |
 | Internal core modules | 8 |
 | Distinct CLI commands | 67 |
 | Distinct `/api` route literals | 57 |
 | Declared schema tables | 26 |
-| Validator scripts | 278 |
-| Validator version groups | 39 |
+| Validator scripts | 68 |
+| Validator version groups | 6 |
 
-Root source SHA-256: `2cdde45c69b84dea354fa64555665428fb514106dd9f0b4dab2e728e71318e06`
+Root source SHA-256: `c8e51cda413b1c3601906fd58365c8cc8d7cede81535a6eeb7f187becb554fff`
 
 ## Modular core inventory
 
@@ -32,7 +32,7 @@ Root source SHA-256: `2cdde45c69b84dea354fa64555665428fb514106dd9f0b4dab2e728e71
 | `deltaaegis_core/jobs.py` | 1857 | 46 | 1 | `auth` | `11ae9f4c1c16dc4c362c441ee5c1dabef0d69634a117d4added03fc9b34ee3d5` |
 | `deltaaegis_core/reports.py` | 796 | 37 | 1 | None | `26b5ddf1e2f93261f510dccb3b76636f5e860fc8b71974d7921edf5a83301e90` |
 | `deltaaegis_core/sites.py` | 654 | 20 | 0 | `auth`, `ingest` | `a59a9ab1fdd700ef5b1be1957e35d7e11c84c500e786fac6eafa5293b32d84ce` |
-| `deltaaegis_core/web.py` | 3736 | 15 | 0 | `auth` | `d30b193820bca8ebbe2e03dd3912e5c6db65aac8d41f360f749b694df1191261` |
+| `deltaaegis_core/web.py` | 3736 | 15 | 0 | `auth` | `530eaf29168581e64a3499610cd6b1e65a8879e793871b3fcbb7c260649de0e6` |
 
 Forbidden imports of the root `deltaaegis` module from internal core modules: None detected.
 
@@ -40,21 +40,21 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 
 | ID | Severity | Area | Evidence | Planned disposition |
 |---|---|---|---|---|
-| DA044-001 | MEDIUM | compatibility facade | deltaaegis.py remains 34016 lines with 662 top-level functions; the eight core modules contain 9166 lines. | Retain the facade through the planned migration/API releases; continue only owned incremental extraction. |
+| DA044-001 | MEDIUM | compatibility facade | deltaaegis.py remains 33843 lines with 661 top-level functions; the eight core modules contain 9166 lines. | Retain the facade through the planned migration/API releases; continue only owned incremental extraction. |
 | DA044-002 | MEDIUM | source-order coupling | Repeated top-level function names in the compatibility facade: dashboard_assets_payload, dashboard_index_html, dashboard_operator_session_shell_html. | Remove only with characterization evidence and explicit compatibility ownership. |
 | DA044-003 | MEDIUM | storage migrations | 26 table names remain declared through the root-owned schema bootstrap. | Introduce the forward-only migration ledger and supported upgrade paths in v0.45. |
 | DA044-004 | MEDIUM | HTTP/API contract | 57 unversioned /api route literals remain implementation endpoints. | Introduce /api/v1, OpenAPI, CSRF, and deprecation policy implementation in v0.46. |
-| DA044-005 | MEDIUM | validation estate | 278 validator scripts span 39 version groups. | Keep flat release composition and retire historical validators only with replacement-contract evidence. |
+| DA044-005 | LOW | validation estate | 68 validator scripts span 6 version groups; 216 historical validators are preserved by a byte-verified retirement manifest. | Retain the current compatibility floor and require manifest-backed replacement evidence for any further validator retirement. |
 | DA044-006 | MEDIUM | TrueAegis compatibility | TrueAegis remains contract-validated but not pinned to a published semantic-version range. | Publish or pin the supported TrueAegis range before v1.0. |
-| DA044-007 | LOW | documentation | 1 known historical architecture document marker remains. | Keep docs/architecture/overview.md authoritative and clean historical prose only in an owned documentation change. |
+| DA044-007 | LOW | documentation | 0 known historical architecture document marker remains. | Keep docs/architecture/overview.md authoritative and clean historical prose only in an owned documentation change. |
 
 ## Duplicate root definitions
 
 | Name | Definition lines |
 |---|---|
-| `dashboard_assets_payload` | 14592, 33997 |
+| `dashboard_assets_payload` | 14592, 33824 |
 | `dashboard_index_html` | 24979, 25005, 25164, 25282, 26280 |
-| `dashboard_operator_session_shell_html` | 26304, 26442, 26936 |
+| `dashboard_operator_session_shell_html` | 26304, 26763 |
 
 ## Command, route, and schema catalogs
 
@@ -74,51 +74,27 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 
 | Version group | Scripts |
 |---|---:|
-| unversioned | 1 |
-| v0.10 | 3 |
-| v0.11 | 4 |
-| v0.12 | 5 |
-| v0.13 | 5 |
-| v0.14 | 5 |
-| v0.15 | 5 |
-| v0.16 | 5 |
-| v0.17 | 6 |
-| v0.18 | 6 |
-| v0.19 | 5 |
-| v0.20 | 6 |
-| v0.21 | 5 |
-| v0.22 | 6 |
-| v0.23 | 7 |
-| v0.24 | 6 |
-| v0.25 | 6 |
-| v0.26 | 8 |
-| v0.27 | 8 |
-| v0.28 | 9 |
-| v0.29 | 5 |
-| v0.30 | 4 |
-| v0.31 | 10 |
-| v0.32 | 4 |
-| v0.33 | 5 |
-| v0.34 | 9 |
-| v0.35 | 5 |
-| v0.36 | 6 |
-| v0.37 | 9 |
-| v0.38 | 9 |
-| v0.39 | 18 |
-| v0.40 | 13 |
-| v0.41 | 12 |
-| v0.42 | 18 |
-| v0.43 | 6 |
-| v0.44 | 14 |
-| v0.7 | 3 |
-| v0.8 | 11 |
-| v0.9 | 6 |
+| v0.39 | 15 |
+| v0.40 | 11 |
+| v0.41 | 9 |
+| v0.42 | 15 |
+| v0.43 | 1 |
+| v0.44 | 17 |
+
+## Validator retirement evidence
+
+- Manifest: `docs/v0.44.1-validator-retirement.json`
+- Archive tag: `v0.44.0`
+- Retired tool files: 219
+- Retired validator scripts: 216
+- Retained validator scripts: 68
+- Retained shell-validator inventory: 51
+- Replacement report contract: `tools/validate_v0_44_1_report_contracts.py`
+- Policy: `docs/validation-retention-policy.md`
 
 ## Stale and historical documents
 
-| Path | Evidence | Disposition |
-|---|---|---|
-| `docs/architecture.md` | Historical v0.8.5 narrative; docs/architecture/overview.md is current. | Retain as historical context until a dedicated documentation cleanup owns it. |
+No known stale architecture-document marker was found.
 
 ## Deferred work map
 
@@ -134,5 +110,5 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 
 - The audit is read-only except when explicitly writing its deterministic Markdown report.
 - Counts use Git cached and non-ignored untracked candidate files and exclude runtime data roots and the generated report.
-- v0.44 changes module ownership but does not change the database schema or introduce a stable API.
-- No historical validator is removed without replacement-contract evidence.
+- v0.44.1 retains the v0.44 module boundaries and introduces no database-schema or stable-API change.
+- Historical validator retirement is allowed only when exact prior bytes remain verified at an immutable release tag, current behavior has replacement-contract evidence, and the retained execution graph is complete.

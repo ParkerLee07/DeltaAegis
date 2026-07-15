@@ -170,7 +170,7 @@ managed_launcher() {
 check_launcher_target() {
     local path="$1"
 
-    [[ -e "$path" ]] || return 0
+    [[ -e "$path" || -L "$path" ]] || return 0
 
     if managed_launcher "$path"; then
         return 0
@@ -178,6 +178,46 @@ check_launcher_target() {
 
     [[ "$FORCE_LAUNCHER" -eq 1 ]] \
         || die "Refusing to replace unmanaged launcher: $path (use --force-launcher)"
+}
+
+replace_launcher_atomically() {
+    local temporary="$1"
+    local target="$2"
+    local attempt
+    local error=""
+
+    for attempt in 1 2 3; do
+        # Re-check the exact destination immediately before replacement. This
+        # closes the preflight/write race and refuses directories, symlinks,
+        # or newly-created unmanaged files unless --force-launcher was used.
+        if [[ -e "$target" || -L "$target" ]]; then
+            if ! managed_launcher "$target" \
+                && [[ "$FORCE_LAUNCHER" -ne 1 ]]
+            then
+                rm -f -- "$temporary"
+                die "Refusing to replace unmanaged launcher: $target (use --force-launcher)"
+            fi
+        fi
+
+        if error="$(mv -fT -- "$temporary" "$target" 2>&1)"; then
+            return 0
+        fi
+
+        # Some overlay filesystems can transiently report an already-unlinked
+        # executable as a directory while its final reference is being
+        # released. Retry only when the destination is now genuinely absent;
+        # never remove or traverse an unexpected destination.
+        if [[ "$attempt" -lt 3 \
+            && ! -e "$target" \
+            && ! -L "$target" ]]
+        then
+            sleep 0.05
+            continue
+        fi
+
+        rm -f -- "$temporary"
+        die "Could not install launcher at $target: $error"
+    done
 }
 
 write_deltaaegis_launcher() {
@@ -214,7 +254,7 @@ EOF
     } > "$temporary"
 
     chmod 0755 "$temporary"
-    mv -f -- "$temporary" "$target"
+    replace_launcher_atomically "$temporary" "$target"
 }
 
 write_troubleshooter_launcher() {
@@ -235,7 +275,7 @@ EOF
     } > "$temporary"
 
     chmod 0755 "$temporary"
-    mv -f -- "$temporary" "$target"
+    replace_launcher_atomically "$temporary" "$target"
 }
 
 log "DeltaAegis installation plan"
@@ -303,7 +343,7 @@ else
     warn "Create the first ADMIN later from the dashboard /setup page."
 fi
 
-log "Running non-mutating syntax and bundle checks"
+log "Running non-mutating syntax and troubleshooter checks"
 PYTHONDONTWRITEBYTECODE=1 python3 - "$BASE" <<'PY'
 from pathlib import Path
 import sys

@@ -76,12 +76,8 @@ git -C "$compat_root/repository" switch -q -C main
   tools/validate_v0_39_schedule_deletion_semantics.sh
   tools/validate_v0_42_scan_watchdog.sh
 
-  echo "[v0.44 checkpoint 7] Reports compatibility"
-  tools/validate_v0_15_port_behavior_report.sh
-  tools/validate_v0_16_investigation_center_report.sh
-  tools/validate_v0_20_report_ticket_evidence.sh
-  tools/validate_v0_22_report_triage_summary.sh
-  tools/validate_v0_34_report_correlation.sh
+  echo "[v0.44 checkpoint 7] Consolidated current report contracts"
+  python3 tools/validate_v0_44_1_report_contracts.py
 )
 rm -rf "$compat_root"
 trap - EXIT

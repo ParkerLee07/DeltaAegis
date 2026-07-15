@@ -162,7 +162,7 @@ def validate_isolated_import() -> None:
         "import deltaaegis; "
         "import deltaaegis_core; "
         "from deltaaegis_core import auth, config, db, ingest, jobs, reports, sites, web; "
-        "assert deltaaegis.DELTAAEGIS_VERSION == '0.44.0'; "
+        "assert deltaaegis.DELTAAEGIS_VERSION == '0.44.1'; "
         "assert tuple(deltaaegis_core.__all__) == ('auth','config','db','ingest','jobs','reports','sites','web')"
     )
     completed = subprocess.run(

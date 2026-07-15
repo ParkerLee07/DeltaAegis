@@ -58,10 +58,17 @@ Release-gate status: `passed` using a disposable clean local clone.
 6. Run SQLite integrity and foreign-key checks.
 7. Run the complete predecessor release gate in a disposable clean local clone.
 
-Regenerate both baseline artifacts with:
+The v0.43 benchmark generator is intentionally retired from current `main`.
+Regenerate both frozen baseline artifacts from the verified archive tag:
 
 ```bash
-python3 tools/benchmark_v0_43.py --write
+temporary="$(mktemp -d)"
+git worktree add --detach "$temporary" v0.44.0
+(
+  cd "$temporary"
+  python3 tools/benchmark_v0_43.py --write
+)
+git worktree remove --force "$temporary"
 ```
 
 ## Interpretation

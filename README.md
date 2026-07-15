@@ -4,26 +4,26 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.44.0
+## Current Release — v0.44.1
 
-**DeltaAegis v0.44.0 — Modular Core Foundation**
+**DeltaAegis v0.44.1 — Repository Hygiene and Validation Retention**
 
-DeltaAegis v0.44.0 completes the behavior-preserving modular-core extraction planned by the v0.43 architecture baseline. The repository-root `deltaaegis.py` remains the executable and import compatibility facade, while owned implementation boundaries now live in the non-conflicting `deltaaegis_core` package.
+DeltaAegis v0.44.1 is a maintenance release that reduces repository and validation debt without changing the database schema, operator workflow, NetSniper/TrueAegis contracts, or the completed v0.44 modular-core architecture.
 
 Highlights:
 
-- Added explicit configuration and SQLite connection-policy boundaries in `deltaaegis_core/config.py` and `deltaaegis_core/db.py`.
-- Extracted authentication, password, session, API-token, RBAC, and access-audit ownership into `deltaaegis_core/auth.py`.
-- Extracted NetSniper bundle trust, normalization, and ingest helpers into `deltaaegis_core/ingest.py`.
-- Extracted logical-site storage and aggregation into `deltaaegis_core/sites.py`.
-- Extracted durable scan, schedule, cancellation, watchdog, and TrueAegis job policy into `deltaaegis_core/jobs.py` while retaining fixed-argument process orchestration in the root facade.
-- Extracted deterministic report queries and Markdown section generation into `deltaaegis_core/reports.py`.
-- Extracted dashboard HTTP routing, response handling, rendering, authentication transport, and server lifecycle into `deltaaegis_core/web.py`.
-- Preserved established root-level function names, signatures, CLI commands, rendered dashboard behavior, API routes, database schema, and NetSniper/TrueAegis contracts through characterization and predecessor compatibility tests.
-- Added exact AST-based dependency, facade-ownership, cycle, installed-import, documentation, metadata, and deterministic repository-audit validation.
-- Added a flat v0.44 release gate for both the feature branch and `main`, with clean-tree enforcement and an explicit approval hold before merge, tag, push, or publication.
-- Kept NetSniper pinned to v2.0.0 and introduced no stable `/api/v1` contract or database migration framework in this release.
-- DeltaAegis v0.44.0 remains licensed under `AGPL-3.0-only`; alternative commercial licensing may be available by separate written agreement.
+- Replaced the stale embedded troubleshooter bundle with a repository-aware diagnostic runner that selects the highest retained release gate and verifies an acyclic executable validator graph.
+- Removed the superseded parallel architecture document and made `docs/architecture/overview.md` the single authoritative architecture entry point.
+- Retired 216 obsolete historical validators and three legacy or release-only tools under an exact SHA-256 manifest while preserving every retired file byte-for-byte at tag `v0.44.0`.
+- Removed superseded v0.40-v0.44 release-only gates, metadata/documentation validators, and v0.43 audit/benchmark generators while retaining staged diagnostics and the active compatibility floor.
+- Consolidated five historical report-stage roots into one current report-contract validator.
+- Removed one unreachable operator-session rendering wrapper while preserving the operator and reset-page HTML fingerprints and all v0.40 action-receipt behavior.
+- Renamed the core regression test module and class to release-neutral names.
+- Restored the complete v0.41 backup, manifest, restore-rehearsal, retention, and guarded cutover behavior suite to the current compatibility gate.
+- Hardened repeated installation of the managed CLI and troubleshooter launchers with exact-target atomic replacement and bounded transient-filesystem retries.
+- Added a v0.44.1 release gate that owns repository hygiene, validator retention, report contracts, data durability, modular-core boundaries, and the inherited v0.42/v0.40/v0.39 compatibility floor.
+- Updated CI to compile the modular core and maintenance validators, run regression tests, verify repository hygiene and retention, and exercise data-durability compatibility.
+- Retained `AGPL-3.0-only`; alternative commercial licensing remains available only by separate written agreement.
 
 ## What DeltaAegis Does
 
@@ -385,7 +385,7 @@ The safety backup is retained after success or rollback. DeltaAegis does not del
 
 ## Security Boundary
 
-DeltaAegis v0.44.0 does not expose arbitrary shell command execution from the dashboard.
+DeltaAegis v0.44.1 does not expose arbitrary shell command execution from the dashboard.
 
 Dashboard NetSniper execution uses guarded job records, validated private IPv4 CIDRs, and fixed argument-vector process creation. Live job-detail reads are bounded and confined to the configured scan-log root.
 
@@ -528,45 +528,42 @@ Open the guided human-readable menu:
 
 Running the tool without arguments also opens the menu when stdin and stdout are interactive terminals. The menu provides concise health checks, targeted validator execution, retained reports, and stable `DAE-TRB-NNNN` diagnostic codes. See [the troubleshooter and error-code reference](docs/TROUBLESHOOTER.md).
 
-DeltaAegis includes one standalone troubleshooting tool containing validator files from the fetched public `origin/main` history and the current local `HEAD`. When a path exists in both sources, the current `HEAD` copy takes precedence so the active release candidate is represented exactly.
+DeltaAegis includes one repository-aware troubleshooting tool. It reads the validator inventory from the selected checkout, identifies the highest versioned release gate, and runs selected validators in fresh isolated clones. It no longer carries an embedded copy of historical validator scripts that can drift behind the repository.
 
 Run the current release gate in a fresh isolated `$HOME/DeltaAegis` clone:
 
     python3 tools/deltaaegis_troubleshooter.py
 
-Strictly verify embedded hashes and Bash syntax while reporting historical
-reference and cycle warnings:
+Verify validator Bash syntax and the executable reference graph:
 
     python3 tools/deltaaegis_troubleshooter.py --self-check
-
-Treat the advisory historical graph as a strict architecture check:
-
     python3 tools/deltaaegis_troubleshooter.py --self-check --strict-graph
 
-Run every static-reference-free validator once, with a fresh clone per
-validator:
+Run the current staged checkpoint wrappers:
+
+    python3 tools/deltaaegis_troubleshooter.py --mode stages
+
+Run every static root once, with a fresh clone per validator:
 
     python3 tools/deltaaegis_troubleshooter.py --mode all-leaves
 
-Inspect or select a validator group:
+Inspect the current validator group:
 
-    python3 tools/deltaaegis_troubleshooter.py --match 'v0_42'
-    python3 tools/deltaaegis_troubleshooter.py --list
+    python3 tools/deltaaegis_troubleshooter.py --match 'v0_44' --list
 
-Reports include environment details, read-only SQLite integrity checks,
-validator provenance, dependency warnings, individual logs, likely failure
-causes, and a Markdown summary. Historical validator failures are reported
-individually rather than treated as current-release regressions.
+Reports include environment details, read-only SQLite integrity checks, validator provenance, individual logs, diagnostic codes, and Markdown and JSON summaries. Historical validator failures are reported individually rather than treated as current-release regressions.
+
+The default branch intentionally retains the active compatibility floor rather than every validator ever published. Retired paths and byte-for-byte archive evidence are recorded in [the validator retention policy](docs/validation-retention-policy.md) and `docs/v0.44.1-validator-retirement.json`; the verified `v0.44.0` tag preserves the pre-retirement tree.
 
 ## Validation
 
-Run the complete v0.44 automated release gate from a clean checkout:
+Run the complete v0.44.1 automated release gate from a clean checkout:
 
 ```bash
-./tools/validate_v0_44_release_gate.sh
+./tools/validate_v0_44_1_release_gate.sh
 ```
 
-The release gate validates all eight focused extraction boundaries exactly once, verifies the internal dependency graph and root compatibility facade, checks the deterministic v0.44 repository audit, and confirms source, CLI, dashboard, README, CHANGELOG, architecture, support, and release metadata. It then runs the inherited v0.42 security, component, install, and license contracts together with v0.40 operator-action and v0.39 functional compatibility in a disposable clean candidate snapshot.
+The release gate validates repository hygiene, validator retirement, consolidated report contracts, the retained v0.41 durability and recovery suite, all focused v0.44 extraction boundaries, the internal dependency graph and root compatibility facade, the deterministic repository audit, release metadata, regression tests, and the inherited v0.42 security, v0.40 operator-action, and v0.39 functional compatibility floor.
 
 Complete the manual backup and restore checklist before merge, tag, or publication:
 
@@ -623,7 +620,7 @@ three-project defensive workflow:
 
 ## License
 
-DeltaAegis v0.44.0 is licensed under the **GNU Affero General Public License, version 3 only** (`AGPL-3.0-only`). See `LICENSE` and `LICENSING.md`.
+DeltaAegis v0.44.1 is licensed under the **GNU Affero General Public License, version 3 only** (`AGPL-3.0-only`). See `LICENSE` and `LICENSING.md`.
 
 Alternative commercial licensing may be available from Parker Lee through a separate written agreement. Earlier copies already distributed under the MIT License retain the permissions that accompanied those copies.
 

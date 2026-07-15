@@ -1,3 +1,18 @@
+## DeltaAegis v0.44.1 — Repository Hygiene and Validation Retention
+
+- Replaced the stale embedded troubleshooter bundle with live repository inventory, strict executable-graph validation, and automatic selection of the highest retained release gate.
+- Removed the superseded parallel architecture document and retained `docs/architecture/overview.md` as the authoritative architecture entry point.
+- Retired 216 obsolete historical validators and three legacy or release-only tools under `docs/v0.44.1-validator-retirement.json`, with exact prior contents preserved at tag `v0.44.0`.
+- Removed superseded v0.40-v0.44 release-only gates, metadata/documentation validators, and v0.43 audit/benchmark generators while retaining staged diagnostics and the active compatibility floor.
+- Consolidated five historical report-stage validators into `tools/validate_v0_44_1_report_contracts.py`.
+- Removed an unreachable operator-session renderer while preserving operator/reset HTML fingerprints, reset audit behavior, and v0.40 action-receipt compatibility.
+- Renamed the core regression test module and test class to release-neutral names.
+- Restored the complete v0.41 data-durability and recovery behavior suite to the current release composition, including backup manifests, restore rehearsal, retention, and guarded cutover.
+- Hardened managed-launcher replacement with exact-target atomic moves, destination revalidation, and bounded retries for transient overlay-filesystem replacement races.
+- Added a v0.44.1 release gate and metadata validator covering repository hygiene, validation retention, report contracts, durability compatibility, v0.44 modular boundaries, regression tests, and predecessor behavior.
+- Updated CI, troubleshooting documentation, supported-version status, validation-retention policy, v1.0 planning status, and the deterministic repository audit.
+- Introduced no database-schema, stable-API, detection, or operator-workflow change.
+
 ## DeltaAegis v0.44.0 — Modular Core Foundation
 
 - Added the non-conflicting `deltaaegis_core` implementation package while retaining the repository-root `deltaaegis.py` executable and import compatibility facade.
