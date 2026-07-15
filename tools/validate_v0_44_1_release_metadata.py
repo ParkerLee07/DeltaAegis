@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -25,16 +26,41 @@ def read(relative: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def main() -> int:
-    print("DeltaAegis v0.44.1 Release Metadata Validator")
-    print("================================================")
-
+def resolve_release_branch() -> str:
     branch = subprocess.run(
         ["git", "-C", str(ROOT), "branch", "--show-current"],
         check=True, capture_output=True, text=True,
     ).stdout.strip()
+    if branch:
+        return branch
+
+    if os.environ.get("GITHUB_ACTIONS", "").strip().lower() == "true":
+        head_ref = os.environ.get("GITHUB_HEAD_REF", "").strip()
+        if head_ref:
+            return head_ref
+
+        ref_name = os.environ.get("GITHUB_REF_NAME", "").strip()
+        if ref_name and not ref_name.endswith("/merge"):
+            return ref_name
+
+        github_ref = os.environ.get("GITHUB_REF", "").strip()
+        heads_prefix = "refs/heads/"
+        if github_ref.startswith(heads_prefix):
+            return github_ref[len(heads_prefix):]
+
+    return ""
+
+
+def main() -> int:
+    print("DeltaAegis v0.44.1 Release Metadata Validator")
+    print("================================================")
+
+    branch = resolve_release_branch()
     if branch not in ALLOWED_BRANCHES:
-        fail(f"unsupported v0.44.1 release branch: {branch}")
+        fail(
+            "unsupported v0.44.1 release branch: "
+            f"{branch or '(detached without supported CI branch context)'}"
+        )
 
     source = read("deltaaegis.py")
     tree = ast.parse(source, filename="deltaaegis.py")
