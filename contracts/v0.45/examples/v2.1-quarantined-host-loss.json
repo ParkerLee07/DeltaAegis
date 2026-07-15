@@ -1,0 +1,51 @@
+{
+  "schema_version": "deltaaegis-telemetry-quality-decision-v1",
+  "policy_version": "deltaaegis-v0.45-stage0f",
+  "bundle_id": "v2.1-quarantined-host-loss",
+  "bundle_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "evaluated_at": "2026-07-15T16:00:00Z",
+  "source_contract": {
+    "netsniper_version": "2.1.0",
+    "bundle_schema_version": "netsniper-run-v2",
+    "capability_manifest_version": "netsniper-capability-manifest-v1",
+    "host_classification_version": "netsniper-host-classification-v2"
+  },
+  "automated_state": "QUARANTINED",
+  "current_state": "QUARANTINED",
+  "reasons": [
+    {
+      "code": "host_inventory_not_preserved",
+      "severity": "error",
+      "scope": "bundle",
+      "overridable": true,
+      "detail": "The capability manifest does not prove full host inventory preservation."
+    },
+    {
+      "code": "omitted_hosts_reported",
+      "severity": "error",
+      "scope": "bundle",
+      "overridable": true,
+      "detail": "The sensor reports one or more omitted discovered hosts."
+    }
+  ],
+  "effects": {
+    "retain_raw_bundle": "allowed",
+    "update_positive_observations": "blocked",
+    "apply_absence_mutations": "blocked",
+    "update_device_classification": "blocked",
+    "create_alerts": "blocked",
+    "create_high_severity_classification_alerts": "blocked",
+    "resolve_alerts": "blocked",
+    "update_risk_score": "blocked",
+    "quality_center_visibility": "allowed"
+  },
+  "retention_disposition": "quarantine_store",
+  "review": {
+    "status": "not_reviewed",
+    "reviewer": null,
+    "reviewed_at": null,
+    "override_from": null,
+    "override_to": null,
+    "override_reason": null
+  }
+}

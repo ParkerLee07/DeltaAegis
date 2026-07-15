@@ -1,0 +1,374 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/deltaaegis/v0.45/telemetry-quality-decision.schema.json",
+  "title": "DeltaAegis v0.45 telemetry quality decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy_version",
+    "bundle_id",
+    "bundle_sha256",
+    "evaluated_at",
+    "source_contract",
+    "automated_state",
+    "current_state",
+    "reasons",
+    "effects",
+    "retention_disposition",
+    "review"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "deltaaegis-telemetry-quality-decision-v1"
+    },
+    "policy_version": {
+      "const": "deltaaegis-v0.45-stage0f"
+    },
+    "bundle_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "bundle_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "evaluated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "netsniper_version",
+        "bundle_schema_version",
+        "capability_manifest_version",
+        "host_classification_version"
+      ],
+      "properties": {
+        "netsniper_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bundle_schema_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "capability_manifest_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "host_classification_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "automated_state": {
+      "enum": [
+        "ACCEPTED",
+        "DEGRADED",
+        "QUARANTINED",
+        "REJECTED"
+      ]
+    },
+    "current_state": {
+      "enum": [
+        "ACCEPTED",
+        "DEGRADED",
+        "QUARANTINED",
+        "REJECTED"
+      ]
+    },
+    "reasons": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/reason"
+      },
+      "minItems": 1
+    },
+    "effects": {
+      "$ref": "#/$defs/effects"
+    },
+    "retention_disposition": {
+      "enum": [
+        "trusted_store",
+        "quarantine_store",
+        "audit_metadata_only"
+      ]
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "reviewer",
+        "reviewed_at",
+        "override_from",
+        "override_to",
+        "override_reason"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "not_reviewed",
+            "reviewed",
+            "overridden"
+          ]
+        },
+        "reviewer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reviewed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "override_from": {
+          "oneOf": [
+            {
+              "enum": [
+                "ACCEPTED",
+                "DEGRADED",
+                "QUARANTINED",
+                "REJECTED"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "override_to": {
+          "oneOf": [
+            {
+              "enum": [
+                "ACCEPTED",
+                "DEGRADED",
+                "QUARANTINED",
+                "REJECTED"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "override_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "reason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "severity",
+        "scope",
+        "overridable",
+        "detail"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "complete_v2_1_contract",
+            "full_inventory_preserved",
+            "integrity_verified",
+            "scope_authorized",
+            "legacy_v2_compatibility",
+            "partial_scan",
+            "collector_failed",
+            "collector_unavailable",
+            "unprivileged_scan",
+            "optional_artifact_missing",
+            "classification_review_present",
+            "classification_unknown_present",
+            "negative_evidence_disabled",
+            "required_collector_failed",
+            "host_inventory_not_preserved",
+            "omitted_hosts_reported",
+            "classification_contract_invalid",
+            "capability_manifest_inconsistent",
+            "identity_collision",
+            "manual_review_required",
+            "unsupported_classifier_version",
+            "required_artifact_missing",
+            "bundle_unreadable",
+            "manifest_missing",
+            "schema_unrecognized",
+            "path_escape",
+            "hash_mismatch",
+            "scope_unauthorized",
+            "run_id_hash_conflict",
+            "required_artifact_invalid",
+            "malformed_inventory_counts"
+          ]
+        },
+        "severity": {
+          "enum": [
+            "info",
+            "warning",
+            "error",
+            "critical"
+          ]
+        },
+        "scope": {
+          "enum": [
+            "bundle",
+            "collector",
+            "host",
+            "artifact",
+            "policy"
+          ]
+        },
+        "overridable": {
+          "type": "boolean"
+        },
+        "detail": {
+          "type": "string"
+        }
+      }
+    },
+    "effects": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "retain_raw_bundle",
+        "update_positive_observations",
+        "apply_absence_mutations",
+        "update_device_classification",
+        "create_alerts",
+        "create_high_severity_classification_alerts",
+        "resolve_alerts",
+        "update_risk_score",
+        "quality_center_visibility"
+      ],
+      "properties": {
+        "retain_raw_bundle": {
+          "enum": [
+            "allowed",
+            "blocked",
+            "coverage_gated",
+            "confidence_gated",
+            "stronger_evidence_only",
+            "positive_observations_only",
+            "uncertainty_capped",
+            "receipt_only"
+          ]
+        },
+        "update_positive_observations": {
+          "enum": [
+            "allowed",
+            "blocked",
+            "coverage_gated",
+            "confidence_gated",
+            "stronger_evidence_only",
+            "positive_observations_only",
+            "uncertainty_capped",
+            "receipt_only"
+          ]
+        },
+        "apply_absence_mutations": {
+          "enum": [
+            "allowed",
+            "blocked",
+            "coverage_gated",
+            "confidence_gated",
+            "stronger_evidence_only",
+            "positive_observations_only",
+            "uncertainty_capped",
+            "receipt_only"
+          ]
+        },
+        "update_device_classification": {
+          "enum": [
+            "allowed",
+            "blocked",
+            "coverage_gated",
+            "confidence_gated",
+            "stronger_evidence_only",
+            "positive_observations_only",
+            "uncertainty_capped",
+            "receipt_only"
+          ]
+        },
+        "create_alerts": {
+          "enum": [
+            "allowed",
+            "blocked",
+            "coverage_gated",
+            "confidence_gated",
+            "stronger_evidence_only",
+            "positive_observations_only",
+            "uncertainty_capped",
+            "receipt_only"
+          ]
+        },
+        "create_high_severity_classification_alerts": {
+          "enum": [
+            "allowed",
+            "blocked",
+            "coverage_gated",
+            "confidence_gated",
+            "stronger_evidence_only",
+            "positive_observations_only",
+            "uncertainty_capped",
+            "receipt_only"
+          ]
+        },
+        "resolve_alerts": {
+          "enum": [
+            "allowed",
+            "blocked",
+            "coverage_gated",
+            "confidence_gated",
+            "stronger_evidence_only",
+            "positive_observations_only",
+            "uncertainty_capped",
+            "receipt_only"
+          ]
+        },
+        "update_risk_score": {
+          "enum": [
+            "allowed",
+            "blocked",
+            "coverage_gated",
+            "confidence_gated",
+            "stronger_evidence_only",
+            "positive_observations_only",
+            "uncertainty_capped",
+            "receipt_only"
+          ]
+        },
+        "quality_center_visibility": {
+          "enum": [
+            "allowed",
+            "blocked",
+            "coverage_gated",
+            "confidence_gated",
+            "stronger_evidence_only",
+            "positive_observations_only",
+            "uncertainty_capped",
+            "receipt_only"
+          ]
+        }
+      }
+    }
+  }
+}
