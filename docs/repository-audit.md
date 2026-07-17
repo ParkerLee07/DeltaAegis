@@ -8,18 +8,18 @@ This deterministic inventory describes the v0.44.1 Repository Hygiene and Valida
 
 | Measure | Count |
 |---|---:|
-| Repository files in audit scope | 130 |
-| `deltaaegis.py` lines | 33843 |
-| Root top-level functions | 661 |
+| Repository files in audit scope | 141 |
+| `deltaaegis.py` lines | 33876 |
+| Root top-level functions | 663 |
 | Root top-level classes | 6 |
 | Internal core modules | 8 |
 | Distinct CLI commands | 67 |
 | Distinct `/api` route literals | 57 |
 | Declared schema tables | 26 |
-| Validator scripts | 68 |
-| Validator version groups | 6 |
+| Validator scripts | 69 |
+| Validator version groups | 7 |
 
-Root source SHA-256: `c8e51cda413b1c3601906fd58365c8cc8d7cede81535a6eeb7f187becb554fff`
+Root source SHA-256: `1ab7a68293b67b7edd1baa04a86019e8961a61087d7e5d3fbd8bb4f0c0acac6d`
 
 ## Modular core inventory
 
@@ -40,11 +40,11 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 
 | ID | Severity | Area | Evidence | Planned disposition |
 |---|---|---|---|---|
-| DA044-001 | MEDIUM | compatibility facade | deltaaegis.py remains 33843 lines with 661 top-level functions; the eight core modules contain 9166 lines. | Retain the facade through the planned migration/API releases; continue only owned incremental extraction. |
+| DA044-001 | MEDIUM | compatibility facade | deltaaegis.py remains 33876 lines with 663 top-level functions; the eight core modules contain 9166 lines. | Retain the facade through the planned migration/API releases; continue only owned incremental extraction. |
 | DA044-002 | MEDIUM | source-order coupling | Repeated top-level function names in the compatibility facade: dashboard_assets_payload, dashboard_index_html, dashboard_operator_session_shell_html. | Remove only with characterization evidence and explicit compatibility ownership. |
 | DA044-003 | MEDIUM | storage migrations | 26 table names remain declared through the root-owned schema bootstrap. | Introduce the forward-only migration ledger and supported upgrade paths in v0.45. |
 | DA044-004 | MEDIUM | HTTP/API contract | 57 unversioned /api route literals remain implementation endpoints. | Introduce /api/v1, OpenAPI, CSRF, and deprecation policy implementation in v0.46. |
-| DA044-005 | LOW | validation estate | 68 validator scripts span 6 version groups; 216 historical validators are preserved by a byte-verified retirement manifest. | Retain the current compatibility floor and require manifest-backed replacement evidence for any further validator retirement. |
+| DA044-005 | LOW | validation estate | 69 validator scripts span 7 version groups; 216 historical validators are preserved by a byte-verified retirement manifest. | Retain the current compatibility floor and require manifest-backed replacement evidence for any further validator retirement. |
 | DA044-006 | MEDIUM | TrueAegis compatibility | TrueAegis remains contract-validated but not pinned to a published semantic-version range. | Publish or pin the supported TrueAegis range before v1.0. |
 | DA044-007 | LOW | documentation | 0 known historical architecture document marker remains. | Keep docs/architecture/overview.md authoritative and clean historical prose only in an owned documentation change. |
 
@@ -52,9 +52,9 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 
 | Name | Definition lines |
 |---|---|
-| `dashboard_assets_payload` | 14592, 33824 |
-| `dashboard_index_html` | 24979, 25005, 25164, 25282, 26280 |
-| `dashboard_operator_session_shell_html` | 26304, 26763 |
+| `dashboard_assets_payload` | 14625, 33857 |
+| `dashboard_index_html` | 25012, 25038, 25197, 25315, 26313 |
+| `dashboard_operator_session_shell_html` | 26337, 26796 |
 
 ## Command, route, and schema catalogs
 
@@ -80,6 +80,7 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 | v0.42 | 15 |
 | v0.43 | 1 |
 | v0.44 | 17 |
+| v0.45 | 1 |
 
 ## Validator retirement evidence
 

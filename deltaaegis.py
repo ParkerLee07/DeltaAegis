@@ -9503,6 +9503,39 @@ def dashboard_json_list(value):
     return decoded if isinstance(decoded, list) else []
 
 
+# DELTAAEGIS_V045_NETSNIPER_CONTEXT_CONSUMER
+def dashboard_v045_json_object(value):
+    """Decode one JSON object and fail closed for absent or malformed input."""
+    if isinstance(value, dict):
+        return value
+    if value is None or value == "":
+        return {}
+
+    try:
+        decoded = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def dashboard_enrich_classification_context_payload(row):
+    """Add NetSniper reasoning only to the asset-detail observation payload."""
+    item = dashboard_enrich_classification_payload(row)
+    if item is None:
+        return None
+
+    classification = dashboard_v045_json_object(
+        item.get("classification_json")
+    )
+    context = classification.get("deltaaegis_context")
+    available = isinstance(context, dict) and bool(context)
+
+    item["classification_context_available"] = available
+    item["classification_context"] = context if available else {}
+    return item
+
+
 def dashboard_enrich_classification_payload(row):
     if row is None:
         return None
@@ -14787,7 +14820,7 @@ def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20)
     ).fetchone()
 
     latest_observation_dict = (
-        dashboard_enrich_classification_payload(dict(latest_observation))
+        dashboard_enrich_classification_context_payload(dict(latest_observation))
         if latest_observation
         else None
     )
