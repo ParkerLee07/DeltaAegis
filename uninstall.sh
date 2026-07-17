@@ -173,6 +173,7 @@ runtime_paths=(
     "$DELTA_AEGIS_HOME/reports"
     "$DELTA_AEGIS_HOME/scan-logs"
     "$DELTA_AEGIS_HOME/trueaegis-logs"
+    "$DELTA_AEGIS_HOME/telemetry-evidence"
     "$DELTA_AEGIS_HOME/restore-rehearsals"
 )
 

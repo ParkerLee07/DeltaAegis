@@ -794,3 +794,98 @@ def port_behavior_risk_points(row):
         if current_state == 'OPEN':
             return (5, f"MAC-port behavior detected volatile open port {row.get('port_key')}: +5")
     return (0, '')
+
+
+# DELTAAEGIS_V045_TELEMETRY_QUALITY_REPORT
+def append_report_telemetry_quality_section(
+    lines,
+    connection,
+    *,
+    scope=None,
+    limit=20,
+):
+    """Append telemetry-quality provenance and review state to a report."""
+    from deltaaegis_core import telemetry_quality as _telemetry_quality
+
+    _telemetry_quality.ensure_schema(connection)
+    try:
+        params = []
+        where = ""
+        if scope:
+            where = " WHERE network_scope = ?"
+            params.append(scope)
+        rows = connection.execute(
+            "SELECT current_state, COUNT(*) AS count "
+            "FROM telemetry_quality_decisions"
+            + where
+            + " GROUP BY current_state ORDER BY current_state",
+            tuple(params),
+        ).fetchall()
+        decisions = connection.execute(
+            "SELECT decision_id, run_id, network_scope, scanner_version, "
+            "automated_state, current_state, reason_codes_json, "
+            "retention_disposition, import_status, evaluated_at "
+            "FROM telemetry_quality_decisions"
+            + where
+            + " ORDER BY evaluated_at DESC, decision_id DESC LIMIT ?",
+            (*params, max(1, min(int(limit), 100))),
+        ).fetchall()
+    except Exception:
+        return
+
+    lines.append("## Telemetry Quality")
+    lines.append("")
+    if not rows:
+        lines.append(
+            "No v0.45 telemetry-quality decisions have been recorded."
+        )
+        lines.append("")
+        return
+
+    counts = {
+        str(row["current_state"]): int(row["count"] or 0)
+        for row in rows
+    }
+    lines.append(
+        "- State totals: "
+        + ", ".join(
+            f"**{state}={counts.get(state, 0)}**"
+            for state in (
+                "ACCEPTED",
+                "DEGRADED",
+                "QUARANTINED",
+                "REJECTED",
+            )
+        )
+    )
+    lines.append(
+        "- Automated state is immutable; current state may differ only "
+        "through an audited, policy-permitted review override."
+    )
+    lines.append(
+        "- DEGRADED evidence is positive-only and cannot independently "
+        "support absence mutation or alert resolution."
+    )
+    lines.append("")
+    lines.append(
+        "| Run | Scope | Automated | Current | Import | Retention | "
+        "Reasons | Evaluated |"
+    )
+    lines.append("|---|---|---|---|---|---|---|---|")
+    for row in decisions:
+        try:
+            reasons = json.loads(row["reason_codes_json"] or "[]")
+        except Exception:
+            reasons = []
+        lines.append(
+            "| "
+            f"`{safe_markdown(row['run_id'])}` | "
+            f"`{safe_markdown(row['network_scope'] or '-')}` | "
+            f"{safe_markdown(row['automated_state'])} | "
+            f"{safe_markdown(row['current_state'])} | "
+            f"{safe_markdown(row['import_status'])} | "
+            f"{safe_markdown(row['retention_disposition'])} | "
+            f"{safe_markdown(', '.join(str(item) for item in reasons) or '-')} | "
+            f"`{safe_markdown(row['evaluated_at'])}` |"
+        )
+    lines.append("")

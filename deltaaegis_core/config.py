@@ -25,6 +25,7 @@ class RuntimePaths:
     trueaegis_logs: Path
     events: Path
     reports: Path
+    telemetry_evidence: Path
 
 
 def runtime_paths(home: Path | None = None) -> RuntimePaths:
@@ -43,6 +44,7 @@ def runtime_paths(home: Path | None = None) -> RuntimePaths:
         trueaegis_logs=deltaaegis_root / "trueaegis-logs",
         events=deltaaegis_root / "events" / "events.jsonl",
         reports=deltaaegis_root / "reports",
+        telemetry_evidence=deltaaegis_root / "telemetry-evidence",
     )
 
 
@@ -58,6 +60,7 @@ DEFAULT_TRUEAEGIS = _DEFAULTS.trueaegis
 DEFAULT_TRUEAEGIS_LOGS = _DEFAULTS.trueaegis_logs
 DEFAULT_EVENTS = _DEFAULTS.events
 DEFAULT_REPORTS = _DEFAULTS.reports
+DEFAULT_TELEMETRY_EVIDENCE = _DEFAULTS.telemetry_evidence
 
 
 __all__ = (
@@ -66,6 +69,7 @@ __all__ = (
     "DEFAULT_EVENTS",
     "DEFAULT_NETSNIPER",
     "DEFAULT_REPORTS",
+    "DEFAULT_TELEMETRY_EVIDENCE",
     "DEFAULT_RESTORE_REHEARSALS",
     "DEFAULT_RUNS",
     "DEFAULT_SCAN_LOGS",

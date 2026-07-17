@@ -53,6 +53,9 @@ scan-logs/
 # DeltaAegis TrueAegis runtime logs
 trueaegis-logs/
 
+# DeltaAegis telemetry trust evidence store
+telemetry-evidence/
+
 # Generic DeltaAegis runtime log artifacts
 logs/
 *.log

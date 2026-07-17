@@ -33,6 +33,8 @@ ACCESS_RBAC_PERMISSIONS = {
     "workflow.write": "ANALYST",
     "scan.start": "ADMIN",
     "sites.write": "ADMIN",
+    "telemetry.quality.review": "ANALYST",
+    "telemetry.quality.override": "ADMIN",
 }
 
 
@@ -41,6 +43,7 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("GET", "/operator", "operator.session.read"),
     ("GET", "/operator/users", "admin.users.read"),
     ("GET", "/operator/reset", "admin.telemetry.cleanup"),
+    ("GET", "/operator/telemetry-quality", "operator.session.read"),
     ("GET", "/netsniper", "dashboard.read"),
     ("GET", "/api/sites", "dashboard.read"),
     ("GET", "/api/site-detail", "dashboard.read"),
@@ -59,9 +62,13 @@ ACCESS_RBAC_ROUTE_POLICIES = (
     ("GET", "/api/trueaegis-jobs", "dashboard.read"),
     ("GET", "/api/trueaegis/context", "dashboard.read"),
     ("POST", "/api/validation-ingest", "workflow.write"),
+    ("POST", "/api/telemetry-quality/review", "telemetry.quality.review"),
+    ("POST", "/api/telemetry-quality/override", "telemetry.quality.override"),
     ("GET", "/api/session", "session.read"),
     ("GET", "/api/admin/users", "admin.users.read"),
     ("GET", "/api/access-audit", "admin.audit.read"),
+    ("GET", "/api/telemetry-quality", "dashboard.read"),
+    ("GET", "/api/telemetry-quality/detail", "dashboard.read"),
     ("GET", "/api/telemetry-cleanup/preview", "admin.telemetry.cleanup"),
     ("GET", "/api/telemetry-cleanup/audit-events", "admin.telemetry.cleanup"),
     ("POST", "/api/telemetry-cleanup/clear-all", "admin.telemetry.cleanup"),

@@ -128,3 +128,19 @@ and historical validators therefore continue to use the same public surface.
 ## Known architecture debt
 
 The reproducible inventory and disposition are maintained in `docs/repository-audit.md`. The highest-risk items are the monolithic source boundary, late top-level function redefinitions, inline storage/API/UI ownership, stale historical architecture prose, and the size of the validator estate. These are mapped work, not authorization for a broad post-v0.44 rewrite.
+## v0.45 telemetry-trust boundary
+
+DeltaAegis evaluates every finalized NetSniper bundle before operational
+mutation. The decision runtime separates immutable automated state from audited
+reviewed state, retains trusted/quarantined evidence in managed storage, and
+projects operational current state from `ACCEPTED` plus positive-only
+`DEGRADED` evidence. `QUARANTINED` and `REJECTED` bundles cannot mutate active
+assets, services, findings, alerts, events, or risk.
+
+The Telemetry Quality Center is an operator surface at
+`/operator/telemetry-quality`. NetSniper remains the CLI/headless sensor and
+does not receive a dashboard or DeltaAegis policy logic.
+
+The v0.45 telemetry-trust storage boundary initializes lazily on first feature
+use so ordinary database connection startup preserves the v0.44 characterized
+table inventory.
