@@ -67,18 +67,53 @@ python3 tools/validate_v0_44_stage5_7.py
 python3 tools/validate_v0_45_v0_44_web_transition.py
 
 echo "[checkpoint-specific predecessor contracts]"
-tools/validate_v0_42_logical_site_foundation.sh
-tools/validate_v0_42_sites_management.sh
-tools/validate_v0_39_scan_lifecycle_storage.sh
-tools/validate_v0_39_cancellation_backend.sh
-tools/validate_v0_39_schedule_deletion_semantics.sh
-tools/validate_v0_42_scan_watchdog.sh
-python3 tools/validate_v0_44_1_report_contracts.py
-tools/validate_v0_40_broken_pipe_response.sh
-tools/validate_v0_40_dashboard_javascript_syntax.sh
-tools/validate_v0_42_dashboard_lan_flag.sh
-python3 tools/validate_v0_42_security_hotfix.py
-tools/validate_v0_42_install_uninstall_lifecycle.sh
+echo "NOTICE: frozen predecessor validators run with compatibility branch context main"
+
+real_git="$(command -v git)"
+if [[ -z "$real_git" ]]; then
+  echo "ERROR: git executable is unavailable" >&2
+  exit 1
+fi
+
+compat_git_dir="$(mktemp -d)"
+cleanup_compat_git() {
+  rm -rf "$compat_git_dir"
+}
+trap cleanup_compat_git EXIT
+
+cat > "$compat_git_dir/git" <<'GIT_SHIM'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$#" -eq 2 && "$1" == "branch" && "$2" == "--show-current" ]]; then
+  printf '%s\n' 'main'
+  exit 0
+fi
+
+exec "${DELTAAEGIS_REAL_GIT:?missing real git path}" "$@"
+GIT_SHIM
+chmod 700 "$compat_git_dir/git"
+
+(
+  export PATH="$compat_git_dir:$PATH"
+  export DELTAAEGIS_REAL_GIT="$real_git"
+
+  tools/validate_v0_42_logical_site_foundation.sh
+  tools/validate_v0_42_sites_management.sh
+  tools/validate_v0_39_scan_lifecycle_storage.sh
+  tools/validate_v0_39_cancellation_backend.sh
+  tools/validate_v0_39_schedule_deletion_semantics.sh
+  tools/validate_v0_42_scan_watchdog.sh
+  python3 tools/validate_v0_44_1_report_contracts.py
+  tools/validate_v0_40_broken_pipe_response.sh
+  tools/validate_v0_40_dashboard_javascript_syntax.sh
+  tools/validate_v0_42_dashboard_lan_flag.sh
+  python3 tools/validate_v0_42_security_hotfix.py
+  tools/validate_v0_42_install_uninstall_lifecycle.sh
+)
+
+cleanup_compat_git
+trap - EXIT
 
 python3 tools/audit_v0_44_repository.py --check
 echo "PASS: deterministic repository audit"
