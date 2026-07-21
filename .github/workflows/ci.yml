@@ -15,6 +15,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Attach validation branch context
+        env:
+          VALIDATION_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          test -n "$VALIDATION_BRANCH"
+          git checkout -B "$VALIDATION_BRANCH" HEAD
+
       - name: Validate v0.45 Python syntax
         run: |
           python3 -W error::SyntaxWarning -m py_compile \
