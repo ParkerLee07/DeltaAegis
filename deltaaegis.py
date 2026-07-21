@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Parker Lee
-"""DeltaAegis v0.45.0: Telemetry Trust.
+"""DeltaAegis v1.0 Stage 1-2: migrations and the stable API boundary.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -33,6 +33,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 import html
+import inspect
 import datetime as _datetime
 import tempfile
 
@@ -49,6 +50,7 @@ from deltaaegis_core import sites as _sites
 from deltaaegis_core import web as _web
 from deltaaegis_core import jobs as _jobs
 from deltaaegis_core import reports as _reports
+from deltaaegis_core import migrations as _migrations
 try:
     from deltaaegis_core import telemetry_quality as _telemetry_quality
     from deltaaegis_core import current_state as _current_state
@@ -86,7 +88,7 @@ def _report_context() -> _reports.ReportContext:
         operator_triage_summary=operator_triage_summary,
     )
 
-DELTAAEGIS_VERSION = "0.45.0"
+DELTAAEGIS_VERSION = "1.0.0-stage12"
 DELTAAEGIS_SECURITY_HOTFIX = "2026-07-13.2"
 DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION = "deltaaegis-backup-manifest-v1"
 DELTAAEGIS_V0_14_COMPATIBILITY_NOTE = "DeltaAegis v0.14.0 — NetSniper Scan Orchestration compatibility retained."
@@ -187,7 +189,10 @@ ACCESS_LOGIN_WINDOW_SECONDS = _auth.ACCESS_LOGIN_WINDOW_SECONDS
 ACCESS_LOGIN_MAX_TRACKED_KEYS = _auth.ACCESS_LOGIN_MAX_TRACKED_KEYS
 ACCESS_LOGIN_DUMMY_PASSWORD_HASH = _auth.ACCESS_LOGIN_DUMMY_PASSWORD_HASH
 ACCESS_API_TOKEN_PREFIX = _auth.ACCESS_API_TOKEN_PREFIX
+ACCESS_API_TOKEN_DEFAULT_TTL_SECONDS = _auth.ACCESS_API_TOKEN_DEFAULT_TTL_SECONDS
+ACCESS_API_TOKEN_MAX_TTL_SECONDS = _auth.ACCESS_API_TOKEN_MAX_TTL_SECONDS
 ACCESS_SESSION_COOKIE_NAME = _auth.ACCESS_SESSION_COOKIE_NAME
+ACCESS_CSRF_COOKIE_NAME = _auth.ACCESS_CSRF_COOKIE_NAME
 ACCESS_SESSION_TTL_SECONDS = _auth.ACCESS_SESSION_TTL_SECONDS
 
 DeltaAegisError = _auth.DeltaAegisError
@@ -956,6 +961,24 @@ def create_access_api_token(connection: sqlite3.Connection, user_id: str, token_
     return _auth.create_access_api_token(connection, user_id, token_name, role, expires_at)
 
 
+def create_scoped_access_api_token(
+    connection: sqlite3.Connection,
+    user_id: str,
+    token_name: str,
+    role: str | None = None,
+    expires_at: str | None = None,
+    scopes: Any = None,
+) -> dict[str, Any]:
+    return _auth.create_scoped_access_api_token(
+        connection,
+        user_id,
+        token_name,
+        role=role,
+        expires_at=expires_at,
+        scopes=scopes,
+    )
+
+
 def record_access_audit_event(connection: sqlite3.Connection, action: str, actor: dict[str, Any] | None=None, target_type: str | None=None, target_key: str | None=None, source_ip: str | None=None, user_agent: str | None=None, details: dict[str, Any] | None=None) -> int:
     return _auth.record_access_audit_event(connection, action, actor, target_type, target_key, source_ip, user_agent, details)
 
@@ -999,12 +1022,7 @@ def revoke_dashboard_user_sessions(connection: sqlite3.Connection, user_id: str,
 def expire_dashboard_session(connection: sqlite3.Connection, session_token: str, actor: dict[str, Any] | None=None, reason: str='logout', commit: bool=True) -> bool:
     return _auth.expire_dashboard_session(connection, session_token, actor, reason, commit)
 
-def connect(db_path: Path) -> sqlite3.Connection:
-    connection = open_database_connection(db_path)
-    connection.executescript(SCHEMA_SQL)
-
-    connection.executescript(
-        """
+VALIDATION_SCHEMA_SQL = """
         CREATE TABLE IF NOT EXISTS validation_runs (
             validation_run_id TEXT PRIMARY KEY,
             source_path TEXT NOT NULL,
@@ -1082,37 +1100,246 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
         CREATE INDEX IF NOT EXISTS idx_validation_correlations_status
             ON validation_correlations(validation_status);
-        """
+"""
+
+
+LEGACY_SCHEMA_COLUMN_MIGRATIONS = (
+    ("snapshots", "manifest_schema_version", "manifest_schema_version TEXT NOT NULL DEFAULT 'netsniper-run-v1'"),
+    ("snapshots", "profile_fingerprint", "profile_fingerprint TEXT NOT NULL DEFAULT ''"),
+    ("snapshots", "monitored_ports_json", "monitored_ports_json TEXT NOT NULL DEFAULT '[]'"),
+    ("snapshots", "protocols_json", "protocols_json TEXT NOT NULL DEFAULT '[]'"),
+    ("snapshots", "discovery_interface", "discovery_interface TEXT"),
+    ("snapshots", "nmap_version", "nmap_version TEXT"),
+    ("snapshots", "scan_started_at", "scan_started_at TEXT"),
+    ("snapshots", "scan_completed_at", "scan_completed_at TEXT"),
+    ("snapshots", "neighbors_captured_at", "neighbors_captured_at TEXT"),
+    ("snapshots", "network_scope", "network_scope TEXT NOT NULL DEFAULT ''"),
+    ("asset_observations", "identity_class", "identity_class TEXT NOT NULL DEFAULT 'IP_ONLY'"),
+    ("scan_jobs", "scan_profile", "scan_profile TEXT NOT NULL DEFAULT 'balanced'"),
+    ("scan_jobs", "process_pid", "process_pid INTEGER"),
+    ("scan_jobs", "heartbeat_at", "heartbeat_at TEXT"),
+    ("scan_jobs", "cancel_requested_at", "cancel_requested_at TEXT"),
+    ("scan_jobs", "cancel_requested_by", "cancel_requested_by TEXT NOT NULL DEFAULT ''"),
+    ("scan_jobs", "cancel_reason", "cancel_reason TEXT NOT NULL DEFAULT ''"),
+    ("scan_jobs", "cancelled_at", "cancelled_at TEXT"),
+    ("trueaegis_jobs", "scan_job_id", "scan_job_id TEXT NOT NULL DEFAULT ''"),
+    ("trueaegis_jobs", "schedule_id", "schedule_id TEXT NOT NULL DEFAULT ''"),
+    ("trueaegis_jobs", "trigger_source", "trigger_source TEXT NOT NULL DEFAULT 'manual_dashboard'"),
+    ("scan_jobs", "schedule_id", "schedule_id TEXT NOT NULL DEFAULT ''"),
+    ("scan_schedules", "run_trueaegis_after_ingest", "run_trueaegis_after_ingest INTEGER NOT NULL DEFAULT 0"),
+    ("snapshots", "requested_profile", "requested_profile TEXT"),
+    ("snapshots", "effective_profile", "effective_profile TEXT"),
+    ("snapshots", "profile_contract", "profile_contract TEXT"),
+    ("snapshots", "profile_runtime_budget_seconds", "profile_runtime_budget_seconds INTEGER"),
+    ("snapshots", "profile_host_timeout_seconds", "profile_host_timeout_seconds INTEGER"),
+    ("snapshots", "profile_duration_seconds", "profile_duration_seconds INTEGER"),
+    ("snapshots", "profile_budget_exceeded", "profile_budget_exceeded INTEGER"),
+    ("snapshots", "bundle_quality_schema_version", "bundle_quality_schema_version TEXT"),
+    ("snapshots", "bundle_deltaaegis_ready", "bundle_deltaaegis_ready INTEGER"),
+    ("snapshots", "bundle_quality_json", "bundle_quality_json TEXT NOT NULL DEFAULT '{}'"),
+    ("asset_observations", "device_type_confidence", "device_type_confidence INTEGER"),
+    ("asset_observations", "classification_type", "classification_type TEXT"),
+    ("asset_observations", "classification_primary_type", "classification_primary_type TEXT"),
+    ("asset_observations", "classification_confidence", "classification_confidence INTEGER"),
+    ("asset_observations", "classification_confidence_label", "classification_confidence_label TEXT"),
+    ("asset_observations", "classification_decision", "classification_decision TEXT"),
+    ("asset_observations", "classification_method", "classification_method TEXT"),
+    ("asset_observations", "classification_json", "classification_json TEXT NOT NULL DEFAULT '{}'"),
+    ("asset_observations", "classification_evidence_json", "classification_evidence_json TEXT NOT NULL DEFAULT '[]'"),
+    ("asset_observations", "classification_contradictions_json", "classification_contradictions_json TEXT NOT NULL DEFAULT '[]'"),
+    ("asset_observations", "classification_candidates_json", "classification_candidates_json TEXT NOT NULL DEFAULT '[]'"),
+    ("asset_observations", "classification_confidence_band", "classification_confidence_band TEXT"),
+    ("asset_observations", "classification_calibrated_decision", "classification_calibrated_decision TEXT"),
+    ("asset_observations", "classification_siem_action", "classification_siem_action TEXT"),
+    ("asset_observations", "classification_calibration_reason", "classification_calibration_reason TEXT"),
+    ("asset_observations", "classification_validation_state", "classification_validation_state TEXT"),
+    ("asset_observations", "classification_contradiction_count", "classification_contradiction_count INTEGER"),
+    ("asset_observations", "classification_validator_summary_json", "classification_validator_summary_json TEXT NOT NULL DEFAULT '{}'"),
+    ("asset_observations", "classification_validators_json", "classification_validators_json TEXT NOT NULL DEFAULT '[]'"),
+)
+
+
+V1_API_SECURITY_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS api_idempotency_keys (
+    idempotency_id TEXT PRIMARY KEY,
+    principal_key TEXT NOT NULL,
+    method TEXT NOT NULL,
+    route TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,
+    state TEXT NOT NULL,
+    response_status INTEGER,
+    response_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    CHECK (state IN ('PENDING', 'COMPLETED', 'FAILED')),
+    CHECK (length(request_sha256) = 64),
+    UNIQUE(principal_key, method, route, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_api_idempotency_keys_expires_at
+    ON api_idempotency_keys(expires_at);
+CREATE INDEX IF NOT EXISTS idx_api_idempotency_keys_principal_route
+    ON api_idempotency_keys(principal_key, route, created_at);
+"""
+
+
+SUPPORTED_V042_SOURCE_SHA256 = {
+    "v0.42.0": "986212b74db632e39b4ff2edf5e8b5cb0605276ab1a09655d3ea9eddc1addfad",
+    "v0.42.1": "5458a1399dda7c973388ec846dd9a7c9eef403c7f038ba20a7393735d015e725",
+    "v0.42.2": "09e8ef6b7eae6a9431de3daf8c859cfa84d77026d92191ba04bdeb96aa7448d4",
+}
+SUPPORTED_V045_RELEASE_COMMIT = (
+    "493df20dabed527757381e3cbae7cad3201b9c57"
+)
+SUPPORTED_V045_RELEASE_TREE = (
+    "ab2c059806e0bbd3908f32200d79cb357e8fa61c"
+)
+SUPPORTED_V045_SOURCE_WITNESS = (
+    "74cba5ec5aa3d35cd57416c3891c161d8bf5fd4b"
+)
+SUPPORTED_V045_SOURCE_SHA256 = (
+    "e277bfeed6e5422d567c5207d14b6bc9a43c5fc8486f95be9c0b73d8c5706c12"
+)
+SUPPORTED_V042_V045_BASE_SCHEMA_SHA256 = (
+    "781be13dec43b657c383c9c7a217c3df83040319cbb8469d1d175667edf63b32"
+)
+SUPPORTED_V045_RUNTIME_SCHEMA_SHA256 = (
+    "7b15660af4a2a6f4424b1c6dc7c9fceaee962c998cd0ad7754bb3ed6051be654"
+)
+SUPPORTED_V042_BASE_TABLES = frozenset(
+    {
+        "access_api_tokens",
+        "access_audit_log",
+        "access_sessions",
+        "access_users",
+        "alert_notes",
+        "alerts",
+        "asset_annotation_history",
+        "asset_annotations",
+        "asset_investigation_history",
+        "asset_investigations",
+        "asset_lifecycle",
+        "asset_observations",
+        "delta_events",
+        "finding_observations",
+        "investigation_ticket_history",
+        "investigation_ticket_state",
+        "logical_site_memberships",
+        "logical_sites",
+        "scan_jobs",
+        "scan_schedule_deletions",
+        "scan_schedules",
+        "service_observations",
+        "snapshots",
+        "trueaegis_jobs",
+        "validation_correlations",
+        "validation_observations",
+        "validation_runs",
+    }
+)
+_DELTAAEGIS_LEGACY_TABLE_DEFINITIONS: dict[str, str] | None = None
+
+
+def _normalized_sql_definition(value: str | None) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def _database_table_definitions(
+    connection: sqlite3.Connection,
+) -> dict[str, str]:
+    return {
+        str(row[0]): _normalized_sql_definition(row[1])
+        for row in connection.execute(
+            "SELECT name, sql FROM sqlite_master "
+            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' "
+            "ORDER BY name"
+        )
+    }
+
+
+def _supported_legacy_table_definitions() -> dict[str, str]:
+    global _DELTAAEGIS_LEGACY_TABLE_DEFINITIONS
+    if _DELTAAEGIS_LEGACY_TABLE_DEFINITIONS is None:
+        reference = sqlite3.connect(":memory:")
+        reference.row_factory = sqlite3.Row
+        reference.execute("PRAGMA foreign_keys = ON")
+        try:
+            _apply_v045_foundation_schema(reference)
+            _apply_v045_telemetry_schema(reference)
+            _DELTAAEGIS_LEGACY_TABLE_DEFINITIONS = (
+                _database_table_definitions(reference)
+            )
+        finally:
+            reference.close()
+    return dict(_DELTAAEGIS_LEGACY_TABLE_DEFINITIONS)
+
+
+def recognize_deltaaegis_database_origin(
+    connection: sqlite3.Connection,
+) -> str:
+    tables = set(_migrations.application_tables(connection))
+    if not tables:
+        return "fresh"
+    if "schema_migrations" in tables:
+        return "ledgered-v1"
+    if not SUPPORTED_V042_BASE_TABLES.issubset(tables):
+        missing = sorted(SUPPORTED_V042_BASE_TABLES - tables)
+        raise _migrations.MigrationError(
+            "unsupported DeltaAegis database; required v0.42.x tables are "
+            "missing: " + ", ".join(missing)
+        )
+
+    fingerprint = _migrations.schema_fingerprint(connection)
+    if fingerprint == SUPPORTED_V042_V045_BASE_SCHEMA_SHA256:
+        # The immutable v0.42.0, v0.42.1, v0.42.2, and clean v0.45.0
+        # database schemas are byte-identical. The database itself therefore
+        # cannot honestly identify which application patch created it.
+        return "v0.42.0-v0.45.0-identical-base-schema"
+
+    expected = _supported_legacy_table_definitions()
+    unexpected = sorted(tables - set(expected))
+    if unexpected:
+        raise _migrations.MigrationError(
+            "unsupported DeltaAegis database tables: " + ", ".join(unexpected)
+        )
+    actual = _database_table_definitions(connection)
+    drifted = sorted(
+        table
+        for table, definition in actual.items()
+        if expected.get(table) != definition
     )
-    ensure_column(connection, "snapshots", "manifest_schema_version", "manifest_schema_version TEXT NOT NULL DEFAULT 'netsniper-run-v1'")
-    ensure_column(connection, "snapshots", "profile_fingerprint", "profile_fingerprint TEXT NOT NULL DEFAULT ''")
-    ensure_column(connection, "snapshots", "monitored_ports_json", "monitored_ports_json TEXT NOT NULL DEFAULT '[]'")
-    ensure_column(connection, "snapshots", "protocols_json", "protocols_json TEXT NOT NULL DEFAULT '[]'")
-    ensure_column(connection, "snapshots", "discovery_interface", "discovery_interface TEXT")
-    ensure_column(connection, "snapshots", "nmap_version", "nmap_version TEXT")
-    ensure_column(connection, "snapshots", "scan_started_at", "scan_started_at TEXT")
-    ensure_column(connection, "snapshots", "scan_completed_at", "scan_completed_at TEXT")
-    ensure_column(connection, "snapshots", "neighbors_captured_at", "neighbors_captured_at TEXT")
-    ensure_column(connection, "snapshots", "network_scope", "network_scope TEXT NOT NULL DEFAULT ''")
-    ensure_column(connection, "asset_observations", "identity_class", "identity_class TEXT NOT NULL DEFAULT 'IP_ONLY'")
-    ensure_column(connection, "scan_jobs", "scan_profile", "scan_profile TEXT NOT NULL DEFAULT 'balanced'")
-    ensure_column(connection, "scan_jobs", "process_pid", "process_pid INTEGER")
-    ensure_column(connection, "scan_jobs", "heartbeat_at", "heartbeat_at TEXT")
-    ensure_column(connection, "scan_jobs", "cancel_requested_at", "cancel_requested_at TEXT")
-    ensure_column(connection, "scan_jobs", "cancel_requested_by", "cancel_requested_by TEXT NOT NULL DEFAULT ''")
-    ensure_column(connection, "scan_jobs", "cancel_reason", "cancel_reason TEXT NOT NULL DEFAULT ''")
-    ensure_column(connection, "scan_jobs", "cancelled_at", "cancelled_at TEXT")
-    ensure_column(connection, "trueaegis_jobs", "scan_job_id", "scan_job_id TEXT NOT NULL DEFAULT ''")
-    ensure_column(connection, "trueaegis_jobs", "schedule_id", "schedule_id TEXT NOT NULL DEFAULT ''")
-    ensure_column(connection, "trueaegis_jobs", "trigger_source", "trigger_source TEXT NOT NULL DEFAULT 'manual_dashboard'")
+    if drifted:
+        raise _migrations.MigrationError(
+            "unsupported DeltaAegis table definitions: " + ", ".join(drifted)
+        )
+    telemetry_tables = {
+        "telemetry_quality_decisions",
+        "telemetry_quality_reviews",
+        "telemetry_current_assets",
+        "telemetry_current_services",
+        "telemetry_current_findings",
+    }
+    return (
+        "v0.45.0-telemetry-runtime-schema"
+        if tables & telemetry_tables
+        else "v0.42.0-v0.45.0-supported-additive-schema"
+    )
+
+
+def _apply_v045_foundation_schema(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    _migrations.execute_sql_script(connection, SCHEMA_SQL)
+    _migrations.execute_sql_script(connection, VALIDATION_SCHEMA_SQL)
+    for table, column, ddl in LEGACY_SCHEMA_COLUMN_MIGRATIONS:
+        ensure_column(connection, table, column, ddl)
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_trueaegis_jobs_scan_job_id ""ON trueaegis_jobs(scan_job_id)"
     )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_trueaegis_jobs_schedule_id ""ON trueaegis_jobs(schedule_id)"
     )
-    ensure_column(connection, "scan_jobs", "schedule_id", "schedule_id TEXT NOT NULL DEFAULT ''")
-    ensure_column(connection, "scan_schedules", "run_trueaegis_after_ingest", "run_trueaegis_after_ingest INTEGER NOT NULL DEFAULT 0")
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_scan_jobs_schedule_id
@@ -1120,46 +1347,350 @@ def connect(db_path: Path) -> sqlite3.Connection:
         """
     )
 
-    # NetSniper v2 / manifest v3 bundle-quality and profile runtime metadata.
-    ensure_column(connection, "snapshots", "requested_profile", "requested_profile TEXT")
-    ensure_column(connection, "snapshots", "effective_profile", "effective_profile TEXT")
-    ensure_column(connection, "snapshots", "profile_contract", "profile_contract TEXT")
-    ensure_column(connection, "snapshots", "profile_runtime_budget_seconds", "profile_runtime_budget_seconds INTEGER")
-    ensure_column(connection, "snapshots", "profile_host_timeout_seconds", "profile_host_timeout_seconds INTEGER")
-    ensure_column(connection, "snapshots", "profile_duration_seconds", "profile_duration_seconds INTEGER")
-    ensure_column(connection, "snapshots", "profile_budget_exceeded", "profile_budget_exceeded INTEGER")
-    ensure_column(connection, "snapshots", "bundle_quality_schema_version", "bundle_quality_schema_version TEXT")
-    ensure_column(connection, "snapshots", "bundle_deltaaegis_ready", "bundle_deltaaegis_ready INTEGER")
-    ensure_column(connection, "snapshots", "bundle_quality_json", "bundle_quality_json TEXT NOT NULL DEFAULT '{}'")
-
-    # NetSniper v1.4 classification intelligence columns.
-    ensure_column(connection, "asset_observations", "device_type_confidence", "device_type_confidence INTEGER")
-    ensure_column(connection, "asset_observations", "classification_type", "classification_type TEXT")
-    ensure_column(connection, "asset_observations", "classification_primary_type", "classification_primary_type TEXT")
-    ensure_column(connection, "asset_observations", "classification_confidence", "classification_confidence INTEGER")
-    ensure_column(connection, "asset_observations", "classification_confidence_label", "classification_confidence_label TEXT")
-    ensure_column(connection, "asset_observations", "classification_decision", "classification_decision TEXT")
-    ensure_column(connection, "asset_observations", "classification_method", "classification_method TEXT")
-    ensure_column(connection, "asset_observations", "classification_json", "classification_json TEXT NOT NULL DEFAULT '{}'")
-    ensure_column(connection, "asset_observations", "classification_evidence_json", "classification_evidence_json TEXT NOT NULL DEFAULT '[]'")
-    ensure_column(connection, "asset_observations", "classification_contradictions_json", "classification_contradictions_json TEXT NOT NULL DEFAULT '[]'")
-    ensure_column(connection, "asset_observations", "classification_candidates_json", "classification_candidates_json TEXT NOT NULL DEFAULT '[]'")
-
-    # NetSniper v1.6 SIEM-facing classification calibration columns.
-    ensure_column(connection, "asset_observations", "classification_confidence_band", "classification_confidence_band TEXT")
-    ensure_column(connection, "asset_observations", "classification_calibrated_decision", "classification_calibrated_decision TEXT")
-    ensure_column(connection, "asset_observations", "classification_siem_action", "classification_siem_action TEXT")
-    ensure_column(connection, "asset_observations", "classification_calibration_reason", "classification_calibration_reason TEXT")
-    ensure_column(connection, "asset_observations", "classification_validation_state", "classification_validation_state TEXT")
-    ensure_column(connection, "asset_observations", "classification_contradiction_count", "classification_contradiction_count INTEGER")
-    ensure_column(connection, "asset_observations", "classification_validator_summary_json", "classification_validator_summary_json TEXT NOT NULL DEFAULT '{}'")
-    ensure_column(connection, "asset_observations", "classification_validators_json", "classification_validators_json TEXT NOT NULL DEFAULT '[]'")
-
     backfill_snapshot_network_scopes(connection)
     ensure_scoped_asset_lifecycle_schema(connection)
     ensure_enterprise_access_schema(connection)
     ensure_dashboard_session_schema(connection)
-    connection.commit()
+    return {
+        "foundation_tables": len(_migrations.application_tables(connection)),
+        "compatibility_columns": len(LEGACY_SCHEMA_COLUMN_MIGRATIONS),
+    }
+
+
+def _validate_v045_foundation_schema(connection: sqlite3.Connection) -> None:
+    required = {
+        "snapshots",
+        "asset_observations",
+        "service_observations",
+        "finding_observations",
+        "delta_events",
+        "asset_lifecycle",
+        "alerts",
+        "scan_jobs",
+        "scan_schedules",
+        "logical_sites",
+        "access_users",
+        "access_api_tokens",
+        "access_sessions",
+        "validation_runs",
+        "validation_observations",
+        "validation_correlations",
+    }
+    missing = sorted(required - set(_migrations.application_tables(connection)))
+    if missing:
+        raise _migrations.MigrationError(
+            "v0.45 foundation migration is missing tables: " + ", ".join(missing)
+        )
+    lifecycle_pk = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(asset_lifecycle)")
+        if int(row[5]) > 0
+    }
+    if lifecycle_pk != {"network_scope", "asset_key"}:
+        raise _migrations.MigrationError(
+            "asset_lifecycle does not use the scoped v0.42 primary key"
+        )
+
+
+def _apply_v045_telemetry_schema(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    if _telemetry_quality is None or _current_state is None:
+        raise _migrations.MigrationError(
+            "v0.45 telemetry-trust modules are required for migration"
+        )
+    ensure_netsniper_intelligence_host_schema(connection)
+    ensure_netsniper_intelligence_schema(connection)
+    _telemetry_quality.ensure_schema(connection)
+    _current_state.ensure_schema(connection)
+    return {
+        "telemetry_quality": True,
+        "current_state_projection": True,
+        "netsniper_intelligence": True,
+    }
+
+
+def _validate_v045_telemetry_schema(connection: sqlite3.Connection) -> None:
+    required = {
+        "netsniper_intelligence_hosts",
+        "netsniper_intelligence_summaries",
+        "telemetry_quality_decisions",
+        "telemetry_quality_reviews",
+        "telemetry_current_assets",
+        "telemetry_current_services",
+        "telemetry_current_findings",
+    }
+    missing = sorted(required - set(_migrations.application_tables(connection)))
+    if missing:
+        raise _migrations.MigrationError(
+            "telemetry-trust migration is missing tables: " + ", ".join(missing)
+        )
+
+
+def _apply_v1_api_security_schema(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    ensure_column(
+        connection,
+        "access_api_tokens",
+        "scopes_json",
+        "scopes_json TEXT NOT NULL DEFAULT '[]'",
+    )
+    ensure_column(
+        connection,
+        "access_sessions",
+        "csrf_token_hash",
+        "csrf_token_hash TEXT NOT NULL DEFAULT ''",
+    )
+    _migrations.execute_sql_script(connection, V1_API_SECURITY_SCHEMA_SQL)
+
+    now = datetime.now(timezone.utc)
+    default_expiry = (
+        now + timedelta(seconds=_auth.ACCESS_API_TOKEN_DEFAULT_TTL_SECONDS)
+    ).isoformat()
+    maximum_expiry = (
+        now + timedelta(seconds=_auth.ACCESS_API_TOKEN_MAX_TTL_SECONDS)
+    )
+    token_rows = connection.execute(
+        "SELECT token_id, role, expires_at FROM access_api_tokens"
+    ).fetchall()
+    bounded = 0
+    scoped = 0
+    for row in token_rows:
+        parsed = _auth.access_parse_datetime(row["expires_at"])
+        if parsed is None:
+            expiry = default_expiry
+            bounded += 1
+        elif parsed > maximum_expiry:
+            expiry = maximum_expiry.isoformat()
+            bounded += 1
+        else:
+            expiry = parsed.astimezone(timezone.utc).isoformat()
+        scopes = _auth.access_api_scopes_for_role(row["role"])
+        connection.execute(
+            "UPDATE access_api_tokens SET expires_at = ?, scopes_json = ? "
+            "WHERE token_id = ?",
+            (
+                expiry,
+                json.dumps(scopes, separators=(",", ":")),
+                row["token_id"],
+            ),
+        )
+        scoped += 1
+
+    sessions = connection.execute(
+        "SELECT session_id, session_token_hash FROM access_sessions "
+        "WHERE csrf_token_hash = ''"
+    ).fetchall()
+    for row in sessions:
+        seed = (
+            "deltaaegis-v1-csrf-upgrade\0"
+            + str(row["session_id"])
+            + "\0"
+            + str(row["session_token_hash"])
+        )
+        connection.execute(
+            "UPDATE access_sessions SET csrf_token_hash = ? WHERE session_id = ?",
+            (hashlib.sha256(seed.encode("utf-8")).hexdigest(), row["session_id"]),
+        )
+
+    _validate_v1_api_security_data(connection)
+
+    return {
+        "bounded_api_tokens": bounded,
+        "scoped_api_tokens": scoped,
+        "csrf_rotated_sessions": len(sessions),
+        "idempotency_store": True,
+    }
+
+
+def _validate_v1_api_security_schema(connection: sqlite3.Connection) -> None:
+    tables = set(_migrations.application_tables(connection))
+    if "api_idempotency_keys" not in tables:
+        raise _migrations.MigrationError("v1 API idempotency table is missing")
+    token_columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(access_api_tokens)")
+    }
+    session_columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(access_sessions)")
+    }
+    if "scopes_json" not in token_columns:
+        raise _migrations.MigrationError("v1 API token scopes column is missing")
+    if "csrf_token_hash" not in session_columns:
+        raise _migrations.MigrationError("v1 session CSRF column is missing")
+
+
+def _validate_v1_api_security_data(connection: sqlite3.Connection) -> None:
+    """Validate the one-time token/session backfill inside migration 0003.
+
+    Mutable credential rows are authenticated fail-closed individually after
+    migration.  They are deliberately not treated as schema invariants on
+    every database connection, which prevents one corrupt or administratively
+    edited credential from denying service to every other principal.
+    """
+
+    for row in connection.execute(
+        "SELECT token_id, role, expires_at, scopes_json FROM access_api_tokens"
+    ):
+        if _auth.access_parse_datetime(row["expires_at"]) is None:
+            raise _migrations.MigrationError(
+                f"API token does not have a bounded expiration: {row['token_id']}"
+            )
+        try:
+            scopes = json.loads(str(row["scopes_json"] or ""))
+        except json.JSONDecodeError as exc:
+            raise _migrations.MigrationError(
+                f"API token scopes are malformed: {row['token_id']}"
+            ) from exc
+        if not isinstance(scopes, list) or not scopes:
+            raise _migrations.MigrationError(
+                f"API token scopes are empty or invalid: {row['token_id']}"
+            )
+        try:
+            normalized = _auth.normalize_access_api_scopes(scopes, role=row["role"])
+        except _auth.DeltaAegisError as exc:
+            raise _migrations.MigrationError(
+                f"API token scopes exceed their role: {row['token_id']}"
+            ) from exc
+        if tuple(scopes) != normalized:
+            raise _migrations.MigrationError(
+                f"API token scopes are not canonical: {row['token_id']}"
+            )
+    missing_csrf = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM access_sessions WHERE csrf_token_hash = ''"
+        ).fetchone()[0]
+    )
+    if missing_csrf:
+        raise _migrations.MigrationError(
+            f"{missing_csrf} dashboard sessions are missing CSRF state"
+        )
+
+
+def deltaaegis_schema_migrations() -> tuple[_migrations.Migration, ...]:
+    foundation_material = json.dumps(
+        {
+            "schema": SCHEMA_SQL,
+            "validation_schema": VALIDATION_SCHEMA_SQL,
+            "columns": LEGACY_SCHEMA_COLUMN_MIGRATIONS,
+            "indexes": (
+                "idx_trueaegis_jobs_scan_job_id",
+                "idx_trueaegis_jobs_schedule_id",
+                "idx_scan_jobs_schedule_id",
+            ),
+            "scoped_asset_lifecycle": 1,
+            "enterprise_access": 1,
+            "dashboard_sessions": 1,
+            "ensure_column_source": inspect.getsource(ensure_column),
+            "network_scope_backfill_source": inspect.getsource(
+                backfill_snapshot_network_scopes
+            ),
+            "scoped_lifecycle_source": inspect.getsource(
+                ensure_scoped_asset_lifecycle_schema
+            ),
+            "access_schema_source": inspect.getsource(
+                ensure_enterprise_access_schema
+            ),
+            "session_schema_source": inspect.getsource(
+                ensure_dashboard_session_schema
+            ),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    telemetry_material = json.dumps(
+        {
+            "quality_schema": getattr(_telemetry_quality, "QUALITY_TABLE_SQL", ""),
+            "projection_schema": getattr(_current_state, "PROJECTION_SCHEMA_SQL", ""),
+            "netsniper_intelligence_schema": 1,
+            "intelligence_host_schema_source": inspect.getsource(
+                ensure_netsniper_intelligence_host_schema
+            ),
+            "intelligence_summary_schema_source": inspect.getsource(
+                ensure_netsniper_intelligence_schema
+            ),
+            "quality_ensure_source": inspect.getsource(_telemetry_quality.ensure_schema)
+            if _telemetry_quality is not None
+            else "",
+            "projection_ensure_source": inspect.getsource(_current_state.ensure_schema)
+            if _current_state is not None
+            else "",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    api_security_material = json.dumps(
+        {
+            "schema": V1_API_SECURITY_SCHEMA_SQL,
+            "token_scopes": sorted(_auth.ACCESS_RBAC_PERMISSIONS),
+            "default_token_ttl": _auth.ACCESS_API_TOKEN_DEFAULT_TTL_SECONDS,
+            "maximum_token_ttl": _auth.ACCESS_API_TOKEN_MAX_TTL_SECONDS,
+            "session_csrf": "sha256-double-submit-v1",
+            "ensure_column_source": inspect.getsource(ensure_column),
+            "expiry_parser_source": inspect.getsource(
+                _auth.access_parse_datetime
+            ),
+            "role_scope_source": inspect.getsource(
+                _auth.access_api_scopes_for_role
+            ),
+            "backfill_validation_source": inspect.getsource(
+                _validate_v1_api_security_data
+            ),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return (
+        _migrations.Migration(
+            migration_id="0001-v045-foundation",
+            description="Converge supported v0.42-v0.45 databases on the v0.45 foundation schema.",
+            checksum_material=foundation_material,
+            apply=_apply_v045_foundation_schema,
+            validate=_validate_v045_foundation_schema,
+        ),
+        _migrations.Migration(
+            migration_id="0002-v045-telemetry-trust",
+            description="Materialize telemetry-quality, current-state, and NetSniper intelligence schema.",
+            checksum_material=telemetry_material,
+            apply=_apply_v045_telemetry_schema,
+            validate=_validate_v045_telemetry_schema,
+        ),
+        _migrations.Migration(
+            migration_id="0003-v1-api-security",
+            description="Add bounded token scopes, session CSRF state, and durable mutation idempotency.",
+            checksum_material=api_security_material,
+            apply=_apply_v1_api_security_schema,
+            validate=_validate_v1_api_security_schema,
+        ),
+    )
+
+
+def _migration_backup_root(db_path: Path) -> Path:
+    resolved = Path(db_path).expanduser().resolve(strict=False)
+    if resolved == Path(DEFAULT_DB).expanduser().resolve(strict=False):
+        return Path(DEFAULT_BACKUPS)
+    return resolved.parent / "migration-backups"
+
+
+def connect(db_path: Path) -> sqlite3.Connection:
+    database = Path(db_path).expanduser()
+    connection = open_database_connection(database)
+    try:
+        _migrations.run_migrations(
+            connection,
+            database_path=database,
+            application_version="1.0.0-stage12",
+            migrations=deltaaegis_schema_migrations(),
+            backup_root=_migration_backup_root(database),
+            create_backup=create_sqlite_database_backup_bundle,
+            verify_backup=verify_database_backup_bundle,
+            origin_recognizer=recognize_deltaaegis_database_origin,
+        )
+    except Exception:
+        connection.close()
+        raise
     return connection
 
 
@@ -1933,12 +2464,13 @@ def command_api_token_create(args: argparse.Namespace) -> int:
         if not int(user.get("is_active") or 0):
             raise DeltaAegisError(f"access user is inactive: {user['username']}")
 
-        token = create_access_api_token(
+        token = create_scoped_access_api_token(
             connection,
             user_id=user["user_id"],
             token_name=args.name,
             role=args.role,
             expires_at=args.expires_at,
+            scopes=args.scope,
         )
         record_access_audit_event(
             connection,
@@ -1956,6 +2488,7 @@ def command_api_token_create(args: argparse.Namespace) -> int:
                 "username": token["username"],
                 "role": token["role"],
                 "expires_at": token["expires_at"],
+                "scopes": token["scopes"],
             },
         )
 
@@ -1967,6 +2500,7 @@ def command_api_token_create(args: argparse.Namespace) -> int:
     print(f"Token ID:     {token['token_id']}")
     print(f"Token prefix: {token['token_prefix']}")
     print(f"Expires at:   {token.get('expires_at') or '-'}")
+    print(f"Scopes:       {', '.join(token.get('scopes') or [])}")
     print()
     print("Copy this token now. It will not be shown again:")
     print(token["token"])
@@ -20271,7 +20805,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.45.0 Telemetry Trust</span></div>
+      <div class="executive-status-pill"><span>Build</span><span>v1.0 Stage 1–2 Candidate</span></div>
     </div>
   </header>
 
@@ -33833,7 +34367,7 @@ def dashboard_telemetry_quality_shell_html() -> str:
 <body>
 <main>
 <section class="panel">
-  <div class="eyebrow">DeltaAegis v0.45</div>
+  <div class="eyebrow">DeltaAegis v1.0 Stage 1–2</div>
   <h1>Telemetry Quality Center</h1>
   <p>Automated decisions remain immutable. Reviewed state may change only through the policy-permitted, session-derived, audited workflow below. DEGRADED telemetry is positive-only; QUARANTINED and REJECTED telemetry cannot mutate active state.</p>
   <div class="actions">
@@ -33988,7 +34522,7 @@ def dashboard_telemetry_quality_shell_html() -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "DeltaAegis v0.45.0 — Telemetry Trust, "
+            "DeltaAegis v1.0 Stage 1–2 — forward migrations, /api/v1, "
             "SQLite-consistent backups, verified manifests, "
             "restore rehearsal, guarded retention, active restore "
             "cutover planning and rollback, operator actions, "
@@ -34308,7 +34842,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("username")
     p.add_argument("--name", default="DeltaAegis API Token")
     p.add_argument("--role", choices=list(ACCESS_ROLES), default=None)
-    p.add_argument("--expires-at", help="Optional ISO-8601 expiration timestamp")
+    p.add_argument(
+        "--expires-at",
+        help="ISO-8601 expiration timestamp (defaults to 30 days; maximum 365 days)",
+    )
+    p.add_argument(
+        "--scope",
+        action="append",
+        choices=sorted(ACCESS_RBAC_PERMISSIONS),
+        help="Grant one role-limited API scope; repeat for multiple scopes (defaults to every scope allowed by the token role)",
+    )
     p.add_argument("--actor", default="system", help="Audit actor name for this administrative action")
 
     p = sub.add_parser("api-tokens", help="List database-backed DeltaAegis API tokens")
@@ -34586,6 +35129,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--token")
     p.add_argument("--scope")
     p.add_argument("--quiet", action="store_true")
+    p.add_argument(
+        "--secure-cookies",
+        action="store_true",
+        help=(
+            "Mark session and CSRF cookies Secure when the public browser "
+            "origin is HTTPS through an explicitly configured reverse proxy"
+        ),
+    )
+    p.add_argument(
+        "--public-origin",
+        help=(
+            "Exact browser-facing HTTP(S) origin for an explicitly configured "
+            "reverse proxy, for example https://deltaaegis.example. The proxy "
+            "must preserve this authority in Host; forwarded headers are ignored."
+        ),
+    )
     p.add_argument(
         "--enable-scheduled-scans",
         dest="enable_scheduled_scans",

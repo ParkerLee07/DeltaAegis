@@ -21,7 +21,7 @@ import time
 from typing import Any, Iterable
 
 TOOL_FORMAT = "deltaaegis-repository-troubleshooter-v4"
-TOOL_VERSION = "0.45.0-telemetry-trust"
+TOOL_VERSION = "1.0.0-stage12-candidate"
 REPORT_SCHEMA = "deltaaegis-troubleshooter-report-v4"
 VALIDATOR_RE = re.compile(r"validate_[A-Za-z0-9_.-]+\.sh")
 VERSION_RE = re.compile(
@@ -285,9 +285,18 @@ def version_tuple(path: str) -> tuple[int, int, int]:
 
 
 def current_release_gate(validators: Iterable[str]) -> str:
-    gates = [path for path in validators if path.endswith("_release_gate.sh")]
+    # A partial v1 delivery must be discoverable without mislabeling it as a
+    # complete v1 release gate.  Candidate checkpoint gates and completed
+    # release gates share the same selection policy; the highest semantic
+    # version wins and the filename preserves its actual status.
+    gates = [
+        path
+        for path in validators
+        if path.endswith("_release_gate.sh")
+        or path.endswith("_stage1_2_gate.sh")
+    ]
     if not gates:
-        raise TroubleshooterError("No versioned release gate exists under tools/")
+        raise TroubleshooterError("No versioned release or candidate gate exists under tools/")
     return max(gates, key=lambda path: (version_tuple(path), path))
 
 
@@ -965,7 +974,7 @@ def interactive_menu(repo: Path) -> int:
         print(f"Repository: {repo}")
         print("=" * 62)
         print("1. Quick health check")
-        print("2. Run current release diagnostics (recommended)")
+        print("2. Run current release/candidate diagnostics (recommended)")
         print(f"3. Run {release_label} staged diagnostics")
         print("4. Find and run a specific validator")
         print("5. Verify repository validator inventory")

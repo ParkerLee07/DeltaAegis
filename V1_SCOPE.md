@@ -1,6 +1,21 @@
 # DeltaAegis v1.0 Product Scope
 
-Status: approved at v0.43.0 and current through DeltaAegis v0.45.0
+Status: approved at v0.43.0 and current for the v1.0 Stage 1–2 candidate
+
+## Delivery status — 2026-07-21
+
+The combined Stage 1–2 candidate implements the forward migration/recovery
+framework and the first stable `/api/v1` surface. Dedicated gates now cover
+the exact v0.42.x database origins, interruption recovery, backup rehearsal,
+OpenAPI, scoped tokens, CSRF, Host/origin enforcement, response headers,
+request limits, and mutation idempotency.
+
+This is checkpoint evidence, not a v1.0 GA declaration. Definition-of-done
+items 4 and 5 require the Stage 3 identity and Stage 4 detection work; items 7
+and 8 require the operations/performance stage; item 9 still requires a
+published or pinned TrueAegis semantic-version contract; and item 10 can close
+only after the complete candidate audit. If those gates are not complete by
+the target date, the publishable artifact must remain a release candidate.
 
 ## Product definition
 

@@ -1,0 +1,2267 @@
+{
+  "components": {
+    "responses": {
+      "ErrorEnvelope": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        },
+        "description": "Error response",
+        "headers": {
+          "X-Request-ID": {
+            "description": "Request correlation identifier.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "IdempotentSuccessEnvelope": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SuccessEnvelope"
+            }
+          }
+        },
+        "description": "Successful response",
+        "headers": {
+          "Idempotency-Replayed": {
+            "description": "True when the stored result of an identical request is replayed.",
+            "schema": {
+              "enum": [
+                "true"
+              ],
+              "type": "string"
+            }
+          },
+          "X-Request-ID": {
+            "description": "Request correlation identifier.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "SuccessEnvelope": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SuccessEnvelope"
+            }
+          }
+        },
+        "description": "Successful response",
+        "headers": {
+          "X-Request-ID": {
+            "description": "Request correlation identifier.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "AlertRecord": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/StableRecord"
+          }
+        ]
+      },
+      "ApiIndex": {
+        "additionalProperties": false,
+        "properties": {
+          "authentication": {
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          },
+          "openapi": {
+            "const": "/api/v1/openapi.json"
+          },
+          "private_compatibility_namespace": {
+            "type": "string"
+          },
+          "version": {
+            "const": "v1"
+          }
+        },
+        "required": [
+          "name",
+          "version",
+          "openapi",
+          "authentication",
+          "private_compatibility_namespace"
+        ],
+        "type": "object"
+      },
+      "AssetDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/StableRecord"
+          }
+        ]
+      },
+      "AssetRecord": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/StableRecord"
+          }
+        ]
+      },
+      "ErrorEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "api_version": {
+            "const": "v1"
+          },
+          "error": {
+            "$ref": "#/components/schemas/ErrorObject"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ResponseMeta"
+          },
+          "ok": {
+            "const": false
+          }
+        },
+        "required": [
+          "api_version",
+          "ok",
+          "error",
+          "meta"
+        ],
+        "type": "object"
+      },
+      "ErrorObject": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "details": {
+            "type": "object"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "details"
+        ],
+        "type": "object"
+      },
+      "EventRecord": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/StableRecord"
+          }
+        ]
+      },
+      "LogicalSite": {
+        "additionalProperties": true,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "member_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "site_id": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ACTIVE",
+              "ARCHIVED"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "site_id",
+          "name",
+          "status",
+          "member_count"
+        ],
+        "type": "object"
+      },
+      "Pagination": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "limit": {
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "next_offset": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "limit",
+          "offset",
+          "count",
+          "has_more",
+          "next_offset"
+        ],
+        "type": "object"
+      },
+      "ResponseMeta": {
+        "additionalProperties": true,
+        "properties": {
+          "pagination": {
+            "$ref": "#/components/schemas/Pagination"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id"
+        ],
+        "type": "object"
+      },
+      "ScanJobRecord": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/StableRecord"
+          }
+        ]
+      },
+      "ScopeRecord": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/StableRecord"
+          }
+        ]
+      },
+      "SessionPrincipal": {
+        "additionalProperties": true,
+        "properties": {
+          "auth_type": {
+            "enum": [
+              "api_token_v1",
+              "dashboard_session"
+            ],
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "enum": [
+              "ADMIN",
+              "ANALYST",
+              "VIEWER"
+            ],
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "token_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "auth_type",
+          "role"
+        ],
+        "type": "object"
+      },
+      "SiteCreateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "maxLength": 2000,
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "type": "string"
+          },
+          "network_scopes": {
+            "items": {
+              "format": "ipv4-network",
+              "type": "string"
+            },
+            "maxItems": 256,
+            "type": "array"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "SiteMutationResult": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "logical_site.create"
+          },
+          "changed": {
+            "type": "boolean"
+          },
+          "membership": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "memberships": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "ok": {
+            "const": true
+          },
+          "receipt": {
+            "type": "object"
+          },
+          "site": {
+            "$ref": "#/components/schemas/LogicalSite"
+          }
+        },
+        "required": [
+          "ok",
+          "action",
+          "changed",
+          "site",
+          "memberships",
+          "receipt"
+        ],
+        "type": "object"
+      },
+      "StableRecord": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "SuccessEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "api_version": {
+            "const": "v1"
+          },
+          "data": {},
+          "meta": {
+            "$ref": "#/components/schemas/ResponseMeta"
+          },
+          "ok": {
+            "const": true
+          }
+        },
+        "required": [
+          "api_version",
+          "ok",
+          "data",
+          "meta"
+        ],
+        "type": "object"
+      },
+      "Summary": {
+        "additionalProperties": true,
+        "properties": {
+          "alerts": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "events": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "open_alerts": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "selected_scope": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "snapshots": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "telemetry_projection": {
+            "type": "object"
+          },
+          "telemetry_quality": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "selected_scope",
+          "snapshots",
+          "events",
+          "alerts",
+          "open_alerts",
+          "telemetry_quality",
+          "telemetry_projection"
+        ],
+        "type": "object"
+      },
+      "TelemetryQualityDecision": {
+        "additionalProperties": true,
+        "properties": {
+          "current_state": {
+            "type": "string"
+          },
+          "decision_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision_id"
+        ],
+        "type": "object"
+      },
+      "ValidationRecord": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/StableRecord"
+          }
+        ]
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "bearerFormat": "DeltaAegis API token",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "csrfCookie": {
+        "in": "cookie",
+        "name": "deltaaegis_csrf",
+        "type": "apiKey"
+      },
+      "sessionCookie": {
+        "in": "cookie",
+        "name": "deltaaegis_session",
+        "type": "apiKey"
+      }
+    }
+  },
+  "info": {
+    "description": "Stable, authenticated DeltaAegis programmatic API. Unversioned /api routes are private dashboard interfaces.",
+    "title": "DeltaAegis API",
+    "version": "1.0.0-stage2"
+  },
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1": {
+      "get": {
+        "operationId": "getApiIndex",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/ApiIndex"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Discover the stable API.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [],
+        "summary": "Discover the stable API.",
+        "x-deltaaegis-permission": "public"
+      }
+    },
+    "/api/v1/alerts": {
+      "get": {
+        "operationId": "listAlerts",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "format": "ipv4-network",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "items": {
+                              "items": {
+                                "$ref": "#/components/schemas/AlertRecord"
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "items"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "List alerts.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "List alerts.",
+        "x-deltaaegis-permission": "dashboard.read"
+      }
+    },
+    "/api/v1/assets": {
+      "get": {
+        "operationId": "listAssets",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "format": "ipv4-network",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "identity",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "items": {
+                              "items": {
+                                "$ref": "#/components/schemas/AssetRecord"
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "items"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "List assets.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "List assets.",
+        "x-deltaaegis-permission": "dashboard.read"
+      }
+    },
+    "/api/v1/assets/{asset_key}": {
+      "get": {
+        "operationId": "getAsset",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "asset_key",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/AssetDetail"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Read one asset.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Read one asset.",
+        "x-deltaaegis-permission": "dashboard.read"
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "operationId": "listEvents",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "format": "ipv4-network",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "items": {
+                              "items": {
+                                "$ref": "#/components/schemas/EventRecord"
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "items"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "List delta events.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "List delta events.",
+        "x-deltaaegis-permission": "dashboard.read"
+      }
+    },
+    "/api/v1/openapi.json": {
+      "get": {
+        "operationId": "getOpenApi",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "required": [
+                    "openapi",
+                    "info",
+                    "paths"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OpenAPI 3.1 document",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [],
+        "summary": "Read the OpenAPI contract.",
+        "x-deltaaegis-permission": "public"
+      }
+    },
+    "/api/v1/scan-jobs": {
+      "get": {
+        "operationId": "listScanJobs",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "items": {
+                              "items": {
+                                "$ref": "#/components/schemas/ScanJobRecord"
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "items"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "List scan jobs.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "List scan jobs.",
+        "x-deltaaegis-permission": "dashboard.read"
+      }
+    },
+    "/api/v1/scopes": {
+      "get": {
+        "operationId": "listScopes",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "items": {
+                              "items": {
+                                "$ref": "#/components/schemas/ScopeRecord"
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "items"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "List observed network scopes.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "List observed network scopes.",
+        "x-deltaaegis-permission": "dashboard.read"
+      }
+    },
+    "/api/v1/session": {
+      "get": {
+        "operationId": "getSession",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/SessionPrincipal"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Read the authenticated principal.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Read the authenticated principal.",
+        "x-deltaaegis-permission": "session.read"
+      }
+    },
+    "/api/v1/sites": {
+      "get": {
+        "operationId": "listSites",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "items": {
+                              "items": {
+                                "$ref": "#/components/schemas/LogicalSite"
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "items"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "List logical sites.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "List logical sites.",
+        "x-deltaaegis-permission": "dashboard.read"
+      },
+      "post": {
+        "operationId": "createSite",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required with cookie authentication and must match the csrfCookie value.",
+            "in": "header",
+            "name": "X-DeltaAegis-CSRF",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SiteCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/SiteMutationResult"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Create a logical site.",
+            "headers": {
+              "Idempotency-Replayed": {
+                "description": "True when the stored result of an identical request is replayed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "csrfCookie": [],
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Create a logical site.",
+        "x-deltaaegis-permission": "sites.write"
+      }
+    },
+    "/api/v1/summary": {
+      "get": {
+        "operationId": "getSummary",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "format": "ipv4-network",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/Summary"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Read the current DeltaAegis summary.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Read the current DeltaAegis summary.",
+        "x-deltaaegis-permission": "dashboard.read"
+      }
+    },
+    "/api/v1/telemetry-quality/decisions": {
+      "get": {
+        "operationId": "listTelemetryQualityDecisions",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "format": "ipv4-network",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "items": {
+                              "items": {
+                                "$ref": "#/components/schemas/TelemetryQualityDecision"
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "items"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "List telemetry-quality decisions.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "List telemetry-quality decisions.",
+        "x-deltaaegis-permission": "dashboard.read"
+      }
+    },
+    "/api/v1/telemetry-quality/decisions/{decision_id}": {
+      "get": {
+        "operationId": "getTelemetryQualityDecision",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "decision_id",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/TelemetryQualityDecision"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Read one telemetry-quality decision.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Read one telemetry-quality decision.",
+        "x-deltaaegis-permission": "dashboard.read"
+      }
+    },
+    "/api/v1/validations": {
+      "get": {
+        "operationId": "listValidations",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "items": {
+                              "items": {
+                                "$ref": "#/components/schemas/ValidationRecord"
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "items"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "List validation evidence.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "List validation evidence.",
+        "x-deltaaegis-permission": "dashboard.read"
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ]
+}

@@ -6,6 +6,7 @@ on:
       - main
       - "maintenance/**"
       - feature/v0.45-telemetry-trust
+      - feature/v1.0-stages-1-2
   pull_request:
   workflow_dispatch:
 
@@ -24,33 +25,39 @@ jobs:
           test -n "$VALIDATION_BRANCH"
           git checkout -B "$VALIDATION_BRANCH" HEAD
 
-      - name: Validate v0.45 Python syntax
+      - name: Validate v1 Stage 1-2 Python syntax
         run: |
           python3 -W error::SyntaxWarning -m py_compile \
             deltaaegis.py \
             deltaaegis_core/__init__.py \
+            deltaaegis_core/api_v1.py \
             deltaaegis_core/auth.py \
             deltaaegis_core/config.py \
             deltaaegis_core/current_state.py \
             deltaaegis_core/db.py \
             deltaaegis_core/ingest.py \
             deltaaegis_core/jobs.py \
+            deltaaegis_core/migrations.py \
             deltaaegis_core/reports.py \
             deltaaegis_core/sites.py \
             deltaaegis_core/telemetry_quality.py \
             deltaaegis_core/web.py \
             tools/audit_v0_44_repository.py \
             tools/deltaaegis_troubleshooter.py \
-            tools/validate_v0_45_release_metadata.py
+            tools/validate_v1_stage1_migrations.py \
+            tools/validate_v1_stage2_api_security.py \
+            tools/validate_v1_stage1_2_architecture.py \
+            tools/validate_v1_v0_45_quality_center_transition.py \
+            tools/validate_v1_v0_45_web_transition.py
 
-      - name: Validate release-gate shell syntax
+      - name: Validate Stage 1-2 gate shell syntax
         run: |
           bash -n \
             install.sh \
             uninstall.sh \
-            tools/validate_v0_45_checkpoints_1_5_all.sh \
-            tools/validate_v0_45_v0_44_compatibility_all.sh \
-            tools/validate_v0_45_release_gate.sh
+            tools/validate_v1_0_stage1_2_all.sh \
+            tools/validate_v1_0_stage1_2_gate.sh \
+            tools/validate_v1_stage1_2_install_lifecycle.sh
 
-      - name: Run DeltaAegis v0.45.0 release gate
-        run: ./tools/validate_v0_45_release_gate.sh
+      - name: Run DeltaAegis v1.0 Stage 1-2 candidate gate
+        run: ./tools/validate_v1_0_stage1_2_gate.sh

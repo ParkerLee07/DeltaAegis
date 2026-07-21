@@ -1,3 +1,37 @@
+## DeltaAegis v1.0.0 — Stage 1–2 candidate (unreleased)
+
+- Added an ordered `schema_migrations` ledger with implementation-bound
+  checksums, origin evidence, schema fingerprints, and migration outcomes.
+- Added exact upgrade gates for immutable v0.42.0, v0.42.1, and v0.42.2
+  sources plus clean and telemetry-expanded databases built from the released
+  v0.45.0 tree; byte-identical base schemas are recorded as one honest shared
+  origin rather than guessed patch identities.
+- Added verified pre-migration backups, protected-history fingerprints,
+  per-migration transactions, interruption recovery, concurrent-start
+  serialization, fresh/upgrade convergence, and restore-rehearsal coverage.
+- Added the initial stable `/api/v1` surface and a deterministic OpenAPI 3.1
+  artifact while retaining unversioned `/api/*` as private compatibility
+  interfaces.
+- Added consistent success/error envelopes, request IDs, bounded pagination,
+  strict JSON body limits, and durable atomic mutation idempotency.
+- Added 30-day-default/365-day-maximum scoped API tokens, current-role caps,
+  bearer-only stable API authentication, and fail-closed demotion, revocation,
+  expiration, and malformed-scope behavior.
+- Added server-backed double-submit CSRF, read-only GET logout behavior, Host
+  and Origin validation, an exact trusted-origin secure-cookie proxy mode, and restrictive
+  headers across JSON, HTML, text, redirect, success, and error responses.
+- Added dedicated Stage 1 database and Stage 2 real-HTTP validators plus the
+  combined Stage 1–2 candidate gate and checklist.
+- Routed first-admin installation through the public migration connection so a
+  fresh install cannot create an unledgered partial database.
+- Promoted the four additive v1/v0.45 core modules to required installation
+  components and added disposable install, reinstall, uninstall, purge, and
+  evidence-preservation coverage.
+- Added explicit v0.45 Quality Center/private-route transition gates instead
+  of weakening frozen partial-schema or minimal-module fixtures.
+- This checkpoint does not close the remaining v1.0 identity, detection,
+  operations, performance, TrueAegis pinning, or final release-audit gates.
+
 ## DeltaAegis v0.45.0 — Telemetry Trust
 
 - Hardened retained telemetry evidence against path traversal, implicit SQLite commits, partial override persistence, and failed-ingest evidence leakage.

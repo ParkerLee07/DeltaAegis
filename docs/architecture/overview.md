@@ -1,6 +1,6 @@
 # DeltaAegis Architecture Overview
 
-Status: v0.45.0 telemetry trust on the v0.44 modular core foundation
+Status: v1.0 combined Stage 1–2 candidate on the released v0.45.0 baseline
 
 ## System role
 
@@ -23,18 +23,19 @@ flowchart TD
 |---|---|---|---|
 | CLI and application dispatch | `deltaaegis.py` | Argument parsing, command dispatch, human/JSON output | Sensor implementation or arbitrary shell execution |
 | Configuration and paths | `deltaaegis_core/config.py`, root facade, environment variables, launchers | Local roots, database, reports, logs, sensor paths | Secrets in source or caller-controlled filesystem escape |
-| Storage and schema bootstrap | `deltaaegis_core/db.py`, root-owned `SCHEMA_SQL` and additive helpers | SQLite connection policy, schema, compatibility additions, row serialization | Untracked destructive migrations |
+| Storage and migrations | `deltaaegis_core/db.py`, `deltaaegis_core/migrations.py`, root-owned migration declarations | SQLite connection policy, ordered checksummed forward migrations, verified pre-migration backup, row serialization | Unledgered mutation, downgrade SQL, or remote/symlinked active databases |
 | NetSniper ingest | `deltaaegis_core/ingest.py` behind the root facade | Bundle discovery, trust checks, normalization, acceptance | Treating conclusions as raw observations |
 | Delta and lifecycle engine | `deltaaegis.py` | Snapshot comparison, events, alerts, lifecycle | Cross-scope identity assumptions after sensor identity exists |
 | Sites and scope aggregation | `deltaaegis_core/sites.py` behind the root facade | Logical groupings and site-wide read aggregation | Replacing technical scope identity |
 | Authentication and authorization | `deltaaegis_core/auth.py` behind the root facade | Users, passwords, sessions, tokens, RBAC, access audit | Browser-supplied actor or privilege |
 | Jobs and schedules | `deltaaegis_core/jobs.py` for durable policy; root facade for process orchestration | Durable state, fixed-argv process launch, cancellation, watchdog, recovery | Direct browser PID signaling or arbitrary command strings |
-| Dashboard HTTP/UI | `deltaaegis_core/web.py` behind the root facade | Local HTTP server, HTML/JS, JSON handlers, operator workflows | A stable public API until `/api/v1` is introduced |
+| Stable API contract | `deltaaegis_core/api_v1.py`, `contracts/v1/openapi.json` | Versioned endpoint inventory, OpenAPI 3.1, envelopes, pagination, request identity, idempotency | Private dashboard compatibility routes or sensor implementation |
+| Dashboard HTTP/UI | `deltaaegis_core/web.py` behind the root facade | Local HTTP server, HTML/JS, stable and private JSON handlers, authentication transport, operator workflows | Domain policy or caller-supplied authority |
 | Reports and backups | `deltaaegis_core/reports.py` for queries/Markdown; root facade for file output and backups | Markdown reports, SQLite backups, manifests, rehearsal, cutover | Silent overwrite or unverified restore |
 | Troubleshooter | `tools/deltaaegis_troubleshooter.py` | Read-mostly diagnostics and bounded repair guidance | Hidden mutation of active evidence |
 | Validation estate | `tools/validate_*` | Release contracts and predecessor compatibility | Unowned duplicate execution graphs |
 
-The repository-root facade remains deliberately compatible with historical imports and validators, but configuration, database connection policy, authentication, ingest, Sites, durable Jobs policy, Reports, and dashboard web ownership now live in explicit internal modules. Remaining root-owned lifecycle, schema-bootstrap, backup, and process-orchestration responsibilities stay mapped work rather than permission for a broad rewrite.
+The repository-root facade remains deliberately compatible with historical imports and validators, but configuration, database connection policy, migrations, authentication, stable API contracts, ingest, Sites, durable Jobs policy, Reports, and dashboard web ownership now live in explicit internal modules. Remaining root-owned lifecycle, migration declarations, backup implementation, and process-orchestration responsibilities stay mapped work rather than permission for a broad rewrite.
 
 ## Runtime process model
 
@@ -55,6 +56,7 @@ SQLite is the authoritative application store through v1.0. Major domains are:
 - scan, schedule, deletion, and TrueAegis job evidence;
 - logical sites and technical-scope memberships;
 - users, sessions, API tokens, and access audit;
+- ordered schema-migration evidence and durable stable-API idempotency records;
 - validation observations and correlations;
 - backup, restore, and release-validation evidence held in files or database rows as their contracts require.
 
@@ -84,7 +86,9 @@ Trust rules:
 
 ## Current API boundary
 
-The dashboard uses unversioned `/api/*` endpoints implemented by the local handler in `deltaaegis_core/web.py` behind the root compatibility facade. They are authenticated implementation endpoints, not yet a stable third-party contract. ADR 0003 reserves `/api/v1` for the stable API introduced in v0.46.
+The combined v1 Stage 1–2 candidate introduces the stable `/api/v1` boundary defined by `deltaaegis_core/api_v1.py` and the tracked OpenAPI 3.1 artifact at `contracts/v1/openapi.json`. Programmatic clients use bounded, scoped `Authorization: Bearer` credentials. Browser sessions use same-origin double-submit CSRF for every mutation. Stable mutations are transactionally idempotent, and stable responses use versioned success/error envelopes plus request IDs.
+
+The dashboard's pre-existing unversioned `/api/*` endpoints remain authenticated private compatibility interfaces. They are not promoted into the stable contract, and the legacy `X-DeltaAegis-Token` transport cannot authenticate `/api/v1`.
 
 ## v0.44 modular boundary result
 
@@ -105,7 +109,7 @@ The repository-root `deltaaegis.py` remains the executable and import
 compatibility facade.  ADR 0010 records why the internal package cannot be
 named `deltaaegis` while that facade exists.
 
-The completed extraction did not mix functional redesign with file movement. Each moved responsibility retains its existing validator coverage, public facade, and frozen behavior evidence.
+The completed extraction did not mix functional redesign with file movement. Each moved responsibility retains its existing validator coverage, public facade, and frozen behavior evidence. The v1 transition adds `api_v1`, `current_state`, `migrations`, and `telemetry_quality` as explicit additive modules without removing the eight characterized v0.44 modules.
 
 Stages 1–8 now implement the configuration, connection-policy, authentication,
 NetSniper ingest, Sites, durable Jobs policy, Reports, and dashboard web boundaries shown above. The root module intentionally retains
@@ -127,7 +131,7 @@ and historical validators therefore continue to use the same public surface.
 
 ## Known architecture debt
 
-The reproducible inventory and disposition are maintained in `docs/repository-audit.md`. The highest-risk items are the monolithic source boundary, late top-level function redefinitions, inline storage/API/UI ownership, stale historical architecture prose, and the size of the validator estate. These are mapped work, not authorization for a broad post-v0.44 rewrite.
+The reproducible inventory and disposition are maintained in `docs/repository-audit.md`. Stage 1 closes the unledgered-upgrade and pre-upgrade-recovery gap, and Stage 2 closes the stable API contract gap. The remaining highest-risk items include the root facade's size, later v1 identity and detection work, operational hardening, performance evidence, TrueAegis version pinning, and the size of the validator estate. These are mapped work, not authorization for a broad rewrite.
 ## v0.45 telemetry-trust boundary
 
 DeltaAegis evaluates every finalized NetSniper bundle before operational
@@ -144,3 +148,26 @@ does not receive a dashboard or DeltaAegis policy logic.
 The v0.45 telemetry-trust storage boundary initializes lazily on first feature
 use so ordinary database connection startup preserves the v0.44 characterized
 table inventory.
+
+## v1 Stage 1–2 boundary
+
+Every database connection now enters through the ordered migration manager.
+Supported unledgered v0.42–v0.45 databases are recognized by exact schema
+fingerprint, backed up and verified while holding a SQLite write reservation,
+then advanced through one migration and ledger row per transaction. Fresh
+databases converge on the same schema without a needless legacy backup.
+Unknown origins, checksum drift, ledger gaps, symlinks, and known remote
+filesystems fail closed. Recovery remains an explicit verified restore rather
+than reverse migration SQL.
+
+The stable API is additive: it calls existing domain functions and does not
+duplicate storage ownership. OpenAPI, runtime routing, authorization scopes,
+and validator inventories derive from the same endpoint declarations. A
+tracked contract artifact must equal runtime generation. The real-HTTP gate
+exercises credential isolation, role and scope caps, revocation, CSRF,
+authority validation, security headers, request bounds, error envelopes, and
+concurrent idempotency against temporary SQLite state.
+
+This checkpoint is not v1.0 GA. The remaining Definition-of-Done stages and
+the complete release gate in `V1_SCOPE.md` remain mandatory before a final
+`v1.0.0` tag.

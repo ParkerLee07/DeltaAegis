@@ -1,6 +1,6 @@
 # DeltaAegis Supported Versions
 
-Status: v0.45.0 telemetry trust
+Status: v0.45.0 release plus v1.0 combined Stage 1–2 candidate
 
 This matrix defines the environment DeltaAegis intends to validate on the path to v1.0. A listed platform is supported only when its operating-system vendor still supplies security maintenance and the installed components remain within the ranges below.
 
@@ -11,7 +11,7 @@ This matrix defines the environment DeltaAegis intends to validate on the path t
 | Operating system | Debian 12 and 13; Ubuntu 22.04 LTS and 24.04 LTS; Kali Linux rolling snapshots whose packages satisfy this matrix | 64-bit Linux only. Clean-install and upgrade gates must cover Debian and Ubuntu. Kali is validated at release time because it is rolling. |
 | Python | CPython 3.10 through 3.14 | The system/vendor Python is preferred. The lowest and highest supported minor versions must pass syntax and focused compatibility validation before v1.0. Python 3.10 remains supported on vendor-maintained distributions even after upstream security-only support ends. |
 | SQLite | 3.37 or newer through Python's standard `sqlite3` module | Foreign keys must be enabled by DeltaAegis. WAL/sidecar handling, backup, integrity, and migration behavior are release-gated. No external SQLite server is required. |
-| NetSniper | v2.0.0 for DeltaAegis v0.43 through v0.46 | Finalized manifest-v3 bundles, compatibility aliases, checksums, profile evidence, and bundle-readiness evidence are required. NetSniper changes are defect-driven until sensor identity work begins with DeltaAegis v0.47. |
+| NetSniper | v2.1.0 pinned at `0624a36550f6eb62ed0daa6862e5cc25a0d93236` for the v1 candidate; v2.0 evidence remains degraded-compatible | Finalized manifest-v3 bundles, compatibility aliases, checksums, profile evidence, bundle-readiness evidence, and the complete v2.1 capability contract are required for accepted telemetry. NetSniper remains unchanged during Stage 1–2. |
 | TrueAegis | Contract-compatible local checkout | TrueAegis is optional. The checkout must support fixed-argv `trueaegis.py MANIFEST --validate --quiet` execution and the validation JSON contract covered by DeltaAegis fixtures. A semantic-version pin is required before v1.0; the absence of one is tracked architecture debt, not permission to accept arbitrary output. |
 | Node.js | Active LTS or Maintenance LTS; Node 20, 22, and 24 are the v0.44 validation range | Node.js is a validator dependency for rendered dashboard JavaScript, not a DeltaAegis runtime service. |
 | Browser | Current and previous stable Firefox, Chrome/Chromium, or Edge | JavaScript, cookies, Fetch, and same-origin behavior are required. Safari and mobile browsers are best-effort until a release gate explicitly adds them. |
@@ -20,9 +20,29 @@ This matrix defines the environment DeltaAegis intends to validate on the path t
 ## Integration contracts
 
 - DeltaAegis consumes only finalized NetSniper run directories whose manifest and referenced evidence pass confinement, checksum, readiness, and compatibility validation.
-- `network_scope` remains the authoritative technical CIDR key through v0.44. Logical-site names are presentation groupings, not evidence identity.
+- `network_scope` remains the authoritative technical CIDR key through the v1 Stage 1–2 checkpoint. Logical-site names are presentation groupings, not evidence identity; the stronger sensor/scope identity contract belongs to Stage 3.
 - TrueAegis observations are evidence-only until correlated by DeltaAegis. A validation result does not silently mutate NetSniper observations.
 - Node.js and a browser do not receive direct filesystem or database access.
+
+## Stage 1–2 upgrade and API support
+
+- Exact database origins created by v0.42.0, v0.42.1, and v0.42.2 are covered
+  by the automated migration gate. Their schema is byte-identical; tag source
+  hashes remain separate validation evidence.
+- Clean and telemetry-runtime-expanded databases built from the exact released
+  v0.45.0 tree are independently upgraded and checked for convergence and
+  protected-history preservation.
+- The active SQLite database must be on a local filesystem and must not be a
+  symlink. Pending legacy upgrades create and verify a pre-migration backup.
+- The initial supported programmatic namespace is `/api/v1` as documented in
+  `docs/api-v1.md` and `contracts/v1/openapi.json`.
+- Browser support requires SameSite cookies, Fetch, Origin headers, and the
+  Stage 2 CSRF boundary. HTTPS proxy deployments must configure both
+  `dashboard --secure-cookies` and the exact HTTPS `--public-origin`; the
+  proxy must preserve that authority in `Host`.
+- Frozen partial-schema and minimal-module fixtures are superseded only as
+  documented in `docs/v1-stage1-2-compatibility.md`; immutable release-tag
+  copies remain unchanged.
 
 ## Version policy before v1.0
 

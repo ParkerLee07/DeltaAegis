@@ -110,13 +110,17 @@ BASE="$(cd -- "$BASE" 2>/dev/null && pwd -P)" \
 required_files=(
     "deltaaegis.py"
     "deltaaegis_core/__init__.py"
+    "deltaaegis_core/api_v1.py"
     "deltaaegis_core/auth.py"
     "deltaaegis_core/config.py"
+    "deltaaegis_core/current_state.py"
     "deltaaegis_core/db.py"
     "deltaaegis_core/ingest.py"
     "deltaaegis_core/jobs.py"
+    "deltaaegis_core/migrations.py"
     "deltaaegis_core/reports.py"
     "deltaaegis_core/sites.py"
+    "deltaaegis_core/telemetry_quality.py"
     "deltaaegis_core/web.py"
     "uninstall.sh"
     "tools/bootstrap_first_admin.py"
@@ -155,6 +159,7 @@ runtime_directories=(
     "$BASE/telemetry-evidence"
     "$BASE/telemetry-evidence/trusted"
     "$BASE/telemetry-evidence/quarantine"
+    "$BASE/restore-rehearsals"
 )
 
 managed_launcher() {
@@ -355,13 +360,17 @@ root = Path(sys.argv[1])
 for relative in (
     "deltaaegis.py",
     "deltaaegis_core/__init__.py",
+    "deltaaegis_core/api_v1.py",
     "deltaaegis_core/auth.py",
     "deltaaegis_core/config.py",
+    "deltaaegis_core/current_state.py",
     "deltaaegis_core/db.py",
     "deltaaegis_core/ingest.py",
     "deltaaegis_core/jobs.py",
+    "deltaaegis_core/migrations.py",
     "deltaaegis_core/reports.py",
     "deltaaegis_core/sites.py",
+    "deltaaegis_core/telemetry_quality.py",
     "deltaaegis_core/web.py",
     "tools/bootstrap_first_admin.py",
     "tools/reset_dashboard_admin.py",
@@ -370,15 +379,6 @@ for relative in (
     path = root / relative
     compile(path.read_text(encoding="utf-8"), str(path), "exec")
 
-# v0.45 modules are present in normal telemetry-trust checkouts. They remain
-# optional only for characterized legacy minimal lifecycle fixtures.
-for relative in (
-    "deltaaegis_core/current_state.py",
-    "deltaaegis_core/telemetry_quality.py",
-):
-    path = root / relative
-    if path.is_file():
-        compile(path.read_text(encoding="utf-8"), str(path), "exec")
 PY
 
 bash -n "$BASE/install.sh"

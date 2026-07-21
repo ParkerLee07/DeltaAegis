@@ -166,7 +166,16 @@ ACCESS_LOGIN_DUMMY_PASSWORD_HASH = (
 ACCESS_API_TOKEN_PREFIX = "da"
 
 
+ACCESS_API_TOKEN_DEFAULT_TTL_SECONDS = 30 * 24 * 60 * 60
+
+
+ACCESS_API_TOKEN_MAX_TTL_SECONDS = 365 * 24 * 60 * 60
+
+
 ACCESS_SESSION_COOKIE_NAME = "deltaaegis_session"
+
+
+ACCESS_CSRF_COOKIE_NAME = "deltaaegis_csrf"
 
 
 ACCESS_SESSION_TTL_SECONDS = 8 * 60 * 60
@@ -447,6 +456,108 @@ def generate_access_api_token() -> str:
     return f"{ACCESS_API_TOKEN_PREFIX}_{secrets.token_urlsafe(32)}"
 
 
+def access_table_has_column(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+) -> bool:
+    return any(
+        str(row[1]) == str(column)
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    )
+
+
+def access_api_scopes_for_role(role: str | None) -> tuple[str, ...]:
+    normalized_role = normalize_access_role(role)
+    return tuple(
+        sorted(
+            permission
+            for permission in ACCESS_RBAC_PERMISSIONS
+            if access_rbac_allows(normalized_role, permission)
+        )
+    )
+
+
+def normalize_access_api_scopes(
+    scopes: Any,
+    *,
+    role: str | None,
+) -> tuple[str, ...]:
+    allowed = set(access_api_scopes_for_role(role))
+    if scopes is None:
+        return tuple(sorted(allowed))
+    if isinstance(scopes, str):
+        candidates = re.split(r"[\s,]+", scopes.strip()) if scopes.strip() else []
+    elif isinstance(scopes, (list, tuple, set, frozenset)):
+        candidates = list(scopes)
+    else:
+        raise DeltaAegisError("API token scopes must be a list or separated string")
+
+    normalized: set[str] = set()
+    for candidate in candidates:
+        scope = str(candidate or "").strip().lower()
+        if not scope:
+            continue
+        if scope not in ACCESS_RBAC_PERMISSIONS:
+            raise DeltaAegisError(f"unsupported API token scope: {scope}")
+        if scope not in allowed:
+            raise DeltaAegisError(
+                f"API token scope {scope} exceeds the token's {normalize_access_role(role)} role"
+            )
+        normalized.add(scope)
+
+    if not normalized:
+        raise DeltaAegisError("at least one API token scope is required")
+    return tuple(sorted(normalized))
+
+
+def parse_stored_access_api_scopes(value: Any) -> tuple[str, ...]:
+    """Parse persisted token scopes without trusting mutable database text.
+
+    Authentication must fail closed when a token row is malformed.  In
+    particular, valid JSON values such as an object, number, or string are not
+    scope lists and must never be iterated as though they granted permissions.
+    """
+
+    try:
+        parsed = json.loads(str(value or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ()
+    if not isinstance(parsed, list):
+        return ()
+    scopes: set[str] = set()
+    for candidate in parsed:
+        if not isinstance(candidate, str):
+            return ()
+        scope = candidate.strip().lower()
+        if scope not in ACCESS_RBAC_PERMISSIONS:
+            return ()
+        scopes.add(scope)
+    return tuple(sorted(scopes))
+
+
+def bounded_access_api_token_expiry(
+    expires_at: str | None = None,
+    *,
+    now: datetime | None = None,
+) -> str:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    requested = access_parse_datetime(expires_at)
+    if requested is None:
+        if str(expires_at or "").strip():
+            raise DeltaAegisError("API token expires_at must be a valid ISO-8601 timestamp")
+        requested = current + timedelta(seconds=ACCESS_API_TOKEN_DEFAULT_TTL_SECONDS)
+    requested = requested.astimezone(timezone.utc)
+    if requested <= current:
+        raise DeltaAegisError("API token expiration must be in the future")
+    if requested > current + timedelta(seconds=ACCESS_API_TOKEN_MAX_TTL_SECONDS):
+        raise DeltaAegisError("API token lifetime must not exceed 365 days")
+    return requested.isoformat()
+
+
 def create_access_user(
     connection: sqlite3.Connection,
     username: str,
@@ -526,6 +637,24 @@ def create_access_api_token(
     role: str | None = None,
     expires_at: str | None = None,
 ) -> dict[str, Any]:
+    return create_scoped_access_api_token(
+        connection,
+        user_id,
+        token_name,
+        role=role,
+        expires_at=expires_at,
+        scopes=None,
+    )
+
+
+def create_scoped_access_api_token(
+    connection: sqlite3.Connection,
+    user_id: str,
+    token_name: str,
+    role: str | None = None,
+    expires_at: str | None = None,
+    scopes: Any = None,
+) -> dict[str, Any]:
     ensure_enterprise_access_schema(connection)
 
     user = connection.execute(
@@ -551,30 +680,52 @@ def create_access_api_token(
             f"API token role {token_role} exceeds the user's current {user_role} role"
         )
 
-    clean_expires_at = str(expires_at or "").strip() or None
-    if clean_expires_at and access_parse_datetime(clean_expires_at) is None:
-        raise DeltaAegisError("API token expires_at must be a valid ISO-8601 timestamp")
+    clean_expires_at = bounded_access_api_token_expiry(expires_at)
+    clean_scopes = normalize_access_api_scopes(scopes, role=token_role)
 
     token_prefix = token_value[:12]
     clean_token_name = str(token_name or "DeltaAegis API Token").strip() or "DeltaAegis API Token"
 
-    connection.execute(
-        "INSERT INTO access_api_tokens ("
-        "token_id, user_id, token_name, token_hash, token_prefix, role, "
-        "is_active, created_at, updated_at, expires_at"
-        ") VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
-        (
-            token_id,
-            user_id,
-            clean_token_name,
-            token_hash,
-            token_prefix,
-            token_role,
-            now,
-            now,
-            clean_expires_at,
-        ),
-    )
+    if access_table_has_column(connection, "access_api_tokens", "scopes_json"):
+        connection.execute(
+            "INSERT INTO access_api_tokens ("
+            "token_id, user_id, token_name, token_hash, token_prefix, role, "
+            "is_active, created_at, updated_at, expires_at, scopes_json"
+            ") VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+            (
+                token_id,
+                user_id,
+                clean_token_name,
+                token_hash,
+                token_prefix,
+                token_role,
+                now,
+                now,
+                clean_expires_at,
+                json.dumps(clean_scopes, separators=(",", ":")),
+            ),
+        )
+    else:
+        # Standalone predecessor fixtures intentionally materialize the frozen
+        # v0.44 table shape. The application migration adds scopes_json before
+        # any stable API credential can be used.
+        connection.execute(
+            "INSERT INTO access_api_tokens ("
+            "token_id, user_id, token_name, token_hash, token_prefix, role, "
+            "is_active, created_at, updated_at, expires_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+            (
+                token_id,
+                user_id,
+                clean_token_name,
+                token_hash,
+                token_prefix,
+                token_role,
+                now,
+                now,
+                clean_expires_at,
+            ),
+        )
 
     return {
         "token_id": token_id,
@@ -584,6 +735,7 @@ def create_access_api_token(
         "token": token_value,
         "token_prefix": token_prefix,
         "role": token_role,
+        "scopes": list(clean_scopes),
         "created_at": now,
         "expires_at": clean_expires_at,
     }
@@ -667,7 +819,15 @@ def generate_dashboard_session_token() -> str:
     return "ds_" + secrets.token_urlsafe(32)
 
 
+def generate_dashboard_csrf_token() -> str:
+    return "dc_" + secrets.token_urlsafe(32)
+
+
 def hash_dashboard_session_token(token: str) -> str:
+    return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+
+
+def hash_dashboard_csrf_token(token: str) -> str:
     return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
 
 
@@ -770,28 +930,51 @@ def create_dashboard_session(
     session_id = str(uuid.uuid4())
     session_token = generate_dashboard_session_token()
     session_hash = hash_dashboard_session_token(session_token)
+    csrf_token = generate_dashboard_csrf_token()
+    csrf_hash = hash_dashboard_csrf_token(csrf_token)
     now = utc_now()
     expires_at = dashboard_session_expiry(ttl_seconds)
 
     role = normalize_access_role(user.get("role") or "VIEWER")
 
-    connection.execute(
-        "INSERT INTO access_sessions ("
-        "session_id, user_id, session_token_hash, role, is_active, "
-        "created_at, last_seen_at, expires_at, source_ip, user_agent"
-        ") VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
-        (
-            session_id,
-            user.get("user_id"),
-            session_hash,
-            role,
-            now,
-            now,
-            expires_at,
-            source_ip,
-            user_agent,
-        ),
-    )
+    if access_table_has_column(connection, "access_sessions", "csrf_token_hash"):
+        connection.execute(
+            "INSERT INTO access_sessions ("
+            "session_id, user_id, session_token_hash, role, is_active, "
+            "created_at, last_seen_at, expires_at, source_ip, user_agent, csrf_token_hash"
+            ") VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)",
+            (
+                session_id,
+                user.get("user_id"),
+                session_hash,
+                role,
+                now,
+                now,
+                expires_at,
+                source_ip,
+                user_agent,
+                csrf_hash,
+            ),
+        )
+    else:
+        connection.execute(
+            "INSERT INTO access_sessions ("
+            "session_id, user_id, session_token_hash, role, is_active, "
+            "created_at, last_seen_at, expires_at, source_ip, user_agent"
+            ") VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
+            (
+                session_id,
+                user.get("user_id"),
+                session_hash,
+                role,
+                now,
+                now,
+                expires_at,
+                source_ip,
+                user_agent,
+            ),
+        )
+        csrf_token = ""
 
     actor = {
         "user_id": user.get("user_id"),
@@ -819,6 +1002,7 @@ def create_dashboard_session(
         "session_id": session_id,
         "session_token": session_token,
         "session_token_hash": session_hash,
+        "csrf_token": csrf_token,
         "user_id": user.get("user_id"),
         "username": user.get("username"),
         "display_name": user.get("display_name"),
@@ -857,6 +1041,11 @@ def authenticate_dashboard_session(
 
     session_hash = hash_dashboard_session_token(token)
 
+    csrf_select = (
+        "s.csrf_token_hash"
+        if access_table_has_column(connection, "access_sessions", "csrf_token_hash")
+        else "'' AS csrf_token_hash"
+    )
     row = connection.execute(
         "SELECT "
         "s.session_id, "
@@ -866,6 +1055,7 @@ def authenticate_dashboard_session(
         "s.created_at AS session_created_at, "
         "s.last_seen_at, "
         "s.expires_at, "
+        f"{csrf_select}, "
         "u.username, "
         "u.display_name, "
         "u.role AS user_role, "
@@ -893,6 +1083,7 @@ def authenticate_dashboard_session(
             row["session_role"] or row["user_role"] or "VIEWER"
         ),
         "expires_at": row["expires_at"],
+        "_csrf_token_hash": row["csrf_token_hash"],
     }
 
     if not int(row["session_active"] or 0) or not int(row["user_active"] or 0):
@@ -923,6 +1114,17 @@ def authenticate_dashboard_session(
         actor["last_seen_at"] = now
 
     return actor
+
+
+def verify_dashboard_csrf_token(
+    actor: dict[str, Any] | None,
+    supplied_token: str | None,
+) -> bool:
+    expected = str((actor or {}).get("_csrf_token_hash") or "")
+    supplied = str(supplied_token or "").strip()
+    if not expected or not supplied:
+        return False
+    return hmac.compare_digest(expected, hash_dashboard_csrf_token(supplied))
 
 
 def revoke_dashboard_user_sessions(
@@ -1026,6 +1228,26 @@ def access_token_is_expired(expires_at: str | None) -> bool:
     return parsed <= datetime.now(timezone.utc)
 
 
+def access_token_expiry_is_bounded(
+    expires_at: str | None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Fail closed when a stable-API token exceeds the maximum live TTL."""
+
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    parsed = access_parse_datetime(expires_at)
+    if parsed is None:
+        return False
+    parsed = parsed.astimezone(timezone.utc)
+    return current < parsed <= current + timedelta(
+        seconds=ACCESS_API_TOKEN_MAX_TTL_SECONDS
+    )
+
+
 def authenticate_access_api_token(
     connection: sqlite3.Connection,
     token: str,
@@ -1040,6 +1262,11 @@ def authenticate_access_api_token(
         return None
 
     token_hash = hash_access_api_token(supplied)
+    scopes_select = (
+        "t.scopes_json"
+        if access_table_has_column(connection, "access_api_tokens", "scopes_json")
+        else "'[]' AS scopes_json"
+    )
     row = connection.execute(
         "SELECT "
         "t.token_id, "
@@ -1052,6 +1279,7 @@ def authenticate_access_api_token(
         "t.updated_at AS token_updated_at, "
         "t.last_used_at, "
         "t.expires_at, "
+        f"{scopes_select}, "
         "u.username, "
         "u.display_name, "
         "u.role AS user_role, "
@@ -1092,6 +1320,14 @@ def authenticate_access_api_token(
         )
         connection.commit()
 
+    stored_scopes = parse_stored_access_api_scopes(row["scopes_json"])
+    effective_scopes = sorted(
+        scope
+        for scope in stored_scopes
+        if scope in ACCESS_RBAC_PERMISSIONS
+        and access_rbac_allows(effective_role, scope)
+    )
+
     return {
         "auth_type": "api_token",
         "token_id": row["token_id"],
@@ -1105,8 +1341,59 @@ def authenticate_access_api_token(
         "user_role": user_role,
         "last_used_at": authenticated_at if update_last_used else row["last_used_at"],
         "expires_at": row["expires_at"],
+        "created_at": row["token_created_at"],
+        "scopes": effective_scopes,
         "authenticated_at": authenticated_at,
     }
+
+
+def authenticate_scoped_access_api_token(
+    connection: sqlite3.Connection,
+    token: str,
+    required_scope: str,
+    update_last_used: bool = True,
+) -> dict[str, Any] | None:
+    scope = str(required_scope or "").strip().lower()
+    if scope not in ACCESS_RBAC_PERMISSIONS:
+        raise DeltaAegisError(f"unsupported API authorization scope: {required_scope}")
+    if not access_table_has_column(connection, "access_api_tokens", "scopes_json"):
+        return None
+    actor = authenticate_access_api_token(
+        connection,
+        token,
+        required_role="VIEWER",
+        update_last_used=False,
+    )
+    if not actor or not access_token_expiry_is_bounded(actor.get("expires_at")):
+        return None
+    if scope not in set(actor.get("scopes") or ()):
+        return None
+    if not access_rbac_allows(actor.get("role"), scope):
+        return None
+
+    authenticated_at = utc_now()
+    if update_last_used:
+        connection.execute(
+            "UPDATE access_api_tokens SET last_used_at = ?, updated_at = ? "
+            "WHERE token_id = ?",
+            (authenticated_at, authenticated_at, actor["token_id"]),
+        )
+        connection.commit()
+    actor["auth_type"] = "api_token_v1"
+    actor["authenticated_at"] = authenticated_at
+    actor["last_used_at"] = authenticated_at if update_last_used else actor.get("last_used_at")
+    return actor
+
+
+def access_actor_allows_scope(actor: dict[str, Any] | None, scope: str) -> bool:
+    permission = str(scope or "").strip().lower()
+    if permission not in ACCESS_RBAC_PERMISSIONS or not actor:
+        return False
+    if not access_rbac_allows(actor.get("role"), permission):
+        return False
+    if str(actor.get("auth_type") or "").startswith("api_token"):
+        return permission in set(actor.get("scopes") or ())
+    return True
 
 
 def list_access_api_tokens(
@@ -1116,6 +1403,11 @@ def list_access_api_tokens(
     ensure_enterprise_access_schema(connection)
 
     where = "" if include_inactive else "WHERE t.is_active = 1 AND u.is_active = 1"
+    scopes_select = (
+        "t.scopes_json"
+        if access_table_has_column(connection, "access_api_tokens", "scopes_json")
+        else "'[]' AS scopes_json"
+    )
     rows = connection.execute(
         "SELECT "
         "t.token_id, "
@@ -1128,14 +1420,25 @@ def list_access_api_tokens(
         "t.created_at, "
         "t.updated_at, "
         "t.last_used_at, "
-        "t.expires_at "
+        "t.expires_at, "
+        f"{scopes_select} "
         "FROM access_api_tokens t "
         "JOIN access_users u ON u.user_id = t.user_id "
         f"{where} "
         "ORDER BY t.created_at DESC, t.token_name"
     ).fetchall()
 
-    return [dict(row) for row in rows]
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        scopes = parse_stored_access_api_scopes(
+            item.pop("scopes_json", "[]")
+        )
+        item["scopes"] = [
+            scope for scope in scopes if scope in ACCESS_RBAC_PERMISSIONS
+        ]
+        result.append(item)
+    return result
 
 
 def list_access_audit_events(

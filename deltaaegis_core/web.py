@@ -8,8 +8,15 @@ import ipaddress
 import json
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
-from deltaaegis_core.auth import ACCESS_SESSION_COOKIE_NAME, ACCESS_SESSION_TTL_SECONDS
+from deltaaegis_core import api_v1 as _api_v1
+from deltaaegis_core import auth as _auth
+from deltaaegis_core.auth import (
+    ACCESS_CSRF_COOKIE_NAME,
+    ACCESS_SESSION_COOKIE_NAME,
+    ACCESS_SESSION_TTL_SECONDS,
+)
 
 
 _OWNED_NAMES = {
@@ -22,6 +29,10 @@ _OWNED_NAMES = {
     "dashboard_session_cookie_header",
     "dashboard_clear_session_cookie_header",
     "dashboard_redirect_response",
+    "dashboard_security_headers",
+    "dashboard_inject_csrf_fetch_boundary",
+    "dashboard_csrf_cookie_header",
+    "dashboard_clear_csrf_cookie_header",
     "dashboard_login_html",
     "render_netsniper_page",
     "dashboard_bind_host_is_loopback",
@@ -29,6 +40,108 @@ _OWNED_NAMES = {
     "install_namespace",
     "_OWNED_NAMES",
 }
+
+
+DASHBOARD_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; "
+        "base-uri 'none'; "
+        "connect-src 'self'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none'; "
+        "img-src 'self' data:; "
+        "object-src 'none'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'"
+    ),
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Permissions-Policy": "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+}
+
+
+_DASHBOARD_FORCE_SECURE_COOKIES = False
+
+
+def _dashboard_public_origin_identity(
+    value: str | None,
+    *,
+    secure_cookies: bool,
+) -> tuple[str, str, int] | None:
+    """Validate one explicitly trusted browser-facing origin.
+
+    Forwarded headers remain untrusted.  A reverse proxy must preserve the
+    configured authority in ``Host`` and the browser must supply this exact
+    origin for every cookie-authenticated mutation.
+    """
+
+    raw = str(value or "").strip()
+    if not raw:
+        if secure_cookies:
+            raise ValueError(
+                "--secure-cookies requires an explicit HTTPS --public-origin"
+            )
+        return None
+    if len(raw) > 512 or any(ord(character) < 33 for character in raw):
+        raise ValueError("--public-origin contains invalid characters")
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("--public-origin is not a valid HTTP origin") from exc
+    scheme = str(parsed.scheme or "").casefold()
+    hostname = str(parsed.hostname or "").rstrip(".").casefold()
+    if (
+        scheme not in {"http", "https"}
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "--public-origin must be an HTTP(S) origin without credentials, path, query, or fragment"
+        )
+    try:
+        ipaddress.ip_address(hostname.split("%", 1)[0])
+    except ValueError:
+        if (
+            re.fullmatch(r"[a-z0-9.-]+", hostname) is None
+            or hostname.startswith(".")
+            or hostname.endswith(".")
+            or ".." in hostname
+        ):
+            raise ValueError("--public-origin hostname is invalid")
+    if secure_cookies and scheme != "https":
+        raise ValueError("--secure-cookies requires an HTTPS --public-origin")
+    if scheme == "https" and not secure_cookies:
+        raise ValueError("an HTTPS --public-origin requires --secure-cookies")
+    return scheme, hostname, int(port or (443 if scheme == "https" else 80))
+
+
+def dashboard_security_headers() -> dict[str, str]:
+    return dict(DASHBOARD_SECURITY_HEADERS)
+
+
+def _dashboard_send_security_headers(handler) -> None:
+    for name, value in DASHBOARD_SECURITY_HEADERS.items():
+        handler.send_header(name, value)
+
+
+def _dashboard_send_extra_headers(handler, headers: Any) -> None:
+    protected = {name.casefold() for name in DASHBOARD_SECURITY_HEADERS}
+    if not headers:
+        return
+    entries = headers.items() if hasattr(headers, "items") else headers
+    for name, value in entries:
+        if str(name).casefold() in protected:
+            continue
+        values = value if isinstance(value, (list, tuple)) else (value,)
+        for item in values:
+            handler.send_header(str(name), str(item))
 
 
 def install_namespace(namespace: dict[str, Any]) -> None:
@@ -45,9 +158,9 @@ def dashboard_json_response(handler, payload, status=200, headers=None):
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Cache-Control", "no-store")
+    _dashboard_send_security_headers(handler)
     handler.send_header("Content-Length", str(len(body)))
-    for header_name, header_value in dict(headers or {}).items():
-        handler.send_header(str(header_name), str(header_value))
+    _dashboard_send_extra_headers(handler, headers)
     handler.end_headers()
     try:
         handler.wfile.write(body)
@@ -251,17 +364,82 @@ def dashboard_inject_netsniper_navigation(html_text: str) -> str:
     return html_text
 
 
+def dashboard_inject_csrf_fetch_boundary(html_text: str) -> str:
+    if not isinstance(html_text, str) or "</body>" not in html_text:
+        return html_text
+    if 'id="deltaaegis-v1-csrf-fetch-boundary"' in html_text:
+        return html_text
+    script = r'''
+<script id="deltaaegis-v1-csrf-fetch-boundary">
+(function () {
+  const originalFetch = window.fetch.bind(window);
+  function cookieValue(name) {
+    const prefix = encodeURIComponent(name) + "=";
+    for (const part of document.cookie.split(";")) {
+      const value = part.trim();
+      if (value.startsWith(prefix)) {
+        return decodeURIComponent(value.slice(prefix.length));
+      }
+    }
+    return "";
+  }
+  window.fetch = function (input, init) {
+    const options = Object.assign({}, init || {});
+    const request = input instanceof Request ? input : null;
+    const url = new URL(request ? request.url : String(input), window.location.href);
+    const method = String(options.method || (request && request.method) || "GET").toUpperCase();
+    if (url.origin === window.location.origin && !["GET", "HEAD", "OPTIONS"].includes(method)) {
+      const csrf = cookieValue("deltaaegis_csrf");
+      if (csrf) {
+        const headers = new Headers(request ? request.headers : undefined);
+        new Headers(options.headers || {}).forEach(function (value, name) {
+          headers.set(name, value);
+        });
+        headers.set("X-DeltaAegis-CSRF", csrf);
+        options.headers = headers;
+      }
+    }
+    return originalFetch(input, options);
+  };
+  function attachLogoutBoundary() {
+    document.querySelectorAll('a[href="/logout"]').forEach(function (link) {
+      link.addEventListener("click", async function (event) {
+        event.preventDefault();
+        try {
+          await window.fetch("/logout", {
+            method: "POST",
+            credentials: "same-origin",
+            cache: "no-store"
+          });
+        } finally {
+          window.location.href = "/login";
+        }
+      });
+    });
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", attachLogoutBoundary);
+  } else {
+    attachLogoutBoundary();
+  }
+})();
+</script>
+'''
+    return html_text.replace("</body>", script + "\n</body>", 1)
+
+
 def dashboard_html_response(handler, body, status=200, headers=None):
     body = dashboard_inject_operator_floating_button(body)
     body = dashboard_inject_netsniper_navigation(body)
+    body = dashboard_inject_csrf_fetch_boundary(body)
     body = body.encode("utf-8")
 
     handler.send_response(status)
     handler.send_header("Content-Type", "text/html; charset=utf-8")
     handler.send_header("Cache-Control", "no-store")
+    _dashboard_send_security_headers(handler)
     handler.send_header("Content-Length", str(len(body)))
-    for name, value in (headers or {}).items():
-        handler.send_header(str(name), str(value))
+    _dashboard_send_extra_headers(handler, headers)
     handler.end_headers()
     handler.wfile.write(body)
 
@@ -272,6 +450,7 @@ def dashboard_text_response(handler, body, status=200):
     handler.send_response(status)
     handler.send_header("Content-Type", "text/plain; charset=utf-8")
     handler.send_header("Cache-Control", "no-store")
+    _dashboard_send_security_headers(handler)
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
@@ -329,23 +508,48 @@ def dashboard_session_cookie_header(
     session_token: str,
     max_age: int = ACCESS_SESSION_TTL_SECONDS,
 ) -> str:
-    return (
+    header = (
         f"{ACCESS_SESSION_COOKIE_NAME}={session_token}; "
         "Path=/; "
         f"Max-Age={max(300, int(max_age or ACCESS_SESSION_TTL_SECONDS))}; "
         "HttpOnly; "
-        "SameSite=Lax"
+        "SameSite=Strict"
     )
+    return header + ("; Secure" if _DASHBOARD_FORCE_SECURE_COOKIES else "")
 
 
 def dashboard_clear_session_cookie_header() -> str:
-    return (
+    header = (
         f"{ACCESS_SESSION_COOKIE_NAME}=; "
         "Path=/; "
         "Max-Age=0; "
         "HttpOnly; "
-        "SameSite=Lax"
+        "SameSite=Strict"
     )
+    return header + ("; Secure" if _DASHBOARD_FORCE_SECURE_COOKIES else "")
+
+
+def dashboard_csrf_cookie_header(
+    csrf_token: str,
+    max_age: int = ACCESS_SESSION_TTL_SECONDS,
+) -> str:
+    header = (
+        f"{ACCESS_CSRF_COOKIE_NAME}={csrf_token}; "
+        "Path=/; "
+        f"Max-Age={max(300, int(max_age or ACCESS_SESSION_TTL_SECONDS))}; "
+        "SameSite=Strict"
+    )
+    return header + ("; Secure" if _DASHBOARD_FORCE_SECURE_COOKIES else "")
+
+
+def dashboard_clear_csrf_cookie_header() -> str:
+    header = (
+        f"{ACCESS_CSRF_COOKIE_NAME}=; "
+        "Path=/; "
+        "Max-Age=0; "
+        "SameSite=Strict"
+    )
+    return header + ("; Secure" if _DASHBOARD_FORCE_SECURE_COOKIES else "")
 
 
 def dashboard_redirect_response(
@@ -356,9 +560,16 @@ def dashboard_redirect_response(
     handler.send_response(303)
     handler.send_header("Location", location)
     handler.send_header("Cache-Control", "no-store")
+    _dashboard_send_security_headers(handler)
 
     if cookie_header:
-        handler.send_header("Set-Cookie", cookie_header)
+        cookie_headers = (
+            cookie_header
+            if isinstance(cookie_header, (list, tuple))
+            else (cookie_header,)
+        )
+        for value in cookie_headers:
+            handler.send_header("Set-Cookie", str(value))
 
     handler.end_headers()
 
@@ -1780,12 +1991,24 @@ def dashboard_bind_host_is_loopback(host: str | None) -> bool:
 def _command_dashboard_impl(args):
     from http.cookies import SimpleCookie
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-    from urllib.parse import parse_qs, urlparse
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    global _DASHBOARD_FORCE_SECURE_COOKIES
 
     # v0.42 dashboard LAN binding
     lan_mode = bool(getattr(args, "lan", False))
     bind_host = "0.0.0.0" if lan_mode else args.host
     non_loopback_bind = not dashboard_bind_host_is_loopback(bind_host)
+    _DASHBOARD_FORCE_SECURE_COOKIES = bool(
+        getattr(args, "secure_cookies", False)
+    )
+    try:
+        public_origin_identity = _dashboard_public_origin_identity(
+            getattr(args, "public_origin", None),
+            secure_cookies=_DASHBOARD_FORCE_SECURE_COOKIES,
+        )
+    except ValueError as exc:
+        raise DeltaAegisError(str(exc)) from exc
 
     db_path = args.db
     token = args.token
@@ -1811,7 +2034,7 @@ def _command_dashboard_impl(args):
 
 
     class DeltaAegisDashboardHandler(BaseHTTPRequestHandler):
-        server_version = "DeltaAegisDashboard/0.45.0"
+        server_version = "DeltaAegisDashboard/1.0-stage2"
 
         def log_message(self, fmt, *handler_args):
             if not args.quiet:
@@ -1826,10 +2049,53 @@ def _command_dashboard_impl(args):
                 )
                 super().log_message(fmt, *sanitized_args)
 
+        def send_error(self, code, message=None, explain=None):
+            # BaseHTTPRequestHandler's stock HTML error omits the dashboard's
+            # security boundary. Keep parser/method errors bounded and apply
+            # the same headers as every other response type.
+            detail = str(message or self.responses.get(code, ("Error",))[0])
+            dashboard_text_response(self, detail, status=int(code))
+
         def dashboard_request_token(self):
             # Secrets in query strings leak into browser history and standard
             # HTTP access logs. Dashboard/API tokens are header-only.
-            return self.headers.get("X-DeltaAegis-Token", "").strip()
+            legacy = self.headers.get("X-DeltaAegis-Token", "").strip()
+            authorization = self.headers.get("Authorization", "").strip()
+            bearer = ""
+            if authorization:
+                scheme, separator, value = authorization.partition(" ")
+                if separator and scheme.casefold() == "bearer":
+                    bearer = value.strip()
+            if legacy and bearer and not secrets.compare_digest(legacy, bearer):
+                return ""
+            return bearer or legacy
+
+        def api_v1_bearer_token(self):
+            """Return only the documented stable-API credential transport."""
+
+            authorizations = self.headers.get_all("Authorization") or []
+            if len(authorizations) > 1:
+                raise _api_v1.ApiV1Error(
+                    "ambiguous_credentials",
+                    "Stable API requests must use exactly one Authorization Bearer credential.",
+                    status=400,
+                )
+            if not authorizations:
+                return ""
+            authorization = str(authorizations[0] or "").strip()
+            scheme, separator, value = authorization.partition(" ")
+            if not separator or scheme.casefold() != "bearer":
+                return ""
+            token_value = value.strip()
+            if not token_value or any(character.isspace() for character in token_value):
+                return ""
+            if self.headers.get("X-DeltaAegis-Token"):
+                raise _api_v1.ApiV1Error(
+                    "ambiguous_credentials",
+                    "Stable API requests must use one Authorization Bearer credential.",
+                    status=400,
+                )
+            return token_value
 
         def dashboard_setup_request_is_local(self):
             try:
@@ -1860,6 +2126,18 @@ def _command_dashboard_impl(args):
 
             return str(morsel.value or "").strip()
 
+        def dashboard_csrf_cookie_token(self):
+            raw_cookie = self.headers.get("Cookie", "")
+            if not raw_cookie:
+                return ""
+            cookie = SimpleCookie()
+            try:
+                cookie.load(raw_cookie)
+            except Exception:
+                return ""
+            morsel = cookie.get(ACCESS_CSRF_COOKIE_NAME)
+            return str(morsel.value or "").strip() if morsel else ""
+
         def dashboard_login_redirect(self):
             dashboard_redirect_response(self, "/login")
 
@@ -1867,7 +2145,10 @@ def _command_dashboard_impl(args):
             dashboard_redirect_response(
                 self,
                 "/login",
-                cookie_header=dashboard_clear_session_cookie_header(),
+                cookie_header=(
+                    dashboard_clear_session_cookie_header(),
+                    dashboard_clear_csrf_cookie_header(),
+                ),
             )
 
         def dashboard_legacy_actor(self, auth_type="dashboard_unauthenticated"):
@@ -1952,6 +2233,654 @@ def _command_dashboard_impl(args):
         def open_connection(self):
             return connect(db_path)
 
+        def api_v1_send(self, payload, status=200, headers=None):
+            _api_v1.validate_envelope(payload)
+            response_id = str(
+                (payload.get("meta") or {}).get("request_id")
+                or self.api_v1_request_id()
+            )
+            response_headers = {"X-Request-ID": response_id}
+            response_headers.update(dict(headers or {}))
+            dashboard_json_response(
+                self,
+                payload,
+                status=status,
+                headers=response_headers,
+            )
+
+        def api_v1_request_id(self):
+            current = getattr(self, "_api_v1_request_id", None)
+            if current:
+                return current
+            current = _api_v1.request_id(self.headers.get("X-Request-ID"))
+            self._api_v1_request_id = current
+            return current
+
+        def api_v1_error(self, code, message, status=400, details=None, headers=None):
+            self.api_v1_send(
+                _api_v1.error_envelope(
+                    code,
+                    message,
+                    request_id_value=self.api_v1_request_id(),
+                    details=details,
+                ),
+                status=status,
+                headers=headers,
+            )
+
+        def api_v1_route_matches(self, route):
+            value = str(route or "")
+            return value == "/api/v1" or value.startswith("/api/v1/")
+
+        def api_v1_read_json_body(self):
+            if self.headers.get("Transfer-Encoding"):
+                raise _api_v1.ApiV1Error(
+                    "unsupported_transfer_encoding",
+                    "Stable API mutations do not accept Transfer-Encoding.",
+                    status=400,
+                )
+            lengths = self.headers.get_all("Content-Length") or []
+            if len(lengths) != 1:
+                raise _api_v1.ApiV1Error(
+                    "length_required",
+                    "Stable API mutations require one Content-Length header.",
+                    status=411,
+                )
+            length_text = str(lengths[0]).strip()
+            if re.fullmatch(r"[0-9]+", length_text) is None:
+                raise _api_v1.ApiV1Error(
+                    "invalid_content_length",
+                    "Content-Length must be a non-negative integer.",
+                    status=400,
+                )
+            length = int(length_text)
+            if length > DASHBOARD_MAX_REQUEST_BODY_BYTES:
+                self.close_connection = True
+                raise _api_v1.ApiV1Error(
+                    "request_too_large",
+                    f"Request bodies are limited to {DASHBOARD_MAX_REQUEST_BODY_BYTES} bytes.",
+                    status=413,
+                )
+            raw = self.rfile.read(length)
+            try:
+                decoded = raw.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as exc:
+                raise _api_v1.ApiV1Error(
+                    "invalid_json_encoding",
+                    "Stable API JSON bodies must use UTF-8.",
+                    status=400,
+                ) from exc
+            try:
+                payload = json.loads(decoded)
+            except json.JSONDecodeError as exc:
+                raise _api_v1.ApiV1Error(
+                    "invalid_json",
+                    "The request body is not valid JSON.",
+                    status=400,
+                    details={"line": exc.lineno, "column": exc.colno},
+                ) from exc
+            if not isinstance(payload, dict):
+                raise _api_v1.ApiV1Error(
+                    "invalid_json_type",
+                    "Stable API JSON bodies must contain an object.",
+                    status=400,
+                )
+            return payload
+
+        def dashboard_host_identity(self):
+            host_values = self.headers.get_all("Host") or []
+            if len(host_values) != 1:
+                return None
+            raw = str(host_values[0] or "").strip()
+            if (
+                not raw
+                or len(raw) > 255
+                or any(character.isspace() for character in raw)
+                or any(character in raw for character in "/?#@")
+            ):
+                return None
+            try:
+                parsed_host = urlsplit("//" + raw)
+                hostname = str(parsed_host.hostname or "").rstrip(".").casefold()
+                port = parsed_host.port
+            except ValueError:
+                return None
+            if not hostname:
+                return None
+            return raw, hostname, port
+
+        def dashboard_host_allowed(self):
+            identity = self.dashboard_host_identity()
+            if identity is None:
+                return False
+            _raw, hostname, port = identity
+            if public_origin_identity is not None:
+                scheme, expected_hostname, expected_port = public_origin_identity
+                actual_port = port or (443 if scheme == "https" else 80)
+                return (
+                    hostname == expected_hostname
+                    and int(actual_port) == int(expected_port)
+                )
+            if port is not None and int(port) != int(self.server.server_port):
+                return False
+            try:
+                local_value = str(self.connection.getsockname()[0]).split("%", 1)[0]
+                local_address = ipaddress.ip_address(local_value)
+            except (AttributeError, IndexError, OSError, ValueError):
+                return False
+            if hostname == "localhost":
+                return bool(local_address.is_loopback)
+            try:
+                address = ipaddress.ip_address(hostname.split("%", 1)[0])
+            except ValueError:
+                expected = str(bind_host or "").rstrip(".").casefold()
+                return expected not in {"", "0.0.0.0", "::"} and hostname == expected
+            return address == local_address
+
+        def dashboard_origin_allowed(self):
+            identity = self.dashboard_host_identity()
+            origin_values = self.headers.get_all("Origin") or []
+            if len(origin_values) != 1:
+                return False
+            origin = str(origin_values[0] or "").strip()
+            if identity is None or not origin or len(origin) > 512:
+                return False
+            raw_host, hostname, host_port = identity
+            try:
+                parsed = urlsplit(origin)
+                origin_port = parsed.port
+            except ValueError:
+                return False
+            if public_origin_identity is not None:
+                expected_scheme, expected_hostname, expected_port = (
+                    public_origin_identity
+                )
+                actual_hostname = (
+                    str(parsed.hostname or "").rstrip(".").casefold()
+                )
+                actual_port = origin_port or (
+                    443 if parsed.scheme == "https" else 80
+                )
+                return bool(
+                    self.dashboard_host_allowed()
+                    and parsed.scheme == expected_scheme
+                    and actual_hostname == expected_hostname
+                    and int(actual_port) == int(expected_port)
+                    and parsed.username is None
+                    and parsed.password is None
+                    and parsed.path in {"", "/"}
+                    and not parsed.query
+                    and not parsed.fragment
+                )
+            if (
+                parsed.scheme
+                != ("https" if _DASHBOARD_FORCE_SECURE_COOKIES else "http")
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.path not in {"", "/"}
+                or parsed.query
+                or parsed.fragment
+                or str(parsed.hostname or "").rstrip(".").casefold() != hostname
+            ):
+                return False
+            expected_port = host_port or int(self.server.server_port)
+            actual_port = origin_port or (443 if parsed.scheme == "https" else 80)
+            if actual_port != expected_port:
+                return False
+            # raw_host is read to keep the comparison anchored to the actual
+            # request header rather than any forwarded proxy value.
+            return bool(raw_host)
+
+        def enforce_host_boundary(self, route):
+            if self.dashboard_host_allowed():
+                return True
+            if self.api_v1_route_matches(route):
+                self.api_v1_error(
+                    "invalid_host",
+                    "The HTTP Host header is not allowed for this dashboard binding.",
+                    status=400,
+                )
+            else:
+                dashboard_json_response(
+                    self,
+                    {
+                        "error": "invalid_host",
+                        "message": "The HTTP Host header is not allowed for this dashboard binding.",
+                    },
+                    status=400,
+                )
+            return False
+
+        def enforce_cookie_mutation_boundary(self, route):
+            session_token = self.dashboard_session_cookie_token()
+            if not session_token:
+                return True
+            connection = self.open_connection()
+            try:
+                actor = _auth.authenticate_dashboard_session(
+                    connection,
+                    session_token,
+                    required_role="VIEWER",
+                    update_last_seen=False,
+                )
+            finally:
+                connection.close()
+            if not actor:
+                headers = {
+                    "Set-Cookie": [
+                        dashboard_clear_session_cookie_header(),
+                        dashboard_clear_csrf_cookie_header(),
+                    ]
+                }
+                if self.api_v1_route_matches(route):
+                    self.api_v1_error(
+                        "unauthorized",
+                        "The dashboard session is invalid or expired.",
+                        status=401,
+                        headers=headers,
+                    )
+                else:
+                    dashboard_json_response(
+                        self,
+                        {"error": "unauthorized", "message": "The dashboard session is invalid or expired."},
+                        status=401,
+                        headers=headers,
+                    )
+                return False
+            csrf_values = self.headers.get_all("X-DeltaAegis-CSRF") or []
+            csrf_header = (
+                str(csrf_values[0] or "").strip()
+                if len(csrf_values) == 1
+                else ""
+            )
+            csrf_cookie = self.dashboard_csrf_cookie_token()
+            valid_double_submit = bool(
+                csrf_header
+                and csrf_cookie
+                and secrets.compare_digest(csrf_header, csrf_cookie)
+            )
+            if (
+                not self.dashboard_origin_allowed()
+                or not valid_double_submit
+                or not _auth.verify_dashboard_csrf_token(actor, csrf_header)
+            ):
+                if self.api_v1_route_matches(route):
+                    self.api_v1_error(
+                        "csrf_validation_failed",
+                        "Cookie-authenticated mutations require a same-origin request and valid CSRF token.",
+                        status=403,
+                    )
+                else:
+                    dashboard_json_response(
+                        self,
+                        {
+                            "error": "csrf_validation_failed",
+                            "message": "Cookie-authenticated mutations require a same-origin request and valid CSRF token.",
+                        },
+                        status=403,
+                    )
+                return False
+            self.current_actor = actor
+            return True
+
+        def authenticate_api_v1(self, permission):
+            self.current_actor = None
+            session_token = self.dashboard_session_cookie_token()
+            if session_token:
+                if (
+                    self.headers.get_all("Authorization")
+                    or self.headers.get("X-DeltaAegis-Token")
+                ):
+                    self.api_v1_error(
+                        "ambiguous_credentials",
+                        "Stable API requests must use one credential transport.",
+                        status=400,
+                    )
+                    return False
+                connection = self.open_connection()
+                try:
+                    actor = _auth.authenticate_dashboard_session(
+                        connection,
+                        session_token,
+                        required_role="VIEWER",
+                    )
+                finally:
+                    connection.close()
+                if not actor:
+                    self.api_v1_error(
+                        "unauthorized",
+                        "The dashboard session is invalid or expired.",
+                        status=401,
+                        headers={
+                            "Set-Cookie": [
+                                dashboard_clear_session_cookie_header(),
+                                dashboard_clear_csrf_cookie_header(),
+                            ]
+                        },
+                    )
+                    return False
+                if not _auth.access_actor_allows_scope(actor, permission):
+                    self.api_v1_error(
+                        "forbidden",
+                        "The authenticated role is not allowed to access this resource.",
+                        status=403,
+                        details={"required_scope": permission, "actor_role": actor.get("role")},
+                    )
+                    return False
+                self.current_actor = actor
+                return True
+
+            supplied = self.api_v1_bearer_token()
+            if not supplied:
+                self.api_v1_error(
+                    "unauthorized",
+                    "Provide a scoped DeltaAegis API token using Authorization: Bearer.",
+                    status=401,
+                )
+                return False
+            connection = self.open_connection()
+            try:
+                actor = _auth.authenticate_scoped_access_api_token(
+                    connection,
+                    supplied,
+                    required_scope=permission,
+                )
+                if actor is None:
+                    known = _auth.authenticate_access_api_token(
+                        connection,
+                        supplied,
+                        required_role="VIEWER",
+                        update_last_used=False,
+                    )
+                else:
+                    known = actor
+            finally:
+                connection.close()
+            if actor is None:
+                self.api_v1_error(
+                    "forbidden" if known else "unauthorized",
+                    (
+                        "The API token is not bounded or does not include the required scope."
+                        if known
+                        else "The API token is invalid, expired, or revoked."
+                    ),
+                    status=403 if known else 401,
+                    details={"required_scope": permission},
+                )
+                return False
+            self.current_actor = actor
+            return True
+
+        def api_v1_scope(self, query):
+            raw_scope = (query.get("scope") or [""])[0].strip()
+            if not raw_scope:
+                return None
+            try:
+                return optional_network_scope(raw_scope)
+            except ValueError as exc:
+                raise _api_v1.ApiV1Error(
+                    "invalid_scope",
+                    "scope must be a valid CIDR network",
+                    status=400,
+                    details={"scope": raw_scope},
+                ) from exc
+
+        def api_v1_paginate(self, items, query):
+            limit, offset = _api_v1.parse_pagination(query)
+            return _api_v1.paginated_envelope(
+                list(items)[offset : offset + limit + 1],
+                limit=limit,
+                offset=offset,
+                request_id_value=self.api_v1_request_id(),
+            )
+
+        def handle_api_v1_get(self, route, query):
+            if route == "/api/v1":
+                self.api_v1_send(
+                    _api_v1.success_envelope(
+                        _api_v1.api_index(),
+                        request_id_value=self.api_v1_request_id(),
+                    )
+                )
+                return
+            if route == "/api/v1/openapi.json":
+                document = _api_v1.openapi_document()
+                _api_v1.validate_openapi_document(document)
+                dashboard_json_response(
+                    self,
+                    document,
+                    headers={"X-Request-ID": self.api_v1_request_id()},
+                )
+                return
+
+            asset_match = re.fullmatch(r"/api/v1/assets/([^/]+)", route)
+            quality_match = re.fullmatch(
+                r"/api/v1/telemetry-quality/decisions/([^/]+)", route
+            )
+            permissions = {
+                "/api/v1/session": "session.read",
+                "/api/v1/summary": "dashboard.read",
+                "/api/v1/scopes": "dashboard.read",
+                "/api/v1/sites": "dashboard.read",
+                "/api/v1/assets": "dashboard.read",
+                "/api/v1/events": "dashboard.read",
+                "/api/v1/alerts": "dashboard.read",
+                "/api/v1/scan-jobs": "dashboard.read",
+                "/api/v1/validations": "dashboard.read",
+                "/api/v1/telemetry-quality/decisions": "dashboard.read",
+            }
+            permission = permissions.get(route)
+            if asset_match or quality_match:
+                permission = "dashboard.read"
+            if permission is None:
+                self.api_v1_error("not_found", "Stable API route not found.", status=404, details={"path": route})
+                return
+            if not self.authenticate_api_v1(permission):
+                return
+
+            connection = self.open_connection()
+            try:
+                scope = self.api_v1_scope(query)
+                if route == "/api/v1/session":
+                    actor = {
+                        key: value
+                        for key, value in dict(self.current_actor or {}).items()
+                        if not str(key).startswith("_")
+                    }
+                    payload = _api_v1.success_envelope(
+                        actor,
+                        request_id_value=self.api_v1_request_id(),
+                    )
+                elif route == "/api/v1/summary":
+                    payload = _api_v1.success_envelope(
+                        dashboard_summary_payload(connection, scope=scope),
+                        request_id_value=self.api_v1_request_id(),
+                    )
+                elif route == "/api/v1/scopes":
+                    payload = self.api_v1_paginate(
+                        dashboard_scopes_payload(connection), query
+                    )
+                elif route == "/api/v1/sites":
+                    sites = dashboard_sites_payload(connection).get("sites", [])
+                    payload = self.api_v1_paginate(sites, query)
+                elif route == "/api/v1/assets":
+                    limit, offset = _api_v1.parse_pagination(query)
+                    items = dashboard_assets_payload(
+                        connection,
+                        limit + offset + 1,
+                        scope=scope,
+                        state=(query.get("state") or [""])[0].strip().upper() or None,
+                        identity=(query.get("identity") or [""])[0].strip().upper() or None,
+                    )
+                    payload = _api_v1.paginated_envelope(
+                        items[offset : offset + limit + 1],
+                        limit=limit,
+                        offset=offset,
+                        request_id_value=self.api_v1_request_id(),
+                    )
+                elif asset_match:
+                    payload = _api_v1.success_envelope(
+                        dashboard_asset_detail_payload(
+                            connection,
+                            unquote(asset_match.group(1)),
+                            scope=scope,
+                            limit=50,
+                        ),
+                        request_id_value=self.api_v1_request_id(),
+                    )
+                elif route == "/api/v1/events":
+                    limit, offset = _api_v1.parse_pagination(query)
+                    items = dashboard_events_payload(connection, limit + offset + 1, scope=scope)
+                    payload = _api_v1.paginated_envelope(items[offset:], limit=limit, offset=offset, request_id_value=self.api_v1_request_id())
+                elif route == "/api/v1/alerts":
+                    limit, offset = _api_v1.parse_pagination(query)
+                    items = dashboard_alerts_payload(connection, limit + offset + 1, scope=scope)
+                    payload = _api_v1.paginated_envelope(items[offset:], limit=limit, offset=offset, request_id_value=self.api_v1_request_id())
+                elif route == "/api/v1/scan-jobs":
+                    limit, offset = _api_v1.parse_pagination(query)
+                    items = dashboard_scan_jobs_payload(connection, limit + offset + 1)
+                    payload = _api_v1.paginated_envelope(items[offset:], limit=limit, offset=offset, request_id_value=self.api_v1_request_id())
+                elif route == "/api/v1/validations":
+                    limit, offset = _api_v1.parse_pagination(query)
+                    data = dashboard_validations_payload(connection, limit=limit + offset + 1)
+                    payload = _api_v1.paginated_envelope(data.get("observations", [])[offset:], limit=limit, offset=offset, request_id_value=self.api_v1_request_id())
+                elif route == "/api/v1/telemetry-quality/decisions":
+                    limit, offset = _api_v1.parse_pagination(query)
+                    data = dashboard_telemetry_quality_payload(
+                        connection,
+                        limit=limit + offset + 1,
+                        scope=scope,
+                        state=(query.get("state") or [""])[0].strip().upper() or None,
+                    )
+                    payload = _api_v1.paginated_envelope(data.get("decisions", [])[offset:], limit=limit, offset=offset, request_id_value=self.api_v1_request_id())
+                elif quality_match:
+                    payload = _api_v1.success_envelope(
+                        dashboard_telemetry_quality_detail_payload(
+                            connection, unquote(quality_match.group(1))
+                        ).get("decision"),
+                        request_id_value=self.api_v1_request_id(),
+                    )
+                else:
+                    raise _api_v1.ApiV1Error("not_found", "Stable API route not found.", status=404)
+            except _api_v1.ApiV1Error:
+                raise
+            except (DeltaAegisError, ValueError) as exc:
+                raise _api_v1.ApiV1Error(
+                    "invalid_request",
+                    str(exc),
+                    status=getattr(exc, "status_code", 400),
+                ) from exc
+            finally:
+                connection.close()
+            self.api_v1_send(payload)
+
+        def handle_api_v1_post(self, route):
+            if route != "/api/v1/sites":
+                self.api_v1_error("not_found", "Stable API route not found.", status=404, details={"path": route})
+                return
+            if not self.authenticate_api_v1("sites.write"):
+                return
+            content_types = self.headers.get_all("Content-Type") or []
+            media_type = (
+                str(content_types[0] if len(content_types) == 1 else "")
+                .split(";", 1)[0]
+                .strip()
+                .casefold()
+            )
+            if media_type != "application/json":
+                self.api_v1_error("unsupported_media_type", "Stable API mutations require application/json.", status=415)
+                return
+            payload = self.api_v1_read_json_body()
+
+            connection = self.open_connection()
+            reservation = None
+            try:
+                idempotency_values = self.headers.get_all("Idempotency-Key") or []
+                if len(idempotency_values) != 1:
+                    raise _api_v1.ApiV1Error(
+                        "invalid_idempotency_key",
+                        "Stable API mutations require exactly one Idempotency-Key header.",
+                        status=400,
+                    )
+                reservation = _api_v1.reserve_idempotency_key(
+                    connection,
+                    actor=self.current_actor or {},
+                    method="POST",
+                    route=route,
+                    key=str(idempotency_values[0]),
+                    payload=payload,
+                )
+                if reservation["replay"]:
+                    self.api_v1_send(
+                        reservation["payload"],
+                        status=reservation["status"],
+                        headers={"Idempotency-Replayed": "true"},
+                    )
+                    return
+
+                connection.execute("BEGIN IMMEDIATE")
+                result = dashboard_site_action_payload(
+                    connection,
+                    "/api/site-create",
+                    payload,
+                    actor=self.current_actor,
+                    source_ip=self.client_address[0] if self.client_address else None,
+                    user_agent=self.headers.get("User-Agent", ""),
+                )
+                response = _api_v1.success_envelope(
+                    result,
+                    request_id_value=self.api_v1_request_id(),
+                )
+                _api_v1.complete_idempotency_key(
+                    connection,
+                    idempotency_id=reservation["idempotency_id"],
+                    status=201,
+                    payload=response,
+                )
+                connection.commit()
+                self.api_v1_send(response, status=201)
+            except _api_v1.ApiV1Error:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
+            except (DashboardAdminUserActionError, DeltaAegisError, ValueError) as exc:
+                if connection.in_transaction:
+                    connection.rollback()
+                response = _api_v1.error_envelope(
+                    "site_create_failed",
+                    str(exc),
+                    request_id_value=self.api_v1_request_id(),
+                )
+                if reservation and not reservation.get("replay"):
+                    _api_v1.complete_idempotency_key(
+                        connection,
+                        idempotency_id=reservation["idempotency_id"],
+                        status=getattr(exc, "status_code", 400),
+                        payload=response,
+                    )
+                self.api_v1_send(
+                    response,
+                    status=getattr(exc, "status_code", 400),
+                )
+            except Exception:
+                if connection.in_transaction:
+                    connection.rollback()
+                response = _api_v1.error_envelope(
+                    "internal_error",
+                    "The stable API mutation could not be completed.",
+                    request_id_value=self.api_v1_request_id(),
+                )
+                if reservation and not reservation.get("replay"):
+                    _api_v1.complete_idempotency_key(
+                        connection,
+                        idempotency_id=reservation["idempotency_id"],
+                        status=500,
+                        payload=response,
+                    )
+                self.api_v1_send(response, status=500)
+            finally:
+                connection.close()
+
 
         def require_permission(self, permission: str):
             required_role = access_rbac_required_role(permission)
@@ -2019,6 +2948,27 @@ def _command_dashboard_impl(args):
             route = parsed.path
             query = parse_qs(parsed.query)
 
+            if not self.enforce_host_boundary(route):
+                return
+
+            if self.api_v1_route_matches(route):
+                try:
+                    self.handle_api_v1_get(route, query)
+                except _api_v1.ApiV1Error as exc:
+                    self.api_v1_error(
+                        exc.code,
+                        str(exc),
+                        status=exc.status,
+                        details=exc.details,
+                    )
+                except Exception:
+                    self.api_v1_error(
+                        "internal_error",
+                        "The stable API request could not be completed.",
+                        status=500,
+                    )
+                return
+
             if route == "/healthz":
                 dashboard_text_response(self, "ok")
                 return
@@ -2074,28 +3024,15 @@ def _command_dashboard_impl(args):
                 return
 
             if route == "/logout":
-                session_token = self.dashboard_session_cookie_token()
-
-                if session_token:
-                    connection = self.open_connection()
-
-                    try:
-                        actor = authenticate_dashboard_session(
-                            connection,
-                            session_token,
-                            required_role="VIEWER",
-                            update_last_seen=False,
-                        )
-                        expire_dashboard_session(
-                            connection,
-                            session_token,
-                            actor=actor,
-                            reason="logout",
-                        )
-                    finally:
-                        connection.close()
-
-                self.dashboard_logout_redirect()
+                dashboard_json_response(
+                    self,
+                    {
+                        "error": "method_not_allowed",
+                        "message": "Logout is a state-changing action and requires POST.",
+                    },
+                    status=405,
+                    headers={"Allow": "POST"},
+                )
                 return
 
             if route == "/":
@@ -2712,6 +3649,46 @@ def _command_dashboard_impl(args):
             parsed = urlparse(self.path)
             route = parsed.path
 
+            if not self.enforce_host_boundary(route):
+                return
+
+            if (
+                self.api_v1_route_matches(route)
+                and self.dashboard_session_cookie_token()
+                and (
+                    self.headers.get_all("Authorization")
+                    or self.headers.get("X-DeltaAegis-Token")
+                )
+            ):
+                self.api_v1_error(
+                    "ambiguous_credentials",
+                    "Stable API requests must use one credential transport.",
+                    status=400,
+                )
+                return
+
+            if route not in {"/setup", "/login"}:
+                if not self.enforce_cookie_mutation_boundary(route):
+                    return
+
+            if self.api_v1_route_matches(route):
+                try:
+                    self.handle_api_v1_post(route)
+                except _api_v1.ApiV1Error as exc:
+                    self.api_v1_error(
+                        exc.code,
+                        str(exc),
+                        status=exc.status,
+                        details=exc.details,
+                    )
+                except Exception:
+                    self.api_v1_error(
+                        "internal_error",
+                        "The stable API mutation could not be completed.",
+                        status=500,
+                    )
+                return
+
             if route == "/setup":
                 if not self.dashboard_setup_request_is_local():
                     dashboard_json_response(
@@ -2865,7 +3842,10 @@ def _command_dashboard_impl(args):
                 dashboard_redirect_response(
                     self,
                     "/",
-                    cookie_header=dashboard_session_cookie_header(session["session_token"]),
+                    cookie_header=(
+                        dashboard_session_cookie_header(session["session_token"]),
+                        dashboard_csrf_cookie_header(session["csrf_token"]),
+                    ),
                 )
                 return
 
@@ -2925,7 +3905,10 @@ def _command_dashboard_impl(args):
                 dashboard_redirect_response(
                     self,
                     "/",
-                    cookie_header=dashboard_session_cookie_header(session["session_token"]),
+                    cookie_header=(
+                        dashboard_session_cookie_header(session["session_token"]),
+                        dashboard_csrf_cookie_header(session["csrf_token"]),
+                    ),
                 )
                 return
 
@@ -3141,8 +4124,7 @@ def _command_dashboard_impl(args):
                 if not self.require_permission("admin.users.write"):
                     return
 
-                connection = sqlite3.connect(db_path)
-                connection.row_factory = sqlite3.Row
+                connection = self.open_connection()
 
                 try:
                     payload = dashboard_read_request_payload(self)
@@ -3794,6 +4776,34 @@ def _command_dashboard_impl(args):
                     status=400,
                 )
 
+        def handle_unsupported_http_method(self):
+            parsed = urlparse(self.path)
+            route = parsed.path
+            if not self.enforce_host_boundary(route):
+                return
+            if self.api_v1_route_matches(route):
+                self.api_v1_error(
+                    "method_not_allowed",
+                    "The HTTP method is not allowed for this stable API route.",
+                    status=405,
+                    details={"method": self.command, "path": route},
+                    headers={"Allow": "GET, POST"},
+                )
+                return
+            self.send_error(501, "Unsupported method")
+
+        def do_PUT(self):
+            self.handle_unsupported_http_method()
+
+        def do_PATCH(self):
+            self.handle_unsupported_http_method()
+
+        def do_DELETE(self):
+            self.handle_unsupported_http_method()
+
+        def do_OPTIONS(self):
+            self.handle_unsupported_http_method()
+
     # Reconcile dead rows at every dashboard start, even when the recurring
     # schedule worker is disabled.
     startup_watchdog_connection = connect(db_path)
@@ -3845,7 +4855,19 @@ def _command_dashboard_impl(args):
 
     print("DeltaAegis dashboard starting")
     print("============================")
-    print(f"URL:      http://{bind_host}:{args.port}")
+    configured_public_origin = str(
+        getattr(args, "public_origin", None) or ""
+    ).strip()
+    print(
+        "URL:      "
+        + (
+            configured_public_origin.rstrip("/")
+            if configured_public_origin
+            else f"http://{bind_host}:{args.port}"
+        )
+    )
+    if configured_public_origin:
+        print(f"Backend:  http://{bind_host}:{args.port}")
     print(f"Database: {db_path}")
     print("Mode:     dashboard + investigation status updates")
     if getattr(args, "enable_scheduled_scans", True):
@@ -3860,7 +4882,7 @@ def _command_dashboard_impl(args):
     elif login_required:
         print("Auth:     username/password login required")
         print("Login:    http://{host}:{port}/login".format(host=bind_host, port=args.port))
-        print("Sessions: HttpOnly SameSite=Lax cookie")
+        print("Sessions: HttpOnly SameSite=Strict cookie")
         print("DB Tokens: still accepted for automation via X-DeltaAegis-Token")
     else:
         print("Auth:     disabled")

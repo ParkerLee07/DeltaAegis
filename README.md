@@ -34,6 +34,28 @@ Highlights:
 - Retained `AGPL-3.0-only`; alternative commercial licensing remains available
   only by separate written agreement.
 
+## Development Candidate — v1.0 combined Stage 1–2
+
+The active development branch combines the first two v1.0 delivery stages on
+top of the immutable v0.45.0 release:
+
+- checksummed, forward-only migrations from every exact v0.42.x database
+  origin, with a verified pre-migration backup and restore rehearsal;
+- a documented OpenAPI 3.1 `/api/v1` surface with stable envelopes,
+  pagination, request IDs, and durable mutation idempotency;
+- bounded role-capped token scopes, session CSRF state, same-origin and Host
+  validation, strict request-body limits, and restrictive response headers;
+- dedicated Stage 1 database/interruption tests and Stage 2 real-HTTP security
+  tests.
+
+See [the migration and recovery contract](docs/v1-stage1-migrations.md),
+[the stable API contract](docs/api-v1.md), and
+[the combined checkpoint checklist](docs/V1_STAGE1_2_RELEASE_CHECKLIST.md).
+The exact predecessor-test transition evidence is recorded in
+[the Stage 1–2 compatibility note](docs/v1-stage1-2-compatibility.md).
+This candidate is not the complete v1.0 GA release: identity, detection,
+operations/soak, and final integration gates remain open under `V1_SCOPE.md`.
+
 ## What DeltaAegis Does
 
 DeltaAegis helps answer:
@@ -73,6 +95,8 @@ data/
 events/
 reports/
 backups/
+telemetry-evidence/
+restore-rehearsals/
 ```
 
 The default installed dashboard database is:
@@ -260,6 +284,14 @@ python3 deltaaegis.py dashboard --lan --port 8090
 
 `--lan` requires at least one active password user or an explicit API token. DeltaAegis continues to serve HTTP directly, so use a trusted LAN or place it behind an HTTPS reverse proxy for broader deployment.
 
+An HTTPS reverse proxy must use an explicit browser-facing origin and preserve
+that authority in `Host`; forwarded headers are not trusted:
+
+```bash
+deltaaegis dashboard --host 127.0.0.1 --port 8090 \
+  --secure-cookies --public-origin https://deltaaegis.example
+```
+
 ## Dashboard
 
 Start the dashboard:
@@ -333,6 +365,13 @@ The default active database is:
 data/deltaaegis.db
 ```
 
+The first connection made by the Stage 1–2 candidate recognizes the database,
+creates and verifies a pre-migration backup when migrations are pending, and
+then applies each migration and ledger record transactionally. Supported
+v0.42.x and v0.45 databases are never upgraded without that verified recovery
+artifact. See [Stage 1 upgrades and recovery](docs/v1-stage1-migrations.md)
+before applying the candidate to an existing database.
+
 Create a SQLite-consistent backup and manifest:
 
 ```bash
@@ -394,7 +433,13 @@ The safety backup is retained after success or rollback. DeltaAegis does not del
 
 ## Security Boundary
 
-DeltaAegis v0.45.0 does not expose arbitrary shell command execution from the dashboard.
+DeltaAegis does not expose arbitrary shell command execution from the dashboard.
+
+The Stage 1–2 candidate adds a stable `/api/v1` boundary. Programmatic clients
+must use a bounded scoped token in `Authorization: Bearer`; browser-session
+mutations require same-origin double-submit CSRF verification. All response
+types receive no-store caching and restrictive browser security headers. The
+legacy unversioned `/api/*` routes remain private dashboard interfaces.
 
 Dashboard NetSniper execution uses guarded job records, validated private IPv4 CIDRs, and fixed argument-vector process creation. Live job-detail reads are bounded and confined to the configured scan-log root.
 
@@ -499,7 +544,10 @@ Typical roles:
 - ANALYST — investigation and workflow actions.
 - VIEWER — read-only dashboard review.
 
-API tokens remain available for automation through the `X-DeltaAegis-Token` header.
+Stable `/api/v1` automation uses bounded scoped API tokens through the
+`Authorization: Bearer` header. The historical `X-DeltaAegis-Token` header is
+retained only for private unversioned dashboard compatibility routes. See
+[the `/api/v1` contract](docs/api-v1.md).
 
 ## Uninstall
 
@@ -537,9 +585,9 @@ Open the guided human-readable menu:
 
 Running the tool without arguments also opens the menu when stdin and stdout are interactive terminals. The menu provides concise health checks, targeted validator execution, retained reports, and stable `DAE-TRB-NNNN` diagnostic codes. See [the troubleshooter and error-code reference](docs/TROUBLESHOOTER.md).
 
-DeltaAegis includes one repository-aware troubleshooting tool. It reads the validator inventory from the selected checkout, identifies the highest versioned release gate, and runs selected validators in fresh isolated clones. It no longer carries an embedded copy of historical validator scripts that can drift behind the repository.
+DeltaAegis includes one repository-aware troubleshooting tool. It reads the validator inventory from the selected checkout, identifies the highest versioned release or explicitly named candidate gate, and runs selected validators in fresh isolated clones. It no longer carries an embedded copy of historical validator scripts that can drift behind the repository.
 
-Run the current release gate in a fresh isolated `$HOME/DeltaAegis` clone:
+Run the current release/candidate gate in a fresh isolated `$HOME/DeltaAegis` clone:
 
     python3 tools/deltaaegis_troubleshooter.py
 
@@ -566,13 +614,19 @@ The default branch intentionally retains the active compatibility floor rather t
 
 ## Validation
 
-Run the complete v0.45.0 automated release gate from a clean checkout:
+Run the combined v1.0 Stage 1–2 gate from a clean candidate checkout:
+
+```bash
+./tools/validate_v1_0_stage1_2_gate.sh
+```
+
+Run the immutable v0.45.0 release gate from its release checkout:
 
 ```bash
 ./tools/validate_v0_45_release_gate.sh
 ```
 
-The release gate validates v0.45 release metadata, deterministic telemetry-quality decisions, durable review storage, state-aware effects, replayable current-state projection, authenticated review and override boundaries, the Telemetry Quality Center, regression tests, the deterministic repository audit, and the retained predecessor compatibility floor.
+The combined candidate gate validates exact supported upgrades, interruption and recovery behavior, the runtime/tracked OpenAPI contract, real HTTP security and idempotency, required-install and modular boundaries, released v0.45 telemetry trust, applicable predecessor security behavior, core regressions, and the deterministic repository audit. It is intentionally not named or represented as the complete v1.0 GA gate.
 
 Complete the manual backup and restore checklist before merge, tag, or publication:
 
