@@ -16,6 +16,22 @@ from typing import Any
 REMOVAL_THRESHOLD = 3
 
 
+def _execute_schema_sql(connection: sqlite3.Connection, script: str) -> None:
+    """Execute DDL without sqlite3.executescript's implicit transaction commit."""
+
+    statement = ""
+    for line in str(script).splitlines(keepends=True):
+        statement += line
+        if not sqlite3.complete_statement(statement):
+            continue
+        sql = statement.strip()
+        statement = ""
+        if sql:
+            connection.execute(sql)
+    if statement.strip():
+        raise ValueError("incomplete current-state schema SQL")
+
+
 PROJECTION_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS telemetry_current_assets (
     network_scope TEXT NOT NULL,
@@ -132,7 +148,7 @@ CLASSIFICATION_FIELDS = (
 
 
 def ensure_schema(connection: sqlite3.Connection) -> None:
-    connection.executescript(PROJECTION_SCHEMA_SQL)
+    _execute_schema_sql(connection, PROJECTION_SCHEMA_SQL)
     existing = {
         str(row[1])
         for row in connection.execute(
@@ -144,9 +160,6 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
             "ALTER TABLE telemetry_current_assets "
             "ADD COLUMN accepted_score INTEGER"
         )
-
-
-
 
 def ensure_ready(connection: sqlite3.Connection) -> int:
     """Initialize v0.45 projection storage and seed legacy accepted state lazily."""
@@ -671,6 +684,43 @@ def _upsert_finding(
     )
 
 
+def snapshot_is_historical(
+    connection: sqlite3.Connection,
+    *,
+    scope: str,
+    created_at: str,
+    scan_id: str,
+) -> bool:
+    """Return true when a newer imported snapshot already owns the scope."""
+
+    row = connection.execute(
+        """
+        SELECT s.created_at, s.scan_id
+        FROM snapshots s
+        LEFT JOIN telemetry_quality_decisions q
+          ON q.decision_id = s.quality_decision_id
+        WHERE s.network_scope = ?
+          AND (
+                (s.quality_decision_id IS NULL AND s.quality_status = 'ACCEPTED')
+                OR
+                (
+                    s.quality_decision_id IS NOT NULL
+                    AND q.current_state IN ('ACCEPTED', 'DEGRADED')
+                    AND q.import_status IN ('IMPORTED', 'ALREADY_IMPORTED')
+                )
+          )
+        ORDER BY s.created_at DESC, s.imported_at DESC, s.scan_id DESC
+        LIMIT 1
+        """,
+        (scope,),
+    ).fetchone()
+    if row is None:
+        return False
+    existing = (str(row["created_at"] or ""), str(row["scan_id"] or ""))
+    incoming = (str(created_at or ""), str(scan_id or ""))
+    return incoming < existing
+
+
 def apply_snapshot(
     connection: sqlite3.Connection,
     snapshot: Any,
@@ -966,13 +1016,15 @@ def replay_scope(
 
     decisions = connection.execute(
         """
-        SELECT q.*, s.scan_id AS snapshot_scan_id
+        SELECT q.*, s.scan_id AS snapshot_scan_id,
+               s.created_at AS snapshot_created_at,
+               s.imported_at AS snapshot_imported_at
         FROM telemetry_quality_decisions q
         JOIN snapshots s ON s.quality_decision_id = q.decision_id
         WHERE q.network_scope = ?
           AND q.current_state IN ('ACCEPTED', 'DEGRADED')
           AND q.import_status IN ('IMPORTED', 'ALREADY_IMPORTED')
-        ORDER BY q.evaluated_at, q.decision_id
+        ORDER BY s.created_at, s.imported_at, s.scan_id, q.decision_id
         """,
         (scope,),
     ).fetchall()
@@ -1395,7 +1447,10 @@ def merge_risk_rows(
 ) -> list[dict[str, Any]]:
     output = [dict(item) for item in rows or []]
     by_key = {
-        str(item.get("subject_key") or item.get("asset_key") or ""): item
+        (
+            str(item.get("network_scope") or scope or ""),
+            str(item.get("subject_key") or item.get("asset_key") or ""),
+        ): item
         for item in output
     }
     projected = current_assets(connection, scope=scope, limit=10000)
@@ -1406,9 +1461,17 @@ def merge_risk_rows(
             scope=str(asset["network_scope"]),
             asset_key=asset_key,
         )
-        existing = by_key.get(asset_key)
+        row_key = (str(asset["network_scope"]), asset_key)
+        existing = by_key.get(row_key)
         if existing is not None:
+            existing_score = max(0, min(100, int(existing.get("score") or 0)))
+            projected_score = int(support["total_score"])
+            accepted_score = int(support["accepted_score"])
             if support["has_degraded_only_support"]:
+                projected_score = max(
+                    accepted_score,
+                    min(projected_score, 64),
+                )
                 existing["degraded_positive_evidence_present"] = True
                 existing["degraded_contribution_ceiling"] = 64
                 reasons = list(existing.get("reasons") or [])
@@ -1419,6 +1482,13 @@ def merge_risk_rows(
                 if note not in reasons:
                     reasons.append(note)
                 existing["reasons"] = reasons
+            existing["score"] = max(existing_score, projected_score)
+            existing["level"] = risk_level(existing["score"])
+            existing["accepted_supported_score"] = max(
+                int(existing.get("accepted_supported_score") or 0),
+                accepted_score,
+            )
+            existing["network_scope"] = str(asset["network_scope"])
             continue
 
         ceiling = (
@@ -1478,11 +1548,12 @@ def merge_risk_rows(
                 "DEGRADED-only risk contribution is capped at MEDIUM (64)."
             )
         output.append(record)
-        by_key[asset_key] = record
+        by_key[row_key] = record
 
     output.sort(
         key=lambda item: (
             -int(item.get("score") or 0),
+            str(item.get("network_scope") or ""),
             str(item.get("subject_key") or ""),
         )
     )
@@ -1503,4 +1574,5 @@ __all__ = [
     "merge_risk_rows",
     "replay_scope",
     "risk_ceiling_for_asset",
+    "snapshot_is_historical",
 ]

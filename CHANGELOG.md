@@ -1,3 +1,34 @@
+## DeltaAegis v0.45.0 — Telemetry Trust
+
+- Hardened retained telemetry evidence against path traversal, implicit SQLite commits, partial override persistence, and failed-ingest evidence leakage.
+- Enforced the complete NetSniper v2.1 capability contract, accepted complete zero-host scans, and preserved authoritative negative evidence for empty scopes.
+- Closed stored dashboard XSS attribute sinks, preserved risk identity across network scopes, enforced degraded-only risk ceilings on existing rows, and prevented historical imports from rolling current state backward.
+- Added bounded telemetry-quality API errors, atomic override replay with evidence compensation, intelligence backfill, and a dedicated deep bug-fix regression validator.
+- Corrected v0.45 telemetry trust so complete unprivileged scans and host-level unknown/review classifications no longer downgrade the whole bundle; actual collector loss still degrades and identity collisions still quarantine.
+- Added deterministic telemetry-quality decisions with `ACCEPTED`, `DEGRADED`,
+  `QUARANTINED`, and `REJECTED` states.
+- Added immutable automated-decision storage and a separate authenticated
+  review and policy-permitted override ledger.
+- Added content-bound run identity, fail-closed conflicts, and retained source
+  evidence.
+- Added state-aware effects: accepted evidence may support complete state
+  transitions when coverage is independently proven, degraded evidence is
+  additive or refresh-only, and quarantined or rejected evidence cannot mutate
+  current state.
+- Added replayable current-state projection and a `MEDIUM` cap for risks based
+  only on degraded evidence.
+- Added the Telemetry Quality Center, four authenticated quality APIs, detail
+  disclosure, and Markdown quality reporting.
+- Added structured NetSniper v2.1 evidence context to asset detail while
+  preserving compact list, risk, event, and schema boundaries.
+- Disabled the legacy mutating CLI `approve` path; review and overrides require
+  the authenticated dashboard workflow.
+- Added focused v0.45 validation, explicit v0.44 transition validators,
+  predecessor compatibility, release metadata validation, and a flat release
+  gate.
+- Did not claim completion of the broader migration-ledger, supported-upgrade,
+  or backup-integrated recovery roadmap; that work remains deferred.
+
 ## DeltaAegis v0.44.1 — Repository Hygiene and Validation Retention
 
 - Replaced the stale embedded troubleshooter bundle with live repository inventory, strict executable-graph validation, and automatic selection of the highest retained release gate.

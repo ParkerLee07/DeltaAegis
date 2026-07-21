@@ -1,25 +1,25 @@
-# DeltaAegis v0.44.1 Repository Audit
+# DeltaAegis v0.45.0 Repository Audit
 
 Schema: `deltaaegis-repository-audit-v2`
 
-This deterministic inventory describes the v0.44.1 Repository Hygiene and Validation Retention maintenance candidate. Regenerate it with `python3 tools/audit_v0_44_repository.py --write`.
+This deterministic inventory describes the v0.45.0 Telemetry Trust release candidate. Regenerate it with `python3 tools/audit_v0_44_repository.py --write`.
 
 ## Inventory summary
 
 | Measure | Count |
 |---|---:|
-| Repository files in audit scope | 154 |
-| `deltaaegis.py` lines | 34692 |
+| Repository files in audit scope | 158 |
+| `deltaaegis.py` lines | 34790 |
 | Root top-level functions | 677 |
 | Root top-level classes | 6 |
 | Internal core modules | 10 |
 | Distinct CLI commands | 67 |
 | Distinct `/api` route literals | 61 |
 | Declared schema tables | 26 |
-| Validator scripts | 78 |
+| Validator scripts | 81 |
 | Validator version groups | 7 |
 
-Root source SHA-256: `d77ee27801d45f1bec1a38c74872bdf5db1b620456e84472017b73fd8f451c3a`
+Root source SHA-256: `e277bfeed6e5422d567c5207d14b6bc9a43c5fc8486f95be9c0b73d8c5706c12`
 
 ## Modular core inventory
 
@@ -27,14 +27,14 @@ Root source SHA-256: `d77ee27801d45f1bec1a38c74872bdf5db1b620456e84472017b73fd8f
 |---|---:|---:|---:|---|---|
 | `deltaaegis_core/auth.py` | 1241 | 40 | 2 | None | `5bc0931d6d764172ae7a6dd7dba1e4398019ae7bc4f2761b7fe9f7d908c1d451` |
 | `deltaaegis_core/config.py` | 80 | 1 | 1 | None | `0860bf7e2b193aa22c4ad41f69f3f3f4a2f3360c3635052ef7fe1959d1f17217` |
-| `deltaaegis_core/current_state.py` | 1506 | 32 | 0 | None | `e67e9ff0380b9b0a4a68c2fd8fc8f90d1facc83798f7790e576429b0756cf433` |
+| `deltaaegis_core/current_state.py` | 1578 | 34 | 0 | None | `731dbc2f93f348dea37dafb305637118608e4b5d602f0d41c7d911b3544276cd` |
 | `deltaaegis_core/db.py` | 25 | 1 | 0 | None | `8637f696f78a861a2d2f1ea00e5e671a1f5dd239659fcb99eb16b6c9154e3488` |
 | `deltaaegis_core/ingest.py` | 788 | 25 | 1 | `auth` | `321d00cfeb0eee57f6fb9bdae0d50adc51e6ad5ded1325cd20a3cbd77057d7c9` |
 | `deltaaegis_core/jobs.py` | 1857 | 46 | 1 | `auth` | `11ae9f4c1c16dc4c362c441ee5c1dabef0d69634a117d4added03fc9b34ee3d5` |
 | `deltaaegis_core/reports.py` | 891 | 38 | 1 | None | `687bdd1a77a785a57e5ef58b1d7f4ed4e5df43ef1e20568db19056225bb14d4f` |
 | `deltaaegis_core/sites.py` | 654 | 20 | 0 | `auth`, `ingest` | `a59a9ab1fdd700ef5b1be1957e35d7e11c84c500e786fac6eafa5293b32d84ce` |
-| `deltaaegis_core/telemetry_quality.py` | 1897 | 40 | 1 | None | `a192a0455dfb5c24f3733c528bdf17b066d28546964ee3e75fb42089f3e599a5` |
-| `deltaaegis_core/web.py` | 3886 | 15 | 0 | `auth` | `d67257473e6faba0d53c2dedbc4b5965e1810ea5956a63d30aed28217751d9d6` |
+| `deltaaegis_core/telemetry_quality.py` | 2257 | 50 | 1 | None | `057a69dd2d15e0a5408925444b3051cbfe4a543782d446caef83d521a8a56ce9` |
+| `deltaaegis_core/web.py` | 3896 | 15 | 0 | `auth` | `8f6657894c3841916c8e95952e57b73450940cb964c27771b4df9e52951117f5` |
 
 Forbidden imports of the root `deltaaegis` module from internal core modules: None detected.
 
@@ -42,11 +42,11 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 
 | ID | Severity | Area | Evidence | Planned disposition |
 |---|---|---|---|---|
-| DA044-001 | MEDIUM | compatibility facade | deltaaegis.py remains 34692 lines with 677 top-level functions; the eight core modules contain 12825 lines. | Retain the facade through the planned migration/API releases; continue only owned incremental extraction. |
+| DA044-001 | MEDIUM | compatibility facade | deltaaegis.py remains 34790 lines with 677 top-level functions; the eight core modules contain 13267 lines. | Retain the facade through the planned migration/API releases; continue only owned incremental extraction. |
 | DA044-002 | MEDIUM | source-order coupling | Repeated top-level function names in the compatibility facade: build_current_risk_register, dashboard_asset_detail_payload, dashboard_assets_payload, dashboard_current_state_payload, dashboard_index_html, dashboard_operator_session_shell_html, dashboard_summary_payload. | Remove only with characterization evidence and explicit compatibility ownership. |
-| DA044-003 | MEDIUM | storage migrations | 26 table names remain declared through the root-owned schema bootstrap. | Introduce the forward-only migration ledger and supported upgrade paths in v0.45. |
+| DA044-003 | MEDIUM | storage migrations | 26 table names remain declared through the root-owned schema bootstrap. | Complete the remaining forward-only migration-ledger and supported-upgrade roadmap after v0.45.0. |
 | DA044-004 | MEDIUM | HTTP/API contract | 61 unversioned /api route literals remain implementation endpoints. | Introduce /api/v1, OpenAPI, CSRF, and deprecation policy implementation in v0.46. |
-| DA044-005 | LOW | validation estate | 78 validator scripts span 7 version groups; 216 historical validators are preserved by a byte-verified retirement manifest. | Retain the current compatibility floor and require manifest-backed replacement evidence for any further validator retirement. |
+| DA044-005 | LOW | validation estate | 81 validator scripts span 7 version groups; 216 historical validators are preserved by a byte-verified retirement manifest. | Retain the current compatibility floor and require manifest-backed replacement evidence for any further validator retirement. |
 | DA044-006 | MEDIUM | TrueAegis compatibility | TrueAegis remains contract-validated but not pinned to a published semantic-version range. | Publish or pin the supported TrueAegis range before v1.0. |
 | DA044-007 | LOW | documentation | 0 known historical architecture document marker remains. | Keep docs/architecture/overview.md authoritative and clean historical prose only in an owned documentation change. |
 
@@ -54,13 +54,13 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 
 | Name | Definition lines |
 |---|---|
-| `build_current_risk_register` | 15875, 33680 |
-| `dashboard_asset_detail_payload` | 14976, 33655 |
-| `dashboard_assets_payload` | 14856, 33629, 34673 |
-| `dashboard_current_state_payload` | 14748, 33587 |
-| `dashboard_index_html` | 25243, 25269, 25428, 25546, 26544 |
-| `dashboard_operator_session_shell_html` | 26568, 27027, 33328 |
-| `dashboard_summary_payload` | 13591, 33608 |
+| `build_current_risk_register` | 15908, 33778 |
+| `dashboard_asset_detail_payload` | 15009, 33753 |
+| `dashboard_assets_payload` | 14889, 33727, 34771 |
+| `dashboard_current_state_payload` | 14781, 33685 |
+| `dashboard_index_html` | 25278, 25304, 25463, 25581, 26579 |
+| `dashboard_operator_session_shell_html` | 26603, 27062, 33363 |
+| `dashboard_summary_payload` | 13624, 33706 |
 
 ## Command, route, and schema catalogs
 
@@ -86,7 +86,7 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 | v0.42 | 15 |
 | v0.43 | 1 |
 | v0.44 | 17 |
-| v0.45 | 10 |
+| v0.45 | 13 |
 
 ## Validator retirement evidence
 
@@ -107,7 +107,7 @@ No known stale architecture-document marker was found.
 
 | Release | Owned work after v0.44 |
 |---|---|
-| v0.45 | Migration ledger, supported upgrades, and backup-integrated recovery |
+| v0.46+ | Remaining migration-ledger, supported-upgrade, and backup-integrated recovery work not delivered by v0.45.0 |
 | v0.46 | `/api/v1`, OpenAPI, CSRF, sessions/tokens, and web security headers |
 | v0.47 | Sensor/scope identity and overlapping CIDRs |
 | v0.48 | Versioned deterministic detection rules |
@@ -117,5 +117,5 @@ No known stale architecture-document marker was found.
 
 - The audit is read-only except when explicitly writing its deterministic Markdown report.
 - Counts use Git cached and non-ignored untracked candidate files and exclude runtime data roots and the generated report.
-- v0.44.1 retains the v0.44 module boundaries and introduces no database-schema or stable-API change.
+- v0.45.0 adds deterministic telemetry-quality decisions, immutable decision and review ledgers, state-aware ingestion effects, replayable current-state projection, and authenticated quality review while preserving the v0.44 modular boundaries.
 - Historical validator retirement is allowed only when exact prior bytes remain verified at an immutable release tag, current behavior has replacement-contract evidence, and the retained execution graph is complete.

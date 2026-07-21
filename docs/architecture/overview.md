@@ -1,6 +1,6 @@
 # DeltaAegis Architecture Overview
 
-Status: v0.44.0 modular core foundation and v1.0 boundary map
+Status: v0.45.0 telemetry trust on the v0.44 modular core foundation
 
 ## System role
 

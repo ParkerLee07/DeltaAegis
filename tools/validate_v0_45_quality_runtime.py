@@ -75,7 +75,7 @@ def validate_contract(payload):
         "public decision schema version mismatch",
     )
     require(
-        payload["policy_version"] == "deltaaegis-v0.45-stage0f",
+        payload["policy_version"] == "deltaaegis-v0.45-stage0g",
         "public decision policy version mismatch",
     )
     require(
@@ -516,5 +516,197 @@ def main():
     print("[PASS] v0.45 deterministic telemetry-quality runtime")
 
 
+
+
+def _validate_stage0g_policy_correction() -> None:
+    '''Validate the narrow Stage 0G quality-policy correction.'''
+    import json as _json
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parents[1]
+    policy_path = root / "contracts" / "v0.45" / "telemetry-quality-policy.json"
+    policy_schema_path = (
+        root / "contracts" / "v0.45" / "telemetry-quality-policy.schema.json"
+    )
+    decision_schema_path = (
+        root / "contracts" / "v0.45" / "telemetry-quality-decision.schema.json"
+    )
+    runtime_path = root / "deltaaegis_core" / "telemetry_quality.py"
+
+    policy = _json.loads(policy_path.read_text(encoding="utf-8"))
+    policy_schema = _json.loads(policy_schema_path.read_text(encoding="utf-8"))
+    decision_schema = _json.loads(decision_schema_path.read_text(encoding="utf-8"))
+
+    def _catalog_entries(value):
+        found = {}
+
+        def _walk(item):
+            if isinstance(item, dict):
+                if (
+                    isinstance(item.get("code"), str)
+                    and "minimum_state" in item
+                    and "description" in item
+                ):
+                    found.setdefault(item["code"], []).append(item)
+                for key, child in item.items():
+                    if (
+                        isinstance(child, dict)
+                        and "minimum_state" in child
+                        and "description" in child
+                    ):
+                        found.setdefault(str(key), []).append(child)
+                    _walk(child)
+            elif isinstance(item, list):
+                for child in item:
+                    _walk(child)
+
+        _walk(value)
+        result = {}
+        for code, entries in found.items():
+            unique = []
+            for entry in entries:
+                if all(existing is not entry for existing in unique):
+                    unique.append(entry)
+            if len(unique) == 1:
+                result[code] = unique[0]
+        return result
+
+    catalog = _catalog_entries(policy)
+    require(
+        policy.get("policy_version") == "deltaaegis-v0.45-stage0g",
+        "Stage 0G policy version is missing",
+    )
+    require(
+        policy_schema["properties"]["policy_version"].get("const")
+        == "deltaaegis-v0.45-stage0g",
+        "policy schema does not require Stage 0G",
+    )
+    require(
+        decision_schema["properties"]["policy_version"].get("enum")
+        == [
+            "deltaaegis-v0.45-stage0f",
+            "deltaaegis-v0.45-stage0g",
+        ],
+        "decision schema does not preserve Stage 0F and accept Stage 0G",
+    )
+
+    for code in (
+        "unprivileged_scan",
+        "classification_review_present",
+        "classification_unknown_present",
+    ):
+        require(
+            catalog[code]["minimum_state"] == "ACCEPTED",
+            f"{code} still downgrades complete bundle telemetry",
+        )
+
+    expected = {
+        "partial_scan": "DEGRADED",
+        "collector_failed": "DEGRADED",
+        "collector_unavailable": "DEGRADED",
+        "required_collector_failed": "DEGRADED",
+        "negative_evidence_disabled": "DEGRADED",
+        "identity_collision": "QUARANTINED",
+    }
+    for code, state in expected.items():
+        require(
+            catalog[code]["minimum_state"] == state,
+            f"{code} no longer preserves its fail-closed state",
+        )
+
+    precedence = {
+        "ACCEPTED": 0,
+        "DEGRADED": 1,
+        "QUARANTINED": 2,
+        "REJECTED": 3,
+    }
+
+    def _evaluate(codes):
+        state = "ACCEPTED"
+        for code in codes:
+            candidate = str(catalog[code]["minimum_state"]).upper()
+            if precedence[candidate] > precedence[state]:
+                state = candidate
+        return state
+
+    require(
+        _evaluate(
+            [
+                "unprivileged_scan",
+                "classification_review_present",
+                "classification_unknown_present",
+            ]
+        )
+        == "ACCEPTED",
+        "complete unprivileged telemetry with host uncertainty is not ACCEPTED",
+    )
+    require(
+        _evaluate(
+            [
+                "unprivileged_scan",
+                "classification_review_present",
+                "partial_scan",
+            ]
+        )
+        == "DEGRADED",
+        "partial scan no longer degrades",
+    )
+    require(
+        _evaluate(
+            [
+                "unprivileged_scan",
+                "classification_unknown_present",
+                "collector_unavailable",
+            ]
+        )
+        == "DEGRADED",
+        "collector unavailability no longer degrades",
+    )
+    require(
+        _evaluate(
+            [
+                "unprivileged_scan",
+                "classification_review_present",
+                "identity_collision",
+            ]
+        )
+        == "QUARANTINED",
+        "identity collision no longer quarantines",
+    )
+
+    accepted_effects = policy["states"]["ACCEPTED"]["effects"]
+    require(
+        accepted_effects["apply_absence_mutations"] == "coverage_gated",
+        "accepted absence effects are not independently coverage-gated",
+    )
+    require(
+        accepted_effects["resolve_alerts"] == "coverage_gated",
+        "accepted alert resolution is not independently coverage-gated",
+    )
+    require(
+        accepted_effects["update_device_classification"] == "confidence_gated",
+        "accepted classification updates are not confidence-gated",
+    )
+    require(
+        accepted_effects["create_high_severity_classification_alerts"]
+        == "confidence_gated",
+        "accepted high-severity classification alerts are not confidence-gated",
+    )
+
+    runtime_source = runtime_path.read_text(encoding="utf-8")
+    require(
+        'POLICY_VERSION = "deltaaegis-v0.45-stage0g"' in runtime_source,
+        "runtime Stage 0G policy constant is missing",
+    )
+    require(
+        'item.get("minimum_state")' in runtime_source
+        and "STATE_PRECEDENCE" in runtime_source,
+        "runtime no longer derives state from policy reason minimum_state",
+    )
+
+    print("[PASS] v0.45 Stage 0G telemetry-quality policy correction")
+
+
 if __name__ == "__main__":
+    _validate_stage0g_policy_correction()
     main()

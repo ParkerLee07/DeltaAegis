@@ -1,6 +1,6 @@
 {
   "schema_version": "deltaaegis-telemetry-quality-policy-v1",
-  "policy_version": "deltaaegis-v0.45-stage0f",
+  "policy_version": "deltaaegis-v0.45-stage0g",
   "states": {
     "ACCEPTED": {
       "description": "Integrity, scope, inventory, and supported-contract checks pass. Normal analysis is permitted, while absence-based actions remain independently gated by proven coverage.",
@@ -128,10 +128,10 @@
     },
     {
       "code": "unprivileged_scan",
-      "minimum_state": "DEGRADED",
-      "severity": "warning",
+      "minimum_state": "ACCEPTED",
+      "severity": "info",
       "overridable": true,
-      "description": "The scan lacked privileges needed for complete evidence collection."
+      "description": "The scan ran without root privileges; requested collector outcomes determine whether required evidence is incomplete."
     },
     {
       "code": "optional_artifact_missing",
@@ -142,17 +142,17 @@
     },
     {
       "code": "classification_review_present",
-      "minimum_state": "DEGRADED",
+      "minimum_state": "ACCEPTED",
       "severity": "warning",
       "overridable": true,
-      "description": "At least one host classification requires review."
+      "description": "At least one host classification requires review; host-level classification uncertainty does not downgrade otherwise complete bundle telemetry."
     },
     {
       "code": "classification_unknown_present",
-      "minimum_state": "DEGRADED",
-      "severity": "warning",
+      "minimum_state": "ACCEPTED",
+      "severity": "info",
       "overridable": true,
-      "description": "At least one host remains unknown; this alone does not invalidate positive evidence."
+      "description": "At least one host remains unknown; host-level classification uncertainty does not invalidate otherwise complete observation evidence."
     },
     {
       "code": "negative_evidence_disabled",

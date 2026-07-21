@@ -23,7 +23,10 @@
       "const": "deltaaegis-telemetry-quality-decision-v1"
     },
     "policy_version": {
-      "const": "deltaaegis-v0.45-stage0f"
+      "enum": [
+        "deltaaegis-v0.45-stage0f",
+        "deltaaegis-v0.45-stage0g"
+      ]
     },
     "bundle_id": {
       "type": "string",

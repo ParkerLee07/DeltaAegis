@@ -1811,7 +1811,7 @@ def _command_dashboard_impl(args):
 
 
     class DeltaAegisDashboardHandler(BaseHTTPRequestHandler):
-        server_version = "DeltaAegisDashboard/0.44.1"
+        server_version = "DeltaAegisDashboard/0.45.0"
 
         def log_message(self, fmt, *handler_args):
             if not args.quiet:
@@ -2487,15 +2487,25 @@ def _command_dashboard_impl(args):
                     )
                 elif route == "/api/telemetry-quality":
                     state_filter = query.get("state", [""])[0].strip() or None
-                    dashboard_json_response(
-                        self,
-                        dashboard_telemetry_quality_payload(
+                    try:
+                        quality_payload = dashboard_telemetry_quality_payload(
                             connection,
                             limit=limit,
                             scope=scope,
                             state=state_filter,
-                        ),
-                    )
+                        )
+                    except (DeltaAegisError, ValueError) as exc:
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "telemetry_quality_query_failed",
+                                "message": str(exc),
+                            },
+                            status=400,
+                        )
+                    else:
+                        dashboard_json_response(self, quality_payload)
                 elif route == "/api/telemetry-quality/detail":
                     decision_id = query.get(
                         "decision_id",

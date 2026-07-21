@@ -18,7 +18,7 @@ import uuid
 
 POLICY_SCHEMA_VERSION = "deltaaegis-telemetry-quality-policy-v1"
 DECISION_SCHEMA_VERSION = "deltaaegis-telemetry-quality-decision-v1"
-POLICY_VERSION = "deltaaegis-v0.45-stage0f"
+POLICY_VERSION = "deltaaegis-v0.45-stage0g"
 CAPABILITY_SCHEMA_VERSION = "netsniper-capability-manifest-v1"
 HOST_CLASSIFICATION_SCHEMA_VERSION = "netsniper-host-classification-v2"
 CLASSIFIER_VERSION = "netsniper-classifier-v2"
@@ -36,6 +36,7 @@ ALLOWED_TRANSITIONS = {
     ("QUARANTINED", "ACCEPTED"),
 }
 REQUIRED_COLLECTORS = {"discovery", "tcp_services"}
+RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 PUBLIC_DECISION_KEYS = (
     "schema_version",
     "policy_version",
@@ -155,7 +156,7 @@ CREATE INDEX IF NOT EXISTS idx_telemetry_quality_reviews_decision
 """
 
 
-class TelemetryQualityError(RuntimeError):
+class TelemetryQualityError(ValueError):
     """Raised for fail-closed telemetry-quality operations."""
 
 
@@ -177,6 +178,64 @@ def read_json(path: Path) -> Any:
 
 def canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def canonical_run_id(value: Any) -> str:
+    run_id = str(value or "").strip()
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        raise TelemetryQualityError(
+            "telemetry run_id must be 1-128 path-free characters using "
+            "letters, numbers, dot, underscore, or dash"
+        )
+    return run_id
+
+
+def _execute_schema_sql(connection: sqlite3.Connection, script: str) -> None:
+    """Execute DDL without sqlite3.executescript's implicit transaction commit."""
+
+    statement = ""
+    for line in str(script).splitlines(keepends=True):
+        statement += line
+        if not sqlite3.complete_statement(statement):
+            continue
+        sql = statement.strip()
+        statement = ""
+        if sql:
+            connection.execute(sql)
+    if statement.strip():
+        raise TelemetryQualityError("incomplete telemetry-quality schema SQL")
+
+
+def _confined_destination(root: Path, name: str) -> Path:
+    resolved_root = root.expanduser().resolve()
+    destination = (resolved_root / name).resolve()
+    try:
+        destination.relative_to(resolved_root)
+    except ValueError as exc:
+        raise TelemetryQualityError(
+            f"retained evidence destination escapes its store: {destination}"
+        ) from exc
+    return destination
+
+
+def _confined_retained_manifest(
+    evidence_root: Path,
+    manifest_path: Path,
+) -> Path:
+    root = evidence_root.expanduser().resolve()
+    resolved = manifest_path.expanduser().resolve()
+    allowed_roots = [root / "trusted", root / "quarantine"]
+    for allowed in allowed_roots:
+        try:
+            resolved.relative_to(allowed.resolve())
+        except ValueError:
+            continue
+        if resolved.name != "manifest.json":
+            break
+        return resolved
+    raise TelemetryQualityError(
+        f"retained evidence path is outside managed stores: {resolved}"
+    )
 
 
 def sha256_file(path: Path) -> str:
@@ -641,7 +700,18 @@ def evaluate_bundle_record(
             )
             base_state = "REJECTED"
         else:
-            run_id = str(manifest.get("scan_id") or run_id).strip() or run_id
+            raw_run_id = manifest.get("scan_id") or run_id
+            try:
+                run_id = canonical_run_id(raw_run_id)
+            except TelemetryQualityError as exc:
+                _add_reason(
+                    reason_codes,
+                    reasons,
+                    reason_catalog,
+                    "required_artifact_invalid",
+                    str(exc),
+                )
+                run_id = f"invalid-{digest[:16]}"
             scanner_version = str(manifest.get("scanner_version") or "").strip()
             schema, contracts, is_v21 = _manifest_contract(manifest)
             source_contract = {
@@ -738,6 +808,7 @@ def evaluate_bundle_record(
                 host_path = resolved_files.get("host_classifications_json")
                 capability: dict[str, Any] = {}
                 host_records: list[dict[str, Any]] = []
+                artifact_by_path: dict[str, dict[str, Any]] = {}
 
                 if capability_path is None or not capability_path.is_file():
                     _add_reason(
@@ -774,6 +845,44 @@ def evaluate_bundle_record(
                             "capability manifest schema version is unsupported",
                         )
 
+                    capability_run_id = str(capability.get("run_id") or "").strip()
+                    if capability_run_id != run_id:
+                        _add_reason(
+                            reason_codes,
+                            reasons,
+                            reason_catalog,
+                            "capability_manifest_inconsistent",
+                            "capability run_id contradicts outer manifest",
+                        )
+
+                    sensor = json_object(capability.get("sensor"))
+                    if str(sensor.get("netsniper_version") or "").strip() != scanner_version:
+                        _add_reason(
+                            reason_codes,
+                            reasons,
+                            reason_catalog,
+                            "capability_manifest_inconsistent",
+                            "capability sensor version contradicts outer manifest",
+                        )
+                    if sensor.get("classifier_version") != CLASSIFIER_VERSION:
+                        _add_reason(
+                            reason_codes,
+                            reasons,
+                            reason_catalog,
+                            "unsupported_classifier_version",
+                        )
+                    if (
+                        sensor.get("host_classification_schema_version")
+                        != HOST_CLASSIFICATION_SCHEMA_VERSION
+                    ):
+                        _add_reason(
+                            reason_codes,
+                            reasons,
+                            reason_catalog,
+                            "classification_contract_invalid",
+                            "capability sensor host schema is unsupported",
+                        )
+
                     target = json_object(capability.get("target"))
                     try:
                         capability_scope = canonical_scope(
@@ -793,16 +902,39 @@ def evaluate_bundle_record(
                             str(exc),
                         )
 
-                    artifacts = [
-                        item
-                        for item in json_array(capability.get("artifacts"))
-                        if isinstance(item, dict)
-                    ]
-                    for artifact in artifacts:
-                        artifact_path = artifact.get("path")
+                    raw_artifacts = json_array(capability.get("artifacts"))
+                    if not raw_artifacts:
+                        _add_reason(
+                            reason_codes,
+                            reasons,
+                            reason_catalog,
+                            "required_artifact_invalid",
+                            "capability manifest does not enumerate artifacts",
+                        )
+                    for artifact in raw_artifacts:
+                        if not isinstance(artifact, dict):
+                            _add_reason(
+                                reason_codes,
+                                reasons,
+                                reason_catalog,
+                                "required_artifact_invalid",
+                                "capability artifact entry is not an object",
+                            )
+                            continue
+                        artifact_path = str(artifact.get("path") or "").strip()
+                        if not artifact_path or artifact_path in artifact_by_path:
+                            _add_reason(
+                                reason_codes,
+                                reasons,
+                                reason_catalog,
+                                "required_artifact_invalid",
+                                "capability artifact path is empty or duplicated",
+                            )
+                            continue
+                        artifact_by_path[artifact_path] = artifact
                         required = bool(artifact.get("required"))
                         try:
-                            path = confined_path(bundle_root, artifact_path)
+                            artifact_file = confined_path(bundle_root, artifact_path)
                         except TelemetryQualityError as exc:
                             _add_reason(
                                 reason_codes,
@@ -812,7 +944,7 @@ def evaluate_bundle_record(
                                 str(exc),
                             )
                             continue
-                        if not path.is_file():
+                        if not artifact_file.is_file():
                             _add_reason(
                                 reason_codes,
                                 reasons,
@@ -826,11 +958,16 @@ def evaluate_bundle_record(
                             )
                             continue
                         expected_size = artifact.get("size_bytes")
-                        if (
-                            isinstance(expected_size, int)
-                            and expected_size >= 0
-                            and path.stat().st_size != expected_size
-                        ):
+                        expected_hash = str(artifact.get("sha256") or "").lower()
+                        if not isinstance(expected_size, int) or expected_size < 0:
+                            _add_reason(
+                                reason_codes,
+                                reasons,
+                                reason_catalog,
+                                "required_artifact_invalid",
+                                f"artifact size is missing or invalid: {artifact_path}",
+                            )
+                        elif artifact_file.stat().st_size != expected_size:
                             _add_reason(
                                 reason_codes,
                                 reasons,
@@ -838,14 +975,35 @@ def evaluate_bundle_record(
                                 "hash_mismatch",
                                 f"artifact size does not match: {artifact_path}",
                             )
-                        expected_hash = str(artifact.get("sha256") or "").lower()
-                        if expected_hash and sha256_file(path) != expected_hash:
+                        if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+                            _add_reason(
+                                reason_codes,
+                                reasons,
+                                reason_catalog,
+                                "required_artifact_invalid",
+                                f"artifact SHA-256 is missing or invalid: {artifact_path}",
+                            )
+                        elif sha256_file(artifact_file) != expected_hash:
                             _add_reason(
                                 reason_codes,
                                 reasons,
                                 reason_catalog,
                                 "hash_mismatch",
                                 f"artifact hash does not match: {artifact_path}",
+                            )
+
+                    for key, outer_path in sorted(files.items()):
+                        if key == "capability_manifest_json":
+                            continue
+                        if not isinstance(outer_path, str) or not outer_path.strip():
+                            continue
+                        if outer_path not in artifact_by_path:
+                            _add_reason(
+                                reason_codes,
+                                reasons,
+                                reason_catalog,
+                                "required_artifact_invalid",
+                                f"outer-manifest artifact is not integrity-bound: {outer_path}",
                             )
 
                     integrity = json_object(capability.get("integrity"))
@@ -903,9 +1061,9 @@ def evaluate_bundle_record(
                         )
 
                     if (
-                        integrity.get("bundle_finalized")
-                        and integrity.get("hashes_verified")
-                        and integrity.get("manifest_complete")
+                        integrity.get("bundle_finalized") is True
+                        and integrity.get("hashes_verified") is True
+                        and integrity.get("manifest_complete") is True
                     ):
                         _add_reason(
                             reason_codes,
@@ -927,7 +1085,7 @@ def evaluate_bundle_record(
                             reasons,
                             reason_catalog,
                             "capability_manifest_inconsistent",
-                            "bundle finalization or manifest completeness is false",
+                            "bundle finalization, hashes, or manifest completeness is not explicitly true",
                         )
 
                     execution = json_object(capability.get("execution"))
@@ -939,7 +1097,15 @@ def evaluate_bundle_record(
                             reason_catalog,
                             "partial_scan",
                         )
-                    elif status not in {"complete", ""}:
+                    elif status == "":
+                        _add_reason(
+                            reason_codes,
+                            reasons,
+                            reason_catalog,
+                            "capability_manifest_inconsistent",
+                            "capability execution status is missing",
+                        )
+                    elif status != "complete":
                         _add_reason(
                             reason_codes,
                             reasons,
@@ -958,14 +1124,25 @@ def evaluate_bundle_record(
                             "unprivileged_scan",
                         )
 
+                    collector_by_id: dict[str, dict[str, Any]] = {}
                     for collector in json_array(capability.get("collectors")):
-                        if not isinstance(collector, dict) or not collector.get(
-                            "requested"
-                        ):
+                        if not isinstance(collector, dict):
                             continue
                         collector_id = str(
                             collector.get("collector_id") or ""
                         ).strip()
+                        if not collector_id or collector_id in collector_by_id:
+                            _add_reason(
+                                reason_codes,
+                                reasons,
+                                reason_catalog,
+                                "capability_manifest_inconsistent",
+                                "collector identifier is empty or duplicated",
+                            )
+                            continue
+                        collector_by_id[collector_id] = collector
+                        if not collector.get("requested"):
+                            continue
                         collector_status = str(
                             collector.get("status") or ""
                         ).strip().lower()
@@ -993,6 +1170,22 @@ def evaluate_bundle_record(
                                 reason_catalog,
                                 "collector_unavailable",
                                 f"collector {collector_id} reported {collector_status}",
+                            )
+
+                    for collector_id in sorted(REQUIRED_COLLECTORS):
+                        collector = collector_by_id.get(collector_id)
+                        if (
+                            collector is None
+                            or collector.get("requested") is not True
+                            or str(collector.get("status") or "").lower()
+                            != "completed"
+                        ):
+                            _add_reason(
+                                reason_codes,
+                                reasons,
+                                reason_catalog,
+                                "required_collector_failed",
+                                f"required collector {collector_id} is missing or incomplete",
                             )
 
                 if host_path is None or not host_path.is_file():
@@ -1026,8 +1219,30 @@ def evaluate_bundle_record(
                             str(exc),
                         )
 
-                negative_allowed = bool(host_records)
+                emitted_count = coverage.get("emitted_host_count")
+                if isinstance(emitted_count, int) and emitted_count != len(host_records):
+                    _add_reason(
+                        reason_codes,
+                        reasons,
+                        reason_catalog,
+                        "capability_manifest_inconsistent",
+                        "emitted host count contradicts host classification rows",
+                    )
+
+                negative_allowed = True
+                host_ids: set[str] = set()
                 for record in host_records:
+                    host_id = str(record.get("host_id") or "").strip()
+                    if not host_id or host_id in host_ids:
+                        _add_reason(
+                            reason_codes,
+                            reasons,
+                            reason_catalog,
+                            "classification_contract_invalid",
+                            "host_id is empty or duplicated",
+                        )
+                    else:
+                        host_ids.add(host_id)
                     if (
                         record.get("schema_version")
                         != HOST_CLASSIFICATION_SCHEMA_VERSION
@@ -1047,7 +1262,7 @@ def evaluate_bundle_record(
                             "unsupported_classifier_version",
                         )
                     observation = json_object(record.get("observation_quality"))
-                    if observation.get("inventory_complete") is False:
+                    if observation.get("inventory_complete") is not True:
                         _add_reason(
                             reason_codes,
                             reasons,
@@ -1085,15 +1300,15 @@ def evaluate_bundle_record(
                             reason_catalog,
                             "collector_unavailable",
                         )
-                    decision = _classification_decision(record)
-                    if decision in {"review", "possible", "ambiguous"}:
+                    classification_decision = _classification_decision(record)
+                    if classification_decision in {"review", "possible", "ambiguous"}:
                         _add_reason(
                             reason_codes,
                             reasons,
                             reason_catalog,
                             "classification_review_present",
                         )
-                    elif decision in {"unknown", ""}:
+                    elif classification_decision in {"unknown", ""}:
                         _add_reason(
                             reason_codes,
                             reasons,
@@ -1101,9 +1316,13 @@ def evaluate_bundle_record(
                             "classification_unknown_present",
                         )
 
+                required_collectors_complete = REQUIRED_COLLECTORS.issubset(
+                    set(coverage["completed_collectors"])
+                )
                 coverage["negative_evidence_allowed"] = (
                     coverage.get("full_inventory", False)
                     and negative_allowed
+                    and required_collectors_complete
                     and not coverage["failed_collectors"]
                     and not coverage["unavailable_collectors"]
                 )
@@ -1115,10 +1334,10 @@ def evaluate_bundle_record(
                         "negative_evidence_disabled",
                     )
 
-                for identity, host_ids in _stable_identity_values(
+                for identity, identity_host_ids in _stable_identity_values(
                     host_records
                 ).items():
-                    if len(host_ids) > 1:
+                    if len(identity_host_ids) > 1:
                         _add_reason(
                             reason_codes,
                             reasons,
@@ -1126,7 +1345,7 @@ def evaluate_bundle_record(
                             "identity_collision",
                             "stable identity "
                             f"{identity[0]}:{identity[1]} is shared by "
-                            f"{len(host_ids)} hosts",
+                            f"{len(identity_host_ids)} hosts",
                         )
 
     final_state = _most_restrictive_state(base_state, reasons)
@@ -1184,7 +1403,7 @@ def ensure_column(
 
 
 def ensure_schema(connection: sqlite3.Connection) -> None:
-    connection.executescript(QUALITY_TABLE_SQL)
+    _execute_schema_sql(connection, QUALITY_TABLE_SQL)
     ensure_column(
         connection,
         "snapshots",
@@ -1233,7 +1452,6 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
         "negative_evidence_allowed",
         "negative_evidence_allowed INTEGER NOT NULL DEFAULT 0",
     )
-
 
 def apply_run_id_conflict(
     connection: sqlite3.Connection,
@@ -1323,16 +1541,16 @@ def apply_run_id_conflict(
     return decision
 
 
-def retain_bundle(
+def retain_bundle_receipt(
     manifest_path: Path,
     *,
     evidence_root: Path,
     decision: dict[str, Any],
-) -> str:
+) -> dict[str, Any]:
     state = str(decision.get("current_state") or "").upper()
     disposition = str(decision.get("retention_disposition") or "")
     if state == "REJECTED" or disposition == "audit_metadata_only":
-        return ""
+        return {"manifest_path": "", "directory": "", "created": False}
 
     expected_digest = str(decision.get("bundle_digest") or "").strip()
     if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
@@ -1343,8 +1561,11 @@ def retain_bundle(
     store = "quarantine" if state == "QUARANTINED" else "trusted"
     root = evidence_root.expanduser().resolve() / store
     root.mkdir(parents=True, exist_ok=True)
-    run_id = str(decision.get("run_id") or "unknown-run")
-    destination = root / f"{run_id}-{expected_digest[:16]}"
+    run_id = canonical_run_id(decision.get("run_id"))
+    destination = _confined_destination(
+        root,
+        f"{run_id}-{expected_digest[:16]}",
+    )
     if destination.exists():
         retained_manifest = destination / "manifest.json"
         if not retained_manifest.is_file():
@@ -1356,7 +1577,11 @@ def retain_bundle(
             raise TelemetryQualityError(
                 "existing retained evidence does not match its decision digest"
             )
-        return str(retained_manifest)
+        return {
+            "manifest_path": str(retained_manifest),
+            "directory": str(destination),
+            "created": False,
+        }
 
     source_root = manifest_path.resolve().parent
     for item in source_root.rglob("*"):
@@ -1407,8 +1632,34 @@ def retain_bundle(
         raise TelemetryQualityError(
             "retained bundle is missing manifest.json after copy"
         )
-    return str(retained_manifest)
+    return {
+        "manifest_path": str(retained_manifest),
+        "directory": str(destination),
+        "created": True,
+    }
 
+
+def retain_bundle(
+    manifest_path: Path,
+    *,
+    evidence_root: Path,
+    decision: dict[str, Any],
+) -> str:
+    return str(
+        retain_bundle_receipt(
+            manifest_path,
+            evidence_root=evidence_root,
+            decision=decision,
+        )["manifest_path"]
+    )
+
+
+def cleanup_retained_bundle(receipt: dict[str, Any] | None) -> None:
+    if not isinstance(receipt, dict) or not receipt.get("created"):
+        return
+    directory = str(receipt.get("directory") or "").strip()
+    if directory:
+        shutil.rmtree(Path(directory), ignore_errors=True)
 
 def persist_decision(
     connection: sqlite3.Connection,
@@ -1741,28 +1992,48 @@ def override_decision(
 
 
 
-def transition_retained_bundle(
-    connection: sqlite3.Connection,
+def prepare_retained_bundle_transition(
     *,
     decision: dict[str, Any],
     evidence_root: Path,
-) -> str:
-    """Move retained evidence between trusted and quarantine stores after override."""
+) -> dict[str, Any]:
+    """Copy evidence to its target store without deleting the committed source."""
 
     retained = str(decision.get("retained_manifest_path") or "").strip()
     state = str(decision.get("current_state") or "").upper()
     if not retained or state == "REJECTED":
-        return retained
+        return {
+            "source_manifest": retained,
+            "target_manifest": retained,
+            "source_directory": "",
+            "target_directory": "",
+            "created_target": False,
+            "remove_source_after_commit": False,
+        }
 
-    source_manifest = Path(retained).expanduser().resolve()
+    source_manifest = _confined_retained_manifest(
+        evidence_root,
+        Path(retained),
+    )
     source_dir = source_manifest.parent
     store = "quarantine" if state == "QUARANTINED" else "trusted"
     destination_root = evidence_root.expanduser().resolve() / store
     destination_root.mkdir(parents=True, exist_ok=True)
-    destination_dir = destination_root / source_dir.name
+    destination_dir = _confined_destination(
+        destination_root,
+        source_dir.name,
+    )
+    destination_manifest = destination_dir / "manifest.json"
 
     if source_dir == destination_dir:
-        return str(source_manifest)
+        return {
+            "source_manifest": str(source_manifest),
+            "target_manifest": str(source_manifest),
+            "source_directory": str(source_dir),
+            "target_directory": str(destination_dir),
+            "created_target": False,
+            "remove_source_after_commit": False,
+        }
 
     expected_digest = str(decision.get("bundle_digest") or "").strip()
     source_digest = bundle_digest(source_manifest)
@@ -1771,34 +2042,116 @@ def transition_retained_bundle(
             "retained source bundle digest no longer matches its ledger"
         )
 
+    created_target = False
     if destination_dir.exists():
-        destination_manifest = destination_dir / "manifest.json"
         if not destination_manifest.is_file():
             raise TelemetryQualityError(
                 f"target evidence directory is incomplete: {destination_dir}"
             )
-        destination_digest = bundle_digest(destination_manifest)
-        if destination_digest != source_digest:
+        if bundle_digest(destination_manifest) != source_digest:
             raise TelemetryQualityError(
                 "existing target evidence differs from retained source"
             )
-        shutil.rmtree(source_dir)
-        new_manifest = destination_manifest
     else:
-        source_dir.replace(destination_dir)
-        new_manifest = destination_dir / "manifest.json"
+        temporary = Path(
+            tempfile.mkdtemp(
+                prefix=f".{destination_dir.name}.",
+                dir=str(destination_root),
+            )
+        )
+        try:
+            shutil.rmtree(temporary)
+            shutil.copytree(source_dir, temporary, symlinks=False)
+            copied_manifest = temporary / "manifest.json"
+            if (
+                not copied_manifest.is_file()
+                or bundle_digest(copied_manifest) != source_digest
+            ):
+                raise TelemetryQualityError(
+                    "staged evidence transition failed digest verification"
+                )
+            temporary.replace(destination_dir)
+            created_target = True
+        except Exception:
+            shutil.rmtree(temporary, ignore_errors=True)
+            raise
 
+    return {
+        "source_manifest": str(source_manifest),
+        "target_manifest": str(destination_manifest),
+        "source_directory": str(source_dir),
+        "target_directory": str(destination_dir),
+        "created_target": created_target,
+        "remove_source_after_commit": True,
+    }
+
+
+def apply_retained_bundle_transition(
+    connection: sqlite3.Connection,
+    *,
+    decision_id: str,
+    transition: dict[str, Any],
+) -> str:
+    target_manifest = str(transition.get("target_manifest") or "")
     connection.execute(
         "UPDATE telemetry_quality_decisions "
         "SET retained_manifest_path = ? WHERE decision_id = ?",
-        (str(new_manifest), decision["decision_id"]),
+        (target_manifest, decision_id),
     )
     connection.execute(
         "UPDATE snapshots SET evidence_retention_path = ?, manifest_path = ? "
         "WHERE quality_decision_id = ?",
-        (str(new_manifest), str(new_manifest), decision["decision_id"]),
+        (target_manifest, target_manifest, decision_id),
     )
-    return str(new_manifest)
+    return target_manifest
+
+
+def abort_retained_bundle_transition(transition: dict[str, Any] | None) -> None:
+    if not isinstance(transition, dict) or not transition.get("created_target"):
+        return
+    target = str(transition.get("target_directory") or "").strip()
+    if target:
+        shutil.rmtree(Path(target), ignore_errors=True)
+
+
+def finalize_retained_bundle_transition(
+    transition: dict[str, Any] | None,
+) -> str | None:
+    if (
+        not isinstance(transition, dict)
+        or not transition.get("remove_source_after_commit")
+    ):
+        return None
+    source = str(transition.get("source_directory") or "").strip()
+    target = str(transition.get("target_directory") or "").strip()
+    if not source or source == target:
+        return None
+    try:
+        shutil.rmtree(Path(source))
+    except OSError as exc:
+        return f"committed evidence transition left a duplicate source: {exc}"
+    return None
+
+
+def transition_retained_bundle(
+    connection: sqlite3.Connection,
+    *,
+    decision: dict[str, Any],
+    evidence_root: Path,
+) -> str:
+    """Compatibility wrapper for callers that own their transaction boundary."""
+
+    transition = prepare_retained_bundle_transition(
+        decision=decision,
+        evidence_root=evidence_root,
+    )
+    target = apply_retained_bundle_transition(
+        connection,
+        decision_id=str(decision.get("decision_id") or ""),
+        transition=transition,
+    )
+    finalize_retained_bundle_transition(transition)
+    return target
 
 def update_snapshot_quality_link(
     connection: sqlite3.Connection,
@@ -1875,9 +2228,13 @@ __all__ = [
     "POLICY_VERSION",
     "STATE_PRECEDENCE",
     "TelemetryQualityError",
+    "abort_retained_bundle_transition",
+    "apply_retained_bundle_transition",
     "apply_run_id_conflict",
     "bundle_digest",
+    "canonical_run_id",
     "canonical_scope",
+    "cleanup_retained_bundle",
     "decision_by_id",
     "decision_contract_payload",
     "ensure_schema",
@@ -1887,11 +2244,14 @@ __all__ = [
     "mark_import_status",
     "override_decision",
     "persist_decision",
+    "prepare_retained_bundle_transition",
     "quality_for_scan",
     "quality_summary",
     "record_review",
     "report_rows",
     "retain_bundle",
+    "retain_bundle_receipt",
     "transition_retained_bundle",
+    "finalize_retained_bundle_transition",
     "update_snapshot_quality_link",
 ]

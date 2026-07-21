@@ -5,40 +5,43 @@ on:
     branches:
       - main
       - "maintenance/**"
+      - feature/v0.45-telemetry-trust
   pull_request:
+  workflow_dispatch:
 
 jobs:
   python-validation:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Validate Python syntax
-        shell: bash
+
+      - name: Validate v0.45 Python syntax
         run: |
-          mapfile -t core_python < <(
-            find deltaaegis_core -maxdepth 1 -type f -name '*.py' -print | sort
-          )
           python3 -W error::SyntaxWarning -m py_compile \
             deltaaegis.py \
-            "${core_python[@]}" \
-            tools/bootstrap_first_admin.py \
-            tools/reset_dashboard_admin.py \
-            tools/deltaaegis_troubleshooter.py \
+            deltaaegis_core/__init__.py \
+            deltaaegis_core/auth.py \
+            deltaaegis_core/config.py \
+            deltaaegis_core/current_state.py \
+            deltaaegis_core/db.py \
+            deltaaegis_core/ingest.py \
+            deltaaegis_core/jobs.py \
+            deltaaegis_core/reports.py \
+            deltaaegis_core/sites.py \
+            deltaaegis_core/telemetry_quality.py \
+            deltaaegis_core/web.py \
             tools/audit_v0_44_repository.py \
-            tools/validate_v0_44_1_repository_hygiene.py \
-            tools/validate_v0_44_1_report_contracts.py \
-            tools/validate_v0_44_1_validator_retirement.py \
-            tools/validate_v0_44_1_release_metadata.py \
-            tools/validate_v0_44_1_data_durability_compatibility.py
-          bash -n tools/validate_v0_44_1_release_gate.sh
-      - name: Run regression tests
-        run: python3 -m unittest discover -s tests -p 'test*.py' -v
-      - name: Validate repository hygiene
+            tools/deltaaegis_troubleshooter.py \
+            tools/validate_v0_45_release_metadata.py
+
+      - name: Validate release-gate shell syntax
         run: |
-          python3 tools/validate_v0_44_1_repository_hygiene.py
-          python3 tools/validate_v0_44_1_report_contracts.py
-          python3 tools/validate_v0_44_1_validator_retirement.py
-          python3 tools/validate_v0_44_1_data_durability_compatibility.py
-          python3 tools/validate_v0_44_1_release_metadata.py
+          bash -n \
+            install.sh \
+            uninstall.sh \
+            tools/validate_v0_45_checkpoints_1_5_all.sh \
+            tools/validate_v0_45_v0_44_compatibility_all.sh \
+            tools/validate_v0_45_release_gate.sh
+
+      - name: Run DeltaAegis v0.45.0 release gate
+        run: ./tools/validate_v0_45_release_gate.sh

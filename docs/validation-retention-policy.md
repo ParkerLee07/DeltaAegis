@@ -1,6 +1,6 @@
 # Validator Retention Policy
 
-Status: DeltaAegis v0.44.1 repository-hygiene maintenance
+Status: current through DeltaAegis v0.45.0; v0.44.1 repository-hygiene policy retained
 
 DeltaAegis keeps validators required by the current release gate, current staged
 checkpoint diagnostics, the supported compatibility floor, installation

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Parker Lee
-"""DeltaAegis v0.44.1: Repository Hygiene and Validation Retention.
+"""DeltaAegis v0.45.0: Telemetry Trust.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -86,7 +86,7 @@ def _report_context() -> _reports.ReportContext:
         operator_triage_summary=operator_triage_summary,
     )
 
-DELTAAEGIS_VERSION = "0.44.1"
+DELTAAEGIS_VERSION = "0.45.0"
 DELTAAEGIS_SECURITY_HOTFIX = "2026-07-13.2"
 DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION = "deltaaegis-backup-manifest-v1"
 DELTAAEGIS_V0_14_COMPATIBILITY_NOTE = "DeltaAegis v0.14.0 — NetSniper Scan Orchestration compatibility retained."
@@ -2901,264 +2901,290 @@ def profile_transition(baseline: sqlite3.Row, snapshot: Snapshot) -> bool:
 
 def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_path: Path) -> str:
     """Import one NetSniper bundle through the v0.45 telemetry-trust runtime."""
-    ensure_root = Path(__file__).resolve().parent
+
     original_manifest = Path(manifest_path).expanduser().resolve()
-    retained_manifest = ""
-    _current_state.bootstrap_legacy_projection(connection)
-    decision = _telemetry_quality.evaluate_bundle_record(
-        original_manifest,
-        policy_path=DELTAAEGIS_V045_POLICY_PATH,
-    )
-    decision = _telemetry_quality.apply_run_id_conflict(
-        connection,
-        decision,
-        policy_path=DELTAAEGIS_V045_POLICY_PATH,
-    )
-
+    retention_receipt: dict[str, Any] | None = None
     try:
-        retained_manifest = _telemetry_quality.retain_bundle(
+        _current_state.bootstrap_legacy_projection(connection)
+        decision = _telemetry_quality.evaluate_bundle_record(
             original_manifest,
-            evidence_root=DEFAULT_TELEMETRY_EVIDENCE,
+            policy_path=DELTAAEGIS_V045_POLICY_PATH,
+        )
+        decision = _telemetry_quality.apply_run_id_conflict(
+            connection,
+            decision,
+            policy_path=DELTAAEGIS_V045_POLICY_PATH,
+        )
+
+        try:
+            retention_receipt = _telemetry_quality.retain_bundle_receipt(
+                original_manifest,
+                evidence_root=DEFAULT_TELEMETRY_EVIDENCE,
+                decision=decision,
+            )
+            retained_manifest = str(
+                retention_receipt.get("manifest_path") or ""
+            )
+        except (OSError, _telemetry_quality.TelemetryQualityError) as exc:
+            decision = dict(decision)
+            decision["automated_state"] = "REJECTED"
+            decision["current_state"] = "REJECTED"
+            decision["retention_disposition"] = "audit_metadata_only"
+            decision["review_required"] = False
+            reasons = list(decision.get("reasons") or [])
+            reason_codes = list(decision.get("reason_codes") or [])
+            if "required_artifact_invalid" not in reason_codes:
+                reason_codes.append("required_artifact_invalid")
+                reasons.append(
+                    {
+                        "code": "required_artifact_invalid",
+                        "severity": "critical",
+                        "minimum_state": "REJECTED",
+                        "overridable": False,
+                        "description": f"evidence retention failed: {exc}",
+                    }
+                )
+            decision["reason_codes"] = reason_codes
+            decision["reasons"] = reasons
+            decision["allowed_effects"] = ["quality_center_visibility"]
+            decision["blocked_effects"] = [
+                "apply_absence_mutations",
+                "create_alerts",
+                "create_high_severity_classification_alerts",
+                "resolve_alerts",
+                "retain_raw_bundle",
+                "update_device_classification",
+                "update_positive_observations",
+                "update_risk_score",
+            ]
+            decision["effect_policy"] = {
+                "apply_absence_mutations": "blocked",
+                "create_alerts": "blocked",
+                "create_high_severity_classification_alerts": "blocked",
+                "quality_center_visibility": "allowed",
+                "resolve_alerts": "blocked",
+                "retain_raw_bundle": "receipt_only",
+                "update_device_classification": "blocked",
+                "update_positive_observations": "blocked",
+                "update_risk_score": "blocked",
+            }
+            retained_manifest = ""
+            retention_receipt = None
+
+        persisted = _telemetry_quality.persist_decision(
+            connection,
+            decision,
+            retained_manifest_path=retained_manifest,
+            import_status="PENDING",
+        )
+        decision_id = str(
+            persisted.get("decision_id")
+            or decision.get("decision_id")
+            or ""
+        )
+        state = str(
+            persisted.get("current_state")
+            or decision.get("current_state")
+            or "REJECTED"
+        ).upper()
+
+        if state == "REJECTED":
+            _telemetry_quality.mark_import_status(
+                connection,
+                decision_id,
+                "REJECTED",
+            )
+            connection.commit()
+            return (
+                f"REJECT {decision.get('run_id')}: "
+                f"reasons={','.join(decision.get('reason_codes') or []) or 'unknown'}"
+            )
+
+        import_manifest = Path(retained_manifest or original_manifest)
+        snapshot = load_snapshot(import_manifest)
+        if snapshot_exists(connection, snapshot.scan_id):
+            _telemetry_quality.mark_import_status(
+                connection,
+                decision_id,
+                "ALREADY_IMPORTED",
+                imported_at=utc_now(),
+            )
+            connection.commit()
+            return f"SKIP {snapshot.scan_id}: already imported"
+
+        historical = _current_state.snapshot_is_historical(
+            connection,
+            scope=snapshot.target,
+            created_at=snapshot.created_at,
+            scan_id=snapshot.scan_id,
+        )
+        baseline = latest_accepted_snapshot(connection, snapshot.target)
+        comparison_baseline = connection.execute(
+            """
+            SELECT *
+            FROM snapshots
+            WHERE target = ?
+              AND quality_status IN ('ACCEPTED', 'DEGRADED')
+            ORDER BY created_at DESC, imported_at DESC
+            LIMIT 1
+            """,
+            (snapshot.target,),
+        ).fetchone()
+        quality_reason = "; ".join(
+            str(item.get("description") or item.get("code") or "")
+            for item in (decision.get("reasons") or [])
+            if isinstance(item, dict)
+        ) or f"Telemetry quality state is {state}."
+        insert_snapshot(
+            connection,
+            snapshot,
+            state,
+            quality_reason,
+        )
+        _telemetry_quality.update_snapshot_quality_link(
+            connection,
+            scan_id=snapshot.scan_id,
             decision=decision,
+            retained_manifest_path=retained_manifest,
         )
-    except (OSError, _telemetry_quality.TelemetryQualityError) as exc:
-        # Retention failure is fail-closed.  The source bundle is not trusted
-        # merely because it was readable during evaluation.
-        decision = dict(decision)
-        decision["automated_state"] = "REJECTED"
-        decision["current_state"] = "REJECTED"
-        decision["retention_disposition"] = "audit_metadata_only"
-        decision["review_required"] = False
-        reasons = list(decision.get("reasons") or [])
-        reason_codes = list(decision.get("reason_codes") or [])
-        if "required_artifact_invalid" not in reason_codes:
-            reason_codes.append("required_artifact_invalid")
-            reasons.append(
-                {
-                    "code": "required_artifact_invalid",
-                    "severity": "critical",
-                    "minimum_state": "REJECTED",
-                    "overridable": False,
-                    "description": f"evidence retention failed: {exc}",
-                }
+
+        manifest_data = load_json_file(import_manifest, {})
+        if not isinstance(manifest_data, dict):
+            manifest_data = {}
+
+        if state in {"ACCEPTED", "DEGRADED"}:
+            store_netsniper_intelligence_summary(
+                connection,
+                snapshot,
+                import_manifest,
+                manifest_data,
             )
-        decision["reason_codes"] = reason_codes
-        decision["reasons"] = reasons
-        decision["allowed_effects"] = ["quality_center_visibility"]
-        decision["blocked_effects"] = [
-            "apply_absence_mutations",
-            "create_alerts",
-            "create_high_severity_classification_alerts",
-            "resolve_alerts",
-            "retain_raw_bundle",
-            "update_device_classification",
-            "update_positive_observations",
-            "update_risk_score",
-        ]
-        decision["effect_policy"] = {
-            "apply_absence_mutations": "blocked",
-            "create_alerts": "blocked",
-            "create_high_severity_classification_alerts": "blocked",
-            "quality_center_visibility": "allowed",
-            "resolve_alerts": "blocked",
-            "retain_raw_bundle": "receipt_only",
-            "update_device_classification": "blocked",
-            "update_positive_observations": "blocked",
-            "update_risk_score": "blocked",
-        }
+            store_netsniper_intelligence_hosts(
+                connection,
+                snapshot,
+                import_manifest,
+                manifest_data,
+            )
 
-    persisted = _telemetry_quality.persist_decision(
-        connection,
-        decision,
-        retained_manifest_path=retained_manifest,
-        import_status="PENDING",
-    )
-    decision_id = str(
-        persisted.get("decision_id")
-        or decision.get("decision_id")
-        or ""
-    )
-    state = str(
-        persisted.get("current_state")
-        or decision.get("current_state")
-        or "REJECTED"
-    ).upper()
+        if historical:
+            _telemetry_quality.mark_import_status(
+                connection,
+                decision_id,
+                "IMPORTED",
+                imported_at=utc_now(),
+            )
+            connection.commit()
+            return (
+                f"IMPORT {snapshot.scan_id}: quality={state}, "
+                "historical=true, current_state_unchanged=true"
+            )
 
-    if state == "REJECTED":
-        _telemetry_quality.mark_import_status(
-            connection,
-            decision_id,
-            "REJECTED",
-        )
-        connection.commit()
-        return (
-            f"REJECT {decision.get('run_id')}: "
-            f"reasons={','.join(decision.get('reason_codes') or []) or 'unknown'}"
-        )
-
-    import_manifest = Path(retained_manifest or original_manifest)
-    snapshot = load_snapshot(import_manifest)
-    if snapshot_exists(connection, snapshot.scan_id):
-        _telemetry_quality.mark_import_status(
-            connection,
-            decision_id,
-            "ALREADY_IMPORTED",
-            imported_at=utc_now(),
-        )
-        connection.commit()
-        return f"SKIP {snapshot.scan_id}: already imported"
-
-    baseline = latest_accepted_snapshot(connection, snapshot.target)
-    comparison_baseline = connection.execute(
-        """
-        SELECT *
-        FROM snapshots
-        WHERE target = ?
-          AND quality_status IN ('ACCEPTED', 'DEGRADED')
-        ORDER BY created_at DESC, imported_at DESC
-        LIMIT 1
-        """,
-        (snapshot.target,),
-    ).fetchone()
-    quality_reason = "; ".join(
-        str(item.get("description") or item.get("code") or "")
-        for item in (decision.get("reasons") or [])
-        if isinstance(item, dict)
-    ) or f"Telemetry quality state is {state}."
-    insert_snapshot(
-        connection,
-        snapshot,
-        state,
-        quality_reason,
-    )
-    _telemetry_quality.update_snapshot_quality_link(
-        connection,
-        scan_id=snapshot.scan_id,
-        decision=decision,
-        retained_manifest_path=retained_manifest,
-    )
-
-    manifest_data = load_json_file(import_manifest, {})
-    if not isinstance(manifest_data, dict):
-        manifest_data = {}
-
-    if state in {"ACCEPTED", "DEGRADED"}:
-        store_netsniper_intelligence_summary(
-            connection,
-            snapshot,
-            import_manifest,
-            manifest_data,
-        )
-        store_netsniper_intelligence_hosts(
-            connection,
-            snapshot,
-            import_manifest,
-            manifest_data,
-        )
-
-    events: list[dict[str, Any]] = []
-    if state == "ACCEPTED":
-        if baseline is None:
-            initialize_lifecycle(connection, snapshot)
-        elif profile_transition(baseline, snapshot):
-            initialize_lifecycle(connection, snapshot)
-            events.append(
-                event(
-                    "PROFILE_BASELINE_RESET",
-                    "INFO",
-                    f"scan:{snapshot.scan_id}",
-                    "NetSniper telemetry contract upgraded to a "
-                    "profile-aware manifest. This accepted snapshot "
-                    "becomes the profile baseline without service-change "
-                    "deltas.",
+        events: list[dict[str, Any]] = []
+        if state == "ACCEPTED":
+            if baseline is None:
+                initialize_lifecycle(connection, snapshot)
+            elif profile_transition(baseline, snapshot):
+                initialize_lifecycle(connection, snapshot)
+                events.append(
+                    event(
+                        "PROFILE_BASELINE_RESET",
+                        "INFO",
+                        f"scan:{snapshot.scan_id}",
+                        "NetSniper telemetry contract upgraded to a "
+                        "profile-aware manifest. This accepted snapshot "
+                        "becomes the profile baseline without service-change "
+                        "deltas.",
+                    )
                 )
-            )
-        elif identity_transition(
-            float(baseline["identity_coverage"]),
-            snapshot.identity_coverage,
-        ):
-            initialize_lifecycle(connection, snapshot)
-            events.append(
-                event(
-                    "IDENTITY_BASELINE_RESET",
-                    "INFO",
-                    f"scan:{snapshot.scan_id}",
-                    "MAC-backed identity coverage increased. This accepted "
-                    "snapshot becomes the identity baseline without "
-                    "asset-change deltas.",
+            elif identity_transition(
+                float(baseline["identity_coverage"]),
+                snapshot.identity_coverage,
+            ):
+                initialize_lifecycle(connection, snapshot)
+                events.append(
+                    event(
+                        "IDENTITY_BASELINE_RESET",
+                        "INFO",
+                        f"scan:{snapshot.scan_id}",
+                        "MAC-backed identity coverage increased. This accepted "
+                        "snapshot becomes the identity baseline without "
+                        "asset-change deltas.",
+                    )
                 )
-            )
-        else:
+            else:
+                previous_assets = load_assets_from_db(
+                    connection,
+                    baseline["scan_id"],
+                )
+                events.extend(
+                    comparison_events(previous_assets, snapshot.assets)
+                )
+                events.extend(
+                    classification_delta_events(
+                        previous_assets,
+                        snapshot.assets,
+                    )
+                )
+                events.extend(lifecycle_events(connection, snapshot))
+        elif state == "DEGRADED" and comparison_baseline is not None:
             previous_assets = load_assets_from_db(
                 connection,
-                baseline["scan_id"],
+                comparison_baseline["scan_id"],
             )
+            positive_event_types = {
+                "MONITORED_SERVICE_OPENED",
+                "NETSNIPER_FINDING_ADDED",
+            }
             events.extend(
-                comparison_events(previous_assets, snapshot.assets)
-            )
-            events.extend(
-                classification_delta_events(
+                item
+                for item in comparison_events(
                     previous_assets,
                     snapshot.assets,
                 )
+                if item.get("event_type") in positive_event_types
             )
-            events.extend(lifecycle_events(connection, snapshot))
-    elif state == "DEGRADED" and comparison_baseline is not None:
-        previous_assets = load_assets_from_db(
+
+        _current_state.apply_snapshot(
             connection,
-            comparison_baseline["scan_id"],
+            snapshot,
+            decision,
+            update_lifecycle=(state == "DEGRADED"),
         )
-        positive_event_types = {
-            "MONITORED_SERVICE_OPENED",
-            "NETSNIPER_FINDING_ADDED",
-        }
-        events.extend(
-            item
-            for item in comparison_events(
-                previous_assets,
-                snapshot.assets,
+        event_count = 0
+        if events:
+            event_count = store_events(
+                connection,
+                snapshot.scan_id,
+                (
+                    baseline["scan_id"]
+                    if baseline is not None
+                    else (
+                        comparison_baseline["scan_id"]
+                        if comparison_baseline is not None
+                        else None
+                    )
+                ),
+                events,
+                export_path,
             )
-            if item.get("event_type") in positive_event_types
-        )
 
-    _current_state.apply_snapshot(
-        connection,
-        snapshot,
-        decision,
-        update_lifecycle=(state == "DEGRADED"),
-    )
-    event_count = 0
-    if events:
-        event_count = store_events(
+        _telemetry_quality.mark_import_status(
             connection,
-            snapshot.scan_id,
-            (
-                baseline["scan_id"]
-                if baseline is not None
-                else (
-                    comparison_baseline["scan_id"]
-                    if comparison_baseline is not None
-                    else None
-                )
-            ),
-            events,
-            export_path,
+            decision_id,
+            "IMPORTED",
+            imported_at=utc_now(),
         )
-
-    _telemetry_quality.mark_import_status(
-        connection,
-        decision_id,
-        "IMPORTED",
-        imported_at=utc_now(),
-    )
-    connection.commit()
-    return (
-        f"IMPORT {snapshot.scan_id}: quality={state}, "
-        f"assets={len(snapshot.assets)}, "
-        f"mac_identity={snapshot.identity_coverage:.0%}, "
-        f"events={event_count}"
-    )
-
+        connection.commit()
+        return (
+            f"IMPORT {snapshot.scan_id}: quality={state}, "
+            f"assets={len(snapshot.assets)}, "
+            f"mac_identity={snapshot.identity_coverage:.0%}, "
+            f"events={event_count}"
+        )
+    except Exception:
+        connection.rollback()
+        _telemetry_quality.cleanup_retained_bundle(retention_receipt)
+        raise
 
 def finalized_manifests(runs_dir: Path) -> list[Path]:
     if not runs_dir.is_dir():
@@ -3175,7 +3201,14 @@ def command_ingest(args: argparse.Namespace) -> int:
     for manifest in manifests:
         try:
             print(ingest_manifest(connection, manifest, args.events))
-        except DeltaAegisError as exc:
+        except (
+            DeltaAegisError,
+            _telemetry_quality.TelemetryQualityError,
+            OSError,
+            ValueError,
+            sqlite3.Error,
+        ) as exc:
+            connection.rollback()
             print(f"ERROR {manifest}: {exc}", file=sys.stderr)
     return 0
 
@@ -20238,7 +20271,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.44.1 Repository Hygiene</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.45.0 Telemetry Trust</span></div>
     </div>
   </header>
 
@@ -21062,7 +21095,9 @@ def dashboard_index_html_base_v025_operator_link():
       return String(value)
         .replaceAll("&", "&amp;")
         .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;");
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
     }
 
     const DASHBOARD_TABS = [
@@ -33350,19 +33385,23 @@ def dashboard_telemetry_quality_payload(
     scope=None,
     state=None,
 ):
-    decisions = _telemetry_quality.list_decisions(
-        connection,
-        limit=limit,
-        scope=scope,
-        state=state,
-    )
+    try:
+        decisions = _telemetry_quality.list_decisions(
+            connection,
+            limit=limit,
+            scope=scope,
+            state=state,
+        )
+        summary = _telemetry_quality.quality_summary(
+            connection,
+            scope=scope,
+        )
+    except _telemetry_quality.TelemetryQualityError as exc:
+        raise DeltaAegisError(str(exc)) from exc
     return {
         "ok": True,
         "schema_version": "deltaaegis-telemetry-quality-center-v1",
-        "summary": _telemetry_quality.quality_summary(
-            connection,
-            scope=scope,
-        ),
+        "summary": summary,
         "decisions": decisions,
         "count": len(decisions),
         "selected_scope": scope,
@@ -33509,56 +33548,113 @@ def dashboard_telemetry_quality_override_payload(
     decision_id = str((payload or {}).get("decision_id") or "").strip()
     target_state = str((payload or {}).get("target_state") or "").strip()
     reason = str((payload or {}).get("reason") or "").strip()
-    result = _telemetry_quality.override_decision(
-        connection,
-        decision_id=decision_id,
-        target_state=target_state,
-        reason=reason,
-        actor=actor,
-        policy_path=DELTAAEGIS_V045_POLICY_PATH,
-    )
-    decision = result["decision"]
-    retained_manifest = _telemetry_quality.transition_retained_bundle(
-        connection,
-        decision=decision,
-        evidence_root=DEFAULT_TELEMETRY_EVIDENCE,
-    )
-    decision["retained_manifest_path"] = retained_manifest
-    connection.execute(
-        """
-        UPDATE snapshots
-        SET quality_status = ?,
-            current_quality_state = ?,
-            is_accepted_baseline = ?
-        WHERE quality_decision_id = ?
-        """,
-        (
-            decision["current_state"],
-            decision["current_state"],
-            1 if decision["current_state"] == "ACCEPTED" else 0,
-            decision_id,
-        ),
-    )
-    replay = _current_state.replay_scope(
-        connection,
-        decision["network_scope"],
-    )
-    record_access_audit_event(
-        connection,
-        action="TELEMETRY_QUALITY_OVERRIDE",
-        actor=actor,
-        target_type="telemetry_quality_decision",
-        target_key=decision_id,
-        source_ip=source_ip,
-        user_agent=user_agent,
-        details={
-            "prior_state": result["review"]["prior_state"],
-            "resulting_state": decision["current_state"],
-            "reason_present": True,
-            "projection_replay": replay,
-        },
-    )
-    return {
+
+    # Schema initialization is deliberately separated from the operational
+    # override transaction. These helpers no longer commit implicitly.
+    _telemetry_quality.ensure_schema(connection)
+    _current_state.ensure_schema(connection)
+    if connection.in_transaction:
+        connection.commit()
+
+    transition = None
+    cleanup_warning = None
+    try:
+        result = _telemetry_quality.override_decision(
+            connection,
+            decision_id=decision_id,
+            target_state=target_state,
+            reason=reason,
+            actor=actor,
+            policy_path=DELTAAEGIS_V045_POLICY_PATH,
+        )
+        decision = result["decision"]
+        transition = _telemetry_quality.prepare_retained_bundle_transition(
+            decision=decision,
+            evidence_root=DEFAULT_TELEMETRY_EVIDENCE,
+        )
+        retained_manifest = _telemetry_quality.apply_retained_bundle_transition(
+            connection,
+            decision_id=decision_id,
+            transition=transition,
+        )
+        decision["retained_manifest_path"] = retained_manifest
+        connection.execute(
+            """
+            UPDATE snapshots
+            SET quality_status = ?,
+                current_quality_state = ?,
+                is_accepted_baseline = ?
+            WHERE quality_decision_id = ?
+            """,
+            (
+                decision["current_state"],
+                decision["current_state"],
+                1 if decision["current_state"] == "ACCEPTED" else 0,
+                decision_id,
+            ),
+        )
+
+        snapshot_rows = connection.execute(
+            "SELECT scan_id FROM snapshots WHERE quality_decision_id = ?",
+            (decision_id,),
+        ).fetchall()
+        for snapshot_row in snapshot_rows:
+            scan_id = str(snapshot_row["scan_id"])
+            if (
+                decision["current_state"] in {"ACCEPTED", "DEGRADED"}
+                and retained_manifest
+            ):
+                manifest_path = Path(retained_manifest)
+                snapshot = load_snapshot(manifest_path)
+                manifest_data = load_json_file(manifest_path, {})
+                if not isinstance(manifest_data, dict):
+                    manifest_data = {}
+                store_netsniper_intelligence_summary(
+                    connection, snapshot, manifest_path, manifest_data
+                )
+                store_netsniper_intelligence_hosts(
+                    connection, snapshot, manifest_path, manifest_data
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM netsniper_intelligence_hosts WHERE scan_id = ?",
+                    (scan_id,),
+                )
+                connection.execute(
+                    "DELETE FROM netsniper_intelligence_summaries WHERE scan_id = ?",
+                    (scan_id,),
+                )
+
+        replay = _current_state.replay_scope(
+            connection,
+            decision["network_scope"],
+        )
+        record_access_audit_event(
+            connection,
+            action="TELEMETRY_QUALITY_OVERRIDE",
+            actor=actor,
+            target_type="telemetry_quality_decision",
+            target_key=decision_id,
+            source_ip=source_ip,
+            user_agent=user_agent,
+            details={
+                "prior_state": result["review"]["prior_state"],
+                "resulting_state": decision["current_state"],
+                "reason_present": True,
+                "projection_replay": replay,
+            },
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        _telemetry_quality.abort_retained_bundle_transition(transition)
+        raise
+    else:
+        cleanup_warning = (
+            _telemetry_quality.finalize_retained_bundle_transition(transition)
+        )
+
+    output = {
         "ok": True,
         "decision": _telemetry_quality.decision_by_id(
             connection,
@@ -33582,7 +33678,9 @@ def dashboard_telemetry_quality_override_payload(
             },
         ),
     }
-
+    if cleanup_warning:
+        output["evidence_cleanup_warning"] = cleanup_warning
+    return output
 
 def dashboard_current_state_payload(connection, scope=None):
     payload = _deltaaegis_dashboard_current_state_v045_base(
@@ -33890,7 +33988,7 @@ def dashboard_telemetry_quality_shell_html() -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "DeltaAegis v0.44.1 — Repository Hygiene and Validation Retention, "
+            "DeltaAegis v0.45.0 — Telemetry Trust, "
             "SQLite-consistent backups, verified manifests, "
             "restore rehearsal, guarded retention, active restore "
             "cutover planning and rollback, operator actions, "

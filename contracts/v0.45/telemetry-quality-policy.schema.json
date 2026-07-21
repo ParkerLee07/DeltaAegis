@@ -18,7 +18,7 @@
       "const": "deltaaegis-telemetry-quality-policy-v1"
     },
     "policy_version": {
-      "const": "deltaaegis-v0.45-stage0f"
+      "const": "deltaaegis-v0.45-stage0g"
     },
     "states": {
       "type": "object",
