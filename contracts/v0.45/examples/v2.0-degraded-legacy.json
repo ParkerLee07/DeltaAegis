@@ -1,0 +1,51 @@
+{
+  "schema_version": "deltaaegis-telemetry-quality-decision-v1",
+  "policy_version": "deltaaegis-v0.45-stage0f",
+  "bundle_id": "v2.0-degraded-legacy",
+  "bundle_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "evaluated_at": "2026-07-15T16:00:00Z",
+  "source_contract": {
+    "netsniper_version": "2.0.0",
+    "bundle_schema_version": "netsniper-run-v2",
+    "capability_manifest_version": null,
+    "host_classification_version": null
+  },
+  "automated_state": "DEGRADED",
+  "current_state": "DEGRADED",
+  "reasons": [
+    {
+      "code": "legacy_v2_compatibility",
+      "severity": "warning",
+      "scope": "bundle",
+      "overridable": true,
+      "detail": "A v2.0 bundle is recognized but cannot prove the v2.1 capability and provenance contract."
+    },
+    {
+      "code": "negative_evidence_disabled",
+      "severity": "warning",
+      "scope": "policy",
+      "overridable": true,
+      "detail": "Coverage is insufficient for negative-evidence or absence-based actions."
+    }
+  ],
+  "effects": {
+    "retain_raw_bundle": "allowed",
+    "update_positive_observations": "positive_observations_only",
+    "apply_absence_mutations": "blocked",
+    "update_device_classification": "stronger_evidence_only",
+    "create_alerts": "positive_observations_only",
+    "create_high_severity_classification_alerts": "blocked",
+    "resolve_alerts": "blocked",
+    "update_risk_score": "uncertainty_capped",
+    "quality_center_visibility": "allowed"
+  },
+  "retention_disposition": "trusted_store",
+  "review": {
+    "status": "not_reviewed",
+    "reviewer": null,
+    "reviewed_at": null,
+    "override_from": null,
+    "override_to": null,
+    "override_reason": null
+  }
+}

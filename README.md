@@ -4,26 +4,35 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v0.44.1
+## Current Release — v0.45.0
 
-**DeltaAegis v0.44.1 — Repository Hygiene and Validation Retention**
+**DeltaAegis v0.45.0 — Telemetry Trust**
 
-DeltaAegis v0.44.1 is a maintenance release that reduces repository and validation debt without changing the database schema, operator workflow, NetSniper/TrueAegis contracts, or the completed v0.44 modular-core architecture.
+DeltaAegis v0.45.0 introduces a policy-driven trust boundary between immutable
+NetSniper evidence and DeltaAegis operational current state. Evidence quality,
+uncertainty, review history, and operator overrides remain explicit instead of
+every imported bundle being treated as equally authoritative.
 
 Highlights:
 
-- Replaced the stale embedded troubleshooter bundle with a repository-aware diagnostic runner that selects the highest retained release gate and verifies an acyclic executable validator graph.
-- Removed the superseded parallel architecture document and made `docs/architecture/overview.md` the single authoritative architecture entry point.
-- Retired 216 obsolete historical validators and three legacy or release-only tools under an exact SHA-256 manifest while preserving every retired file byte-for-byte at tag `v0.44.0`.
-- Removed superseded v0.40-v0.44 release-only gates, metadata/documentation validators, and v0.43 audit/benchmark generators while retaining staged diagnostics and the active compatibility floor.
-- Consolidated five historical report-stage roots into one current report-contract validator.
-- Removed one unreachable operator-session rendering wrapper while preserving the operator and reset-page HTML fingerprints and all v0.40 action-receipt behavior.
-- Renamed the core regression test module and class to release-neutral names.
-- Restored the complete v0.41 backup, manifest, restore-rehearsal, retention, and guarded cutover behavior suite to the current compatibility gate.
-- Hardened repeated installation of the managed CLI and troubleshooter launchers with exact-target atomic replacement and bounded transient-filesystem retries.
-- Added a v0.44.1 release gate that owns repository hygiene, validator retention, report contracts, data durability, modular-core boundaries, and the inherited v0.42/v0.40/v0.39 compatibility floor.
-- Updated CI to compile the modular core and maintenance validators, run regression tests, verify repository hygiene and retention, and exercise data-durability compatibility.
-- Retained `AGPL-3.0-only`; alternative commercial licensing remains available only by separate written agreement.
+- Added deterministic `ACCEPTED`, `DEGRADED`, `QUARANTINED`, and `REJECTED`
+  telemetry-quality decisions from versioned policy and content-bound evidence.
+- Added immutable automated-decision records plus a separate authenticated
+  review and override ledger.
+- Added state-aware ingestion effects: accepted evidence may update full state,
+  degraded evidence is additive or refresh-only, and quarantined or rejected
+  evidence cannot mutate current state.
+- Added replayable current-state projection so reviewed decisions rebuild the
+  affected scope without rewriting source evidence.
+- Added the authenticated Telemetry Quality Center, quality-detail APIs,
+  review and policy-permitted override actions, Markdown reporting, and
+  progressive technical disclosure.
+- Added asset-detail visibility for structured NetSniper v2.1 classification
+  context without changing list, event, or risk payload boundaries.
+- Preserved the v0.44 modular-core ownership model and the retained v0.42,
+  v0.40, and v0.39 compatibility floor.
+- Retained `AGPL-3.0-only`; alternative commercial licensing remains available
+  only by separate written agreement.
 
 ## What DeltaAegis Does
 
@@ -44,7 +53,7 @@ NetSniper telemetry bundle → DeltaAegis ingest → SQLite snapshot history →
 
 NetSniper remains the lightweight scanner and telemetry producer. DeltaAegis is the dashboard, history store, delta engine, analyst workflow layer, and local SIEM-style console.
 
-The current architecture, completed v0.44 responsibility boundaries, compatibility facade, and accepted decisions are documented in [`docs/architecture/overview.md`](docs/architecture/overview.md). The v1.0 product boundary is defined in [`V1_SCOPE.md`](V1_SCOPE.md), and supported environments are defined in [`SUPPORTED_VERSIONS.md`](SUPPORTED_VERSIONS.md).
+The current architecture, completed v0.44 responsibility boundaries, v0.45 telemetry-trust boundary, compatibility facade, and accepted decisions are documented in [`docs/architecture/overview.md`](docs/architecture/overview.md). The v1.0 product boundary is defined in [`V1_SCOPE.md`](V1_SCOPE.md), and supported environments are defined in [`SUPPORTED_VERSIONS.md`](SUPPORTED_VERSIONS.md).
 
 ## Installation
 
@@ -385,7 +394,7 @@ The safety backup is retained after success or rollback. DeltaAegis does not del
 
 ## Security Boundary
 
-DeltaAegis v0.44.1 does not expose arbitrary shell command execution from the dashboard.
+DeltaAegis v0.45.0 does not expose arbitrary shell command execution from the dashboard.
 
 Dashboard NetSniper execution uses guarded job records, validated private IPv4 CIDRs, and fixed argument-vector process creation. Live job-detail reads are bounded and confined to the configured scan-log root.
 
@@ -557,13 +566,13 @@ The default branch intentionally retains the active compatibility floor rather t
 
 ## Validation
 
-Run the complete v0.44.1 automated release gate from a clean checkout:
+Run the complete v0.45.0 automated release gate from a clean checkout:
 
 ```bash
-./tools/validate_v0_44_1_release_gate.sh
+./tools/validate_v0_45_release_gate.sh
 ```
 
-The release gate validates repository hygiene, validator retirement, consolidated report contracts, the retained v0.41 durability and recovery suite, all focused v0.44 extraction boundaries, the internal dependency graph and root compatibility facade, the deterministic repository audit, release metadata, regression tests, and the inherited v0.42 security, v0.40 operator-action, and v0.39 functional compatibility floor.
+The release gate validates v0.45 release metadata, deterministic telemetry-quality decisions, durable review storage, state-aware effects, replayable current-state projection, authenticated review and override boundaries, the Telemetry Quality Center, regression tests, the deterministic repository audit, and the retained predecessor compatibility floor.
 
 Complete the manual backup and restore checklist before merge, tag, or publication:
 
@@ -620,7 +629,7 @@ three-project defensive workflow:
 
 ## License
 
-DeltaAegis v0.44.1 is licensed under the **GNU Affero General Public License, version 3 only** (`AGPL-3.0-only`). See `LICENSE` and `LICENSING.md`.
+DeltaAegis v0.45.0 is licensed under the **GNU Affero General Public License, version 3 only** (`AGPL-3.0-only`). See `LICENSE` and `LICENSING.md`.
 
 Alternative commercial licensing may be available from Parker Lee through a separate written agreement. Earlier copies already distributed under the MIT License retain the permissions that accompanied those copies.
 

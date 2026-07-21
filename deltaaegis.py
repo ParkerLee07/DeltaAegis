@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Parker Lee
-"""DeltaAegis v0.44.1: Repository Hygiene and Validation Retention.
+"""DeltaAegis v0.45.0: Telemetry Trust.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -49,12 +49,21 @@ from deltaaegis_core import sites as _sites
 from deltaaegis_core import web as _web
 from deltaaegis_core import jobs as _jobs
 from deltaaegis_core import reports as _reports
+try:
+    from deltaaegis_core import telemetry_quality as _telemetry_quality
+    from deltaaegis_core import current_state as _current_state
+except ImportError:
+    # Compatibility for legacy minimal lifecycle fixtures. Normal installs
+    # require both v0.45 modules through install.sh before feature use.
+    _telemetry_quality = None
+    _current_state = None
 from deltaaegis_core.config import (
     DEFAULT_BACKUPS,
     DEFAULT_DB,
     DEFAULT_EVENTS,
     DEFAULT_NETSNIPER,
     DEFAULT_REPORTS,
+    DEFAULT_TELEMETRY_EVIDENCE,
     DEFAULT_RESTORE_REHEARSALS,
     DEFAULT_RUNS,
     DEFAULT_SCAN_LOGS,
@@ -77,7 +86,7 @@ def _report_context() -> _reports.ReportContext:
         operator_triage_summary=operator_triage_summary,
     )
 
-DELTAAEGIS_VERSION = "0.44.1"
+DELTAAEGIS_VERSION = "0.45.0"
 DELTAAEGIS_SECURITY_HOTFIX = "2026-07-13.2"
 DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION = "deltaaegis-backup-manifest-v1"
 DELTAAEGIS_V0_14_COMPATIBILITY_NOTE = "DeltaAegis v0.14.0 — NetSniper Scan Orchestration compatibility retained."
@@ -2891,39 +2900,291 @@ def profile_transition(baseline: sqlite3.Row, snapshot: Snapshot) -> bool:
 
 
 def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_path: Path) -> str:
-    snapshot = load_snapshot(manifest_path)
-    if snapshot_exists(connection, snapshot.scan_id):
-        return f"SKIP {snapshot.scan_id}: already imported"
-    baseline = latest_accepted_snapshot(connection, snapshot.target)
-    quality_status, quality_reason = assess_quality(snapshot, baseline)
-    insert_snapshot(connection, snapshot, quality_status, quality_reason)
-    manifest_data = load_json_file(manifest_path, {})
-    if not isinstance(manifest_data, dict):
-        manifest_data = {}
-    store_netsniper_intelligence_summary(connection, snapshot, manifest_path, manifest_data)
-    store_netsniper_intelligence_hosts(connection, snapshot, manifest_path, manifest_data)
-    events: list[dict[str, Any]] = []
-    if quality_status == "ACCEPTED":
-        if baseline is None:
-            initialize_lifecycle(connection, snapshot)
-        elif profile_transition(baseline, snapshot):
-            initialize_lifecycle(connection, snapshot)
-            events.append(event("PROFILE_BASELINE_RESET", "INFO", f"scan:{snapshot.scan_id}", "NetSniper telemetry contract upgraded to a profile-aware manifest. This snapshot becomes the new profile baseline without generating service-change deltas."))
-        elif identity_transition(float(baseline["identity_coverage"]), snapshot.identity_coverage):
-            initialize_lifecycle(connection, snapshot)
-            events.append(event("IDENTITY_BASELINE_RESET", "INFO", f"scan:{snapshot.scan_id}", f"MAC-backed identity coverage increased from {float(baseline['identity_coverage']):.0%} to {snapshot.identity_coverage:.0%}. This snapshot becomes the new identity baseline without generating asset-change deltas."))
-        else:
-            previous_assets = load_assets_from_db(connection, baseline["scan_id"])
-            events.extend(comparison_events(previous_assets, snapshot.assets))
-            events.extend(classification_delta_events(previous_assets, snapshot.assets))
-            events.extend(lifecycle_events(connection, snapshot))
-    else:
-        etype = "SNAPSHOT_PROFILE_CHANGED" if "profile fingerprint changed" in quality_reason.lower() else "SNAPSHOT_REVIEW_REQUIRED"
-        events.append(event(etype, "MEDIUM", f"scan:{snapshot.scan_id}", quality_reason))
-    event_count = store_events(connection, snapshot.scan_id, baseline["scan_id"] if baseline else None, events, export_path)
-    connection.commit()
-    return f"IMPORT {snapshot.scan_id}: quality={quality_status}, assets={len(snapshot.assets)}, mac_identity={snapshot.identity_coverage:.0%}, events={event_count}"
+    """Import one NetSniper bundle through the v0.45 telemetry-trust runtime."""
 
+    original_manifest = Path(manifest_path).expanduser().resolve()
+    retention_receipt: dict[str, Any] | None = None
+    try:
+        _current_state.bootstrap_legacy_projection(connection)
+        decision = _telemetry_quality.evaluate_bundle_record(
+            original_manifest,
+            policy_path=DELTAAEGIS_V045_POLICY_PATH,
+        )
+        decision = _telemetry_quality.apply_run_id_conflict(
+            connection,
+            decision,
+            policy_path=DELTAAEGIS_V045_POLICY_PATH,
+        )
+
+        try:
+            retention_receipt = _telemetry_quality.retain_bundle_receipt(
+                original_manifest,
+                evidence_root=DEFAULT_TELEMETRY_EVIDENCE,
+                decision=decision,
+            )
+            retained_manifest = str(
+                retention_receipt.get("manifest_path") or ""
+            )
+        except (OSError, _telemetry_quality.TelemetryQualityError) as exc:
+            decision = dict(decision)
+            decision["automated_state"] = "REJECTED"
+            decision["current_state"] = "REJECTED"
+            decision["retention_disposition"] = "audit_metadata_only"
+            decision["review_required"] = False
+            reasons = list(decision.get("reasons") or [])
+            reason_codes = list(decision.get("reason_codes") or [])
+            if "required_artifact_invalid" not in reason_codes:
+                reason_codes.append("required_artifact_invalid")
+                reasons.append(
+                    {
+                        "code": "required_artifact_invalid",
+                        "severity": "critical",
+                        "minimum_state": "REJECTED",
+                        "overridable": False,
+                        "description": f"evidence retention failed: {exc}",
+                    }
+                )
+            decision["reason_codes"] = reason_codes
+            decision["reasons"] = reasons
+            decision["allowed_effects"] = ["quality_center_visibility"]
+            decision["blocked_effects"] = [
+                "apply_absence_mutations",
+                "create_alerts",
+                "create_high_severity_classification_alerts",
+                "resolve_alerts",
+                "retain_raw_bundle",
+                "update_device_classification",
+                "update_positive_observations",
+                "update_risk_score",
+            ]
+            decision["effect_policy"] = {
+                "apply_absence_mutations": "blocked",
+                "create_alerts": "blocked",
+                "create_high_severity_classification_alerts": "blocked",
+                "quality_center_visibility": "allowed",
+                "resolve_alerts": "blocked",
+                "retain_raw_bundle": "receipt_only",
+                "update_device_classification": "blocked",
+                "update_positive_observations": "blocked",
+                "update_risk_score": "blocked",
+            }
+            retained_manifest = ""
+            retention_receipt = None
+
+        persisted = _telemetry_quality.persist_decision(
+            connection,
+            decision,
+            retained_manifest_path=retained_manifest,
+            import_status="PENDING",
+        )
+        decision_id = str(
+            persisted.get("decision_id")
+            or decision.get("decision_id")
+            or ""
+        )
+        state = str(
+            persisted.get("current_state")
+            or decision.get("current_state")
+            or "REJECTED"
+        ).upper()
+
+        if state == "REJECTED":
+            _telemetry_quality.mark_import_status(
+                connection,
+                decision_id,
+                "REJECTED",
+            )
+            connection.commit()
+            return (
+                f"REJECT {decision.get('run_id')}: "
+                f"reasons={','.join(decision.get('reason_codes') or []) or 'unknown'}"
+            )
+
+        import_manifest = Path(retained_manifest or original_manifest)
+        snapshot = load_snapshot(import_manifest)
+        if snapshot_exists(connection, snapshot.scan_id):
+            _telemetry_quality.mark_import_status(
+                connection,
+                decision_id,
+                "ALREADY_IMPORTED",
+                imported_at=utc_now(),
+            )
+            connection.commit()
+            return f"SKIP {snapshot.scan_id}: already imported"
+
+        historical = _current_state.snapshot_is_historical(
+            connection,
+            scope=snapshot.target,
+            created_at=snapshot.created_at,
+            scan_id=snapshot.scan_id,
+        )
+        baseline = latest_accepted_snapshot(connection, snapshot.target)
+        comparison_baseline = connection.execute(
+            """
+            SELECT *
+            FROM snapshots
+            WHERE target = ?
+              AND quality_status IN ('ACCEPTED', 'DEGRADED')
+            ORDER BY created_at DESC, imported_at DESC
+            LIMIT 1
+            """,
+            (snapshot.target,),
+        ).fetchone()
+        quality_reason = "; ".join(
+            str(item.get("description") or item.get("code") or "")
+            for item in (decision.get("reasons") or [])
+            if isinstance(item, dict)
+        ) or f"Telemetry quality state is {state}."
+        insert_snapshot(
+            connection,
+            snapshot,
+            state,
+            quality_reason,
+        )
+        _telemetry_quality.update_snapshot_quality_link(
+            connection,
+            scan_id=snapshot.scan_id,
+            decision=decision,
+            retained_manifest_path=retained_manifest,
+        )
+
+        manifest_data = load_json_file(import_manifest, {})
+        if not isinstance(manifest_data, dict):
+            manifest_data = {}
+
+        if state in {"ACCEPTED", "DEGRADED"}:
+            store_netsniper_intelligence_summary(
+                connection,
+                snapshot,
+                import_manifest,
+                manifest_data,
+            )
+            store_netsniper_intelligence_hosts(
+                connection,
+                snapshot,
+                import_manifest,
+                manifest_data,
+            )
+
+        if historical:
+            _telemetry_quality.mark_import_status(
+                connection,
+                decision_id,
+                "IMPORTED",
+                imported_at=utc_now(),
+            )
+            connection.commit()
+            return (
+                f"IMPORT {snapshot.scan_id}: quality={state}, "
+                "historical=true, current_state_unchanged=true"
+            )
+
+        events: list[dict[str, Any]] = []
+        if state == "ACCEPTED":
+            if baseline is None:
+                initialize_lifecycle(connection, snapshot)
+            elif profile_transition(baseline, snapshot):
+                initialize_lifecycle(connection, snapshot)
+                events.append(
+                    event(
+                        "PROFILE_BASELINE_RESET",
+                        "INFO",
+                        f"scan:{snapshot.scan_id}",
+                        "NetSniper telemetry contract upgraded to a "
+                        "profile-aware manifest. This accepted snapshot "
+                        "becomes the profile baseline without service-change "
+                        "deltas.",
+                    )
+                )
+            elif identity_transition(
+                float(baseline["identity_coverage"]),
+                snapshot.identity_coverage,
+            ):
+                initialize_lifecycle(connection, snapshot)
+                events.append(
+                    event(
+                        "IDENTITY_BASELINE_RESET",
+                        "INFO",
+                        f"scan:{snapshot.scan_id}",
+                        "MAC-backed identity coverage increased. This accepted "
+                        "snapshot becomes the identity baseline without "
+                        "asset-change deltas.",
+                    )
+                )
+            else:
+                previous_assets = load_assets_from_db(
+                    connection,
+                    baseline["scan_id"],
+                )
+                events.extend(
+                    comparison_events(previous_assets, snapshot.assets)
+                )
+                events.extend(
+                    classification_delta_events(
+                        previous_assets,
+                        snapshot.assets,
+                    )
+                )
+                events.extend(lifecycle_events(connection, snapshot))
+        elif state == "DEGRADED" and comparison_baseline is not None:
+            previous_assets = load_assets_from_db(
+                connection,
+                comparison_baseline["scan_id"],
+            )
+            positive_event_types = {
+                "MONITORED_SERVICE_OPENED",
+                "NETSNIPER_FINDING_ADDED",
+            }
+            events.extend(
+                item
+                for item in comparison_events(
+                    previous_assets,
+                    snapshot.assets,
+                )
+                if item.get("event_type") in positive_event_types
+            )
+
+        _current_state.apply_snapshot(
+            connection,
+            snapshot,
+            decision,
+            update_lifecycle=(state == "DEGRADED"),
+        )
+        event_count = 0
+        if events:
+            event_count = store_events(
+                connection,
+                snapshot.scan_id,
+                (
+                    baseline["scan_id"]
+                    if baseline is not None
+                    else (
+                        comparison_baseline["scan_id"]
+                        if comparison_baseline is not None
+                        else None
+                    )
+                ),
+                events,
+                export_path,
+            )
+
+        _telemetry_quality.mark_import_status(
+            connection,
+            decision_id,
+            "IMPORTED",
+            imported_at=utc_now(),
+        )
+        connection.commit()
+        return (
+            f"IMPORT {snapshot.scan_id}: quality={state}, "
+            f"assets={len(snapshot.assets)}, "
+            f"mac_identity={snapshot.identity_coverage:.0%}, "
+            f"events={event_count}"
+        )
+    except Exception:
+        connection.rollback()
+        _telemetry_quality.cleanup_retained_bundle(retention_receipt)
+        raise
 
 def finalized_manifests(runs_dir: Path) -> list[Path]:
     if not runs_dir.is_dir():
@@ -2940,7 +3201,14 @@ def command_ingest(args: argparse.Namespace) -> int:
     for manifest in manifests:
         try:
             print(ingest_manifest(connection, manifest, args.events))
-        except DeltaAegisError as exc:
+        except (
+            DeltaAegisError,
+            _telemetry_quality.TelemetryQualityError,
+            OSError,
+            ValueError,
+            sqlite3.Error,
+        ) as exc:
+            connection.rollback()
             print(f"ERROR {manifest}: {exc}", file=sys.stderr)
     return 0
 
@@ -6349,28 +6617,19 @@ def command_summary(args: argparse.Namespace) -> int:
 
 
 def command_approve(args: argparse.Namespace) -> int:
-    connection = connect(args.db)
-    row = connection.execute("SELECT * FROM snapshots WHERE scan_id = ?", (args.scan_id,)).fetchone()
-    if row is None:
-        raise DeltaAegisError(f"snapshot not found: {args.scan_id}")
-    if row["quality_status"] == "ACCEPTED":
-        print(f"Snapshot {args.scan_id} is already accepted.")
-        return 0
-    previous = latest_accepted_snapshot(connection, row["target"])
-    assets = load_assets_from_db(connection, args.scan_id)
-    reset_lifecycle(
-        connection,
-        args.scan_id,
-        row["created_at"],
-        assets,
-        row["network_scope"],
+    """Retire the legacy mutating approval path.
+
+    v0.45 keeps automated quality decisions immutable.  Review and override
+    operations must use the authenticated Telemetry Quality Center so actor
+    identity, role, reason, allowed transition, evidence retention, and
+    projection replay are audited atomically.
+    """
+    raise DeltaAegisError(
+        "The legacy 'approve' command is disabled by DeltaAegis v0.45. "
+        "Use /operator/telemetry-quality with an authenticated dashboard "
+        "session. ANALYST may annotate; ADMIN may apply policy-permitted "
+        "overrides. REJECTED telemetry remains non-overridable."
     )
-    connection.execute("UPDATE snapshots SET quality_status = 'ACCEPTED', quality_reason = ?, is_accepted_baseline = 1 WHERE scan_id = ?", ("Manually approved as the new baseline by the operator.", args.scan_id))
-    approval = event("PROFILE_BASELINE_APPROVED", "INFO", f"scan:{args.scan_id}", "Operator approved this reviewed snapshot as the new comparison baseline.")
-    store_events(connection, args.scan_id, previous["scan_id"] if previous else None, [approval], args.events)
-    connection.commit()
-    print(f"Snapshot {args.scan_id} approved as the new baseline.")
-    return 0
 
 
 def command_alerts(args: argparse.Namespace) -> int:
@@ -8386,6 +8645,11 @@ def command_report(args):
     lines.append(f"- Asset inventory limit: `{args.asset_limit}`")
     lines.append("")
 
+    _reports.append_report_telemetry_quality_section(
+        lines,
+        connection,
+        scope=scope,
+    )
     append_report_network_scope_summary(lines, connection, scope=scope)
     append_report_asset_lifecycle_section(lines, report_lifecycle_rows)
     append_report_classification_summary_section(lines, report_classification_summary)
@@ -9501,6 +9765,39 @@ def dashboard_json_list(value):
         return []
 
     return decoded if isinstance(decoded, list) else []
+
+
+# DELTAAEGIS_V045_NETSNIPER_CONTEXT_CONSUMER
+def dashboard_v045_json_object(value):
+    """Decode one JSON object and fail closed for absent or malformed input."""
+    if isinstance(value, dict):
+        return value
+    if value is None or value == "":
+        return {}
+
+    try:
+        decoded = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def dashboard_enrich_classification_context_payload(row):
+    """Add NetSniper reasoning only to the asset-detail observation payload."""
+    item = dashboard_enrich_classification_payload(row)
+    if item is None:
+        return None
+
+    classification = dashboard_v045_json_object(
+        item.get("classification_json")
+    )
+    context = classification.get("deltaaegis_context")
+    available = isinstance(context, dict) and bool(context)
+
+    item["classification_context_available"] = available
+    item["classification_context"] = context if available else {}
+    return item
 
 
 def dashboard_enrich_classification_payload(row):
@@ -14787,7 +15084,7 @@ def dashboard_asset_detail_payload(connection, identifier, scope=None, limit=20)
     ).fetchone()
 
     latest_observation_dict = (
-        dashboard_enrich_classification_payload(dict(latest_observation))
+        dashboard_enrich_classification_context_payload(dict(latest_observation))
         if latest_observation
         else None
     )
@@ -19974,7 +20271,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.44.1 Repository Hygiene</span></div>
+      <div class="executive-status-pill"><span>Release</span><span>v0.45.0 Telemetry Trust</span></div>
     </div>
   </header>
 
@@ -20798,7 +21095,9 @@ def dashboard_index_html_base_v025_operator_link():
       return String(value)
         .replaceAll("&", "&amp;")
         .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;");
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
     }
 
     const DASHBOARD_TABS = [
@@ -33038,10 +33337,658 @@ def command_restore_cutover_execute(args) -> int:
     return 0 if receipt["status"] == "COMPLETED" else 1
 
 
+
+# DELTAAEGIS_V045_TELEMETRY_TRUST_RUNTIME
+DELTAAEGIS_V045_POLICY_PATH = (
+    Path(__file__).resolve().parent
+    / "contracts"
+    / "v0.45"
+    / "telemetry-quality-policy.json"
+)
+
+_deltaaegis_dashboard_operator_session_shell_v045_base = (
+    dashboard_operator_session_shell_html
+)
+_deltaaegis_dashboard_current_state_v045_base = (
+    dashboard_current_state_payload
+)
+_deltaaegis_dashboard_summary_v045_base = dashboard_summary_payload
+_deltaaegis_dashboard_assets_v045_base = dashboard_assets_payload
+_deltaaegis_dashboard_asset_detail_v045_base = (
+    dashboard_asset_detail_payload
+)
+_deltaaegis_build_current_risk_v045_base = build_current_risk_register
+
+
+def dashboard_operator_session_shell_html() -> str:
+    html_text = _deltaaegis_dashboard_operator_session_shell_v045_base()
+    link = (
+        '<a id="deltaaegis-telemetry-quality-link" '
+        'href="/operator/telemetry-quality">Telemetry Quality Center</a>'
+    )
+    if link in html_text:
+        return html_text
+    marker = '<a href="/">Back to dashboard</a>'
+    if marker in html_text:
+        return html_text.replace(marker, link + "\n        " + marker, 1)
+    return html_text.replace(
+        "</div>",
+        link + "\n      </div>",
+        1,
+    )
+
+
+def dashboard_telemetry_quality_payload(
+    connection,
+    *,
+    limit=50,
+    scope=None,
+    state=None,
+):
+    try:
+        decisions = _telemetry_quality.list_decisions(
+            connection,
+            limit=limit,
+            scope=scope,
+            state=state,
+        )
+        summary = _telemetry_quality.quality_summary(
+            connection,
+            scope=scope,
+        )
+    except _telemetry_quality.TelemetryQualityError as exc:
+        raise DeltaAegisError(str(exc)) from exc
+    return {
+        "ok": True,
+        "schema_version": "deltaaegis-telemetry-quality-center-v1",
+        "summary": summary,
+        "decisions": decisions,
+        "count": len(decisions),
+        "selected_scope": scope,
+        "selected_state": state,
+        "policy_version": _telemetry_quality.POLICY_VERSION,
+    }
+
+
+def dashboard_telemetry_quality_detail_payload(
+    connection,
+    decision_id,
+):
+    decision = _telemetry_quality.decision_by_id(
+        connection,
+        decision_id,
+    )
+    if decision is None:
+        raise DeltaAegisError(
+            f"telemetry-quality decision not found: {decision_id}"
+        )
+    return {
+        "ok": True,
+        "schema_version": "deltaaegis-telemetry-quality-detail-v1",
+        "decision": decision,
+    }
+
+
+def _dashboard_v045_quality_payload_fields(payload):
+    return {
+        str(key)
+        for key in (payload or {})
+        if str(key)
+    }
+
+
+def _dashboard_v045_reject_actor_fields(payload):
+    unsafe = {
+        "actor",
+        "actor_user_id",
+        "actor_username",
+        "actor_role",
+        "role",
+        "username",
+        "user_id",
+        "auth_type",
+    }
+    supplied = _dashboard_v045_quality_payload_fields(payload) & unsafe
+    if supplied:
+        raise DeltaAegisError(
+            "telemetry-quality actor identity is session-derived; "
+            "remove caller-supplied field(s): "
+            + ", ".join(sorted(supplied))
+        )
+
+
+def _dashboard_v045_require_session_actor(actor):
+    if not isinstance(actor, dict):
+        raise DeltaAegisError(
+            "authenticated dashboard session actor is required"
+        )
+    auth_type = str(actor.get("auth_type") or "").strip()
+    if auth_type != "dashboard_session":
+        raise DeltaAegisError(
+            "telemetry-quality review and override require an authenticated "
+            "dashboard session"
+        )
+    username = str(actor.get("username") or "").strip()
+    role = str(actor.get("role") or "VIEWER").strip().upper()
+    if not username:
+        raise DeltaAegisError("session actor username is missing")
+    if role not in {"ANALYST", "ADMIN"}:
+        raise DeltaAegisError(
+            "ANALYST or ADMIN role is required for telemetry-quality review"
+        )
+    return actor
+
+
+def dashboard_telemetry_quality_review_payload(
+    connection,
+    payload,
+    *,
+    actor,
+    source_ip=None,
+    user_agent=None,
+):
+    _dashboard_v045_require_session_actor(actor)
+    _dashboard_v045_reject_actor_fields(payload)
+    decision_id = str((payload or {}).get("decision_id") or "").strip()
+    reason = str((payload or {}).get("reason") or "").strip()
+    review = _telemetry_quality.record_review(
+        connection,
+        decision_id=decision_id,
+        action="ANNOTATE",
+        reason=reason,
+        actor=actor,
+    )
+    record_access_audit_event(
+        connection,
+        action="TELEMETRY_QUALITY_REVIEW",
+        actor=actor,
+        target_type="telemetry_quality_decision",
+        target_key=decision_id,
+        source_ip=source_ip,
+        user_agent=user_agent,
+        details={
+            "review_id": review["review_id"],
+            "resulting_state": review["resulting_state"],
+            "reason_present": True,
+        },
+    )
+    return {
+        "ok": True,
+        "review": review,
+        "decision": _telemetry_quality.decision_by_id(
+            connection,
+            decision_id,
+        ),
+        "receipt": dashboard_action_receipt(
+            "telemetry_quality.review",
+            "Telemetry-quality review annotation recorded.",
+            severity="success",
+            identifiers={
+                "decision_id": decision_id,
+                "review_id": review["review_id"],
+            },
+            summary={
+                "state": review["resulting_state"],
+                "actor": review["actor_username"],
+            },
+        ),
+    }
+
+
+def dashboard_telemetry_quality_override_payload(
+    connection,
+    payload,
+    *,
+    actor,
+    source_ip=None,
+    user_agent=None,
+):
+    _dashboard_v045_require_session_actor(actor)
+    _dashboard_v045_reject_actor_fields(payload)
+    decision_id = str((payload or {}).get("decision_id") or "").strip()
+    target_state = str((payload or {}).get("target_state") or "").strip()
+    reason = str((payload or {}).get("reason") or "").strip()
+
+    # Schema initialization is deliberately separated from the operational
+    # override transaction. These helpers no longer commit implicitly.
+    _telemetry_quality.ensure_schema(connection)
+    _current_state.ensure_schema(connection)
+    if connection.in_transaction:
+        connection.commit()
+
+    transition = None
+    cleanup_warning = None
+    try:
+        result = _telemetry_quality.override_decision(
+            connection,
+            decision_id=decision_id,
+            target_state=target_state,
+            reason=reason,
+            actor=actor,
+            policy_path=DELTAAEGIS_V045_POLICY_PATH,
+        )
+        decision = result["decision"]
+        transition = _telemetry_quality.prepare_retained_bundle_transition(
+            decision=decision,
+            evidence_root=DEFAULT_TELEMETRY_EVIDENCE,
+        )
+        retained_manifest = _telemetry_quality.apply_retained_bundle_transition(
+            connection,
+            decision_id=decision_id,
+            transition=transition,
+        )
+        decision["retained_manifest_path"] = retained_manifest
+        connection.execute(
+            """
+            UPDATE snapshots
+            SET quality_status = ?,
+                current_quality_state = ?,
+                is_accepted_baseline = ?
+            WHERE quality_decision_id = ?
+            """,
+            (
+                decision["current_state"],
+                decision["current_state"],
+                1 if decision["current_state"] == "ACCEPTED" else 0,
+                decision_id,
+            ),
+        )
+
+        snapshot_rows = connection.execute(
+            "SELECT scan_id FROM snapshots WHERE quality_decision_id = ?",
+            (decision_id,),
+        ).fetchall()
+        for snapshot_row in snapshot_rows:
+            scan_id = str(snapshot_row["scan_id"])
+            if (
+                decision["current_state"] in {"ACCEPTED", "DEGRADED"}
+                and retained_manifest
+            ):
+                manifest_path = Path(retained_manifest)
+                snapshot = load_snapshot(manifest_path)
+                manifest_data = load_json_file(manifest_path, {})
+                if not isinstance(manifest_data, dict):
+                    manifest_data = {}
+                store_netsniper_intelligence_summary(
+                    connection, snapshot, manifest_path, manifest_data
+                )
+                store_netsniper_intelligence_hosts(
+                    connection, snapshot, manifest_path, manifest_data
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM netsniper_intelligence_hosts WHERE scan_id = ?",
+                    (scan_id,),
+                )
+                connection.execute(
+                    "DELETE FROM netsniper_intelligence_summaries WHERE scan_id = ?",
+                    (scan_id,),
+                )
+
+        replay = _current_state.replay_scope(
+            connection,
+            decision["network_scope"],
+        )
+        record_access_audit_event(
+            connection,
+            action="TELEMETRY_QUALITY_OVERRIDE",
+            actor=actor,
+            target_type="telemetry_quality_decision",
+            target_key=decision_id,
+            source_ip=source_ip,
+            user_agent=user_agent,
+            details={
+                "prior_state": result["review"]["prior_state"],
+                "resulting_state": decision["current_state"],
+                "reason_present": True,
+                "projection_replay": replay,
+            },
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        _telemetry_quality.abort_retained_bundle_transition(transition)
+        raise
+    else:
+        cleanup_warning = (
+            _telemetry_quality.finalize_retained_bundle_transition(transition)
+        )
+
+    output = {
+        "ok": True,
+        "decision": _telemetry_quality.decision_by_id(
+            connection,
+            decision_id,
+        ),
+        "review": result["review"],
+        "projection_replay": replay,
+        "receipt": dashboard_action_receipt(
+            "telemetry_quality.override",
+            "Telemetry-quality override applied and current-state "
+            "projection rebuilt.",
+            severity="warning",
+            identifiers={
+                "decision_id": decision_id,
+                "review_id": result["review"]["review_id"],
+            },
+            summary={
+                "prior_state": result["review"]["prior_state"],
+                "current_state": decision["current_state"],
+                "assets_replayed": replay.get("assets", 0),
+            },
+        ),
+    }
+    if cleanup_warning:
+        output["evidence_cleanup_warning"] = cleanup_warning
+    return output
+
+def dashboard_current_state_payload(connection, scope=None):
+    payload = _deltaaegis_dashboard_current_state_v045_base(
+        connection,
+        scope=scope,
+    )
+    if not isinstance(payload, dict):
+        return payload
+    output = dict(payload)
+    output["telemetry_projection"] = (
+        _current_state.current_state_summary(
+            connection,
+            scope=scope,
+        )
+    )
+    output["telemetry_quality"] = _telemetry_quality.quality_summary(
+        connection,
+        scope=scope,
+    )
+    return output
+
+
+def dashboard_summary_payload(connection, scope=None):
+    payload = _deltaaegis_dashboard_summary_v045_base(
+        connection,
+        scope=scope,
+    )
+    if not isinstance(payload, dict):
+        return payload
+    output = dict(payload)
+    output["telemetry_quality"] = _telemetry_quality.quality_summary(
+        connection,
+        scope=scope,
+    )
+    output["telemetry_projection"] = (
+        _current_state.current_state_summary(
+            connection,
+            scope=scope,
+        )
+    )
+    return output
+
+
+def dashboard_assets_payload(
+    connection,
+    limit=100,
+    scope=None,
+    state=None,
+    identity=None,
+):
+    rows = _deltaaegis_dashboard_assets_v045_base(
+        connection,
+        limit=10000,
+        scope=scope,
+        state=state,
+        identity=identity,
+    )
+    if not isinstance(rows, list):
+        return rows
+    return _current_state.merge_asset_rows(
+        connection,
+        rows,
+        scope=scope,
+        state=state,
+        identity=identity,
+        limit=limit,
+    )
+
+
+def dashboard_asset_detail_payload(
+    connection,
+    identifier,
+    scope=None,
+):
+    payload = _deltaaegis_dashboard_asset_detail_v045_base(
+        connection,
+        identifier,
+        scope=scope,
+    )
+    if isinstance(payload, dict):
+        latest_observation = payload.get("latest_observation")
+        if isinstance(latest_observation, dict):
+            payload = dict(payload)
+            payload["latest_observation"] = (
+                dashboard_enrich_classification_context_payload(
+                    latest_observation
+                )
+            )
+    return _current_state.augment_asset_detail(
+        connection,
+        payload,
+    )
+
+
+def build_current_risk_register(connection, limit, scope=None):
+    rows = _deltaaegis_build_current_risk_v045_base(
+        connection,
+        max(int(limit), 1),
+        scope=scope,
+    )
+    return _current_state.merge_risk_rows(
+        connection,
+        rows,
+        scope=scope,
+        limit=limit,
+        risk_level=risk_level,
+    )
+
+
+def dashboard_telemetry_quality_shell_html() -> str:
+    return r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DeltaAegis Telemetry Quality Center</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #020617; color: #e2e8f0; }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top left, rgba(34,211,238,.13), transparent 34rem), #020617; }
+    main { width: min(1280px, calc(100vw - 32px)); margin: 0 auto; padding: 36px 0; }
+    .panel { border: 1px solid rgba(148,163,184,.22); border-radius: 24px; background: rgba(15,23,42,.92); box-shadow: 0 24px 80px rgba(0,0,0,.34); padding: 26px; }
+    .eyebrow { color: #67e8f9; font-size: 12px; font-weight: 900; letter-spacing: .16em; text-transform: uppercase; }
+    h1 { margin: 8px 0; font-size: 34px; letter-spacing: -.04em; }
+    h2 { margin-top: 28px; }
+    p { color: #94a3b8; line-height: 1.55; }
+    .actions, .filters, .review-grid { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+    a, button { border: 1px solid rgba(34,211,238,.28); border-radius: 999px; background: rgba(8,145,178,.14); color: #67e8f9; cursor: pointer; padding: 9px 13px; text-decoration: none; font-size: 13px; font-weight: 900; }
+    button.warning { border-color: rgba(251,191,36,.38); color: #fde68a; background: rgba(217,119,6,.12); }
+    input, select, textarea { border: 1px solid rgba(148,163,184,.22); border-radius: 12px; background: rgba(2,6,23,.48); color: #e2e8f0; padding: 10px 12px; font-weight: 700; }
+    textarea { min-width: min(520px, 80vw); min-height: 90px; }
+    label { display: grid; gap: 6px; color: #94a3b8; font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+    .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 20px 0; }
+    .card { border: 1px solid rgba(148,163,184,.18); border-radius: 18px; background: rgba(2,6,23,.34); padding: 14px; }
+    .value { font-size: 25px; font-weight: 950; margin-top: 4px; }
+    .status { border: 1px solid rgba(148,163,184,.18); border-radius: 16px; background: rgba(2,6,23,.38); color: #cbd5e1; margin: 18px 0; padding: 12px 14px; font-weight: 700; white-space: pre-wrap; }
+    .table-wrap { overflow-x: auto; border: 1px solid rgba(148,163,184,.18); border-radius: 18px; }
+    table { width: 100%; border-collapse: collapse; min-width: 1100px; }
+    th, td { border-bottom: 1px solid rgba(148,163,184,.14); padding: 11px 13px; text-align: left; vertical-align: top; }
+    th { color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+    td { font-size: 13px; }
+    .pill { display: inline-flex; border: 1px solid rgba(148,163,184,.24); border-radius: 999px; padding: 4px 8px; font-size: 11px; font-weight: 950; }
+    .ACCEPTED { color: #bbf7d0; border-color: rgba(34,197,94,.38); }
+    .DEGRADED { color: #fde68a; border-color: rgba(251,191,36,.38); }
+    .QUARANTINED { color: #fdba74; border-color: rgba(249,115,22,.4); }
+    .REJECTED { color: #fecaca; border-color: rgba(248,113,113,.4); }
+    details pre { white-space: pre-wrap; overflow-wrap: anywhere; color: #cbd5e1; }
+    .muted { color: #94a3b8; }
+  </style>
+</head>
+<body>
+<main>
+<section class="panel">
+  <div class="eyebrow">DeltaAegis v0.45</div>
+  <h1>Telemetry Quality Center</h1>
+  <p>Automated decisions remain immutable. Reviewed state may change only through the policy-permitted, session-derived, audited workflow below. DEGRADED telemetry is positive-only; QUARANTINED and REJECTED telemetry cannot mutate active state.</p>
+  <div class="actions">
+    <a href="/operator">Back to operator session</a>
+    <a href="/">Back to dashboard</a>
+    <a href="/api/telemetry-quality?limit=100">Raw quality JSON</a>
+    <button id="refresh" type="button">Refresh</button>
+  </div>
+  <div class="filters">
+    <label>State
+      <select id="state-filter">
+        <option value="">All states</option>
+        <option>ACCEPTED</option><option>DEGRADED</option>
+        <option>QUARANTINED</option><option>REJECTED</option>
+      </select>
+    </label>
+    <label>Scope
+      <input id="scope-filter" placeholder="192.168.1.0/24">
+    </label>
+  </div>
+  <div class="summary">
+    <div class="card"><div class="muted">Accepted</div><div class="value" id="count-accepted">0</div></div>
+    <div class="card"><div class="muted">Degraded</div><div class="value" id="count-degraded">0</div></div>
+    <div class="card"><div class="muted">Quarantined</div><div class="value" id="count-quarantined">0</div></div>
+    <div class="card"><div class="muted">Rejected</div><div class="value" id="count-rejected">0</div></div>
+    <div class="card"><div class="muted">Needs review</div><div class="value" id="count-review">0</div></div>
+  </div>
+  <div class="status" id="status">Loading telemetry-quality decisions…</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Run</th><th>Scope</th><th>Automated</th><th>Current</th><th>Import</th><th>Retention</th><th>Reasons</th><th>Evaluated</th><th>Details</th></tr></thead>
+      <tbody id="quality-body"></tbody>
+    </table>
+  </div>
+
+  <h2>Review or override</h2>
+  <p class="muted">ANALYST may annotate. ADMIN may apply only allowed transitions. Caller-supplied actor fields are rejected.</p>
+  <div class="review-grid">
+    <label>Decision ID<input id="decision-id" autocomplete="off"></label>
+    <label>Override target
+      <select id="target-state">
+        <option value="">Annotation only</option>
+        <option>ACCEPTED</option><option>DEGRADED</option><option>QUARANTINED</option>
+      </select>
+    </label>
+    <label>Required reason<textarea id="reason"></textarea></label>
+    <button id="submit-review" type="button">Record annotation</button>
+    <button id="submit-override" class="warning" type="button">Apply override</button>
+  </div>
+  <div class="status" id="action-status">No review action submitted.</div>
+  <div class="status" id="detail-status">Select “View” to inspect a decision.</div>
+</section>
+</main>
+<script>
+  function esc(value) {
+    return String(value === null || value === undefined ? "—" : value)
+      .replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;").replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
+  async function jsonRequest(path, options) {
+    const response = await fetch(path, Object.assign({
+      credentials: "same-origin", cache: "no-store"
+    }, options || {}));
+    let payload = {};
+    try { payload = await response.json(); } catch (error) { payload = {}; }
+    if (response.status === 401) { window.location.href = "/login"; return null; }
+    if (!response.ok) throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+    return payload;
+  }
+  function setCount(id, value) {
+    const element = document.getElementById(id);
+    if (element) element.textContent = String(value || 0);
+  }
+  async function loadQuality() {
+    const status = document.getElementById("status");
+    const state = document.getElementById("state-filter").value;
+    const scope = document.getElementById("scope-filter").value.trim();
+    const params = new URLSearchParams({limit: "100"});
+    if (state) params.set("state", state);
+    if (scope) params.set("scope", scope);
+    try {
+      const payload = await jsonRequest(`/api/telemetry-quality?${params}`);
+      if (!payload) return;
+      const counts = (payload.summary || {}).counts || {};
+      setCount("count-accepted", counts.ACCEPTED);
+      setCount("count-degraded", counts.DEGRADED);
+      setCount("count-quarantined", counts.QUARANTINED);
+      setCount("count-rejected", counts.REJECTED);
+      setCount("count-review", (payload.summary || {}).review_required);
+      const rows = payload.decisions || [];
+      document.getElementById("quality-body").innerHTML = rows.length
+        ? rows.map(item => `<tr>
+            <td><code>${esc(item.run_id)}</code><br><small>${esc(item.decision_id)}</small></td>
+            <td><code>${esc(item.network_scope)}</code></td>
+            <td><span class="pill ${esc(item.automated_state)}">${esc(item.automated_state)}</span></td>
+            <td><span class="pill ${esc(item.current_state)}">${esc(item.current_state)}</span></td>
+            <td>${esc(item.import_status)}</td>
+            <td>${esc(item.retention_disposition)}</td>
+            <td>${esc((item.reason_codes || []).join(", "))}</td>
+            <td>${esc(item.evaluated_at)}</td>
+            <td><button type="button" data-decision="${esc(item.decision_id)}">View</button></td>
+          </tr>`).join("")
+        : '<tr><td colspan="9" class="muted">No decisions matched.</td></tr>';
+      status.textContent = `Loaded ${rows.length} decision(s).`;
+    } catch (error) { status.textContent = `Load failed: ${error.message || error}`; }
+  }
+  async function loadDetail(decisionId) {
+    document.getElementById("decision-id").value = decisionId;
+    const status = document.getElementById("detail-status");
+    try {
+      const payload = await jsonRequest(`/api/telemetry-quality/detail?decision_id=${encodeURIComponent(decisionId)}`);
+      status.textContent = JSON.stringify(payload.decision || {}, null, 2);
+    } catch (error) { status.textContent = `Detail failed: ${error.message || error}`; }
+  }
+  async function submitAction(path) {
+    const status = document.getElementById("action-status");
+    const decisionId = document.getElementById("decision-id").value.trim();
+    const reason = document.getElementById("reason").value.trim();
+    const targetState = document.getElementById("target-state").value;
+    const payload = {decision_id: decisionId, reason: reason};
+    if (path.endsWith("/override")) payload.target_state = targetState;
+    try {
+      const result = await jsonRequest(path, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      status.textContent = JSON.stringify((result || {}).receipt || result, null, 2);
+      await loadQuality();
+      await loadDetail(decisionId);
+    } catch (error) { status.textContent = `Action failed: ${error.message || error}`; }
+  }
+  document.getElementById("refresh").addEventListener("click", loadQuality);
+  document.getElementById("state-filter").addEventListener("change", loadQuality);
+  document.getElementById("quality-body").addEventListener("click", event => {
+    const button = event.target.closest("button[data-decision]");
+    if (button) loadDetail(button.dataset.decision);
+  });
+  document.getElementById("submit-review").addEventListener("click", () => submitAction("/api/telemetry-quality/review"));
+  document.getElementById("submit-override").addEventListener("click", () => submitAction("/api/telemetry-quality/override"));
+  loadQuality();
+</script>
+<footer data-deltaaegis-license="AGPL-3.0-only" style="margin:2rem 0 0;padding:1rem;border-top:1px solid currentColor;opacity:.78;text-align:center;font-size:.85rem">
+  DeltaAegis is licensed under AGPL-3.0-only.
+  <a href="https://github.com/ParkerLee07/DeltaAegis" target="_blank" rel="noopener noreferrer">View Corresponding Source</a>.
+</footer>
+</body>
+</html>"""
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "DeltaAegis v0.44.1 — Repository Hygiene and Validation Retention, "
+            "DeltaAegis v0.45.0 — Telemetry Trust, "
             "SQLite-consistent backups, verified manifests, "
             "restore rehearsal, guarded retention, active restore "
             "cutover planning and rollback, operator actions, "

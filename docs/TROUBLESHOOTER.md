@@ -21,8 +21,8 @@ python3 tools/deltaaegis_troubleshooter.py --menu
 ```
 
 Noninteractive execution without arguments runs the highest versioned release
-gate present under `tools/`. In the v0.44.1 repository, that is
-`tools/validate_v0_44_1_release_gate.sh`.
+gate present under `tools/`. In the v0.45.0 repository, that is
+`tools/validate_v0_45_release_gate.sh`.
 
 The troubleshooter inventories the retained validator inventory in the selected
 checkout. Validators retired by v0.44.1 remain available byte-for-byte at the

@@ -152,6 +152,9 @@ runtime_directories=(
     "$BASE/reports"
     "$BASE/scan-logs"
     "$BASE/trueaegis-logs"
+    "$BASE/telemetry-evidence"
+    "$BASE/telemetry-evidence/trusted"
+    "$BASE/telemetry-evidence/quarantine"
 )
 
 managed_launcher() {
@@ -366,6 +369,16 @@ for relative in (
 ):
     path = root / relative
     compile(path.read_text(encoding="utf-8"), str(path), "exec")
+
+# v0.45 modules are present in normal telemetry-trust checkouts. They remain
+# optional only for characterized legacy minimal lifecycle fixtures.
+for relative in (
+    "deltaaegis_core/current_state.py",
+    "deltaaegis_core/telemetry_quality.py",
+):
+    path = root / relative
+    if path.is_file():
+        compile(path.read_text(encoding="utf-8"), str(path), "exec")
 PY
 
 bash -n "$BASE/install.sh"

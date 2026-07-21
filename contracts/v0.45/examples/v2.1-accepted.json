@@ -1,0 +1,65 @@
+{
+  "schema_version": "deltaaegis-telemetry-quality-decision-v1",
+  "policy_version": "deltaaegis-v0.45-stage0f",
+  "bundle_id": "v2.1-accepted",
+  "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "evaluated_at": "2026-07-15T16:00:00Z",
+  "source_contract": {
+    "netsniper_version": "2.1.0",
+    "bundle_schema_version": "netsniper-run-v2",
+    "capability_manifest_version": "netsniper-capability-manifest-v1",
+    "host_classification_version": "netsniper-host-classification-v2"
+  },
+  "automated_state": "ACCEPTED",
+  "current_state": "ACCEPTED",
+  "reasons": [
+    {
+      "code": "complete_v2_1_contract",
+      "severity": "info",
+      "scope": "bundle",
+      "overridable": true,
+      "detail": "Recognized v2.1 capability and host-classification contracts are complete."
+    },
+    {
+      "code": "full_inventory_preserved",
+      "severity": "info",
+      "scope": "bundle",
+      "overridable": true,
+      "detail": "Discovered and emitted host counts match with zero omissions."
+    },
+    {
+      "code": "integrity_verified",
+      "severity": "info",
+      "scope": "bundle",
+      "overridable": true,
+      "detail": "Required artifact hashes and finalization checks pass."
+    },
+    {
+      "code": "scope_authorized",
+      "severity": "info",
+      "scope": "bundle",
+      "overridable": true,
+      "detail": "The normalized target scope is authorized for this logical scope."
+    }
+  ],
+  "effects": {
+    "retain_raw_bundle": "allowed",
+    "update_positive_observations": "allowed",
+    "apply_absence_mutations": "coverage_gated",
+    "update_device_classification": "confidence_gated",
+    "create_alerts": "allowed",
+    "create_high_severity_classification_alerts": "confidence_gated",
+    "resolve_alerts": "coverage_gated",
+    "update_risk_score": "allowed",
+    "quality_center_visibility": "allowed"
+  },
+  "retention_disposition": "trusted_store",
+  "review": {
+    "status": "not_reviewed",
+    "reviewer": null,
+    "reviewed_at": null,
+    "override_from": null,
+    "override_to": null,
+    "override_reason": null
+  }
+}

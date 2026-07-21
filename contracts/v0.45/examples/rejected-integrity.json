@@ -1,0 +1,44 @@
+{
+  "schema_version": "deltaaegis-telemetry-quality-decision-v1",
+  "policy_version": "deltaaegis-v0.45-stage0f",
+  "bundle_id": "rejected-integrity",
+  "bundle_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "evaluated_at": "2026-07-15T16:00:00Z",
+  "source_contract": {
+    "netsniper_version": "2.1.0",
+    "bundle_schema_version": "netsniper-run-v2",
+    "capability_manifest_version": "netsniper-capability-manifest-v1",
+    "host_classification_version": "netsniper-host-classification-v2"
+  },
+  "automated_state": "REJECTED",
+  "current_state": "REJECTED",
+  "reasons": [
+    {
+      "code": "hash_mismatch",
+      "severity": "critical",
+      "scope": "artifact",
+      "overridable": false,
+      "detail": "Artifact content does not match its declared hash."
+    }
+  ],
+  "effects": {
+    "retain_raw_bundle": "receipt_only",
+    "update_positive_observations": "blocked",
+    "apply_absence_mutations": "blocked",
+    "update_device_classification": "blocked",
+    "create_alerts": "blocked",
+    "create_high_severity_classification_alerts": "blocked",
+    "resolve_alerts": "blocked",
+    "update_risk_score": "blocked",
+    "quality_center_visibility": "allowed"
+  },
+  "retention_disposition": "audit_metadata_only",
+  "review": {
+    "status": "not_reviewed",
+    "reviewer": null,
+    "reviewed_at": null,
+    "override_from": null,
+    "override_to": null,
+    "override_reason": null
+  }
+}

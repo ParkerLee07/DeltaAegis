@@ -1811,7 +1811,7 @@ def _command_dashboard_impl(args):
 
 
     class DeltaAegisDashboardHandler(BaseHTTPRequestHandler):
-        server_version = "DeltaAegisDashboard/0.44.1"
+        server_version = "DeltaAegisDashboard/0.45.0"
 
         def log_message(self, fmt, *handler_args):
             if not args.quiet:
@@ -1982,7 +1982,7 @@ def _command_dashboard_impl(args):
                     return False
 
                 route = self.path.split("?", 1)[0]
-                if route in {"/", "/operator", "/operator/users", "/operator/reset", "/netsniper"}:
+                if route in {"/", "/operator", "/operator/users", "/operator/reset", "/operator/telemetry-quality", "/netsniper"}:
                     self.dashboard_logout_redirect()
                 else:
                     dashboard_json_response(
@@ -2003,7 +2003,7 @@ def _command_dashboard_impl(args):
             route = self.path.split("?", 1)[0]
             request_token = self.dashboard_request_token()
 
-            if not request_token and route in {"/", "/operator", "/operator/users"}:
+            if not request_token and route in {"/", "/operator", "/operator/users", "/operator/telemetry-quality"}:
                 self.dashboard_login_redirect()
                 return False
 
@@ -2110,6 +2110,15 @@ def _command_dashboard_impl(args):
                 if not self.require_permission("operator.session.read"):
                     return
                 dashboard_html_response(self, dashboard_operator_session_shell_html())
+                return
+
+            if route == "/operator/telemetry-quality":
+                if not self.require_permission("operator.session.read"):
+                    return
+                dashboard_html_response(
+                    self,
+                    dashboard_telemetry_quality_shell_html(),
+                )
                 return
 
             if not self.require_permission("dashboard.read"):
@@ -2476,6 +2485,64 @@ def _command_dashboard_impl(args):
                             status=status,
                         ),
                     )
+                elif route == "/api/telemetry-quality":
+                    state_filter = query.get("state", [""])[0].strip() or None
+                    try:
+                        quality_payload = dashboard_telemetry_quality_payload(
+                            connection,
+                            limit=limit,
+                            scope=scope,
+                            state=state_filter,
+                        )
+                    except (DeltaAegisError, ValueError) as exc:
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "telemetry_quality_query_failed",
+                                "message": str(exc),
+                            },
+                            status=400,
+                        )
+                    else:
+                        dashboard_json_response(self, quality_payload)
+                elif route == "/api/telemetry-quality/detail":
+                    decision_id = query.get(
+                        "decision_id",
+                        [""],
+                    )[0].strip()
+                    if not decision_id:
+                        dashboard_json_response(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "decision_id_required",
+                                "message": (
+                                    "decision_id query parameter is required"
+                                ),
+                            },
+                            status=400,
+                        )
+                    else:
+                        try:
+                            detail = (
+                                dashboard_telemetry_quality_detail_payload(
+                                    connection,
+                                    decision_id,
+                                )
+                            )
+                        except DeltaAegisError as exc:
+                            dashboard_json_response(
+                                self,
+                                {
+                                    "ok": False,
+                                    "error": "quality_decision_not_found",
+                                    "message": str(exc),
+                                },
+                                status=404,
+                            )
+                        else:
+                            dashboard_json_response(self, detail)
                 elif route == "/api/current-state":
                     dashboard_json_response(self, dashboard_current_state_payload(connection, scope=scope))
                 elif route == "/api/latest-network-changes":
@@ -2969,6 +3036,99 @@ def _command_dashboard_impl(args):
                             "status_code",
                             400,
                         ),
+                    )
+                    return
+                finally:
+                    connection.close()
+
+                dashboard_json_response(self, result)
+                return
+
+            if route in {
+                "/api/telemetry-quality/review",
+                "/api/telemetry-quality/override",
+            }:
+                permission = (
+                    "telemetry.quality.override"
+                    if route.endswith("/override")
+                    else "telemetry.quality.review"
+                )
+                if not self.require_permission(permission):
+                    return
+
+                actor = getattr(self, "current_actor", None)
+                if not actor or actor.get("auth_type") != "dashboard_session":
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "dashboard_session_required",
+                            "message": (
+                                "Telemetry-quality review and override require "
+                                "an authenticated dashboard session."
+                            ),
+                        },
+                        status=403,
+                    )
+                    return
+
+                try:
+                    quality_payload = dashboard_read_request_payload(self)
+                except DashboardAdminUserActionError as exc:
+                    dashboard_admin_json_error_response(
+                        self,
+                        str(exc),
+                        status_code=exc.status_code,
+                    )
+                    return
+
+                connection = self.open_connection()
+                try:
+                    if route.endswith("/override"):
+                        result = (
+                            dashboard_telemetry_quality_override_payload(
+                                connection,
+                                quality_payload,
+                                actor=actor,
+                                source_ip=(
+                                    self.client_address[0]
+                                    if self.client_address
+                                    else None
+                                ),
+                                user_agent=self.headers.get(
+                                    "User-Agent",
+                                    "",
+                                ),
+                            )
+                        )
+                    else:
+                        result = (
+                            dashboard_telemetry_quality_review_payload(
+                                connection,
+                                quality_payload,
+                                actor=actor,
+                                source_ip=(
+                                    self.client_address[0]
+                                    if self.client_address
+                                    else None
+                                ),
+                                user_agent=self.headers.get(
+                                    "User-Agent",
+                                    "",
+                                ),
+                            )
+                        )
+                    connection.commit()
+                except (DeltaAegisError, ValueError) as exc:
+                    connection.rollback()
+                    dashboard_json_response(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "telemetry_quality_action_failed",
+                            "message": str(exc),
+                        },
+                        status=400,
                     )
                     return
                 finally:

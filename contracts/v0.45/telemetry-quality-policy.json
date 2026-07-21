@@ -1,0 +1,354 @@
+{
+  "schema_version": "deltaaegis-telemetry-quality-policy-v1",
+  "policy_version": "deltaaegis-v0.45-stage0g",
+  "states": {
+    "ACCEPTED": {
+      "description": "Integrity, scope, inventory, and supported-contract checks pass. Normal analysis is permitted, while absence-based actions remain independently gated by proven coverage.",
+      "retention_disposition": "trusted_store",
+      "effects": {
+        "retain_raw_bundle": "allowed",
+        "update_positive_observations": "allowed",
+        "apply_absence_mutations": "coverage_gated",
+        "update_device_classification": "confidence_gated",
+        "create_alerts": "allowed",
+        "create_high_severity_classification_alerts": "confidence_gated",
+        "resolve_alerts": "coverage_gated",
+        "update_risk_score": "allowed",
+        "quality_center_visibility": "allowed"
+      }
+    },
+    "DEGRADED": {
+      "description": "Telemetry is safe and useful for positive observations, but coverage or provenance is incomplete. Absence-based mutation and alert resolution are blocked.",
+      "retention_disposition": "trusted_store",
+      "effects": {
+        "retain_raw_bundle": "allowed",
+        "update_positive_observations": "positive_observations_only",
+        "apply_absence_mutations": "blocked",
+        "update_device_classification": "stronger_evidence_only",
+        "create_alerts": "positive_observations_only",
+        "create_high_severity_classification_alerts": "blocked",
+        "resolve_alerts": "blocked",
+        "update_risk_score": "uncertainty_capped",
+        "quality_center_visibility": "allowed"
+      }
+    },
+    "QUARANTINED": {
+      "description": "Telemetry is structurally retainable but cannot be trusted to mutate active state until an authorized review resolves the blocking reason.",
+      "retention_disposition": "quarantine_store",
+      "effects": {
+        "retain_raw_bundle": "allowed",
+        "update_positive_observations": "blocked",
+        "apply_absence_mutations": "blocked",
+        "update_device_classification": "blocked",
+        "create_alerts": "blocked",
+        "create_high_severity_classification_alerts": "blocked",
+        "resolve_alerts": "blocked",
+        "update_risk_score": "blocked",
+        "quality_center_visibility": "allowed"
+      }
+    },
+    "REJECTED": {
+      "description": "Telemetry is unsafe, unauthorized, unreadable, tampered with, or uses an unrecognized contract. Only a rejection receipt and audit metadata are retained.",
+      "retention_disposition": "audit_metadata_only",
+      "effects": {
+        "retain_raw_bundle": "receipt_only",
+        "update_positive_observations": "blocked",
+        "apply_absence_mutations": "blocked",
+        "update_device_classification": "blocked",
+        "create_alerts": "blocked",
+        "create_high_severity_classification_alerts": "blocked",
+        "resolve_alerts": "blocked",
+        "update_risk_score": "blocked",
+        "quality_center_visibility": "allowed"
+      }
+    }
+  },
+  "decision_precedence": [
+    "REJECTED",
+    "QUARANTINED",
+    "DEGRADED",
+    "ACCEPTED"
+  ],
+  "reason_catalog": [
+    {
+      "code": "complete_v2_1_contract",
+      "minimum_state": "ACCEPTED",
+      "severity": "info",
+      "overridable": true,
+      "description": "Recognized v2.1 capability and host-classification contracts are complete."
+    },
+    {
+      "code": "full_inventory_preserved",
+      "minimum_state": "ACCEPTED",
+      "severity": "info",
+      "overridable": true,
+      "description": "Discovered and emitted host counts match with zero omissions."
+    },
+    {
+      "code": "integrity_verified",
+      "minimum_state": "ACCEPTED",
+      "severity": "info",
+      "overridable": true,
+      "description": "Required artifact hashes and finalization checks pass."
+    },
+    {
+      "code": "scope_authorized",
+      "minimum_state": "ACCEPTED",
+      "severity": "info",
+      "overridable": true,
+      "description": "The normalized target scope is authorized for this logical scope."
+    },
+    {
+      "code": "legacy_v2_compatibility",
+      "minimum_state": "DEGRADED",
+      "severity": "warning",
+      "overridable": true,
+      "description": "A v2.0 bundle is recognized but cannot prove the v2.1 capability and provenance contract."
+    },
+    {
+      "code": "partial_scan",
+      "minimum_state": "DEGRADED",
+      "severity": "warning",
+      "overridable": true,
+      "description": "The sensor reports a partial scan."
+    },
+    {
+      "code": "collector_failed",
+      "minimum_state": "DEGRADED",
+      "severity": "warning",
+      "overridable": true,
+      "description": "A requested collector failed."
+    },
+    {
+      "code": "collector_unavailable",
+      "minimum_state": "DEGRADED",
+      "severity": "warning",
+      "overridable": true,
+      "description": "A requested collector was unavailable."
+    },
+    {
+      "code": "unprivileged_scan",
+      "minimum_state": "ACCEPTED",
+      "severity": "info",
+      "overridable": true,
+      "description": "The scan ran without root privileges; requested collector outcomes determine whether required evidence is incomplete."
+    },
+    {
+      "code": "optional_artifact_missing",
+      "minimum_state": "DEGRADED",
+      "severity": "warning",
+      "overridable": true,
+      "description": "An optional artifact is missing."
+    },
+    {
+      "code": "classification_review_present",
+      "minimum_state": "ACCEPTED",
+      "severity": "warning",
+      "overridable": true,
+      "description": "At least one host classification requires review; host-level classification uncertainty does not downgrade otherwise complete bundle telemetry."
+    },
+    {
+      "code": "classification_unknown_present",
+      "minimum_state": "ACCEPTED",
+      "severity": "info",
+      "overridable": true,
+      "description": "At least one host remains unknown; host-level classification uncertainty does not invalidate otherwise complete observation evidence."
+    },
+    {
+      "code": "negative_evidence_disabled",
+      "minimum_state": "DEGRADED",
+      "severity": "warning",
+      "overridable": true,
+      "description": "Coverage is insufficient for negative-evidence or absence-based actions."
+    },
+    {
+      "code": "required_collector_failed",
+      "minimum_state": "DEGRADED",
+      "severity": "error",
+      "overridable": true,
+      "description": "A policy-required collector failed while safe positive evidence remains usable."
+    },
+    {
+      "code": "host_inventory_not_preserved",
+      "minimum_state": "QUARANTINED",
+      "severity": "error",
+      "overridable": true,
+      "description": "The capability manifest does not prove full host inventory preservation."
+    },
+    {
+      "code": "omitted_hosts_reported",
+      "minimum_state": "QUARANTINED",
+      "severity": "error",
+      "overridable": true,
+      "description": "The sensor reports one or more omitted discovered hosts."
+    },
+    {
+      "code": "classification_contract_invalid",
+      "minimum_state": "QUARANTINED",
+      "severity": "error",
+      "overridable": true,
+      "description": "Host classification objects fail the recognized v2.1 contract while the bundle remains safely retainable."
+    },
+    {
+      "code": "capability_manifest_inconsistent",
+      "minimum_state": "QUARANTINED",
+      "severity": "error",
+      "overridable": true,
+      "description": "Capability, collector, inventory, or artifact records contradict one another."
+    },
+    {
+      "code": "identity_collision",
+      "minimum_state": "QUARANTINED",
+      "severity": "error",
+      "overridable": true,
+      "description": "Conflicting stable identity evidence requires review."
+    },
+    {
+      "code": "manual_review_required",
+      "minimum_state": "QUARANTINED",
+      "severity": "warning",
+      "overridable": true,
+      "description": "Policy requires operator review before active-state mutation."
+    },
+    {
+      "code": "unsupported_classifier_version",
+      "minimum_state": "QUARANTINED",
+      "severity": "error",
+      "overridable": true,
+      "description": "The classifier version is recognized but is outside the active compatibility allowlist."
+    },
+    {
+      "code": "required_artifact_missing",
+      "minimum_state": "QUARANTINED",
+      "severity": "error",
+      "overridable": true,
+      "description": "A required artifact is safely referenced but absent."
+    },
+    {
+      "code": "bundle_unreadable",
+      "minimum_state": "REJECTED",
+      "severity": "critical",
+      "overridable": false,
+      "description": "The bundle cannot be parsed safely."
+    },
+    {
+      "code": "manifest_missing",
+      "minimum_state": "REJECTED",
+      "severity": "critical",
+      "overridable": false,
+      "description": "The required outer bundle manifest is absent."
+    },
+    {
+      "code": "schema_unrecognized",
+      "minimum_state": "REJECTED",
+      "severity": "critical",
+      "overridable": false,
+      "description": "The bundle uses an unrecognized schema contract."
+    },
+    {
+      "code": "path_escape",
+      "minimum_state": "REJECTED",
+      "severity": "critical",
+      "overridable": false,
+      "description": "A bundle path escapes or attempts to escape the allowed run root."
+    },
+    {
+      "code": "hash_mismatch",
+      "minimum_state": "REJECTED",
+      "severity": "critical",
+      "overridable": false,
+      "description": "Artifact content does not match its declared hash."
+    },
+    {
+      "code": "scope_unauthorized",
+      "minimum_state": "REJECTED",
+      "severity": "critical",
+      "overridable": false,
+      "description": "The normalized target scope is not authorized for ingestion."
+    },
+    {
+      "code": "run_id_hash_conflict",
+      "minimum_state": "REJECTED",
+      "severity": "critical",
+      "overridable": false,
+      "description": "An existing run identifier is associated with different content."
+    },
+    {
+      "code": "required_artifact_invalid",
+      "minimum_state": "REJECTED",
+      "severity": "critical",
+      "overridable": false,
+      "description": "A required artifact is malformed or unsafe to parse."
+    },
+    {
+      "code": "malformed_inventory_counts",
+      "minimum_state": "REJECTED",
+      "severity": "critical",
+      "overridable": false,
+      "description": "Inventory counts are impossible, negative, or internally malformed."
+    }
+  ],
+  "compatibility_policy": {
+    "netsniper_v2_1": {
+      "recognized": true,
+      "default_state": "ACCEPTED",
+      "reason_code": "complete_v2_1_contract",
+      "description": "A complete, valid, authorized v2.1 bundle begins as accepted before downgrade reasons are applied."
+    },
+    "netsniper_v2_0": {
+      "recognized": true,
+      "default_state": "DEGRADED",
+      "reason_code": "legacy_v2_compatibility",
+      "description": "A valid v2.0 bundle is usable for positive observations but cannot prove v2.1 collector coverage or absence semantics."
+    },
+    "unknown_future_schema": {
+      "recognized": false,
+      "default_state": "REJECTED",
+      "reason_code": "schema_unrecognized",
+      "description": "Unknown future schemas fail closed until explicitly supported."
+    }
+  },
+  "override_policy": {
+    "actor_source": "authenticated_session",
+    "roles": {
+      "VIEWER": {
+        "may_review": false,
+        "may_override": false
+      },
+      "ANALYST": {
+        "may_review": true,
+        "may_override": false
+      },
+      "ADMIN": {
+        "may_review": true,
+        "may_override": true
+      }
+    },
+    "original_automated_state_immutable": true,
+    "reason_required": true,
+    "rejected_is_non_overridable": true,
+    "absence_mutations_require_independent_coverage": true,
+    "allowed_transitions": [
+      {
+        "from": "ACCEPTED",
+        "to": "QUARANTINED"
+      },
+      {
+        "from": "DEGRADED",
+        "to": "ACCEPTED"
+      },
+      {
+        "from": "DEGRADED",
+        "to": "QUARANTINED"
+      },
+      {
+        "from": "QUARANTINED",
+        "to": "DEGRADED"
+      },
+      {
+        "from": "QUARANTINED",
+        "to": "ACCEPTED"
+      }
+    ]
+  }
+}

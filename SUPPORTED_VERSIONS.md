@@ -1,6 +1,6 @@
 # DeltaAegis Supported Versions
 
-Status: v0.44.1 repository hygiene and validation retention
+Status: v0.45.0 telemetry trust
 
 This matrix defines the environment DeltaAegis intends to validate on the path to v1.0. A listed platform is supported only when its operating-system vendor still supplies security maintenance and the installed components remain within the ranges below.
 
