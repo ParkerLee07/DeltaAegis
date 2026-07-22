@@ -31,7 +31,10 @@ This matrix defines the environment DeltaAegis intends to validate on the path t
   hashes remain separate validation evidence.
 - Clean and telemetry-runtime-expanded databases built from the exact released
   v0.45.0 tree are independently upgraded and checked for convergence and
-  protected-history preservation.
+  protected-history preservation. The exact historical additive-runtime layout
+  `5c777b2a731133a8793c6710eda3e1a18b15deb9ffa416bed71ffd70e11581ef`
+  is also supported; its column-order/quoting differences are schema-contract
+  equivalent, and any deviation from that complete fingerprint fails closed.
 - The active SQLite database must be on a local filesystem and must not be a
   symlink. Pending legacy upgrades create and verify a pre-migration backup.
 - The initial supported programmatic namespace is `/api/v1` as documented in

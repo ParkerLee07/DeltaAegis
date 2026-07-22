@@ -47,7 +47,122 @@ EXPECTED_V045_RELEASE_TREE = "ab2c059806e0bbd3908f32200d79cb357e8fa61c"
 EXPECTED_V045_SOURCE_WITNESS = "74cba5ec5aa3d35cd57416c3891c161d8bf5fd4b"
 EXPECTED_V045_SOURCE_SHA256 = "e277bfeed6e5422d567c5207d14b6bc9a43c5fc8486f95be9c0b73d8c5706c12"
 EXPECTED_V045_RUNTIME_SCHEMA = "7b15660af4a2a6f4424b1c6dc7c9fceaee962c998cd0ad7754bb3ed6051be654"
+EXPECTED_V045_HISTORICAL_RUNTIME_SCHEMA = "5c777b2a731133a8793c6710eda3e1a18b15deb9ffa416bed71ffd70e11581ef"
+EXPECTED_V045_HISTORICAL_ORIGIN = "v0.45.0-historical-additive-runtime-schema"
+EXPECTED_V1_HISTORICAL_RUNTIME_SCHEMA = "6f82fe381a4ab11437a64d8ef0b127a0fe654183d3fe986f1735f2e156fac7c6"
 EXPECTED_ORIGIN = "v0.42.0-v0.45.0-identical-base-schema"
+
+V045_HISTORICAL_TABLE_SQL = {
+    "asset_lifecycle": """CREATE TABLE "asset_lifecycle" (
+            network_scope TEXT NOT NULL DEFAULT '',
+            asset_key TEXT NOT NULL,
+            identity_class TEXT NOT NULL,
+            state TEXT NOT NULL,
+            missing_count INTEGER NOT NULL DEFAULT 0,
+            current_ip TEXT NOT NULL,
+            mac_address TEXT,
+            vendor TEXT,
+            hostname TEXT,
+            first_seen_scan_id TEXT NOT NULL,
+            last_seen_scan_id TEXT NOT NULL,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            removed_at TEXT,
+            PRIMARY KEY (network_scope, asset_key)
+        )""",
+    "asset_observations": """CREATE TABLE asset_observations (
+    scan_id TEXT NOT NULL,
+    asset_key TEXT NOT NULL,
+    identity_confidence TEXT NOT NULL,
+    identity_source TEXT NOT NULL,
+    ip_address TEXT NOT NULL,
+    mac_address TEXT,
+    vendor TEXT,
+    hostname TEXT,
+    device_type TEXT,
+    severity TEXT,
+    score INTEGER, identity_class TEXT NOT NULL DEFAULT 'IP_ONLY', device_type_confidence INTEGER, classification_type TEXT, classification_primary_type TEXT, classification_confidence INTEGER, classification_confidence_label TEXT, classification_decision TEXT, classification_method TEXT, classification_json TEXT NOT NULL DEFAULT '{}', classification_evidence_json TEXT NOT NULL DEFAULT '[]', classification_contradictions_json TEXT NOT NULL DEFAULT '[]', classification_candidates_json TEXT NOT NULL DEFAULT '[]', classification_confidence_band TEXT, classification_calibrated_decision TEXT, classification_siem_action TEXT, classification_calibration_reason TEXT, classification_validation_state TEXT, classification_contradiction_count INTEGER, classification_validator_summary_json TEXT NOT NULL DEFAULT '{}', classification_validators_json TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (scan_id, asset_key),
+    FOREIGN KEY (scan_id) REFERENCES snapshots(scan_id) ON DELETE CASCADE
+)""",
+    "scan_jobs": """CREATE TABLE scan_jobs (
+    job_id TEXT PRIMARY KEY,
+    target TEXT NOT NULL,
+    network_scope TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    netsniper_path TEXT NOT NULL DEFAULT '',
+    runs_dir TEXT NOT NULL DEFAULT '',
+    bundle_path TEXT,
+    exit_code INTEGER,
+    auto_ingest INTEGER NOT NULL DEFAULT 0,
+    stdout_log TEXT,
+    stderr_log TEXT,
+    status_json TEXT NOT NULL DEFAULT '{}',
+    message TEXT NOT NULL DEFAULT ''
+, scan_profile TEXT NOT NULL DEFAULT 'balanced', schedule_id TEXT NOT NULL DEFAULT '', process_pid INTEGER, heartbeat_at TEXT, cancel_requested_at TEXT, cancel_requested_by TEXT NOT NULL DEFAULT '', cancel_reason TEXT NOT NULL DEFAULT '', cancelled_at TEXT)""",
+    "scan_schedules": """CREATE TABLE scan_schedules (
+    schedule_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    target TEXT NOT NULL,
+    network_scope TEXT NOT NULL,
+    scan_profile TEXT NOT NULL DEFAULT 'balanced',
+    cadence_minutes INTEGER NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    auto_ingest INTEGER NOT NULL DEFAULT 1,
+    last_run_at TEXT,
+    next_run_at TEXT,
+    last_job_id TEXT,
+    last_status TEXT,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    skip_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    message TEXT NOT NULL DEFAULT ''
+, run_trueaegis_after_ingest INTEGER NOT NULL DEFAULT 0)""",
+    "snapshots": """CREATE TABLE snapshots (
+    scan_id TEXT PRIMARY KEY,
+    manifest_path TEXT NOT NULL,
+    target TEXT NOT NULL,
+    scanner_version TEXT NOT NULL,
+    scan_profile TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    imported_at TEXT NOT NULL,
+    bundle_status TEXT NOT NULL,
+    quality_status TEXT NOT NULL,
+    quality_reason TEXT NOT NULL,
+    xml_exit_status TEXT NOT NULL,
+    hosts_up INTEGER NOT NULL,
+    hosts_down INTEGER NOT NULL,
+    hosts_total INTEGER NOT NULL,
+    mac_backed_assets INTEGER NOT NULL,
+    identity_coverage REAL NOT NULL,
+    is_accepted_baseline INTEGER NOT NULL DEFAULT 0
+, manifest_schema_version TEXT NOT NULL DEFAULT 'netsniper-run-v1', profile_fingerprint TEXT NOT NULL DEFAULT '', monitored_ports_json TEXT NOT NULL DEFAULT '[]', protocols_json TEXT NOT NULL DEFAULT '[]', discovery_interface TEXT, nmap_version TEXT, scan_started_at TEXT, scan_completed_at TEXT, neighbors_captured_at TEXT, network_scope TEXT NOT NULL DEFAULT '', requested_profile TEXT, effective_profile TEXT, profile_contract TEXT, profile_runtime_budget_seconds INTEGER, profile_host_timeout_seconds INTEGER, profile_duration_seconds INTEGER, profile_budget_exceeded INTEGER, bundle_quality_schema_version TEXT, bundle_deltaaegis_ready INTEGER, bundle_quality_json TEXT NOT NULL DEFAULT '{}', quality_decision_id TEXT, automated_quality_state TEXT, current_quality_state TEXT, bundle_digest TEXT NOT NULL DEFAULT '', evidence_retention_path TEXT NOT NULL DEFAULT '', quality_effects_json TEXT NOT NULL DEFAULT '{}', quality_reasons_json TEXT NOT NULL DEFAULT '[]', negative_evidence_allowed INTEGER NOT NULL DEFAULT 0)""",
+    "trueaegis_jobs": """CREATE TABLE trueaegis_jobs (
+    job_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    scan_id TEXT,
+    network_scope TEXT NOT NULL DEFAULT '',
+    manifest_path TEXT NOT NULL,
+    trueaegis_path TEXT NOT NULL DEFAULT '',
+    validation_results_path TEXT,
+    validation_run_id TEXT,
+    imported_observations INTEGER NOT NULL DEFAULT 0,
+    correlation_count INTEGER NOT NULL DEFAULT 0,
+    stdout_log_path TEXT,
+    stderr_log_path TEXT,
+    exit_code INTEGER,
+    message TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+, scan_job_id TEXT NOT NULL DEFAULT '', schedule_id TEXT NOT NULL DEFAULT '', trigger_source TEXT NOT NULL DEFAULT 'manual_dashboard')""",
+}
 
 
 class ValidationFailure(RuntimeError):
@@ -255,6 +370,47 @@ connection.close()
     return fingerprint
 
 
+def convert_to_historical_v045_runtime_layout(database: Path) -> str:
+    """Reproduce the audited schema emitted by released additive upgrades."""
+    connection = sqlite3.connect(database)
+    try:
+        before = migrations.schema_fingerprint(connection)
+        check(
+            before == EXPECTED_V045_RUNTIME_SCHEMA,
+            "historical-layout fixture did not start from exact v0.45 runtime",
+        )
+        connection.execute("PRAGMA foreign_keys = OFF")
+        for table, table_sql in V045_HISTORICAL_TABLE_SQL.items():
+            index_sql = [
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT sql FROM sqlite_master "
+                    "WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL "
+                    "ORDER BY name",
+                    (table,),
+                )
+            ]
+            connection.execute(
+                f"DROP TABLE {migrations.quote_identifier(table)}"
+            )
+            connection.execute(table_sql)
+            for statement in index_sql:
+                connection.execute(statement)
+        connection.commit()
+        check(
+            connection.execute("PRAGMA foreign_key_check").fetchall() == [],
+            "historical v0.45 fixture has foreign-key violations",
+        )
+        fingerprint = migrations.schema_fingerprint(connection)
+    finally:
+        connection.close()
+    check(
+        fingerprint == EXPECTED_V045_HISTORICAL_RUNTIME_SCHEMA,
+        "historical v0.45 runtime fingerprint changed: " + fingerprint,
+    )
+    return fingerprint
+
+
 def populate_protected_history(database: Path) -> None:
     now = "2026-07-21T18:45:00Z"
     future = (
@@ -408,6 +564,77 @@ def raw_history(
             connection,
             reference=reference,
         )
+    finally:
+        connection.close()
+
+
+def schema_contract(database: Path) -> dict[str, Any]:
+    """Describe schema semantics while ignoring historical column ordering."""
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+    try:
+        result: dict[str, Any] = {}
+        for table in migrations.application_tables(connection):
+            quoted_table = migrations.quote_identifier(table)
+            columns = sorted(
+                (
+                    {
+                        key: row[key]
+                        for key in row.keys()
+                        if key != "cid"
+                    }
+                    for row in connection.execute(
+                        f"PRAGMA table_xinfo({quoted_table})"
+                    )
+                ),
+                key=lambda item: str(item["name"]),
+            )
+            foreign_keys = sorted(
+                (
+                    {
+                        key: row[key]
+                        for key in row.keys()
+                        if key not in {"id", "seq"}
+                    }
+                    for row in connection.execute(
+                        f"PRAGMA foreign_key_list({quoted_table})"
+                    )
+                ),
+                key=lambda item: json.dumps(item, sort_keys=True),
+            )
+            indexes = []
+            for row in connection.execute(
+                f"PRAGMA index_list({quoted_table})"
+            ):
+                if str(row["origin"]) == "pk":
+                    continue
+                name = str(row["name"])
+                quoted_index = migrations.quote_identifier(name)
+                index_columns = [
+                    {
+                        key: item[key]
+                        for key in item.keys()
+                        if key not in {"seqno", "cid"}
+                    }
+                    for item in connection.execute(
+                        f"PRAGMA index_xinfo({quoted_index})"
+                    )
+                ]
+                indexes.append(
+                    {
+                        "name": name,
+                        "unique": row["unique"],
+                        "origin": row["origin"],
+                        "partial": row["partial"],
+                        "columns": index_columns,
+                    }
+                )
+            result[table] = {
+                "columns": columns,
+                "foreign_keys": foreign_keys,
+                "indexes": sorted(indexes, key=lambda item: item["name"]),
+            }
+        return result
     finally:
         connection.close()
 
@@ -606,6 +833,80 @@ def validate_exact_origins(root: Path) -> tuple[Path, str]:
             raw_history(Path(verified["backup_path"])),
         )
 
+    historical_case = root / "v0.45-historical-runtime"
+    historical_case.mkdir()
+    historical_database = historical_case / "legacy.db"
+    create_exact_v045_database(
+        historical_database,
+        expanded_runtime=True,
+    )
+    source_schema = convert_to_historical_v045_runtime_layout(
+        historical_database
+    )
+    populate_protected_history(historical_database)
+    before_history = raw_history(historical_database)
+    before_logical = deltaaegis._sqlite_database_logical_fingerprint(
+        historical_database
+    )
+    rows = verify_completed_upgrade(
+        historical_database,
+        expected_history=before_history,
+        expected_schema=EXPECTED_V1_HISTORICAL_RUNTIME_SCHEMA,
+        expected_origin=EXPECTED_V045_HISTORICAL_ORIGIN,
+        expected_schema_before=source_schema,
+    )
+    check(
+        schema_contract(historical_database) == schema_contract(fresh),
+        "historical and fresh v1 databases do not expose the same schema contract",
+    )
+    backup_evidence = json.loads(rows[0]["outcome_json"])[
+        "pre_migration_backup"
+    ]
+    verified = deltaaegis.verify_database_backup_bundle(
+        Path(backup_evidence["backup_path"]),
+        Path(backup_evidence["manifest_path"]),
+    )
+    check(
+        verified["logical_fingerprint"] == before_logical,
+        "historical v0.45 backup was not the exact pre-migration state",
+    )
+    migrations.verify_protected_history(
+        before_history,
+        raw_history(Path(verified["backup_path"])),
+    )
+    check(
+        ledger_rows(Path(verified["backup_path"])) == [],
+        "historical v0.45 backup contains post-migration ledger state",
+    )
+    rehearsal = historical_case / "restore-rehearsal.db"
+    restored = deltaaegis.create_database_restore_rehearsal(
+        historical_database,
+        Path(verified["backup_path"]),
+        Path(verified["manifest_path"]),
+        rehearsal,
+    )
+    check(
+        restored["restored_integrity_status"] == "ok",
+        "historical v0.45 restore rehearsal integrity failed",
+    )
+    migrations.verify_protected_history(
+        before_history,
+        raw_history(rehearsal),
+    )
+    backups_before = sorted((historical_case / "migration-backups").glob("*"))
+    verify_completed_upgrade(
+        historical_database,
+        expected_history=before_history,
+        expected_schema=EXPECTED_V1_HISTORICAL_RUNTIME_SCHEMA,
+        expected_origin=EXPECTED_V045_HISTORICAL_ORIGIN,
+        expected_schema_before=source_schema,
+    )
+    backups_after = sorted((historical_case / "migration-backups").glob("*"))
+    check(
+        backups_before == backups_after,
+        "historical v0.45 idempotent reopen created another backup",
+    )
+
     check(retained_fixture is not None, "no exact legacy fixture was retained")
     return retained_fixture, fresh_schema
 
@@ -706,6 +1007,20 @@ def validate_fail_closed_cases(legacy_database: Path, root: Path) -> None:
     connection.commit()
     connection.close()
     expect_migration_failure(unsupported, "required v0.42.x tables")
+
+    historical_drift = root / "historical-runtime-with-real-drift.db"
+    create_exact_v045_database(
+        historical_drift,
+        expanded_runtime=True,
+    )
+    convert_to_historical_v045_runtime_layout(historical_drift)
+    connection = sqlite3.connect(historical_drift)
+    connection.execute(
+        "ALTER TABLE asset_lifecycle ADD COLUMN unsupported_runtime_value TEXT"
+    )
+    connection.commit()
+    connection.close()
+    expect_migration_failure(historical_drift, "asset_lifecycle")
 
     symlink_target = root / "symlink-target.db"
     shutil.copy2(legacy_database, symlink_target)
@@ -942,6 +1257,11 @@ def main() -> int:
         and deltaaegis.SUPPORTED_V045_RUNTIME_SCHEMA_SHA256 == EXPECTED_V045_RUNTIME_SCHEMA,
         "runtime v0.45 release or schema pins drifted",
     )
+    check(
+        deltaaegis.SUPPORTED_V045_HISTORICAL_RUNTIME_SCHEMA_SHA256
+        == EXPECTED_V045_HISTORICAL_RUNTIME_SCHEMA,
+        "runtime historical v0.45 schema pin drifted",
+    )
     with tempfile.TemporaryDirectory(prefix="deltaaegis-v1-stage1-") as temporary:
         root = Path(temporary)
         origins_root = root / "origins"
@@ -957,7 +1277,7 @@ def main() -> int:
         validate_forced_interleaving(root, fresh_schema)
 
     print(
-        "[PASS] v1 Stage 1: exact v0.42 and released v0.45 origins, checksummed forward migrations, "
+        "[PASS] v1 Stage 1: exact v0.42, released v0.45, and audited historical v0.45 origins, checksummed forward migrations, "
         "verified backup/rehearsal, interruption recovery, history preservation, "
         "convergence, forced concurrency interleaving, and fail-closed ledger controls"
     )

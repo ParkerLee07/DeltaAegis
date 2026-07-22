@@ -1210,6 +1210,9 @@ SUPPORTED_V042_V045_BASE_SCHEMA_SHA256 = (
 SUPPORTED_V045_RUNTIME_SCHEMA_SHA256 = (
     "7b15660af4a2a6f4424b1c6dc7c9fceaee962c998cd0ad7754bb3ed6051be654"
 )
+SUPPORTED_V045_HISTORICAL_RUNTIME_SCHEMA_SHA256 = (
+    "5c777b2a731133a8793c6710eda3e1a18b15deb9ffa416bed71ffd70e11581ef"
+)
 SUPPORTED_V042_BASE_TABLES = frozenset(
     {
         "access_api_tokens",
@@ -1299,6 +1302,16 @@ def recognize_deltaaegis_database_origin(
         # database schemas are byte-identical. The database itself therefore
         # cannot honestly identify which application patch created it.
         return "v0.42.0-v0.45.0-identical-base-schema"
+
+    if fingerprint == SUPPORTED_V045_HISTORICAL_RUNTIME_SCHEMA_SHA256:
+        # A production v0.45 database can reach this exact schema through the
+        # released additive ALTER TABLE path. Its column order (and one
+        # SQLite-preserved quoted table name) differs from a newly created
+        # v0.45 database, while columns, constraints, foreign keys, and indexes
+        # remain equivalent. Admit only the audited complete-schema fingerprint;
+        # all other definition or index drift continues through the fail-closed
+        # checks below.
+        return "v0.45.0-historical-additive-runtime-schema"
 
     expected = _supported_legacy_table_definitions()
     unexpected = sorted(tables - set(expected))

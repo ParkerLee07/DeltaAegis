@@ -9,7 +9,7 @@ This deterministic inventory describes the combined v1.0 Stage 3–5 candidate, 
 | Measure | Count |
 |---|---:|
 | Repository files in audit scope | 191 |
-| `deltaaegis.py` lines | 35953 |
+| `deltaaegis.py` lines | 35966 |
 | Root top-level functions | 703 |
 | Root top-level classes | 6 |
 | Internal core modules | 15 |
@@ -19,7 +19,7 @@ This deterministic inventory describes the combined v1.0 Stage 3–5 candidate, 
 | Validator scripts | 92 |
 | Validator version groups | 9 |
 
-Root source SHA-256: `98cce99544475ce15ccf8962e6de56c87738061f622a4af77011fcbce24df527`
+Root source SHA-256: `3ec76b9f56a8b24f5b4562ce000f2449f6a1d5b90a871c49d2fcabdc9c97ae70`
 
 ## Modular core inventory
 
@@ -47,7 +47,7 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 
 | ID | Severity | Area | Evidence | Planned disposition |
 |---|---|---|---|---|
-| DA044-001 | MEDIUM | compatibility facade | deltaaegis.py remains 35953 lines with 703 top-level functions; 15 core modules contain 19648 lines. | Retain the facade through v1 compatibility; continue only owned incremental extraction behind characterization evidence. |
+| DA044-001 | MEDIUM | compatibility facade | deltaaegis.py remains 35966 lines with 703 top-level functions; 15 core modules contain 19648 lines. | Retain the facade through v1 compatibility; continue only owned incremental extraction behind characterization evidence. |
 | DA044-002 | MEDIUM | source-order coupling | Repeated top-level function names in the compatibility facade: build_current_risk_register, dashboard_asset_detail_payload, dashboard_assets_payload, dashboard_current_state_payload, dashboard_index_html, dashboard_operator_session_shell_html, dashboard_summary_payload. | Remove only with characterization evidence and explicit compatibility ownership. |
 | DA044-003 | INFO | storage migrations | Stage 1 inventories 47 declared tables behind an ordered checksummed migration ledger and verified pre-migration backup. | Delivered for the supported v0.42.x origins; retain interruption, restore-rehearsal, convergence, and tamper tests in every v1 gate. |
 | DA044-004 | INFO | HTTP/API contract | Stages 2–5 expose 17 stable /api/v1 route literals while 61 pre-existing route literals remain private compatibility interfaces. | Delivered through the Stage 3–5 candidate; keep runtime, tracked OpenAPI, authorization, HTTP, and private-route transition inventories release-gated. |
@@ -59,13 +59,13 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 
 | Name | Definition lines |
 |---|---|
-| `build_current_risk_register` | 16901, 34869 |
-| `dashboard_asset_detail_payload` | 16002, 34844 |
-| `dashboard_assets_payload` | 15882, 34818, 35934 |
-| `dashboard_current_state_payload` | 15774, 34776 |
-| `dashboard_index_html` | 26271, 26297, 26456, 26574, 27572 |
-| `dashboard_operator_session_shell_html` | 27596, 28055, 34454 |
-| `dashboard_summary_payload` | 14584, 34797 |
+| `build_current_risk_register` | 16914, 34882 |
+| `dashboard_asset_detail_payload` | 16015, 34857 |
+| `dashboard_assets_payload` | 15895, 34831, 35947 |
+| `dashboard_current_state_payload` | 15787, 34789 |
+| `dashboard_index_html` | 26284, 26310, 26469, 26587, 27585 |
+| `dashboard_operator_session_shell_html` | 27609, 28068, 34467 |
+| `dashboard_summary_payload` | 14597, 34810 |
 
 ## Command, route, and schema catalogs
 

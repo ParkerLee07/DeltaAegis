@@ -1,5 +1,11 @@
 ## DeltaAegis v1.0.0 — combined Stage 3–5 candidate (unreleased)
 
+- Recognized the exact audited v0.45 historical additive-runtime schema
+  fingerprint produced by long-lived databases, without weakening rejection of
+  unknown tables, definitions, indexes, or constraints. Added migration tests
+  proving protected-history preservation, verified backup and restore,
+  deterministic lineage output, fresh-v1 schema-contract equivalence,
+  idempotent reopen, and fail-closed rejection of real historical-schema drift.
 - Added migration `0004-v1-sensor-scope-identity` with explicit legacy sensor
   attribution, deterministic sensor-bound scope IDs, source/internal scan
   identity, evidence receipts, scoped current-state tables, and logical-site

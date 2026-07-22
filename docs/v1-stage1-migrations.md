@@ -16,6 +16,17 @@ Those three releases and the clean v0.45 database have the same schema fingerpri
 
 The published v0.45.0 release commit is `493df20dabed527757381e3cbae7cad3201b9c57` with tree `ab2c059806e0bbd3908f32200d79cb357e8fa61c`. The validator prefers that published commit when it is present. A disposable checkout may instead use witness `74cba5ec5aa3d35cd57416c3891c161d8bf5fd4b`, but only after proving that it has the same released tree. The released `deltaaegis.py` SHA-256 is `e277bfeed6e5422d567c5207d14b6bc9a43c5fc8486f95be9c0b73d8c5706c12`. The validator builds both a clean database and a telemetry-runtime-expanded database (schema `7b15660af4a2a6f442b1c6dc7c9fceaee962c998cd0ad7754bb3ed6051be654`) from those released bytes before upgrading them.
 
+Released additive upgrades can also produce the exact historical runtime schema
+`5c777b2a731133a8793c6710eda3e1a18b15deb9ffa416bed71ffd70e11581ef`.
+It has the same tables, columns, types, defaults, primary keys, foreign keys, and
+indexes as the clean v0.45 runtime. Six tables retain historical column ordering,
+and SQLite retains quotes around one rebuilt table name. DeltaAegis recognizes
+only that complete audited fingerprint as
+`v0.45.0-historical-additive-runtime-schema`; it does not use a relaxed or
+partial comparison. Its migrated v1 lineage has deterministic fingerprint
+`6f82fe381a4ab11437a64d8ef0b127a0fe654183d3fe986f1735f2e156fac7c6`
+and the same column, key, foreign-key, and index contract as a fresh v1 database.
+
 An incomplete, unknown, extra-table, or definition-drifted unledgered schema fails closed. The active database must be a regular local path, not a symlink or a known network filesystem.
 
 ## Ordered migration ledger
@@ -30,11 +41,13 @@ An incomplete, unknown, extra-table, or definition-drifted unledgered schema fai
 
 Migration checksums bind the migration functions, declared SQL and constants, and the source of every helper that can change migration output. Historical migration definitions and their bound helpers are immutable; a later storage change must append a new migration rather than rewrite these definitions.
 
-The combined candidate contains three forward migrations:
+The combined candidate contains five forward migrations:
 
 1. `0001-v045-foundation` converges the supported v0.42–v0.45 foundation.
 2. `0002-v045-telemetry-trust` materializes telemetry quality, current-state projection, and NetSniper intelligence storage.
 3. `0003-v1-api-security` adds bounded token scopes, session CSRF state, and durable API mutation idempotency.
+4. `0004-v1-sensor-scope-identity` adds explicit sensor/scope identity and provenance.
+5. `0005-v1-deterministic-detection` adds immutable versioned detection and separate review history.
 
 Unknown IDs, gaps, changed checksums, malformed timestamps, inconsistent origins, broken schema-fingerprint chains, live-schema drift, or altered outcome evidence stop startup. There is no reverse-SQL downgrade.
 
@@ -81,4 +94,8 @@ Run the dedicated Stage 1 gate:
 python3 tools/validate_v1_stage1_migrations.py
 ```
 
-It creates only temporary databases and validates exact v0.42.0, v0.42.1, and v0.42.2 origins, clean-install convergence, backup verification, restore rehearsal, protected-history retention, interruption recovery, concurrent startup, foreign keys, integrity, idempotence, and fail-closed ledger behavior.
+It creates only temporary databases and validates exact v0.42.0, v0.42.1, and
+v0.42.2 origins; clean, expanded, and historical-additive v0.45 origins;
+clean-install and schema-contract convergence; backup verification; restore
+rehearsal; protected-history retention; interruption recovery; concurrent
+startup; foreign keys; integrity; idempotence; and fail-closed ledger behavior.

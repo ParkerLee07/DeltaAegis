@@ -7,9 +7,11 @@ separate mandatory evidence.
 ## Baseline and migration
 
 - [ ] Candidate is based on exact Stage 1–2 tree `e259130de5e54c6673a5e294c88244f6b0ab4048`.
-- [ ] Stage 1 migration tests still cover every supported v0.42.x and v0.45 origin.
+- [ ] Stage 1 migration tests cover every supported v0.42.x origin plus clean,
+  telemetry-expanded, and exact historical-additive v0.45 origins.
 - [ ] Migration checksums 0001–0003 remain unchanged.
-- [ ] Migration 0004 and 0005 apply once, validate, and converge on fresh and upgraded databases.
+- [ ] Migration 0004 and 0005 apply once, validate, and converge on fresh and
+  upgraded schema contracts; the pinned historical lineage remains deterministic.
 - [ ] Protected history, quick check, foreign keys, backup, restore, and interruption tests pass.
 
 ## Stage 3 — identity and provenance

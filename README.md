@@ -40,7 +40,8 @@ The active development branch preserves the completed Stage 1–2 foundation
 and combines the remaining implementation stages into one guarded upgrade:
 
 - checksummed, forward-only migrations from every exact v0.42.x database
-  origin, with a verified pre-migration backup and restore rehearsal;
+  origin plus clean, telemetry-expanded, and audited historical-additive v0.45
+  layouts, with a verified pre-migration backup and restore rehearsal;
 - a documented OpenAPI 3.1 `/api/v1` surface with stable envelopes,
   pagination, request IDs, and durable mutation idempotency;
 - bounded role-capped token scopes, session CSRF state, same-origin and Host
@@ -395,8 +396,10 @@ data/deltaaegis.db
 The first connection made by the v1 candidate recognizes the database,
 creates and verifies a pre-migration backup when migrations are pending, and
 then applies each migration and ledger record transactionally. Supported
-v0.42.x and v0.45 databases are never upgraded without that verified recovery
-artifact. See [Stage 1 upgrades and recovery](docs/v1-stage1-migrations.md)
+v0.42.x and v0.45 databases—including the exact historical additive layout
+emitted by released upgrades—are never upgraded without that verified recovery
+artifact. Unknown or partially matching layouts still fail closed. See
+[Stage 1 upgrades and recovery](docs/v1-stage1-migrations.md)
 before applying the candidate to an existing database.
 
 Create a SQLite-consistent backup and manifest:

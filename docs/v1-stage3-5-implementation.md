@@ -2,6 +2,12 @@
 
 Status: implementation candidate; the 24-hour GA soak is not yet claimed
 
+The release soak must start from a database copy whose origin passes Stage 1.
+Long-lived v0.45 databases may carry the exact audited historical additive
+schema fingerprint `5c777b2a731133a8793c6710eda3e1a18b15deb9ffa416bed71ffd70e11581ef`;
+that complete fingerprint is supported while all partial or unknown drift still
+fails closed.
+
 ## Upgrade boundary
 
 This upgrade is additive to the completed Stage 1–2 tree. It introduces two
