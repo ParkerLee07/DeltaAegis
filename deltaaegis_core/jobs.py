@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from deltaaegis_core.auth import DeltaAegisError
+from deltaaegis_core import identity as _identity
 
 
 SCAN_JOB_STATUSES = {"QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"}
@@ -96,10 +97,35 @@ def create_scan_job(
     auto_ingest: bool = False,
     scan_profile: str = "balanced",
     schedule_id: str | None = None,
+    sensor_id: str = _identity.DEFAULT_SENSOR_ID,
+    scope_id: str | None = None,
 ) -> dict[str, Any]:
     safe_target = validate_private_cidr(target)
     safe_profile = validate_netsniper_scan_profile(scan_profile)
     safe_schedule_id = str(schedule_id or "").strip()
+    table_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(scan_jobs)")
+    }
+    identity_enabled = {"sensor_id", "scope_id"}.issubset(table_columns)
+    if identity_enabled:
+        scope = _identity.ensure_scope(
+            connection,
+            sensor_id=sensor_id or _identity.DEFAULT_SENSOR_ID,
+            network_scope=safe_target,
+            allow_default_create=(
+                str(sensor_id or _identity.DEFAULT_SENSOR_ID).strip().lower()
+                == _identity.DEFAULT_SENSOR_ID
+            ),
+        )
+        safe_sensor_id = str(scope["sensor_id"])
+        safe_scope_id = str(scope["scope_id"])
+        if scope_id and _identity.canonical_scope_id(scope_id) != safe_scope_id:
+            raise DeltaAegisError(
+                "scan scope_id does not match the sensor and target CIDR"
+            )
+    else:
+        safe_sensor_id = _identity.DEFAULT_SENSOR_ID
+        safe_scope_id = ""
 
     if len(safe_schedule_id) > 96:
         raise DeltaAegisError("scan schedule id is too long")
@@ -107,8 +133,27 @@ def create_scan_job(
     now = utc_now_text()
     job_id = f"scan-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
 
+    identity_columns = ", sensor_id, scope_id" if identity_enabled else ""
+    identity_placeholders = ", ?, ?" if identity_enabled else ""
+    values: tuple[Any, ...] = (
+        job_id,
+        safe_target,
+        safe_target,
+        safe_schedule_id,
+        "QUEUED",
+        now,
+        now,
+        str(netsniper_path),
+        str(runs_dir),
+        safe_profile,
+        1 if auto_ingest else 0,
+        "{}",
+        "scan job queued",
+    )
+    if identity_enabled:
+        values += (safe_sensor_id, safe_scope_id)
     connection.execute(
-        """
+        f"""
         INSERT INTO scan_jobs (
             job_id,
             target,
@@ -123,30 +168,19 @@ def create_scan_job(
             auto_ingest,
             status_json,
             message
+            {identity_columns}
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{identity_placeholders})
         """,
-        (
-            job_id,
-            safe_target,
-            safe_target,
-            safe_schedule_id,
-            "QUEUED",
-            now,
-            now,
-            str(netsniper_path),
-            str(runs_dir),
-            safe_profile,
-            1 if auto_ingest else 0,
-            "{}",
-            "scan job queued",
-        ),
+        values,
     )
 
     return {
         "job_id": job_id,
         "target": safe_target,
         "network_scope": safe_target,
+        "sensor_id": safe_sensor_id,
+        "scope_id": safe_scope_id,
         "schedule_id": safe_schedule_id,
         "status": "QUEUED",
         "created_at": now,
@@ -581,12 +615,44 @@ def create_trueaegis_job(
     scan_job_id: str | None = None,
     schedule_id: str | None = None,
     trigger_source: str = "manual_dashboard",
+    sensor_id: str | None = None,
+    scope_id: str | None = None,
 ) -> dict[str, Any]:
     safe_manifest_path = Path(manifest_path).expanduser()
     safe_trueaegis_path = Path(trueaegis_path).expanduser()
     safe_scan_job_id = str(scan_job_id or "").strip()
     safe_schedule_id = str(schedule_id or "").strip()
     safe_trigger_source = str(trigger_source or "manual_dashboard").strip().lower()
+    columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(trueaegis_jobs)")
+    }
+    identity_enabled = {"sensor_id", "scope_id"}.issubset(columns)
+    safe_sensor_id = str(sensor_id or "").strip().lower()
+    safe_scope_id = str(scope_id or "").strip().lower()
+    if identity_enabled and (not safe_sensor_id or not safe_scope_id):
+        source_row = None
+        if scan_id:
+            source_row = connection.execute(
+                "SELECT sensor_id, scope_id FROM snapshots WHERE scan_id=?",
+                (str(scan_id),),
+            ).fetchone()
+        if source_row is None and safe_scan_job_id:
+            source_row = connection.execute(
+                "SELECT sensor_id, scope_id FROM scan_jobs WHERE job_id=?",
+                (safe_scan_job_id,),
+            ).fetchone()
+        if source_row is not None:
+            safe_sensor_id = str(source_row["sensor_id"] or "")
+            safe_scope_id = str(source_row["scope_id"] or "")
+    if identity_enabled and (not safe_sensor_id or not safe_scope_id):
+        scope = _identity.ensure_scope(
+            connection,
+            sensor_id=_identity.DEFAULT_SENSOR_ID,
+            network_scope=network_scope,
+            allow_default_create=True,
+        )
+        safe_sensor_id = str(scope["sensor_id"])
+        safe_scope_id = str(scope["scope_id"])
 
     if safe_trigger_source not in {"manual_dashboard", "scheduled_followup"}:
         raise DeltaAegisError(f"invalid TrueAegis trigger source: {trigger_source}")
@@ -594,8 +660,26 @@ def create_trueaegis_job(
     now = utc_now_text()
     job_id = f"trueaegis-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
 
+    identity_columns = ", sensor_id, scope_id" if identity_enabled else ""
+    identity_placeholders = ", ?, ?" if identity_enabled else ""
+    values: tuple[Any, ...] = (
+        job_id,
+        "QUEUED",
+        str(scan_id or ""),
+        safe_scan_job_id,
+        safe_schedule_id,
+        safe_trigger_source,
+        str(network_scope or ""),
+        str(safe_manifest_path),
+        str(safe_trueaegis_path),
+        "TrueAegis validation job queued",
+        now,
+        now,
+    )
+    if identity_enabled:
+        values += (safe_sensor_id, safe_scope_id)
     connection.execute(
-        """
+        f"""
         INSERT INTO trueaegis_jobs (
             job_id,
             status,
@@ -609,23 +693,11 @@ def create_trueaegis_job(
             message,
             created_at,
             updated_at
+            {identity_columns}
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{identity_placeholders})
         """,
-        (
-            job_id,
-            "QUEUED",
-            str(scan_id or ""),
-            safe_scan_job_id,
-            safe_schedule_id,
-            safe_trigger_source,
-            str(network_scope or ""),
-            str(safe_manifest_path),
-            str(safe_trueaegis_path),
-            "TrueAegis validation job queued",
-            now,
-            now,
-        ),
+        values,
     )
 
     row = connection.execute(
@@ -1000,18 +1072,62 @@ def create_scan_schedule(
     enabled: bool = True,
     auto_ingest: bool = True,
     run_trueaegis_after_ingest: bool = False,
+    sensor_id: str = _identity.DEFAULT_SENSOR_ID,
+    scope_id: str | None = None,
 ) -> dict[str, Any]:
     safe_name = validate_scan_schedule_name(name)
     safe_target = validate_private_cidr(target)
     safe_profile = validate_netsniper_scan_profile(scan_profile)
     safe_cadence = validate_scan_schedule_cadence_minutes(cadence_minutes)
+    columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(scan_schedules)")
+    }
+    identity_enabled = {"sensor_id", "scope_id"}.issubset(columns)
+    if identity_enabled:
+        scope = _identity.ensure_scope(
+            connection,
+            sensor_id=sensor_id or _identity.DEFAULT_SENSOR_ID,
+            network_scope=safe_target,
+            allow_default_create=(
+                str(sensor_id or _identity.DEFAULT_SENSOR_ID).strip().lower()
+                == _identity.DEFAULT_SENSOR_ID
+            ),
+        )
+        safe_sensor_id = str(scope["sensor_id"])
+        safe_scope_id = str(scope["scope_id"])
+        if scope_id and _identity.canonical_scope_id(scope_id) != safe_scope_id:
+            raise DeltaAegisError(
+                "schedule scope_id does not match the sensor and target CIDR"
+            )
+    else:
+        safe_sensor_id = _identity.DEFAULT_SENSOR_ID
+        safe_scope_id = ""
 
     now = utc_now_text()
     schedule_id = f"sched-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
     next_run_at = now if enabled else None
 
+    identity_columns = ", sensor_id, scope_id" if identity_enabled else ""
+    identity_placeholders = ", ?, ?" if identity_enabled else ""
+    values: tuple[Any, ...] = (
+        schedule_id,
+        safe_name,
+        safe_target,
+        safe_target,
+        safe_profile,
+        safe_cadence,
+        1 if enabled else 0,
+        1 if auto_ingest else 0,
+        1 if run_trueaegis_after_ingest else 0,
+        next_run_at,
+        now,
+        now,
+        "schedule created",
+    )
+    if identity_enabled:
+        values += (safe_sensor_id, safe_scope_id)
     connection.execute(
-        """
+        f"""
         INSERT INTO scan_schedules (
             schedule_id,
             name,
@@ -1026,6 +1142,7 @@ def create_scan_schedule(
             created_at,
             updated_at,
             message
+            {identity_columns}
         ) VALUES (
             ?,
             ?,
@@ -1039,24 +1156,10 @@ def create_scan_schedule(
             ?,
             ?,
             ?,
-            ?
+            ?{identity_placeholders}
         )
         """,
-        (
-            schedule_id,
-            safe_name,
-            safe_target,
-            safe_target,
-            safe_profile,
-            safe_cadence,
-            1 if enabled else 0,
-            1 if auto_ingest else 0,
-            1 if run_trueaegis_after_ingest else 0,
-            next_run_at,
-            now,
-            now,
-            "schedule created",
-        ),
+        values,
     )
 
     row = connection.execute(
@@ -1131,20 +1234,43 @@ def next_schedule_run_text(cadence_minutes: int, base_time: datetime | None = No
     return utc_datetime_to_text(base + timedelta(minutes=safe_cadence))
 
 
-def active_scan_job_row(connection: sqlite3.Connection) -> sqlite3.Row | None:
+def active_scan_job_row(
+    connection: sqlite3.Connection,
+    sensor_id: str = _identity.DEFAULT_SENSOR_ID,
+) -> sqlite3.Row | None:
+    columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(scan_jobs)")
+    }
+    if "sensor_id" not in columns:
+        return connection.execute(
+            """
+            SELECT * FROM scan_jobs
+            WHERE status IN ('QUEUED', 'RUNNING')
+            ORDER BY created_at DESC, updated_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    safe_sensor_id = _identity.canonical_sensor_id(
+        sensor_id or _identity.DEFAULT_SENSOR_ID
+    )
     return connection.execute(
         """
         SELECT *
         FROM scan_jobs
-        WHERE status IN ('QUEUED', 'RUNNING')
+        WHERE sensor_id = ?
+          AND status IN ('QUEUED', 'RUNNING')
         ORDER BY created_at DESC, updated_at DESC
         LIMIT 1
-        """
+        """,
+        (safe_sensor_id,),
     ).fetchone()
 
 
-def active_scan_job_exists(connection: sqlite3.Connection) -> bool:
-    return active_scan_job_row(connection) is not None
+def active_scan_job_exists(
+    connection: sqlite3.Connection,
+    sensor_id: str = _identity.DEFAULT_SENSOR_ID,
+) -> bool:
+    return active_scan_job_row(connection, sensor_id) is not None
 
 
 def reserve_scan_job_if_idle(
@@ -1156,9 +1282,11 @@ def reserve_scan_job_if_idle(
     auto_ingest: bool = False,
     scan_profile: str = "balanced",
     schedule_id: str | None = None,
+    sensor_id: str = _identity.DEFAULT_SENSOR_ID,
+    scope_id: str | None = None,
     context: JobContext,
 ) -> dict[str, Any]:
-    """Atomically enforce the global one-active-NetSniper-job invariant."""
+    """Atomically enforce one active NetSniper job for each sensor."""
     if not isinstance(connection, sqlite3.Connection):
         # Historical receipt validators use a deliberately minimal connection
         # test double. Production connections always take the serialized path.
@@ -1170,6 +1298,8 @@ def reserve_scan_job_if_idle(
             auto_ingest=auto_ingest,
             scan_profile=scan_profile,
             schedule_id=schedule_id,
+            sensor_id=sensor_id,
+            scope_id=scope_id,
         )
         commit = getattr(connection, "commit", None)
         if callable(commit):
@@ -1185,7 +1315,7 @@ def reserve_scan_job_if_idle(
         # BEGIN IMMEDIATE serializes all competing dashboard, scheduler, and
         # CLI reservations before any caller can perform the active-job check.
         connection.execute("BEGIN IMMEDIATE")
-        active = active_scan_job_row(connection)
+        active = active_scan_job_row(connection, sensor_id)
         if active is not None:
             raise context.active_scan_job_exists_error_type(scan_job_to_dict(active))
 
@@ -1197,6 +1327,8 @@ def reserve_scan_job_if_idle(
             auto_ingest=auto_ingest,
             scan_profile=scan_profile,
             schedule_id=schedule_id,
+            sensor_id=sensor_id,
+            scope_id=scope_id,
         )
         connection.commit()
         return job
@@ -1775,9 +1907,47 @@ def delete_scan_schedule(
         safe_schedule_id,
     )
     deleted_at = utc_now_text()
+    deletion_columns = {
+        str(item[1])
+        for item in connection.execute(
+            "PRAGMA table_info(scan_schedule_deletions)"
+        )
+    }
+    identity_enabled = {"sensor_id", "scope_id"}.issubset(deletion_columns)
+    identity_column_sql = ", sensor_id, scope_id" if identity_enabled else ""
+    identity_value_sql = ", ?, ?" if identity_enabled else ""
+    values: tuple[Any, ...] = (
+        safe_schedule_id,
+        schedule["name"],
+        schedule["target"],
+        schedule["network_scope"],
+        schedule["scan_profile"],
+        schedule["cadence_minutes"],
+        1 if schedule["enabled"] else 0,
+        1 if schedule["auto_ingest"] else 0,
+        1 if schedule.get("run_trueaegis_after_ingest") else 0,
+        schedule.get("last_run_at"),
+        schedule.get("next_run_at"),
+        schedule.get("last_job_id"),
+        schedule.get("last_status"),
+        int(schedule.get("failure_count") or 0),
+        int(schedule.get("skip_count") or 0),
+        schedule.get("created_at") or deleted_at,
+        schedule.get("updated_at") or deleted_at,
+        schedule.get("message") or "",
+        deleted_at,
+        summary["linked_job_count"],
+        summary["linked_active_job_count"],
+        json.dumps(summary["linked_job_status_counts"], sort_keys=True),
+    )
+    if identity_enabled:
+        values += (
+            schedule.get("sensor_id") or _identity.DEFAULT_SENSOR_ID,
+            schedule.get("scope_id") or _identity.UNASSIGNED_SCOPE_ID,
+        )
 
     connection.execute(
-        """
+        f"""
         INSERT OR REPLACE INTO scan_schedule_deletions (
             schedule_id,
             name,
@@ -1801,37 +1971,12 @@ def delete_scan_schedule(
             linked_job_count,
             linked_active_job_count,
             linked_job_status_counts_json
+            {identity_column_sql}
         ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{identity_value_sql}
         )
         """,
-        (
-            safe_schedule_id,
-            schedule["name"],
-            schedule["target"],
-            schedule["network_scope"],
-            schedule["scan_profile"],
-            schedule["cadence_minutes"],
-            1 if schedule["enabled"] else 0,
-            1 if schedule["auto_ingest"] else 0,
-            1 if schedule.get("run_trueaegis_after_ingest") else 0,
-            schedule.get("last_run_at"),
-            schedule.get("next_run_at"),
-            schedule.get("last_job_id"),
-            schedule.get("last_status"),
-            int(schedule.get("failure_count") or 0),
-            int(schedule.get("skip_count") or 0),
-            schedule.get("created_at") or deleted_at,
-            schedule.get("updated_at") or deleted_at,
-            schedule.get("message") or "",
-            deleted_at,
-            summary["linked_job_count"],
-            summary["linked_active_job_count"],
-            json.dumps(
-                summary["linked_job_status_counts"],
-                sort_keys=True,
-            ),
-        ),
+        values,
     )
 
     cursor = connection.execute(

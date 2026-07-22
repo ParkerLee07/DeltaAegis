@@ -58,6 +58,10 @@ def normalize_stable_routes(routes: set[str]) -> set[str]:
             normalized.add("/api/v1/assets/{asset_key}")
         elif route == "/api/v1/telemetry-quality/decisions/([^/]+)":
             normalized.add("/api/v1/telemetry-quality/decisions/{decision_id}")
+        elif route == "/api/v1/detections/([^/]+)":
+            normalized.add("/api/v1/detections/{result_id}")
+        elif route == "/api/v1/detections/([^/]+)/reviews":
+            normalized.add("/api/v1/detections/{result_id}/reviews")
         else:
             normalized.add(route)
     return normalized

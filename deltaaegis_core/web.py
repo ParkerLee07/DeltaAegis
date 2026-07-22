@@ -12,6 +12,9 @@ from urllib.parse import urlsplit
 
 from deltaaegis_core import api_v1 as _api_v1
 from deltaaegis_core import auth as _auth
+from deltaaegis_core import identity as _identity
+from deltaaegis_core import detection as _detection
+from deltaaegis_core import operations as _operations
 from deltaaegis_core.auth import (
     ACCESS_CSRF_COOKIE_NAME,
     ACCESS_SESSION_COOKIE_NAME,
@@ -2652,15 +2655,27 @@ def _command_dashboard_impl(args):
                     headers={"X-Request-ID": self.api_v1_request_id()},
                 )
                 return
+            if route == "/api/v1/health":
+                self.api_v1_send(
+                    _api_v1.success_envelope(
+                        _operations.liveness_report(),
+                        request_id_value=self.api_v1_request_id(),
+                    )
+                )
+                return
 
             asset_match = re.fullmatch(r"/api/v1/assets/([^/]+)", route)
             quality_match = re.fullmatch(
                 r"/api/v1/telemetry-quality/decisions/([^/]+)", route
             )
+            detection_match = re.fullmatch(r"/api/v1/detections/([^/]+)", route)
             permissions = {
+                "/api/v1/readiness": "operations.read",
+                "/api/v1/diagnostics": "operations.read",
                 "/api/v1/session": "session.read",
                 "/api/v1/summary": "dashboard.read",
                 "/api/v1/scopes": "dashboard.read",
+                "/api/v1/sensors": "dashboard.read",
                 "/api/v1/sites": "dashboard.read",
                 "/api/v1/assets": "dashboard.read",
                 "/api/v1/events": "dashboard.read",
@@ -2668,9 +2683,10 @@ def _command_dashboard_impl(args):
                 "/api/v1/scan-jobs": "dashboard.read",
                 "/api/v1/validations": "dashboard.read",
                 "/api/v1/telemetry-quality/decisions": "dashboard.read",
+                "/api/v1/detections": "dashboard.read",
             }
             permission = permissions.get(route)
-            if asset_match or quality_match:
+            if asset_match or quality_match or detection_match:
                 permission = "dashboard.read"
             if permission is None:
                 self.api_v1_error("not_found", "Stable API route not found.", status=404, details={"path": route})
@@ -2681,7 +2697,25 @@ def _command_dashboard_impl(args):
             connection = self.open_connection()
             try:
                 scope = self.api_v1_scope(query)
-                if route == "/api/v1/session":
+                sensor_filter = (query.get("sensor_id") or [""])[0].strip()
+                scope_id_filter = (query.get("scope_id") or [""])[0].strip()
+                if route == "/api/v1/readiness":
+                    payload = _api_v1.success_envelope(
+                        _operations.readiness_report(
+                            connection,
+                            database_path=db_path,
+                        ),
+                        request_id_value=self.api_v1_request_id(),
+                    )
+                elif route == "/api/v1/diagnostics":
+                    payload = _api_v1.success_envelope(
+                        _operations.diagnostics_report(
+                            connection,
+                            database_path=db_path,
+                        ),
+                        request_id_value=self.api_v1_request_id(),
+                    )
+                elif route == "/api/v1/session":
                     actor = {
                         key: value
                         for key, value in dict(self.current_actor or {}).items()
@@ -2698,34 +2732,63 @@ def _command_dashboard_impl(args):
                     )
                 elif route == "/api/v1/scopes":
                     payload = self.api_v1_paginate(
-                        dashboard_scopes_payload(connection), query
+                        _identity.list_scopes(
+                            connection,
+                            sensor_id=sensor_filter or None,
+                        ),
+                        query,
+                    )
+                elif route == "/api/v1/sensors":
+                    payload = self.api_v1_paginate(
+                        _identity.list_sensors(connection), query
                     )
                 elif route == "/api/v1/sites":
                     sites = dashboard_sites_payload(connection).get("sites", [])
                     payload = self.api_v1_paginate(sites, query)
                 elif route == "/api/v1/assets":
                     limit, offset = _api_v1.parse_pagination(query)
-                    items = dashboard_assets_payload(
-                        connection,
-                        limit + offset + 1,
-                        scope=scope,
-                        state=(query.get("state") or [""])[0].strip().upper() or None,
-                        identity=(query.get("identity") or [""])[0].strip().upper() or None,
-                    )
+                    if sensor_filter or scope_id_filter:
+                        items = _identity.list_assets(
+                            connection,
+                            sensor_id=sensor_filter or None,
+                            scope_id=scope_id_filter or None,
+                            limit=limit + 1,
+                            offset=offset,
+                        )
+                        page_items = items
+                    else:
+                        items = dashboard_assets_payload(
+                            connection,
+                            limit + offset + 1,
+                            scope=scope,
+                            state=(query.get("state") or [""])[0].strip().upper() or None,
+                            identity=(query.get("identity") or [""])[0].strip().upper() or None,
+                        )
+                        page_items = items[offset : offset + limit + 1]
                     payload = _api_v1.paginated_envelope(
-                        items[offset : offset + limit + 1],
+                        page_items,
                         limit=limit,
                         offset=offset,
                         request_id_value=self.api_v1_request_id(),
                     )
                 elif asset_match:
-                    payload = _api_v1.success_envelope(
-                        dashboard_asset_detail_payload(
+                    asset_key = unquote(asset_match.group(1))
+                    detail = (
+                        _identity.asset_detail(
                             connection,
-                            unquote(asset_match.group(1)),
+                            asset_key=asset_key,
+                            scope_id=scope_id_filter,
+                        )
+                        if scope_id_filter
+                        else dashboard_asset_detail_payload(
+                            connection,
+                            asset_key,
                             scope=scope,
                             limit=50,
-                        ),
+                        )
+                    )
+                    payload = _api_v1.success_envelope(
+                        detail,
                         request_id_value=self.api_v1_request_id(),
                     )
                 elif route == "/api/v1/events":
@@ -2760,6 +2823,30 @@ def _command_dashboard_impl(args):
                         ).get("decision"),
                         request_id_value=self.api_v1_request_id(),
                     )
+                elif route == "/api/v1/detections":
+                    limit, offset = _api_v1.parse_pagination(query)
+                    items = _detection.list_results(
+                        connection,
+                        sensor_id=sensor_filter or None,
+                        scope_id=scope_id_filter or None,
+                        disposition=(query.get("disposition") or [""])[0].strip().upper() or None,
+                        limit=limit + 1,
+                        offset=offset,
+                    )
+                    payload = _api_v1.paginated_envelope(
+                        items,
+                        limit=limit,
+                        offset=offset,
+                        request_id_value=self.api_v1_request_id(),
+                    )
+                elif detection_match:
+                    payload = _api_v1.success_envelope(
+                        _detection.result_by_id(
+                            connection,
+                            unquote(detection_match.group(1)),
+                        ),
+                        request_id_value=self.api_v1_request_id(),
+                    )
                 else:
                     raise _api_v1.ApiV1Error("not_found", "Stable API route not found.", status=404)
             except _api_v1.ApiV1Error:
@@ -2775,10 +2862,20 @@ def _command_dashboard_impl(args):
             self.api_v1_send(payload)
 
         def handle_api_v1_post(self, route):
-            if route != "/api/v1/sites":
+            detection_review_match = re.fullmatch(
+                r"/api/v1/detections/([^/]+)/reviews", route
+            )
+            permissions = {
+                "/api/v1/sites": "sites.write",
+                "/api/v1/sensors": "identity.sensors.write",
+            }
+            permission = permissions.get(route)
+            if detection_review_match:
+                permission = "detection.review"
+            if permission is None:
                 self.api_v1_error("not_found", "Stable API route not found.", status=404, details={"path": route})
                 return
-            if not self.authenticate_api_v1("sites.write"):
+            if not self.authenticate_api_v1(permission):
                 return
             content_types = self.headers.get_all("Content-Type") or []
             media_type = (
@@ -2819,13 +2916,83 @@ def _command_dashboard_impl(args):
                     return
 
                 connection.execute("BEGIN IMMEDIATE")
-                result = dashboard_site_action_payload(
+                if route == "/api/v1/sites":
+                    result = dashboard_site_action_payload(
+                        connection,
+                        "/api/site-create",
+                        payload,
+                        actor=self.current_actor,
+                        source_ip=self.client_address[0] if self.client_address else None,
+                        user_agent=self.headers.get("User-Agent", ""),
+                    )
+                    audit_action = "API_V1_SITE_CREATE"
+                    target_type = "logical_site"
+                    target_key = str(
+                        ((result.get("site") or {}).get("site_id") or "")
+                    )
+                elif route == "/api/v1/sensors":
+                    allowed = {
+                        "sensor_id",
+                        "display_name",
+                        "trust_domain",
+                        "network_scopes",
+                        "metadata",
+                    }
+                    unexpected = sorted(set(payload) - allowed)
+                    if unexpected:
+                        raise _api_v1.ApiV1Error(
+                            "invalid_sensor",
+                            "sensor enrollment contains unsupported fields",
+                            status=400,
+                            details={"fields": unexpected},
+                        )
+                    result = _identity.register_sensor(
+                        connection,
+                        sensor_id=payload.get("sensor_id"),
+                        display_name=payload.get("display_name"),
+                        trust_domain=payload.get("trust_domain") or _identity.DEFAULT_TRUST_DOMAIN,
+                        network_scopes=payload.get("network_scopes") or (),
+                        metadata=payload.get("metadata") or {},
+                        actor=self.current_actor,
+                    )
+                    audit_action = "API_V1_SENSOR_ENROLL"
+                    target_type = "sensor"
+                    target_key = str(result.get("sensor_id") or "")
+                elif detection_review_match:
+                    allowed = {"action", "reason"}
+                    unexpected = sorted(set(payload) - allowed)
+                    if unexpected:
+                        raise _api_v1.ApiV1Error(
+                            "invalid_detection_review",
+                            "detection review contains unsupported fields",
+                            status=400,
+                            details={"fields": unexpected},
+                        )
+                    result = _detection.review_result(
+                        connection,
+                        result_id=unquote(detection_review_match.group(1)),
+                        action=payload.get("action"),
+                        reason=payload.get("reason"),
+                        actor=self.current_actor,
+                    )
+                    audit_action = "API_V1_DETECTION_REVIEW"
+                    target_type = "detection_result"
+                    target_key = str(result.get("result_id") or "")
+                else:
+                    raise _api_v1.ApiV1Error(
+                        "not_found", "Stable API route not found.", status=404
+                    )
+                _auth.record_access_audit_event(
                     connection,
-                    "/api/site-create",
-                    payload,
+                    audit_action,
                     actor=self.current_actor,
-                    source_ip=self.client_address[0] if self.client_address else None,
+                    target_type=target_type,
+                    target_key=target_key,
+                    source_ip=(
+                        self.client_address[0] if self.client_address else None
+                    ),
                     user_agent=self.headers.get("User-Agent", ""),
+                    details={"stable_api_route": route},
                 )
                 response = _api_v1.success_envelope(
                     result,
@@ -2847,7 +3014,7 @@ def _command_dashboard_impl(args):
                 if connection.in_transaction:
                     connection.rollback()
                 response = _api_v1.error_envelope(
-                    "site_create_failed",
+                    "mutation_failed",
                     str(exc),
                     request_id_value=self.api_v1_request_id(),
                 )

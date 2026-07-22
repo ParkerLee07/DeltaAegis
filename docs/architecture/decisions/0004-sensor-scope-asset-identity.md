@@ -1,8 +1,8 @@
 # ADR 0004: Separate sensor, scope, and asset identity
 
-- Status: Accepted
+- Status: Implemented in the v1 Stage 3–5 candidate
 - Date: 2026-07-13
-- Applies to: identity work beginning in v0.47
+- Applies to: migration 0004 and the v1 identity boundary
 
 ## Context
 
@@ -14,7 +14,7 @@ DeltaAegis will introduce durable `sensor_id` and `scope_id` identities. A scope
 
 Logical-site membership references scope identity and remains a presentation/ownership grouping. It never becomes evidence identity. Existing `network_scope` remains the v0.42 compatibility key and is migrated without guessing across overlapping networks.
 
-Sensor enrollment, scan UUID rules, replay protection, and bundle trust metadata are coordinated with NetSniper v2.1.0. No multi-sensor inference is implemented before those contracts and migrations are approved.
+Sensor enrollment, source/internal scan identity, replay protection, and bundle trust metadata are pinned to NetSniper v2.1.0. Managed evidence must name an enrolled sensor and authorized scope. Legacy data is assigned to `sensor-legacy-local`; no cross-sensor inference is performed.
 
 ## Consequences
 

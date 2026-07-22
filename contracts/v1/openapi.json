@@ -79,6 +79,12 @@
           "authentication": {
             "type": "object"
           },
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "name": {
             "type": "string"
           },
@@ -97,7 +103,8 @@
           "version",
           "openapi",
           "authentication",
-          "private_compatibility_namespace"
+          "private_compatibility_namespace",
+          "capabilities"
         ],
         "type": "object"
       },
@@ -114,6 +121,97 @@
             "$ref": "#/components/schemas/StableRecord"
           }
         ]
+      },
+      "DetectionResult": {
+        "additionalProperties": true,
+        "properties": {
+          "disposition": {
+            "type": "string"
+          },
+          "evidence_digest": {
+            "type": "string"
+          },
+          "explanation": {
+            "type": "object"
+          },
+          "result_id": {
+            "type": "string"
+          },
+          "rule_id": {
+            "type": "string"
+          },
+          "rule_version": {
+            "type": "string"
+          },
+          "scope_id": {
+            "type": "string"
+          },
+          "sensor_id": {
+            "type": "string"
+          },
+          "source_scan_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "result_id",
+          "rule_id",
+          "rule_version",
+          "sensor_id",
+          "scope_id",
+          "source_scan_id",
+          "evidence_digest",
+          "explanation",
+          "disposition"
+        ],
+        "type": "object"
+      },
+      "DetectionReviewRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "REVIEWED",
+              "SUPPRESSED",
+              "UNSUPPRESSED"
+            ],
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "Diagnostics": {
+        "additionalProperties": true,
+        "properties": {
+          "database": {
+            "type": "object"
+          },
+          "readiness": {
+            "$ref": "#/components/schemas/Readiness"
+          },
+          "runtime": {
+            "type": "object"
+          },
+          "schema_version": {
+            "const": "deltaaegis-diagnostics-v1"
+          }
+        },
+        "required": [
+          "schema_version",
+          "readiness",
+          "runtime",
+          "database"
+        ],
+        "type": "object"
       },
       "ErrorEnvelope": {
         "additionalProperties": false,
@@ -165,6 +263,26 @@
             "$ref": "#/components/schemas/StableRecord"
           }
         ]
+      },
+      "Health": {
+        "additionalProperties": true,
+        "properties": {
+          "generated_at": {
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "deltaaegis-health-v1"
+          },
+          "status": {
+            "const": "UP"
+          }
+        },
+        "required": [
+          "schema_version",
+          "status",
+          "generated_at"
+        ],
+        "type": "object"
       },
       "LogicalSite": {
         "additionalProperties": true,
@@ -234,6 +352,33 @@
         ],
         "type": "object"
       },
+      "Readiness": {
+        "additionalProperties": true,
+        "properties": {
+          "checks": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "schema_version": {
+            "const": "deltaaegis-readiness-v1"
+          },
+          "status": {
+            "enum": [
+              "READY",
+              "NOT_READY"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "status",
+          "checks"
+        ],
+        "type": "object"
+      },
       "ResponseMeta": {
         "additionalProperties": true,
         "properties": {
@@ -257,11 +402,98 @@
         ]
       },
       "ScopeRecord": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/StableRecord"
+        "additionalProperties": true,
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "network_scope": {
+            "type": "string"
+          },
+          "scope_id": {
+            "type": "string"
+          },
+          "sensor_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
           }
-        ]
+        },
+        "required": [
+          "scope_id",
+          "sensor_id",
+          "network_scope",
+          "status"
+        ],
+        "type": "object"
+      },
+      "SensorCreateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "display_name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "type": "string"
+          },
+          "metadata": {
+            "type": "object"
+          },
+          "network_scopes": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 256,
+            "minItems": 1,
+            "type": "array"
+          },
+          "sensor_id": {
+            "type": "string"
+          },
+          "trust_domain": {
+            "maxLength": 96,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "display_name",
+          "network_scopes"
+        ],
+        "type": "object"
+      },
+      "SensorRecord": {
+        "additionalProperties": true,
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "$ref": "#/components/schemas/ScopeRecord"
+            },
+            "type": "array"
+          },
+          "sensor_id": {
+            "type": "string"
+          },
+          "sensor_kind": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "trust_domain": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sensor_id",
+          "display_name",
+          "trust_domain",
+          "status"
+        ],
+        "type": "object"
       },
       "SessionPrincipal": {
         "additionalProperties": true,
@@ -503,9 +735,9 @@
     }
   },
   "info": {
-    "description": "Stable, authenticated DeltaAegis programmatic API. Unversioned /api routes are private dashboard interfaces.",
+    "description": "Stable DeltaAegis API with sensor/scope identity, deterministic detection, and operational readiness. Unversioned /api routes are private dashboard interfaces.",
     "title": "DeltaAegis API",
-    "version": "1.0.0-stage2"
+    "version": "1.0.0-stage35"
   },
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "openapi": "3.1.0",
@@ -774,6 +1006,22 @@
           },
           {
             "in": "query",
+            "name": "sensor_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "state",
             "required": false,
             "schema": {
@@ -902,6 +1150,23 @@
               "minLength": 1,
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "format": "ipv4-network",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -979,6 +1244,497 @@
         ],
         "summary": "Read one asset.",
         "x-deltaaegis-permission": "dashboard.read"
+      }
+    },
+    "/api/v1/detections": {
+      "get": {
+        "operationId": "listDetections",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sensor_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "disposition",
+            "required": false,
+            "schema": {
+              "enum": [
+                "OPEN",
+                "REVIEWED",
+                "SUPPRESSED"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "items": {
+                              "items": {
+                                "$ref": "#/components/schemas/DetectionResult"
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "items"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "List immutable detection results.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "List immutable detection results.",
+        "x-deltaaegis-permission": "dashboard.read"
+      }
+    },
+    "/api/v1/detections/{result_id}": {
+      "get": {
+        "operationId": "getDetection",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "result_id",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/DetectionResult"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Read one immutable detection result.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Read one immutable detection result.",
+        "x-deltaaegis-permission": "dashboard.read"
+      }
+    },
+    "/api/v1/detections/{result_id}/reviews": {
+      "post": {
+        "operationId": "reviewDetection",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "result_id",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required with cookie authentication and must match the csrfCookie value.",
+            "in": "header",
+            "name": "X-DeltaAegis-CSRF",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DetectionReviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/DetectionResult"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Append review or suppression state.",
+            "headers": {
+              "Idempotency-Replayed": {
+                "description": "True when the stored result of an identical request is replayed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "csrfCookie": [],
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Append review or suppression state.",
+        "x-deltaaegis-permission": "detection.review"
+      }
+    },
+    "/api/v1/diagnostics": {
+      "get": {
+        "operationId": "getDiagnostics",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/Diagnostics"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Read bounded secret-redacted diagnostics.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Read bounded secret-redacted diagnostics.",
+        "x-deltaaegis-permission": "operations.read"
       }
     },
     "/api/v1/events": {
@@ -1114,6 +1870,92 @@
         "x-deltaaegis-permission": "dashboard.read"
       }
     },
+    "/api/v1/health": {
+      "get": {
+        "operationId": "getHealth",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/Health"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Read minimal process liveness.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [],
+        "summary": "Read minimal process liveness.",
+        "x-deltaaegis-permission": "public"
+      }
+    },
     "/api/v1/openapi.json": {
       "get": {
         "operationId": "getOpenApi",
@@ -1191,6 +2033,99 @@
         "security": [],
         "summary": "Read the OpenAPI contract.",
         "x-deltaaegis-permission": "public"
+      }
+    },
+    "/api/v1/readiness": {
+      "get": {
+        "operationId": "getReadiness",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/Readiness"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Read authenticated dependency readiness.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Read authenticated dependency readiness.",
+        "x-deltaaegis-permission": "operations.read"
       }
     },
     "/api/v1/scan-jobs": {
@@ -1350,6 +2285,14 @@
               "minimum": 0,
               "type": "integer"
             }
+          },
+          {
+            "in": "query",
+            "name": "sensor_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1439,6 +2382,268 @@
         ],
         "summary": "List observed network scopes.",
         "x-deltaaegis-permission": "dashboard.read"
+      }
+    },
+    "/api/v1/sensors": {
+      "get": {
+        "operationId": "listSensors",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sensor_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "items": {
+                              "items": {
+                                "$ref": "#/components/schemas/SensorRecord"
+                              },
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "items"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "List enrolled sensors.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "List enrolled sensors.",
+        "x-deltaaegis-permission": "dashboard.read"
+      },
+      "post": {
+        "operationId": "createSensor",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Request-ID",
+            "required": false,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 8,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required with cookie authentication and must match the csrfCookie value.",
+            "in": "header",
+            "name": "X-DeltaAegis-CSRF",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SensorCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/SensorRecord"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Enroll a managed sensor and its scopes.",
+            "headers": {
+              "Idempotency-Replayed": {
+                "description": "True when the stored result of an identical request is replayed.",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-Request-ID": {
+                "description": "Request correlation identifier.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "403": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "404": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "405": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "409": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "411": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "413": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "415": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "429": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          },
+          "500": {
+            "$ref": "#/components/responses/ErrorEnvelope"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "csrfCookie": [],
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Enroll a managed sensor and its scopes.",
+        "x-deltaaegis-permission": "identity.sensors.write"
       }
     },
     "/api/v1/session": {

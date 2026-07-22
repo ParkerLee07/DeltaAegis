@@ -27,7 +27,13 @@ ADDITIVE_MODULES = (
     "migrations",
     "telemetry_quality",
 )
-EXPECTED_MODULES = tuple(sorted((*LEGACY_MODULES, *ADDITIVE_MODULES)))
+STAGE3_5_MODULES = (
+    "detection",
+    "identity",
+    "operations",
+)
+STAGE1_2_MODULES = tuple(sorted((*LEGACY_MODULES, *ADDITIVE_MODULES)))
+EXPECTED_MODULES = tuple(sorted((*STAGE1_2_MODULES, *STAGE3_5_MODULES)))
 ALIASES = {
     "auth": "_auth",
     "ingest": "_ingest",
@@ -174,7 +180,7 @@ def validate_isolated_import() -> None:
         f"sys.path.insert(0, {str(ROOT)!r}); "
         "import deltaaegis, deltaaegis_core; "
         f"from deltaaegis_core import {imports}; "
-        "assert deltaaegis.DELTAAEGIS_VERSION == '1.0.0-stage12'; "
+        "assert deltaaegis.DELTAAEGIS_VERSION == '1.0.0-stage35'; "
         f"assert tuple(sorted(deltaaegis_core.__all__)) == {EXPECTED_MODULES!r}"
     )
     completed = subprocess.run(
@@ -202,8 +208,9 @@ def main() -> int:
     validate_legacy_facades()
     validate_isolated_import()
     print(
-        "[PASS] v1 Stage 1–2 architecture: exact additive module inventory, "
-        "acyclic dependencies, preserved v0.44 facades, and isolated imports"
+        "[PASS] v1 Stage 1–2 architecture transition: baseline modules remain "
+        "complete beneath the exact Stage 3–5 additive inventory, dependencies "
+        "are acyclic, v0.44 facades are preserved, and imports are isolated"
     )
     return 0
 

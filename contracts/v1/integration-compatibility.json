@@ -1,0 +1,22 @@
+{
+  "netsniper": {
+    "capability_schema": "netsniper-capability-manifest-v1",
+    "classifier_version": "netsniper-classifier-v2",
+    "execution_boundary": "fixed-argv-headless-cli",
+    "host_classification_schema": "netsniper-host-classification-v2",
+    "manifest_schemas": [
+      "netsniper-run-v3",
+      "netsniper-run-v2"
+    ],
+    "semantic_version": "2.1.0",
+    "source_commit": "0624a36550f6eb62ed0daa6862e5cc25a0d93236"
+  },
+  "schema_version": "deltaaegis-integration-compatibility-v1",
+  "trueaegis": {
+    "contract": "trueaegis-validation-results-v1",
+    "optional": true,
+    "required_shape": "json-array-of-validation-result-objects",
+    "source_witness_commit": "16b9e88b232aac568859ab8d68e2eaa26558c4e7",
+    "supported_semver": ">=1.2.0,<2.0.0"
+  }
+}

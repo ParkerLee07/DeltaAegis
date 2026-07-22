@@ -90,6 +90,8 @@ try:
         "0001-v045-foundation",
         "0002-v045-telemetry-trust",
         "0003-v1-api-security",
+        "0004-v1-sensor-scope-identity",
+        "0005-v1-deterministic-detection",
     ]
     assert all(row["origin"] == "fresh" for row in migrations)
     for row in migrations:
@@ -195,7 +197,7 @@ try:
     assert users[0][0] in {"concurrent.admin.one", "concurrent.admin.two"}
     assert connection.execute(
         "SELECT COUNT(*) FROM schema_migrations"
-    ).fetchone()[0] == 3
+    ).fetchone()[0] == 5
 finally:
     connection.close()
 PY
@@ -241,4 +243,4 @@ DELTAAEGIS_DB_PATH="$external_db" \
     "$project/uninstall.sh" --purge-runtime > "$tmp_root/external-purge.log"
 [[ -f "$external_db" ]] || fail "runtime purge removed an external database"
 
-echo "[PASS] v1 Stage 1–2 install lifecycle: required modules, dry run, fresh migrations, serialized admin bootstrap, bounded scoped-token CLI, idempotent reinstall, launcher removal, runtime purge, and external evidence preservation"
+echo "[PASS] v1 install lifecycle transition: Stage 1–2 controls and Stage 3–5 modules, fresh migrations, serialized admin bootstrap, bounded scoped-token CLI, idempotent reinstall, launcher removal, runtime purge, and external evidence preservation"

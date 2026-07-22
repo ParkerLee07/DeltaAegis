@@ -1,6 +1,6 @@
 # ADR 0006: Persist jobs and keep workers responsible for processes
 
-- Status: Accepted
+- Status: Implemented through the v1 Stage 3–5 candidate
 - Date: 2026-07-13
 - Applies to: scan, schedule, and TrueAegis execution
 
@@ -18,5 +18,5 @@ Startup and scheduler passes reconcile stale or orphaned jobs using PID identity
 
 - Arbitrary command text and shell execution remain prohibited.
 - v0.44 extracts job ownership without changing state semantics.
-- v0.47 changes active-scan concurrency from global to per-sensor only after sensor identity exists.
+- Migration 0004 changes active-scan concurrency from global to one active job per enrolled sensor while preserving transactional reservation.
 - Future service managers integrate at the worker boundary rather than bypassing the job ledger.

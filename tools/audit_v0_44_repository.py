@@ -168,9 +168,8 @@ def source_inventory(root: Path, files: list[Path]) -> dict[str, Any]:
                     routes.add(route)
 
     schema_sources = [source]
-    migrations_path = root / CORE_DIR / "migrations.py"
-    if migrations_path.is_file():
-        schema_sources.append(migrations_path.read_text(encoding="utf-8"))
+    for schema_path in sorted((root / CORE_DIR).glob("*.py")):
+        schema_sources.append(schema_path.read_text(encoding="utf-8"))
     tables = sorted(set(re.findall(
         r"CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+[`\"']?([A-Za-z_][A-Za-z0-9_]*)",
         "\n".join(schema_sources),
@@ -255,8 +254,8 @@ def findings(inventory: dict[str, Any]) -> list[dict[str, str]]:
         },
         {
             "id": "DA044-004", "severity": "INFO", "area": "HTTP/API contract",
-            "evidence": f"Stage 2 exposes {len(inventory['stable_api_routes'])} stable /api/v1 route literals while {len(inventory['private_api_routes'])} pre-existing route literals remain private compatibility interfaces.",
-            "disposition": "Delivered for the Stage 1–2 checkpoint; keep runtime, tracked OpenAPI, authorization, HTTP, and private-route transition inventories release-gated.",
+            "evidence": f"Stages 2–5 expose {len(inventory['stable_api_routes'])} stable /api/v1 route literals while {len(inventory['private_api_routes'])} pre-existing route literals remain private compatibility interfaces.",
+            "disposition": "Delivered through the Stage 3–5 candidate; keep runtime, tracked OpenAPI, authorization, HTTP, and private-route transition inventories release-gated.",
         },
         {
             "id": "DA044-005", "severity": "LOW", "area": "validation estate",
@@ -269,9 +268,9 @@ def findings(inventory: dict[str, Any]) -> list[dict[str, str]]:
             "disposition": "Retain the current compatibility floor and require manifest-backed replacement evidence for any further validator retirement.",
         },
         {
-            "id": "DA044-006", "severity": "MEDIUM", "area": "TrueAegis compatibility",
-            "evidence": "TrueAegis remains contract-validated but not pinned to a published semantic-version range.",
-            "disposition": "Publish or pin the supported TrueAegis range before v1.0.",
+            "id": "DA044-006", "severity": "INFO", "area": "integration compatibility",
+            "evidence": "NetSniper is pinned to v2.1.0 commit 0624a36550f6eb62ed0daa6862e5cc25a0d93236; optional TrueAegis is pinned to >=1.2.0,<2.0.0, a witness commit, and a fixture-validated result contract.",
+            "disposition": "Retain exact pins, fixtures, scope-containment tests, and fail-closed integration readiness in every v1 gate.",
         },
         {
             "id": "DA044-007", "severity": "LOW", "area": "documentation",
@@ -286,14 +285,14 @@ def build_audit(root: Path) -> dict[str, Any]:
     inventory = source_inventory(root, files)
     return {
         "schema_version": SCHEMA_VERSION,
-        "scope": "DeltaAegis v1.0 combined Stage 1–2 candidate",
+        "scope": "DeltaAegis v1.0 combined Stage 3–5 candidate",
         "inventory": inventory,
         "findings": findings(inventory),
         "constraints": [
             "The audit is read-only except when explicitly writing its deterministic Markdown report.",
             "Counts use Git cached and non-ignored untracked candidate files and exclude runtime data roots and the generated report.",
-            "The v1 Stage 1–2 checkpoint adds checksummed forward migrations, verified recovery evidence, and the stable authenticated /api/v1 contract while preserving released v0.45 telemetry trust and v0.44 modular compatibility.",
-            "This audit is checkpoint evidence and does not declare v1.0 GA; every remaining V1_SCOPE.md definition-of-done item still applies.",
+            "The v1 candidate preserves Stage 1–2 migrations, recovery, stable API, and security while adding sensor/scope isolation, immutable detection, operational readiness, performance thresholds, and pinned integrations.",
+            "This audit is candidate evidence and does not declare v1.0 GA; the mandatory 24-hour soak and final blocker review still apply.",
             "Historical validator retirement is allowed only when exact prior bytes remain verified at an immutable release tag, current behavior has replacement-contract evidence, and the retained execution graph is complete.",
         ],
     }
@@ -306,9 +305,9 @@ def markdown_list(values: list[str]) -> str:
 def render_markdown(audit: dict[str, Any]) -> str:
     inv = audit["inventory"]
     lines = [
-        "# DeltaAegis v1.0 Stage 1–2 Repository Audit", "",
+        "# DeltaAegis v1.0 Stage 3–5 Repository Audit", "",
         f"Schema: `{audit['schema_version']}`", "",
-        "This deterministic inventory describes the combined v1.0 Stage 1–2 candidate based on released v0.45.0. Regenerate it with `python3 tools/audit_v0_44_repository.py --write`.", "",
+        "This deterministic inventory describes the combined v1.0 Stage 3–5 candidate, including the preserved Stage 1–2 foundation, based on released v0.45.0. Regenerate it with `python3 tools/audit_v0_44_repository.py --write`.", "",
         "## Inventory summary", "", "| Measure | Count |", "|---|---:|",
         f"| Repository files in audit scope | {inv['file_count']} |",
         f"| `deltaaegis.py` lines | {inv['source_lines']} |",
@@ -379,11 +378,12 @@ def render_markdown(audit: dict[str, Any]) -> str:
 
     lines.extend([
         "", "## v1 delivery map", "", "| Stage | Status | Owned work |", "|---|---|---|",
-        "| Stage 1 | Delivered in this checkpoint | Forward migrations, exact supported origins, verified backup, interruption recovery, and restore rehearsal |",
-        "| Stage 2 | Delivered in this checkpoint | `/api/v1`, OpenAPI 3.1, scoped tokens, CSRF, security headers, request bounds, and durable idempotency |",
-        "| Stage 3 | Deferred | Sensor/scope identity, evidence provenance, replay protection, and overlapping CIDRs |",
-        "| Stage 4 | Deferred | Versioned deterministic detection rules and explainable results |",
-        "| Later v1 gates | Deferred | Health/readiness, structured operations, low-resource and performance evidence, pinned TrueAegis compatibility, and final blocker audit |",
+        "| Stage 1 | Preserved and release-gated | Forward migrations, exact supported origins, verified backup, interruption recovery, and restore rehearsal |",
+        "| Stage 2 | Preserved and release-gated | `/api/v1`, OpenAPI 3.1, scoped tokens, CSRF, security headers, request bounds, and durable idempotency |",
+        "| Stage 3 | Implemented and candidate-gated | Sensor/scope identity, evidence provenance, replay protection, per-sensor concurrency, and overlapping CIDRs |",
+        "| Stage 4 | Implemented and candidate-gated | Versioned deterministic immutable detections, explanations, replay, and separate reviews |",
+        "| Stage 5 | Implementation gate passed; GA soak pending | Health/readiness, diagnostics, low-resource and performance evidence, pinned integrations, and soak harness |",
+        "| Final GA gate | Pending external-duration evidence | 24-hour release-evidence soak and final blocker audit |",
         "", "## Audit constraints", "",
     ])
     lines.extend(f"- {item}" for item in audit["constraints"])

@@ -115,9 +115,12 @@ required_files=(
     "deltaaegis_core/config.py"
     "deltaaegis_core/current_state.py"
     "deltaaegis_core/db.py"
+    "deltaaegis_core/detection.py"
+    "deltaaegis_core/identity.py"
     "deltaaegis_core/ingest.py"
     "deltaaegis_core/jobs.py"
     "deltaaegis_core/migrations.py"
+    "deltaaegis_core/operations.py"
     "deltaaegis_core/reports.py"
     "deltaaegis_core/sites.py"
     "deltaaegis_core/telemetry_quality.py"
@@ -365,9 +368,12 @@ for relative in (
     "deltaaegis_core/config.py",
     "deltaaegis_core/current_state.py",
     "deltaaegis_core/db.py",
+    "deltaaegis_core/detection.py",
+    "deltaaegis_core/identity.py",
     "deltaaegis_core/ingest.py",
     "deltaaegis_core/jobs.py",
     "deltaaegis_core/migrations.py",
+    "deltaaegis_core/operations.py",
     "deltaaegis_core/reports.py",
     "deltaaegis_core/sites.py",
     "deltaaegis_core/telemetry_quality.py",

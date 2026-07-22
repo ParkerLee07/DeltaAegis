@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Parker Lee
-"""DeltaAegis v1.0 Stage 1-2: migrations and the stable API boundary.
+"""DeltaAegis v1.0 Stage 3-5 combined upgrade candidate.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -51,6 +51,9 @@ from deltaaegis_core import web as _web
 from deltaaegis_core import jobs as _jobs
 from deltaaegis_core import reports as _reports
 from deltaaegis_core import migrations as _migrations
+from deltaaegis_core import identity as _identity
+from deltaaegis_core import detection as _detection
+from deltaaegis_core import operations as _operations
 try:
     from deltaaegis_core import telemetry_quality as _telemetry_quality
     from deltaaegis_core import current_state as _current_state
@@ -88,7 +91,7 @@ def _report_context() -> _reports.ReportContext:
         operator_triage_summary=operator_triage_summary,
     )
 
-DELTAAEGIS_VERSION = "1.0.0-stage12"
+DELTAAEGIS_VERSION = "1.0.0-stage35"
 DELTAAEGIS_SECURITY_HOTFIX = "2026-07-13.2"
 DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION = "deltaaegis-backup-manifest-v1"
 DELTAAEGIS_V0_14_COMPATIBILITY_NOTE = "DeltaAegis v0.14.0 — NetSniper Scan Orchestration compatibility retained."
@@ -1569,6 +1572,36 @@ def _validate_v1_api_security_data(connection: sqlite3.Connection) -> None:
         )
 
 
+def _apply_v1_identity_schema(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    """Apply the explicit sensor/scope boundary and legacy attribution."""
+
+    return _identity.apply_schema(connection)
+
+
+def _validate_v1_identity_schema(connection: sqlite3.Connection) -> None:
+    try:
+        _identity.validate_schema(connection)
+    except _identity.IdentityError as exc:
+        raise _migrations.MigrationError(str(exc)) from exc
+
+
+def _apply_v1_detection_schema(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    """Create immutable versioned detection and separate review ledgers."""
+
+    return _detection.apply_schema(connection)
+
+
+def _validate_v1_detection_schema(connection: sqlite3.Connection) -> None:
+    try:
+        _detection.validate_schema(connection)
+    except _detection.DetectionError as exc:
+        raise _migrations.MigrationError(str(exc)) from exc
+
+
 def deltaaegis_schema_migrations() -> tuple[_migrations.Migration, ...]:
     foundation_material = json.dumps(
         {
@@ -1624,7 +1657,18 @@ def deltaaegis_schema_migrations() -> tuple[_migrations.Migration, ...]:
     api_security_material = json.dumps(
         {
             "schema": V1_API_SECURITY_SCHEMA_SQL,
-            "token_scopes": sorted(_auth.ACCESS_RBAC_PERMISSIONS),
+            # Migration 0003 is immutable. Stage 3-5 permissions are additive
+            # runtime scopes and must not change its committed checksum.
+            "token_scopes": sorted(
+                permission
+                for permission in _auth.ACCESS_RBAC_PERMISSIONS
+                if permission
+                not in {
+                    "identity.sensors.write",
+                    "detection.review",
+                    "operations.read",
+                }
+            ),
             "default_token_ttl": _auth.ACCESS_API_TOKEN_DEFAULT_TTL_SECONDS,
             "maximum_token_ttl": _auth.ACCESS_API_TOKEN_MAX_TTL_SECONDS,
             "session_csrf": "sha256-double-submit-v1",
@@ -1638,6 +1682,36 @@ def deltaaegis_schema_migrations() -> tuple[_migrations.Migration, ...]:
             "backfill_validation_source": inspect.getsource(
                 _validate_v1_api_security_data
             ),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    identity_material = json.dumps(
+        {
+            "schema": _identity.IDENTITY_SCHEMA_SQL,
+            "compatibility_columns": _identity.IDENTITY_COLUMNS,
+            "default_sensor": _identity.DEFAULT_SENSOR_ID,
+            "unassigned_scope": _identity.UNASSIGNED_SCOPE_ID,
+            "apply_source": inspect.getsource(_identity.apply_schema),
+            "projection_source": inspect.getsource(
+                _identity.apply_snapshot_projection
+            ),
+            "receipt_source": inspect.getsource(
+                _identity.record_evidence_receipt
+            ),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    detection_material = json.dumps(
+        {
+            "schema": _detection.DETECTION_SCHEMA_SQL,
+            "rules": _detection.rules_contract(),
+            "result_source": inspect.getsource(_detection.result_for_event),
+            "persistence_source": inspect.getsource(
+                _detection.persist_results
+            ),
+            "review_source": inspect.getsource(_detection.review_result),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -1664,6 +1738,20 @@ def deltaaegis_schema_migrations() -> tuple[_migrations.Migration, ...]:
             apply=_apply_v1_api_security_schema,
             validate=_validate_v1_api_security_schema,
         ),
+        _migrations.Migration(
+            migration_id="0004-v1-sensor-scope-identity",
+            description="Assign durable sensor and scope identities, isolate overlapping CIDRs, and bind replay receipts.",
+            checksum_material=identity_material,
+            apply=_apply_v1_identity_schema,
+            validate=_validate_v1_identity_schema,
+        ),
+        _migrations.Migration(
+            migration_id="0005-v1-deterministic-detection",
+            description="Add immutable versioned detection results with evidence provenance and separate review state.",
+            checksum_material=detection_material,
+            apply=_apply_v1_detection_schema,
+            validate=_validate_v1_detection_schema,
+        ),
     )
 
 
@@ -1681,7 +1769,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
         _migrations.run_migrations(
             connection,
             database_path=database,
-            application_version="1.0.0-stage12",
+            application_version=DELTAAEGIS_VERSION,
             migrations=deltaaegis_schema_migrations(),
             backup_root=_migration_backup_root(database),
             create_backup=create_sqlite_database_backup_bundle,
@@ -3401,7 +3489,7 @@ def alert_dedup_key(item: dict[str, Any]) -> str | None:
     return None
 
 
-def sync_alert(connection: sqlite3.Connection, item: dict[str, Any], event_id: int, created_at: str) -> None:
+def sync_alert(connection: sqlite3.Connection, item: dict[str, Any], event_id: int, created_at: str, *, sensor_id: str=_identity.DEFAULT_SENSOR_ID, scope_id: str=_identity.UNASSIGNED_SCOPE_ID) -> None:
     key = alert_dedup_key(item)
     if key is None:
         return
@@ -3409,17 +3497,33 @@ def sync_alert(connection: sqlite3.Connection, item: dict[str, Any], event_id: i
     if etype in {"MONITORED_SERVICE_CLOSED", "NETSNIPER_FINDING_REMOVED", "ASSET_REAPPEARED"}:
         connection.execute("UPDATE alerts SET status = 'RESOLVED', resolved_at = ?, last_seen_at = ?, last_event_id = ? WHERE dedup_key = ? AND status != 'RESOLVED'", (created_at, created_at, event_id, key))
         return
-    connection.execute("""INSERT INTO alerts (dedup_key, event_type, severity, subject_key, status, summary, opened_at, last_seen_at, first_event_id, last_event_id) VALUES (?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?) ON CONFLICT(dedup_key) DO UPDATE SET event_type=excluded.event_type, severity=excluded.severity, subject_key=excluded.subject_key, summary=excluded.summary, last_seen_at=excluded.last_seen_at, last_event_id=excluded.last_event_id, status=CASE WHEN alerts.status='RESOLVED' THEN 'OPEN' ELSE alerts.status END, resolved_at=CASE WHEN alerts.status='RESOLVED' THEN NULL ELSE alerts.resolved_at END""", (key, etype, item["severity"], item["subject_key"], item["summary"], created_at, created_at, event_id, event_id))
+    columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(alerts)")
+    }
+    identity_columns = ", sensor_id, scope_id" if {"sensor_id", "scope_id"}.issubset(columns) else ""
+    identity_values = ", ?, ?" if identity_columns else ""
+    values: tuple[Any, ...] = (key, etype, item["severity"], item["subject_key"], item["summary"], created_at, created_at, event_id, event_id)
+    if identity_columns:
+        values += (sensor_id, scope_id)
+    connection.execute(f"""INSERT INTO alerts (dedup_key, event_type, severity, subject_key, status, summary, opened_at, last_seen_at, first_event_id, last_event_id{identity_columns}) VALUES (?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?{identity_values}) ON CONFLICT(dedup_key) DO UPDATE SET event_type=excluded.event_type, severity=excluded.severity, subject_key=excluded.subject_key, summary=excluded.summary, last_seen_at=excluded.last_seen_at, last_event_id=excluded.last_event_id, status=CASE WHEN alerts.status='RESOLVED' THEN 'OPEN' ELSE alerts.status END, resolved_at=CASE WHEN alerts.status='RESOLVED' THEN NULL ELSE alerts.resolved_at END""", values)
 
 
-def store_events(connection: sqlite3.Connection, scan_id: str, baseline_scan_id: str | None, events: Iterable[dict[str, Any]], export_path: Path) -> int:
+def store_events(connection: sqlite3.Connection, scan_id: str, baseline_scan_id: str | None, events: Iterable[dict[str, Any]], export_path: Path, *, sensor_id: str=_identity.DEFAULT_SENSOR_ID, scope_id: str=_identity.UNASSIGNED_SCOPE_ID) -> int:
     export_path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
     with export_path.open("a", encoding="utf-8") as handle:
         for item in events:
             created_at = utc_now()
-            cursor = connection.execute("""INSERT INTO delta_events (scan_id, baseline_scan_id, event_type, severity, subject_key, previous_value, current_value, summary, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", (scan_id, baseline_scan_id, item["event_type"], item["severity"], item["subject_key"], json.dumps(item.get("previous_value"), sort_keys=True), json.dumps(item.get("current_value"), sort_keys=True), item["summary"], created_at))
-            sync_alert(connection, item, int(cursor.lastrowid), created_at)
+            columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(delta_events)")
+            }
+            identity_columns = ", sensor_id, scope_id" if {"sensor_id", "scope_id"}.issubset(columns) else ""
+            identity_values = ", ?, ?" if identity_columns else ""
+            values: tuple[Any, ...] = (scan_id, baseline_scan_id, item["event_type"], item["severity"], item["subject_key"], json.dumps(item.get("previous_value"), sort_keys=True), json.dumps(item.get("current_value"), sort_keys=True), item["summary"], created_at)
+            if identity_columns:
+                values += (sensor_id, scope_id)
+            cursor = connection.execute(f"""INSERT INTO delta_events (scan_id, baseline_scan_id, event_type, severity, subject_key, previous_value, current_value, summary, created_at{identity_columns}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?{identity_values})""", values)
+            sync_alert(connection, item, int(cursor.lastrowid), created_at, sensor_id=sensor_id, scope_id=scope_id)
             handle.write(json.dumps({"scan_id": scan_id, "baseline_scan_id": baseline_scan_id, "created_at": created_at, **item}, sort_keys=True) + "\n")
             count += 1
     return count
@@ -3433,16 +3537,28 @@ def profile_transition(baseline: sqlite3.Row, snapshot: Snapshot) -> bool:
     return str(baseline["manifest_schema_version"]) not in NETSNIPER_PROFILE_AWARE_SCHEMAS and snapshot.manifest_schema_version in NETSNIPER_PROFILE_AWARE_SCHEMAS
 
 
-def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_path: Path) -> str:
-    """Import one NetSniper bundle through the v0.45 telemetry-trust runtime."""
+def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_path: Path, sensor_id: str=_identity.DEFAULT_SENSOR_ID) -> str:
+    """Import one NetSniper bundle through the v1 identity/trust runtime."""
 
     original_manifest = Path(manifest_path).expanduser().resolve()
     retention_receipt: dict[str, Any] | None = None
+    evidence_identity: dict[str, Any] | None = None
     try:
         _current_state.bootstrap_legacy_projection(connection)
         decision = _telemetry_quality.evaluate_bundle_record(
             original_manifest,
             policy_path=DELTAAEGIS_V045_POLICY_PATH,
+        )
+        evidence_identity = _identity.identity_for_evidence(
+            connection,
+            sensor_id=sensor_id,
+            network_scope=decision.get("network_scope"),
+            source_scan_id=decision.get("run_id"),
+            bundle_digest=decision.get("bundle_digest"),
+        )
+        decision = _identity.bind_decision_identity(
+            decision,
+            evidence_identity,
         )
         decision = _telemetry_quality.apply_run_id_conflict(
             connection,
@@ -3521,6 +3637,17 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
             or decision.get("current_state")
             or "REJECTED"
         ).upper()
+        _identity.link_decision(
+            connection,
+            decision_id=decision_id,
+            identity=evidence_identity,
+        )
+        _identity.record_evidence_receipt(
+            connection,
+            identity=evidence_identity,
+            decision_id=decision_id,
+            import_status="PENDING",
+        )
 
         if state == "REJECTED":
             _telemetry_quality.mark_import_status(
@@ -3528,14 +3655,25 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
                 decision_id,
                 "REJECTED",
             )
+            _identity.record_evidence_receipt(
+                connection,
+                identity=evidence_identity,
+                decision_id=decision_id,
+                import_status="REJECTED",
+            )
             connection.commit()
             return (
-                f"REJECT {decision.get('run_id')}: "
+                f"REJECT {evidence_identity['source_scan_id']}: "
                 f"reasons={','.join(decision.get('reason_codes') or []) or 'unknown'}"
             )
 
         import_manifest = Path(retained_manifest or original_manifest)
         snapshot = load_snapshot(import_manifest)
+        if snapshot.scan_id != evidence_identity["source_scan_id"]:
+            raise _identity.IdentityError(
+                "normalized snapshot scan ID differs from the evaluated evidence"
+            )
+        snapshot.scan_id = str(evidence_identity["internal_scan_id"])
         if snapshot_exists(connection, snapshot.scan_id):
             _telemetry_quality.mark_import_status(
                 connection,
@@ -3543,26 +3681,51 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
                 "ALREADY_IMPORTED",
                 imported_at=utc_now(),
             )
+            _identity.record_evidence_receipt(
+                connection,
+                identity=evidence_identity,
+                decision_id=decision_id,
+                import_status="ALREADY_IMPORTED",
+                imported_at=utc_now(),
+            )
             connection.commit()
-            return f"SKIP {snapshot.scan_id}: already imported"
+            return (
+                f"SKIP {evidence_identity['source_scan_id']}: already imported "
+                f"as {snapshot.scan_id}"
+            )
 
-        historical = _current_state.snapshot_is_historical(
-            connection,
-            scope=snapshot.target,
-            created_at=snapshot.created_at,
-            scan_id=snapshot.scan_id,
+        legacy_sensor = (
+            evidence_identity["sensor_id"] == _identity.DEFAULT_SENSOR_ID
         )
-        baseline = latest_accepted_snapshot(connection, snapshot.target)
+        historical = (
+            _current_state.snapshot_is_historical(
+                connection,
+                scope=snapshot.target,
+                created_at=snapshot.created_at,
+                scan_id=snapshot.scan_id,
+            )
+            if legacy_sensor
+            else False
+        )
+        baseline = connection.execute(
+            """
+            SELECT * FROM snapshots
+            WHERE scope_id = ? AND quality_status = 'ACCEPTED'
+            ORDER BY created_at DESC, imported_at DESC, scan_id DESC
+            LIMIT 1
+            """,
+            (evidence_identity["scope_id"],),
+        ).fetchone()
         comparison_baseline = connection.execute(
             """
             SELECT *
             FROM snapshots
-            WHERE target = ?
+            WHERE scope_id = ?
               AND quality_status IN ('ACCEPTED', 'DEGRADED')
-            ORDER BY created_at DESC, imported_at DESC
+            ORDER BY created_at DESC, imported_at DESC, scan_id DESC
             LIMIT 1
             """,
-            (snapshot.target,),
+            (evidence_identity["scope_id"],),
         ).fetchone()
         quality_reason = "; ".join(
             str(item.get("description") or item.get("code") or "")
@@ -3574,6 +3737,11 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
             snapshot,
             state,
             quality_reason,
+        )
+        _identity.link_snapshot(
+            connection,
+            scan_id=snapshot.scan_id,
+            identity=evidence_identity,
         )
         _telemetry_quality.update_snapshot_quality_link(
             connection,
@@ -3599,12 +3767,24 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
                 import_manifest,
                 manifest_data,
             )
+        _identity.link_snapshot(
+            connection,
+            scan_id=snapshot.scan_id,
+            identity=evidence_identity,
+        )
 
         if historical:
             _telemetry_quality.mark_import_status(
                 connection,
                 decision_id,
                 "IMPORTED",
+                imported_at=utc_now(),
+            )
+            _identity.record_evidence_receipt(
+                connection,
+                identity=evidence_identity,
+                decision_id=decision_id,
+                import_status="IMPORTED_HISTORICAL",
                 imported_at=utc_now(),
             )
             connection.commit()
@@ -3616,9 +3796,11 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
         events: list[dict[str, Any]] = []
         if state == "ACCEPTED":
             if baseline is None:
-                initialize_lifecycle(connection, snapshot)
+                if legacy_sensor:
+                    initialize_lifecycle(connection, snapshot)
             elif profile_transition(baseline, snapshot):
-                initialize_lifecycle(connection, snapshot)
+                if legacy_sensor:
+                    initialize_lifecycle(connection, snapshot)
                 events.append(
                     event(
                         "PROFILE_BASELINE_RESET",
@@ -3634,7 +3816,8 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
                 float(baseline["identity_coverage"]),
                 snapshot.identity_coverage,
             ):
-                initialize_lifecycle(connection, snapshot)
+                if legacy_sensor:
+                    initialize_lifecycle(connection, snapshot)
                 events.append(
                     event(
                         "IDENTITY_BASELINE_RESET",
@@ -3659,7 +3842,8 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
                         snapshot.assets,
                     )
                 )
-                events.extend(lifecycle_events(connection, snapshot))
+                if legacy_sensor:
+                    events.extend(lifecycle_events(connection, snapshot))
         elif state == "DEGRADED" and comparison_baseline is not None:
             previous_assets = load_assets_from_db(
                 connection,
@@ -3678,28 +3862,45 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
                 if item.get("event_type") in positive_event_types
             )
 
-        _current_state.apply_snapshot(
+        if legacy_sensor:
+            _current_state.apply_snapshot(
+                connection,
+                snapshot,
+                decision,
+                update_lifecycle=(state == "DEGRADED"),
+            )
+        identity_projection = _identity.apply_snapshot_projection(
             connection,
-            snapshot,
-            decision,
-            update_lifecycle=(state == "DEGRADED"),
+            snapshot=snapshot,
+            decision=decision,
+            identity=evidence_identity,
         )
         event_count = 0
-        if events:
+        baseline_scan_id = (
+            baseline["scan_id"]
+            if baseline is not None
+            else (
+                comparison_baseline["scan_id"]
+                if comparison_baseline is not None
+                else None
+            )
+        )
+        detection_outcome = _detection.persist_results(
+            connection,
+            events,
+            identity=evidence_identity,
+            decision=decision,
+            baseline_scan_id=baseline_scan_id,
+        )
+        if events and legacy_sensor:
             event_count = store_events(
                 connection,
                 snapshot.scan_id,
-                (
-                    baseline["scan_id"]
-                    if baseline is not None
-                    else (
-                        comparison_baseline["scan_id"]
-                        if comparison_baseline is not None
-                        else None
-                    )
-                ),
+                baseline_scan_id,
                 events,
                 export_path,
+                sensor_id=evidence_identity["sensor_id"],
+                scope_id=evidence_identity["scope_id"],
             )
 
         _telemetry_quality.mark_import_status(
@@ -3708,12 +3909,29 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
             "IMPORTED",
             imported_at=utc_now(),
         )
+        _identity.record_evidence_receipt(
+            connection,
+            identity=evidence_identity,
+            decision_id=decision_id,
+            import_status="IMPORTED",
+            imported_at=utc_now(),
+        )
         connection.commit()
+        if legacy_sensor:
+            return (
+                f"IMPORT {evidence_identity['source_scan_id']}: "
+                f"quality={state}, assets={len(snapshot.assets)}, "
+                f"mac_identity={snapshot.identity_coverage:.0%}, "
+                f"events={event_count}"
+            )
         return (
-            f"IMPORT {snapshot.scan_id}: quality={state}, "
+            f"IMPORT {evidence_identity['source_scan_id']} as {snapshot.scan_id}: "
+            f"sensor={evidence_identity['sensor_id']}, "
+            f"scope={evidence_identity['scope_id']}, quality={state}, "
             f"assets={len(snapshot.assets)}, "
             f"mac_identity={snapshot.identity_coverage:.0%}, "
-            f"events={event_count}"
+            f"events={event_count}, detections={detection_outcome['inserted']}, "
+            f"projection={'updated' if identity_projection.get('applied') else identity_projection.get('reason')}"
         )
     except Exception:
         connection.rollback()
@@ -3734,7 +3952,18 @@ def command_ingest(args: argparse.Namespace) -> int:
         return 0
     for manifest in manifests:
         try:
-            print(ingest_manifest(connection, manifest, args.events))
+            print(
+                ingest_manifest(
+                    connection,
+                    manifest,
+                    args.events,
+                    sensor_id=getattr(
+                        args,
+                        "sensor_id",
+                        _identity.DEFAULT_SENSOR_ID,
+                    ),
+                )
+            )
         except (
             DeltaAegisError,
             _telemetry_quality.TelemetryQualityError,
@@ -3744,6 +3973,132 @@ def command_ingest(args: argparse.Namespace) -> int:
         ) as exc:
             connection.rollback()
             print(f"ERROR {manifest}: {exc}", file=sys.stderr)
+    return 0
+
+
+def _local_cli_actor() -> dict[str, Any]:
+    return {
+        "user_id": "local-cli",
+        "username": "local_admin",
+        "role": "ADMIN",
+        "auth_type": "local_cli",
+    }
+
+
+def command_sensor_enroll(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        sensor = _identity.register_sensor(
+            connection,
+            display_name=args.name,
+            trust_domain=args.trust_domain,
+            sensor_id=args.sensor_id,
+            network_scopes=args.scope,
+            metadata={"enrolled_via": "local_cli"},
+            actor=_local_cli_actor(),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    print(json.dumps(sensor, indent=2, sort_keys=True))
+    return 0
+
+
+def command_sensors_v1(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    try:
+        payload = _identity.list_sensors(
+            connection,
+            include_revoked=args.include_revoked,
+        )
+    finally:
+        connection.close()
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def command_scopes_v1(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    try:
+        payload = _identity.list_scopes(
+            connection,
+            sensor_id=args.sensor_id,
+            include_unassigned=args.include_unassigned,
+        )
+    finally:
+        connection.close()
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def command_detections(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    try:
+        payload = _detection.list_results(
+            connection,
+            sensor_id=args.sensor_id,
+            scope_id=args.scope_id,
+            disposition=args.disposition,
+            limit=args.limit,
+        )
+    finally:
+        connection.close()
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def command_detection_review(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        payload = _detection.review_result(
+            connection,
+            result_id=args.result_id,
+            action=args.action,
+            reason=args.reason,
+            actor=_local_cli_actor(),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def command_readiness(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    try:
+        payload = _operations.readiness_report(
+            connection,
+            database_path=args.db,
+            netsniper_path=args.netsniper_path,
+            trueaegis_path=args.trueaegis_path,
+        )
+    finally:
+        connection.close()
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0 if payload["status"] == "READY" else 1
+
+
+def command_diagnostics(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    try:
+        payload = _operations.diagnostics_report(
+            connection,
+            database_path=args.db,
+            netsniper_path=args.netsniper_path,
+            trueaegis_path=args.trueaegis_path,
+        )
+    finally:
+        connection.close()
+    print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
 
@@ -3781,8 +4136,8 @@ def build_netsniper_headless_command(netsniper_path: Path, target: str, scan_pro
 
 
 
-def create_scan_job(connection: sqlite3.Connection, target: str, netsniper_path: Path, runs_dir: Path, auto_ingest: bool=False, scan_profile: str='balanced', schedule_id: str | None=None) -> dict[str, Any]:
-    return _jobs.create_scan_job(connection, target, netsniper_path, runs_dir, auto_ingest, scan_profile, schedule_id)
+def create_scan_job(connection: sqlite3.Connection, target: str, netsniper_path: Path, runs_dir: Path, auto_ingest: bool=False, scan_profile: str='balanced', schedule_id: str | None=None, sensor_id: str=_identity.DEFAULT_SENSOR_ID, scope_id: str | None=None) -> dict[str, Any]:
+    return _jobs.create_scan_job(connection, target, netsniper_path, runs_dir, auto_ingest, scan_profile, schedule_id, sensor_id, scope_id)
 
 def update_scan_job(connection: sqlite3.Connection, job_id: str, **fields: Any) -> None:
     return _jobs.update_scan_job(connection, job_id, **fields)
@@ -3963,6 +4318,7 @@ def scan_job_auto_ingest_evidence(
     manifest_path: Path | str,
     ingest_result: Any,
     status_json: dict[str, Any] | None = None,
+    sensor_id: str=_identity.DEFAULT_SENSOR_ID,
 ) -> dict[str, Any]:
     """Build durable evidence that a scan bundle was ingested and quality-gated."""
 
@@ -3984,15 +4340,30 @@ def scan_job_auto_ingest_evidence(
     row = None
 
     if scan_id:
-        row = connection.execute(
-            """
-            SELECT scan_id, quality_status, manifest_path, network_scope
-            FROM snapshots
-            WHERE scan_id = ?
-            LIMIT 1
-            """,
-            (scan_id,),
-        ).fetchone()
+        columns = {
+            str(item[1])
+            for item in connection.execute("PRAGMA table_info(snapshots)")
+        }
+        if {"sensor_id", "source_scan_id"}.issubset(columns):
+            row = connection.execute(
+                """
+                SELECT scan_id, quality_status, manifest_path, network_scope
+                FROM snapshots
+                WHERE sensor_id = ? AND source_scan_id = ?
+                LIMIT 1
+                """,
+                (sensor_id, scan_id),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                """
+                SELECT scan_id, quality_status, manifest_path, network_scope
+                FROM snapshots
+                WHERE scan_id = ?
+                LIMIT 1
+                """,
+                (scan_id,),
+            ).fetchone()
 
     if row is None:
         row = connection.execute(
@@ -4107,6 +4478,11 @@ def execute_scan_job(
     runs_dir = Path(runs_dir).expanduser()
     logs_dir = Path(logs_dir).expanduser()
     events_path = Path(events_path).expanduser()
+    execution_row = scan_job_row(connection, job_id)
+    execution_job = scan_job_to_dict(execution_row) if execution_row else {}
+    execution_sensor_id = str(
+        execution_job.get("sensor_id") or _identity.DEFAULT_SENSOR_ID
+    )
 
     if not netsniper_path.is_file():
         raise DeltaAegisError(f"NetSniper executable not found: {netsniper_path}")
@@ -4423,9 +4799,18 @@ def execute_scan_job(
             auto_ingest_evidence["manifest_path"] = str(manifest)
 
             if manifest.is_file():
-                ingest_result = ingest_manifest(connection, manifest, events_path)
+                ingest_result = ingest_manifest(
+                    connection,
+                    manifest,
+                    events_path,
+                    sensor_id=execution_sensor_id,
+                )
                 auto_ingest_evidence = scan_job_auto_ingest_evidence(
-                    connection, manifest, ingest_result, status_json=status_json
+                    connection,
+                    manifest,
+                    ingest_result,
+                    status_json=status_json,
+                    sensor_id=execution_sensor_id,
                 )
                 message_parts.append(f"auto-ingest={ingest_result}")
                 message_parts.append(
@@ -4481,6 +4866,11 @@ def command_scan_start(args: argparse.Namespace) -> int:
         runs_dir,
         auto_ingest=args.auto_ingest,
         scan_profile=safe_profile,
+        sensor_id=getattr(
+            args,
+            "sensor_id",
+            _identity.DEFAULT_SENSOR_ID,
+        ),
     )
 
     print(f"Created scan job: {job['job_id']}")
@@ -4751,8 +5141,8 @@ def trueaegis_job_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return _jobs.trueaegis_job_to_dict(row)
 
 
-def create_trueaegis_job(connection: sqlite3.Connection, scan_id: str | None, network_scope: str | None, manifest_path: Path, trueaegis_path: Path, scan_job_id: str | None=None, schedule_id: str | None=None, trigger_source: str='manual_dashboard') -> dict[str, Any]:
-    return _jobs.create_trueaegis_job(connection, scan_id, network_scope, manifest_path, trueaegis_path, scan_job_id, schedule_id, trigger_source)
+def create_trueaegis_job(connection: sqlite3.Connection, scan_id: str | None, network_scope: str | None, manifest_path: Path, trueaegis_path: Path, scan_job_id: str | None=None, schedule_id: str | None=None, trigger_source: str='manual_dashboard', sensor_id: str | None=None, scope_id: str | None=None) -> dict[str, Any]:
+    return _jobs.create_trueaegis_job(connection, scan_id, network_scope, manifest_path, trueaegis_path, scan_job_id, schedule_id, trigger_source, sensor_id, scope_id)
 
 
 def update_trueaegis_job(connection: sqlite3.Connection, job_id: str, **fields: Any) -> None:
@@ -5305,8 +5695,8 @@ def scan_schedule_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return _jobs.scan_schedule_to_dict(row)
 
 
-def create_scan_schedule(connection: sqlite3.Connection, name: str, target: str, scan_profile: str='balanced', cadence_minutes: int=60, enabled: bool=True, auto_ingest: bool=True, run_trueaegis_after_ingest: bool=False) -> dict[str, Any]:
-    return _jobs.create_scan_schedule(connection, name, target, scan_profile, cadence_minutes, enabled, auto_ingest, run_trueaegis_after_ingest)
+def create_scan_schedule(connection: sqlite3.Connection, name: str, target: str, scan_profile: str='balanced', cadence_minutes: int=60, enabled: bool=True, auto_ingest: bool=True, run_trueaegis_after_ingest: bool=False, sensor_id: str=_identity.DEFAULT_SENSOR_ID, scope_id: str | None=None) -> dict[str, Any]:
+    return _jobs.create_scan_schedule(connection, name, target, scan_profile, cadence_minutes, enabled, auto_ingest, run_trueaegis_after_ingest, sensor_id, scope_id)
 
 
 def query_scan_schedules(connection: sqlite3.Connection, limit: int=20, enabled: bool | None=None, scope: str | None=None) -> list[sqlite3.Row]:
@@ -5322,12 +5712,12 @@ def next_schedule_run_text(cadence_minutes: int, base_time: datetime | None=None
     return _jobs.next_schedule_run_text(cadence_minutes, base_time)
 
 
-def active_scan_job_row(connection: sqlite3.Connection) -> sqlite3.Row | None:
-    return _jobs.active_scan_job_row(connection)
+def active_scan_job_row(connection: sqlite3.Connection, sensor_id: str=_identity.DEFAULT_SENSOR_ID) -> sqlite3.Row | None:
+    return _jobs.active_scan_job_row(connection, sensor_id)
 
 
-def active_scan_job_exists(connection: sqlite3.Connection) -> bool:
-    return _jobs.active_scan_job_exists(connection)
+def active_scan_job_exists(connection: sqlite3.Connection, sensor_id: str=_identity.DEFAULT_SENSOR_ID) -> bool:
+    return _jobs.active_scan_job_exists(connection, sensor_id)
 
 
 class ActiveScanJobExistsError(DeltaAegisError):
@@ -5347,8 +5737,8 @@ _JOB_CONTEXT = _jobs.JobContext(
 )
 
 
-def reserve_scan_job_if_idle(connection: sqlite3.Connection, target: str, netsniper_path: Path, runs_dir: Path, *, auto_ingest: bool=False, scan_profile: str='balanced', schedule_id: str | None=None) -> dict[str, Any]:
-    return _jobs.reserve_scan_job_if_idle(connection, target, netsniper_path, runs_dir, auto_ingest=auto_ingest, scan_profile=scan_profile, schedule_id=schedule_id, context=_JOB_CONTEXT)
+def reserve_scan_job_if_idle(connection: sqlite3.Connection, target: str, netsniper_path: Path, runs_dir: Path, *, auto_ingest: bool=False, scan_profile: str='balanced', schedule_id: str | None=None, sensor_id: str=_identity.DEFAULT_SENSOR_ID, scope_id: str | None=None) -> dict[str, Any]:
+    return _jobs.reserve_scan_job_if_idle(connection, target, netsniper_path, runs_dir, auto_ingest=auto_ingest, scan_profile=scan_profile, schedule_id=schedule_id, sensor_id=sensor_id, scope_id=scope_id, context=_JOB_CONTEXT)
 
 
 STALE_SCAN_JOB_RECOVERY_CONFIRMATION = "MARK STALE SCANS FAILED"
@@ -5636,12 +6026,18 @@ def scan_job_reconcile_completed_orphan(
                 connection,
                 manifest_path,
                 Path(events_path).expanduser(),
+                sensor_id=str(
+                    item.get("sensor_id") or _identity.DEFAULT_SENSOR_ID
+                ),
             )
             auto_ingest_evidence = scan_job_auto_ingest_evidence(
                 connection,
                 manifest_path,
                 ingest_result,
                 status_json=status_json,
+                sensor_id=str(
+                    item.get("sensor_id") or _identity.DEFAULT_SENSOR_ID
+                ),
             )
             message_parts.append(
                 f"auto-ingest={ingest_result}"
@@ -6148,7 +6544,10 @@ def run_due_scan_schedules(
     for row in query_due_scan_schedules(connection, limit=max_runs):
         schedule = scan_schedule_to_dict(row)
 
-        active_job = active_scan_job_row(connection)
+        schedule_sensor_id = str(
+            schedule.get("sensor_id") or _identity.DEFAULT_SENSOR_ID
+        )
+        active_job = active_scan_job_row(connection, schedule_sensor_id)
 
         if active_job is not None:
             results.append(
@@ -6176,6 +6575,8 @@ def run_due_scan_schedules(
                 auto_ingest=schedule["auto_ingest"],
                 scan_profile=schedule["scan_profile"],
                 schedule_id=schedule["schedule_id"],
+                sensor_id=schedule_sensor_id,
+                scope_id=str(schedule.get("scope_id") or "") or None,
             )
         except ActiveScanJobExistsError as exc:
             results.append(
@@ -6455,6 +6856,11 @@ def command_schedule_create(args: argparse.Namespace) -> int:
         enabled=not args.disabled,
         auto_ingest=args.auto_ingest,
         run_trueaegis_after_ingest=args.run_trueaegis_after_ingest,
+        sensor_id=getattr(
+            args,
+            "sensor_id",
+            _identity.DEFAULT_SENSOR_ID,
+        ),
     )
     connection.commit()
 
@@ -13846,12 +14252,22 @@ def import_trueaegis_job_results(
     connection: sqlite3.Connection,
     validation_results_path: Path | str,
     scope: str | None = None,
+    *,
+    sensor_id: str=_identity.DEFAULT_SENSOR_ID,
+    scope_id: str | None=None,
 ) -> dict[str, Any]:
     validation_path = Path(validation_results_path).expanduser()
-    import_summary = import_trueaegis_validation_results(connection, validation_path)
+    import_summary = import_trueaegis_validation_results(
+        connection,
+        validation_path,
+        sensor_id=sensor_id,
+        scope_id=scope_id,
+    )
     refresh_summary = refresh_trueaegis_validation_correlations(
         connection,
         scope=scope,
+        sensor_id=sensor_id,
+        scope_id=scope_id,
     )
     connection.commit()
 
@@ -13976,7 +14392,7 @@ def execute_trueaegis_job(
 
     if final_status == "COMPLETED" and validation_results_path is not None:
         job_row = connection.execute(
-            "SELECT network_scope FROM trueaegis_jobs WHERE job_id = ?",
+            "SELECT network_scope, sensor_id, scope_id FROM trueaegis_jobs WHERE job_id = ?",
             (job_id,),
         ).fetchone()
         job_scope = (
@@ -13990,6 +14406,16 @@ def execute_trueaegis_job(
                 connection,
                 validation_results_path,
                 scope=job_scope,
+                sensor_id=(
+                    str(job_row["sensor_id"] or _identity.DEFAULT_SENSOR_ID)
+                    if job_row is not None
+                    else _identity.DEFAULT_SENSOR_ID
+                ),
+                scope_id=(
+                    str(job_row["scope_id"] or "") or None
+                    if job_row is not None
+                    else None
+                ),
             )
             validation_run_id = import_summary.get("validation_run_id")
             imported_observations = int(import_summary.get("imported_observations") or 0)
@@ -14772,20 +15198,27 @@ def trueaegis_validation_service_protocol(
 def trueaegis_latest_accepted_snapshots(
     connection: sqlite3.Connection,
     scope: str | None = None,
+    *,
+    sensor_id: str=_identity.DEFAULT_SENSOR_ID,
+    scope_id: str | None=None,
 ) -> list[sqlite3.Row]:
     clauses = ["(quality_status = 'ACCEPTED' OR is_accepted_baseline = 1)"]
-    params: list[Any] = []
+    params: list[Any] = [_identity.canonical_sensor_id(sensor_id)]
+    clauses.append("sensor_id = ?")
 
     if scope:
         clauses.append("network_scope = ?")
         params.append(scope)
+    if scope_id:
+        clauses.append("scope_id = ?")
+        params.append(_identity.canonical_scope_id(scope_id))
 
     rows = connection.execute(
         f"""
-        SELECT scan_id, network_scope, created_at, imported_at
+        SELECT scan_id, sensor_id, scope_id, network_scope, created_at, imported_at
         FROM snapshots
         WHERE {" AND ".join(clauses)}
-        ORDER BY network_scope ASC, created_at DESC, imported_at DESC, scan_id DESC
+        ORDER BY scope_id ASC, created_at DESC, imported_at DESC, scan_id DESC
         """,
         tuple(params),
     ).fetchall()
@@ -14793,9 +15226,9 @@ def trueaegis_latest_accepted_snapshots(
     latest_by_scope: dict[str, sqlite3.Row] = {}
 
     for row in rows:
-        network_scope = str(row["network_scope"] or "")
-        if network_scope not in latest_by_scope:
-            latest_by_scope[network_scope] = row
+        identity_scope = str(row["scope_id"] or "")
+        if identity_scope not in latest_by_scope:
+            latest_by_scope[identity_scope] = row
 
     return list(latest_by_scope.values())
 
@@ -14803,18 +15236,36 @@ def trueaegis_latest_accepted_snapshots(
 def refresh_trueaegis_validation_correlations(
     connection: sqlite3.Connection,
     scope: str | None = None,
+    *,
+    sensor_id: str=_identity.DEFAULT_SENSOR_ID,
+    scope_id: str | None=None,
 ) -> dict[str, Any]:
     matched_at = utc_now()
-    latest_snapshots = trueaegis_latest_accepted_snapshots(connection, scope=scope)
+    safe_sensor_id = _identity.canonical_sensor_id(sensor_id)
+    safe_scope_id = _identity.canonical_scope_id(scope_id) if scope_id else None
+    latest_snapshots = trueaegis_latest_accepted_snapshots(
+        connection,
+        scope=scope,
+        sensor_id=safe_sensor_id,
+        scope_id=safe_scope_id,
+    )
     latest_scan_ids = [row["scan_id"] for row in latest_snapshots]
 
-    if scope:
+    if safe_scope_id:
         connection.execute(
-            "DELETE FROM validation_correlations WHERE network_scope = ?",
-            (scope,),
+            "DELETE FROM validation_correlations WHERE scope_id = ?",
+            (safe_scope_id,),
+        )
+    elif scope:
+        connection.execute(
+            "DELETE FROM validation_correlations WHERE sensor_id = ? AND network_scope = ?",
+            (safe_sensor_id, scope),
         )
     else:
-        connection.execute("DELETE FROM validation_correlations")
+        connection.execute(
+            "DELETE FROM validation_correlations WHERE sensor_id = ?",
+            (safe_sensor_id,),
+        )
 
     if not latest_scan_ids:
         return {
@@ -14837,6 +15288,8 @@ def refresh_trueaegis_validation_correlations(
             f"""
             SELECT
                 s.network_scope,
+                s.sensor_id,
+                s.scope_id,
                 so.scan_id,
                 ao.asset_key,
                 ao.ip_address,
@@ -14884,8 +15337,11 @@ def refresh_trueaegis_validation_correlations(
             WHERE o.host IS NOT NULL
               AND TRIM(o.host) != ''
               AND o.port IS NOT NULL
+              AND o.sensor_id = ?
+              AND (? IS NULL OR o.scope_id = ?)
             ORDER BY r.imported_at DESC, o.row_index ASC
-            """
+            """,
+            (safe_sensor_id, safe_scope_id, safe_scope_id),
         )
     ]
 
@@ -14958,7 +15414,8 @@ def refresh_trueaegis_validation_correlations(
                     confidence,
                     match_method,
                     matched_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    , sensor_id, scope_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     correlation_id,
@@ -14981,6 +15438,8 @@ def refresh_trueaegis_validation_correlations(
                     observation.get("confidence"),
                     match_method,
                     matched_at,
+                    service.get("sensor_id") or safe_sensor_id,
+                    service.get("scope_id") or safe_scope_id or _identity.UNASSIGNED_SCOPE_ID,
                 ),
             )
 
@@ -20805,7 +21264,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Build</span><span>v1.0 Stage 1–2 Candidate</span></div>
+      <div class="executive-status-pill"><span>Build</span><span>v1.0 Stage 3–5 Candidate</span></div>
     </div>
   </header>
 
@@ -28483,12 +28942,87 @@ def load_trueaegis_validation_results(path: Path) -> list[dict[str, Any]]:
 def import_trueaegis_validation_results(
     connection: sqlite3.Connection,
     validation_path: Path,
+    *,
+    sensor_id: str=_identity.DEFAULT_SENSOR_ID,
+    scope_id: str | None=None,
 ) -> dict[str, Any]:
     validation_path = validation_path.expanduser().resolve()
     rows = load_trueaegis_validation_results(validation_path)
 
     source_hash = trueaegis_source_hash(validation_path)
-    validation_run_id = "trueaegis-" + source_hash[:16]
+    safe_sensor_id = _identity.canonical_sensor_id(sensor_id)
+    host_addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    invalid_hosts: list[str] = []
+    for item in rows:
+        raw_host = str(item.get("host") or "").strip()
+        try:
+            host_addresses.append(ipaddress.ip_address(raw_host))
+        except ValueError:
+            invalid_hosts.append(raw_host)
+    if scope_id:
+        safe_scope_id = _identity.canonical_scope_id(scope_id)
+        scope_row = connection.execute(
+            "SELECT * FROM identity_scopes WHERE scope_id=? AND sensor_id=? AND status='ACTIVE'",
+            (safe_scope_id, safe_sensor_id),
+        ).fetchone()
+        if scope_row is None:
+            raise _identity.IdentityError(
+                "TrueAegis scope is not active for the selected sensor"
+            )
+    else:
+        candidates = []
+        for candidate in _identity.list_scopes(
+            connection,
+            sensor_id=safe_sensor_id,
+        ):
+            try:
+                network = ipaddress.ip_network(candidate["network_scope"], strict=False)
+            except ValueError:
+                continue
+            if host_addresses and all(address in network for address in host_addresses):
+                candidates.append(candidate)
+        if len(candidates) == 1:
+            safe_scope_id = str(candidates[0]["scope_id"])
+        elif safe_sensor_id == _identity.DEFAULT_SENSOR_ID:
+            safe_scope_id = _identity.UNASSIGNED_SCOPE_ID
+        else:
+            raise _identity.IdentityError(
+                "non-default TrueAegis evidence requires an explicit unambiguous scope_id"
+            )
+    if safe_scope_id != _identity.UNASSIGNED_SCOPE_ID:
+        selected_scope = connection.execute(
+            "SELECT network_scope FROM identity_scopes "
+            "WHERE scope_id=? AND sensor_id=? AND status='ACTIVE'",
+            (safe_scope_id, safe_sensor_id),
+        ).fetchone()
+        if selected_scope is None:
+            raise _identity.IdentityError(
+                "TrueAegis scope is not active for the selected sensor"
+            )
+        try:
+            selected_network = ipaddress.ip_network(
+                str(selected_scope["network_scope"]),
+                strict=False,
+            )
+        except ValueError as exc:
+            raise _identity.IdentityError(
+                "TrueAegis scope has an invalid network binding"
+            ) from exc
+        outside = [
+            str(address)
+            for address in host_addresses
+            if address.version != selected_network.version
+            or address not in selected_network
+        ]
+        if invalid_hosts or outside:
+            raise _identity.IdentityError(
+                "TrueAegis result hosts must be IP addresses contained by the "
+                f"selected scope; invalid={invalid_hosts[:5]}, outside={outside[:5]}"
+            )
+    validation_seed = f"{safe_sensor_id}\0{safe_scope_id}\0{source_hash}"
+    validation_run_id = "trueaegis-" + hashlib.sha256(
+        validation_seed.encode("utf-8")
+    ).hexdigest()[:24]
     imported_at = utc_now()
     inferred_created_at = trueaegis_infer_created_at(validation_path)
 
@@ -28502,8 +29036,8 @@ def import_trueaegis_validation_results(
         INSERT OR REPLACE INTO validation_runs (
             validation_run_id, source_path, source_filename, source_sha256,
             source_format, inferred_created_at, imported_at, result_count,
-            status_counts_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            status_counts_json, sensor_id, scope_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             validation_run_id,
@@ -28515,6 +29049,8 @@ def import_trueaegis_validation_results(
             imported_at,
             len(rows),
             json.dumps(status_counts, sort_keys=True),
+            safe_sensor_id,
+            safe_scope_id,
         ),
     )
 
@@ -28550,7 +29086,8 @@ def import_trueaegis_validation_results(
                 port, protocol, transport, status, validated, safe, confidence,
                 summary, reachability, exposure, authentication, details_json,
                 evidence_json, metadata_json, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                , sensor_id, scope_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 observation_id,
@@ -28573,6 +29110,8 @@ def import_trueaegis_validation_results(
                 trueaegis_json_dump(row.get("evidence"), []),
                 trueaegis_json_dump(row.get("metadata"), {}),
                 trueaegis_json_dump(row, {}),
+                safe_sensor_id,
+                safe_scope_id,
             ),
         )
 
@@ -28583,6 +29122,8 @@ def import_trueaegis_validation_results(
         "source_path": str(validation_path),
         "result_count": len(rows),
         "status_counts": status_counts,
+        "sensor_id": safe_sensor_id,
+        "scope_id": safe_scope_id,
     }
 
 
@@ -28635,7 +29176,14 @@ def dashboard_trueaegis_validation_ingest_payload(
             f"TrueAegis validation file was not found: {validation_path}"
         )
 
-    result = import_trueaegis_validation_results(connection, validation_path)
+    result = import_trueaegis_validation_results(
+        connection,
+        validation_path,
+        sensor_id=str(
+            payload.get("sensor_id") or _identity.DEFAULT_SENSOR_ID
+        ),
+        scope_id=str(payload.get("scope_id") or "") or None,
+    )
     connection.commit()
 
     summary = dashboard_validation_summary_payload(connection)
@@ -28675,7 +29223,16 @@ def dashboard_trueaegis_validation_ingest_payload(
 
 def command_validation_ingest(args) -> int:
     connection = connect(args.db)
-    result = import_trueaegis_validation_results(connection, args.validation_results)
+    result = import_trueaegis_validation_results(
+        connection,
+        args.validation_results,
+        sensor_id=getattr(
+            args,
+            "sensor_id",
+            _identity.DEFAULT_SENSOR_ID,
+        ),
+        scope_id=getattr(args, "scope_id", None),
+    )
 
     print(f"Imported TrueAegis validation run: {result['validation_run_id']}")
     print(f"Source: {result['source_path']}")
@@ -34367,7 +34924,7 @@ def dashboard_telemetry_quality_shell_html() -> str:
 <body>
 <main>
 <section class="panel">
-  <div class="eyebrow">DeltaAegis v1.0 Stage 1–2</div>
+  <div class="eyebrow">DeltaAegis v1.0 Stage 3–5</div>
   <h1>Telemetry Quality Center</h1>
   <p>Automated decisions remain immutable. Reviewed state may change only through the policy-permitted, session-derived, audited workflow below. DEGRADED telemetry is positive-only; QUARANTINED and REJECTED telemetry cannot mutate active state.</p>
   <div class="actions">
@@ -34522,7 +35079,8 @@ def dashboard_telemetry_quality_shell_html() -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "DeltaAegis v1.0 Stage 1–2 — forward migrations, /api/v1, "
+            "DeltaAegis v1.0 Stage 3–5 — scoped identity, detection, operations, "
+            "forward migrations, /api/v1, "
             "SQLite-consistent backups, verified manifests, "
             "restore rehearsal, guarded retention, active restore "
             "cutover planning and rollback, operator actions, "
@@ -34863,9 +35421,41 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--actor")
     p.add_argument("--target-type")
 
-    sub.add_parser("ingest")
+    p = sub.add_parser("ingest")
+    p.add_argument(
+        "--sensor-id",
+        default=_identity.DEFAULT_SENSOR_ID,
+        help="Enrolled sensor identity for every bundle in --runs-dir",
+    )
+    p = sub.add_parser("sensor-enroll", help="Enroll one managed NetSniper sensor and its authorized scopes")
+    p.add_argument("--name", required=True)
+    p.add_argument("--sensor-id")
+    p.add_argument("--trust-domain", default=_identity.DEFAULT_TRUST_DOMAIN)
+    p.add_argument("--scope", action="append", required=True, help="Authorized private IPv4 CIDR; repeat as needed")
+    p = sub.add_parser("sensors-v1", help="List durable v1 sensor identities")
+    p.add_argument("--include-revoked", action="store_true")
+    p = sub.add_parser("scopes-v1", help="List durable v1 scope identities")
+    p.add_argument("--sensor-id")
+    p.add_argument("--include-unassigned", action="store_true")
+    p = sub.add_parser("detections", help="List immutable versioned detection results")
+    p.add_argument("--sensor-id")
+    p.add_argument("--scope-id")
+    p.add_argument("--disposition", choices=["OPEN", "REVIEWED", "SUPPRESSED"])
+    p.add_argument("--limit", type=int, default=100)
+    p = sub.add_parser("detection-review", help="Append a review or suppression decision")
+    p.add_argument("result_id")
+    p.add_argument("--action", required=True, choices=sorted(_detection.REVIEW_ACTIONS))
+    p.add_argument("--reason", required=True)
+    p = sub.add_parser("readiness", help="Evaluate structured v1 readiness checks")
+    p.add_argument("--netsniper-path", type=Path)
+    p.add_argument("--trueaegis-path", type=Path)
+    p = sub.add_parser("diagnostics", help="Print bounded secret-redacted v1 diagnostics")
+    p.add_argument("--netsniper-path", type=Path)
+    p.add_argument("--trueaegis-path", type=Path)
     p = sub.add_parser("validation-ingest", help="Import a TrueAegis validation_results JSON file")
     p.add_argument("validation_results", type=Path)
+    p.add_argument("--sensor-id", default=_identity.DEFAULT_SENSOR_ID)
+    p.add_argument("--scope-id", help="Explicit durable scope for non-default sensors or ambiguous evidence")
     p = sub.add_parser("validations", help="List imported TrueAegis validation observations")
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--status", choices=sorted(TRUEAEGIS_VALIDATION_STATUSES))
@@ -34876,6 +35466,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--netsniper-path", type=Path, default=DEFAULT_NETSNIPER)
     p.add_argument("--scan-logs-dir", type=Path, default=DEFAULT_SCAN_LOGS)
     p.add_argument("--auto-ingest", action="store_true", help="Ingest the completed NetSniper bundle after a successful scan")
+    p.add_argument("--sensor-id", default=_identity.DEFAULT_SENSOR_ID, help="Enrolled sensor identity that owns this scan")
     p = sub.add_parser("scan-jobs", help="List NetSniper scan orchestration jobs")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--status", choices=sorted(SCAN_JOB_STATUSES))
@@ -34888,6 +35479,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--disabled", action="store_true", help="Create the schedule disabled")
     p.add_argument("--no-auto-ingest", dest="auto_ingest", action="store_false", default=True, help="Do not auto-ingest completed scheduled scan bundles")
     p.add_argument("--trueaegis-after-ingest", dest="run_trueaegis_after_ingest", action="store_true", default=False, help="Run TrueAegis automatically after a completed scheduled scan is accepted by DeltaAegis")
+    p.add_argument("--sensor-id", default=_identity.DEFAULT_SENSOR_ID, help="Enrolled sensor identity that owns this schedule")
     p = sub.add_parser("schedule-list", help="List saved NetSniper scan schedules")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--enabled", choices=["all", "enabled", "disabled"], default="all")
@@ -35221,6 +35813,13 @@ def main() -> int:
         if args.command == "api-tokens": return command_api_tokens(args)
         if args.command == "access-audit": return command_access_audit(args)
         if args.command == "ingest": return command_ingest(args)
+        if args.command == "sensor-enroll": return command_sensor_enroll(args)
+        if args.command == "sensors-v1": return command_sensors_v1(args)
+        if args.command == "scopes-v1": return command_scopes_v1(args)
+        if args.command == "detections": return command_detections(args)
+        if args.command == "detection-review": return command_detection_review(args)
+        if args.command == "readiness": return command_readiness(args)
+        if args.command == "diagnostics": return command_diagnostics(args)
         if args.command == "validation-ingest": return command_validation_ingest(args)
         if args.command == "validations": return command_validations(args)
         if args.command == "scan-start": return command_scan_start(args)
@@ -35283,7 +35882,12 @@ def main() -> int:
 
         if args.command == "paths": return command_paths(args)
         raise DeltaAegisError(f"unknown command: {args.command}")
-    except DeltaAegisError as exc:
+    except (
+        DeltaAegisError,
+        _identity.IdentityError,
+        _detection.DetectionError,
+        _operations.OperationsError,
+    ) as exc:
         print(f"DeltaAegis error: {exc}", file=sys.stderr); return 1
 
 

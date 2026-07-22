@@ -1,21 +1,23 @@
 # DeltaAegis v1.0 Product Scope
 
-Status: approved at v0.43.0 and current for the v1.0 Stage 1–2 candidate
+Status: approved at v0.43.0 and current for the combined v1.0 Stage 3–5 candidate
 
 ## Delivery status — 2026-07-21
 
-The combined Stage 1–2 candidate implements the forward migration/recovery
-framework and the first stable `/api/v1` surface. Dedicated gates now cover
-the exact v0.42.x database origins, interruption recovery, backup rehearsal,
-OpenAPI, scoped tokens, CSRF, Host/origin enforcement, response headers,
-request limits, and mutation idempotency.
+The combined Stage 3–5 candidate builds on the completed Stage 1–2 migration,
+recovery, stable API, and web-security foundation. It adds durable
+sensor/scope identity, overlapping-CIDR isolation, source-scan replay
+protection, per-sensor job concurrency, versioned immutable detections,
+append-only review/suppression history, readiness, bounded diagnostics,
+low-resource/failure tests, reproducible performance thresholds, and pinned
+NetSniper/TrueAegis integration contracts.
 
-This is checkpoint evidence, not a v1.0 GA declaration. Definition-of-done
-items 4 and 5 require the Stage 3 identity and Stage 4 detection work; items 7
-and 8 require the operations/performance stage; item 9 still requires a
-published or pinned TrueAegis semantic-version contract; and item 10 can close
-only after the complete candidate audit. If those gates are not complete by
-the target date, the publishable artifact must remain a release candidate.
+This is implementation evidence, not a v1.0 GA declaration. The combined
+gate and short soak-harness rehearsal may pass before the mandatory 24-hour
+release-evidence soak has completed. Definition-of-done item 8 and the final
+blocker audit in item 10 remain open until that evidence is reviewed. If the
+soak or final audit is incomplete by the target date, the publishable artifact
+must remain a release candidate.
 
 ## Product definition
 
@@ -69,7 +71,7 @@ DeltaAegis is the history, correlation, orchestration, and analyst-workflow laye
 ## Supported deployment shape
 
 - One DeltaAegis application/database node operated by one organization or household.
-- One or more authorized NetSniper sensors after the v0.47 identity contract is implemented.
+- One or more enrolled NetSniper v2.1 sensors, each with explicit authorized scope identities.
 - Private IPv4 network monitoring; every scan requires an operator-authorized target.
 - Local filesystem storage with SQLite and local process execution.
 - Browser access from a trusted administrative network when LAN binding is explicitly enabled.
@@ -95,7 +97,7 @@ DeltaAegis may be tagged v1.0.0 only when all of the following are true:
 5. Detection results are deterministic, versioned, explainable, idempotent, and traceable to source evidence.
 6. CSRF, session, token, security-header, bind-boundary, path-confinement, and privilege-revocation tests pass.
 7. Health/readiness, structured diagnostics, clean install, service operation, uninstall, and low-resource tests pass.
-8. Performance targets are defined from the v0.43 baseline and met during the v0.49 soak period.
+8. Performance targets are defined from the v0.43 baseline, met by the candidate, and confirmed by the required release-evidence soak.
 9. NetSniper and TrueAegis compatibility contracts are pinned and verified with fixtures.
 10. No open release-blocking security, integrity, migration, data-loss, or authorization defect remains.
 

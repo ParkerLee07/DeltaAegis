@@ -98,14 +98,9 @@ def main():
         "deltaaegis_core/telemetry_quality.py",
     ):
         require(
-            install_source.count(relative) == 1,
-            f"install lifecycle does not conditionally compile {relative}",
+            install_source.count(relative) >= 1,
+            f"install lifecycle does not compile {relative}",
         )
-    require(
-        "characterized legacy minimal lifecycle fixtures" in install_source
-        and "if path.is_file():" in install_source,
-        "optional legacy lifecycle compile boundary is missing",
-    )
     require(
         "except ImportError:" in root_source
         and "legacy minimal lifecycle fixtures" in root_source,

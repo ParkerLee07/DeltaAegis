@@ -33,6 +33,9 @@ ACCESS_RBAC_PERMISSIONS = {
     "workflow.write": "ANALYST",
     "scan.start": "ADMIN",
     "sites.write": "ADMIN",
+    "identity.sensors.write": "ADMIN",
+    "detection.review": "ANALYST",
+    "operations.read": "ADMIN",
     "telemetry.quality.review": "ANALYST",
     "telemetry.quality.override": "ADMIN",
 }

@@ -1,6 +1,6 @@
 # DeltaAegis `/api/v1` contract
 
-Status: implemented and release-gated in the combined v1.0 Stage 1–2 candidate. The complete v1.0 definition of done still includes later identity, detection, operations, performance, and integration stages.
+Status: implemented through the combined v1.0 Stage 3–5 candidate. GA still requires the mandatory 24-hour soak receipt and final blocker audit.
 
 The machine-readable OpenAPI 3.1 contract is available at [`contracts/v1/openapi.json`](../contracts/v1/openapi.json) and from `GET /api/v1/openapi.json` while the dashboard is running.
 
@@ -10,9 +10,14 @@ The machine-readable OpenAPI 3.1 contract is available at [`contracts/v1/openapi
 |---|---|---|---|
 | GET | `/api/v1` | Public | Discovery document |
 | GET | `/api/v1/openapi.json` | Public | Raw OpenAPI 3.1 document |
+| GET | `/api/v1/health` | Public | Minimal process liveness; no dependency disclosure |
+| GET | `/api/v1/readiness` | `operations.read` | Migration, database, worker, identity, detection, integration, and capacity readiness |
+| GET | `/api/v1/diagnostics` | `operations.read` | Bounded, secret-redacted structured diagnostics |
 | GET | `/api/v1/session` | `session.read` | Current server-derived principal |
 | GET | `/api/v1/summary` | `dashboard.read` | Current summary; optional `scope` |
 | GET | `/api/v1/scopes` | `dashboard.read` | Paginated scope inventory |
+| GET | `/api/v1/sensors` | `dashboard.read` | Paginated enrolled-sensor inventory |
+| POST | `/api/v1/sensors` | `identity.sensors.write` | Idempotent sensor and authorized-scope enrollment |
 | GET | `/api/v1/sites` | `dashboard.read` | Paginated logical sites |
 | POST | `/api/v1/sites` | `sites.write` | Idempotent logical-site creation |
 | GET | `/api/v1/assets` | `dashboard.read` | Paginated assets; optional scope/state/identity filters |
@@ -23,6 +28,9 @@ The machine-readable OpenAPI 3.1 contract is available at [`contracts/v1/openapi
 | GET | `/api/v1/validations` | `dashboard.read` | Paginated TrueAegis observations |
 | GET | `/api/v1/telemetry-quality/decisions` | `dashboard.read` | Paginated quality decisions |
 | GET | `/api/v1/telemetry-quality/decisions/{decision_id}` | `dashboard.read` | One quality decision |
+| GET | `/api/v1/detections` | `dashboard.read` | Paginated immutable detection results; sensor/scope/disposition filters |
+| GET | `/api/v1/detections/{result_id}` | `dashboard.read` | Detection provenance, explanation, and separate review history |
+| POST | `/api/v1/detections/{result_id}/reviews` | `detection.review` | Idempotent append-only review or suppression action |
 
 Only this table is stable. Existing unversioned `/api/*` routes remain private dashboard compatibility interfaces. They are not promoted by implication and may evolve with their focused compatibility tests.
 
@@ -119,6 +127,7 @@ Every DeltaAegis JSON, HTML, text, and redirect response includes no-store cachi
 
 ```bash
 python3 tools/validate_v1_stage2_api_security.py
+python3 tools/validate_v1_stage3_5.py
 ```
 
 The validator starts a real threaded HTTP server on a temporary loopback port and exercises the OpenAPI inventory, every list route, envelopes, pagination, request IDs, scoped tokens, demotion/revocation, private-interface separation, strict request parsing, security headers, host/origin rejection, browser login cookies, CSRF, logout semantics, exact/failed/concurrent idempotency, and final SQLite integrity.

@@ -1,0 +1,19 @@
+{
+  "rules": [
+    {"event_type": "ASSET_FIRST_OBSERVED", "rationale": "A previously unseen asset entered the preserved scope evidence.", "rule_id": "DA-RULE-0001", "rule_version": "1.0.0", "title": "Asset first observed"},
+    {"event_type": "ASSET_REAPPEARED", "rationale": "A previously missing or removed asset returned.", "rule_id": "DA-RULE-0003", "rule_version": "1.0.0", "title": "Asset reappeared"},
+    {"event_type": "ASSET_REMOVED", "rationale": "A stable asset crossed the accepted absence threshold.", "rule_id": "DA-RULE-0002", "rule_version": "1.0.0", "title": "Stable asset removed"},
+    {"event_type": "DEVICE_CLASSIFICATION_CHANGED", "rationale": "The evidence-backed device classification changed between preserved scans.", "rule_id": "DA-RULE-0030", "rule_version": "1.0.0", "title": "Device classification changed"},
+    {"event_type": "IDENTITY_BASELINE_RESET", "rationale": "Identity coverage changed materially and established a new baseline.", "rule_id": "DA-RULE-0091", "rule_version": "1.0.0", "title": "Identity baseline reset"},
+    {"event_type": "MONITORED_SERVICE_CLOSED", "rationale": "A monitored service present in the baseline is absent from complete current evidence.", "rule_id": "DA-RULE-0011", "rule_version": "1.0.0", "title": "Monitored service closed"},
+    {"event_type": "MONITORED_SERVICE_OPENED", "rationale": "A monitored service is present in current evidence but absent from the baseline.", "rule_id": "DA-RULE-0010", "rule_version": "1.0.0", "title": "Monitored service opened"},
+    {"event_type": "NETSNIPER_FINDING_ADDED", "rationale": "NetSniper supplied a new interpreted finding for the scoped asset.", "rule_id": "DA-RULE-0020", "rule_version": "1.0.0", "title": "Finding added"},
+    {"event_type": "NETSNIPER_FINDING_REMOVED", "rationale": "A prior finding is absent from complete current evidence.", "rule_id": "DA-RULE-0021", "rule_version": "1.0.0", "title": "Finding removed"},
+    {"event_type": "PROFILE_BASELINE_RESET", "rationale": "The telemetry contract changed and established a new comparison baseline.", "rule_id": "DA-RULE-0090", "rule_version": "1.0.0", "title": "Profile baseline reset"},
+    {"event_type": "SNAPSHOT_PROFILE_CHANGED", "rationale": "The scan profile differs from its comparison baseline.", "rule_id": "DA-RULE-0093", "rule_version": "1.0.0", "title": "Telemetry profile changed"},
+    {"event_type": "SNAPSHOT_REVIEW_REQUIRED", "rationale": "Telemetry quality evidence requires operator review.", "rule_id": "DA-RULE-0092", "rule_version": "1.0.0", "title": "Telemetry review required"}
+  ],
+  "ruleset_id": "deltaaegis-core-network-change",
+  "ruleset_version": "1.0.0",
+  "schema_version": "deltaaegis-detection-rules-v1"
+}

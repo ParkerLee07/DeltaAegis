@@ -34,10 +34,10 @@ Highlights:
 - Retained `AGPL-3.0-only`; alternative commercial licensing remains available
   only by separate written agreement.
 
-## Development Candidate — v1.0 combined Stage 1–2
+## Development Candidate — v1.0 combined Stage 3–5
 
-The active development branch combines the first two v1.0 delivery stages on
-top of the immutable v0.45.0 release:
+The active development branch preserves the completed Stage 1–2 foundation
+and combines the remaining implementation stages into one guarded upgrade:
 
 - checksummed, forward-only migrations from every exact v0.42.x database
   origin, with a verified pre-migration backup and restore rehearsal;
@@ -47,14 +47,41 @@ top of the immutable v0.45.0 release:
   validation, strict request-body limits, and restrictive response headers;
 - dedicated Stage 1 database/interruption tests and Stage 2 real-HTTP security
   tests.
+- durable sensor and scope identities, explicit legacy attribution,
+  overlapping-CIDR isolation, sensor-bound evidence receipts, and one active
+  scan per sensor;
+- immutable, deterministic, versioned detection results with evidence
+  provenance, structured explanations, replay idempotence, and a separate
+  append-only review/suppression ledger;
+- public liveness plus authenticated dependency readiness and secret-redacted
+  diagnostics;
+- v0.43-derived performance thresholds, low-resource and failure injection,
+  a bounded 24-hour soak-evidence harness, and exact NetSniper/TrueAegis
+  compatibility pins.
 
 See [the migration and recovery contract](docs/v1-stage1-migrations.md),
 [the stable API contract](docs/api-v1.md), and
 [the combined checkpoint checklist](docs/V1_STAGE1_2_RELEASE_CHECKLIST.md).
 The exact predecessor-test transition evidence is recorded in
 [the Stage 1–2 compatibility note](docs/v1-stage1-2-compatibility.md).
-This candidate is not the complete v1.0 GA release: identity, detection,
-operations/soak, and final integration gates remain open under `V1_SCOPE.md`.
+The combined implementation and operating contract are documented in
+[the Stage 3–5 implementation note](docs/v1-stage3-5-implementation.md) and
+[the Stage 3–5 checklist](docs/V1_STAGE3_5_RELEASE_CHECKLIST.md).
+This candidate is not v1.0 GA until the mandatory 24-hour soak receipt and
+final release-blocker review close the remaining `V1_SCOPE.md` gates.
+
+Key Stage 3–5 operator commands:
+
+```bash
+python3 deltaaegis.py sensor-enroll --name "Branch sensor" \
+  --sensor-id sensor-branch-one \
+  --scope 192.168.50.0/24
+python3 deltaaegis.py sensors-v1
+python3 deltaaegis.py scopes-v1 --sensor-id sensor-branch-one
+python3 deltaaegis.py detections --sensor-id sensor-branch-one
+python3 deltaaegis.py readiness
+python3 deltaaegis.py diagnostics
+```
 
 ## What DeltaAegis Does
 
@@ -365,7 +392,7 @@ The default active database is:
 data/deltaaegis.db
 ```
 
-The first connection made by the Stage 1–2 candidate recognizes the database,
+The first connection made by the v1 candidate recognizes the database,
 creates and verifies a pre-migration backup when migrations are pending, and
 then applies each migration and ledger record transactionally. Supported
 v0.42.x and v0.45 databases are never upgraded without that verified recovery
@@ -435,7 +462,7 @@ The safety backup is retained after success or rollback. DeltaAegis does not del
 
 DeltaAegis does not expose arbitrary shell command execution from the dashboard.
 
-The Stage 1–2 candidate adds a stable `/api/v1` boundary. Programmatic clients
+The v1 candidate provides a stable `/api/v1` boundary. Programmatic clients
 must use a bounded scoped token in `Authorization: Bearer`; browser-session
 mutations require same-origin double-submit CSRF verification. All response
 types receive no-store caching and restrictive browser security headers. The
@@ -614,10 +641,10 @@ The default branch intentionally retains the active compatibility floor rather t
 
 ## Validation
 
-Run the combined v1.0 Stage 1–2 gate from a clean candidate checkout:
+Run the combined v1.0 Stage 3–5 gate from a clean candidate checkout:
 
 ```bash
-./tools/validate_v1_0_stage1_2_gate.sh
+./tools/validate_v1_0_stage3_5_gate.sh
 ```
 
 Run the immutable v0.45.0 release gate from its release checkout:
@@ -626,7 +653,13 @@ Run the immutable v0.45.0 release gate from its release checkout:
 ./tools/validate_v0_45_release_gate.sh
 ```
 
-The combined candidate gate validates exact supported upgrades, interruption and recovery behavior, the runtime/tracked OpenAPI contract, real HTTP security and idempotency, required-install and modular boundaries, released v0.45 telemetry trust, applicable predecessor security behavior, core regressions, and the deterministic repository audit. It is intentionally not named or represented as the complete v1.0 GA gate.
+The combined candidate gate validates exact supported upgrades, interruption
+and recovery behavior, the runtime/tracked OpenAPI contract, real HTTP security
+and idempotency, sensor/scope isolation, immutable detection replay, readiness,
+diagnostics, low-resource behavior, integration pins, performance thresholds,
+install boundaries, released v0.45 telemetry trust, applicable predecessor
+security, core regressions, and the deterministic repository audit. It does
+not replace the separately recorded 24-hour GA soak.
 
 Complete the manual backup and restore checklist before merge, tag, or publication:
 

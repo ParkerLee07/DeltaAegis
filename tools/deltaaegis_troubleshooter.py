@@ -21,7 +21,7 @@ import time
 from typing import Any, Iterable
 
 TOOL_FORMAT = "deltaaegis-repository-troubleshooter-v4"
-TOOL_VERSION = "1.0.0-stage12-candidate"
+TOOL_VERSION = "1.0.0-stage35-candidate"
 REPORT_SCHEMA = "deltaaegis-troubleshooter-report-v4"
 VALIDATOR_RE = re.compile(r"validate_[A-Za-z0-9_.-]+\.sh")
 VERSION_RE = re.compile(
@@ -294,6 +294,7 @@ def current_release_gate(validators: Iterable[str]) -> str:
         for path in validators
         if path.endswith("_release_gate.sh")
         or path.endswith("_stage1_2_gate.sh")
+        or path.endswith("_stage3_5_gate.sh")
     ]
     if not gates:
         raise TroubleshooterError("No versioned release or candidate gate exists under tools/")

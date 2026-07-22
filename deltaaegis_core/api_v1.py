@@ -54,9 +54,14 @@ class ApiV1Endpoint:
 API_V1_ENDPOINTS = (
     ApiV1Endpoint("GET", "/api/v1", "getApiIndex", None, "Discover the stable API."),
     ApiV1Endpoint("GET", "/api/v1/openapi.json", "getOpenApi", None, "Read the OpenAPI contract."),
+    ApiV1Endpoint("GET", "/api/v1/health", "getHealth", None, "Read minimal process liveness."),
+    ApiV1Endpoint("GET", "/api/v1/readiness", "getReadiness", "operations.read", "Read authenticated dependency readiness."),
+    ApiV1Endpoint("GET", "/api/v1/diagnostics", "getDiagnostics", "operations.read", "Read bounded secret-redacted diagnostics."),
     ApiV1Endpoint("GET", "/api/v1/session", "getSession", "session.read", "Read the authenticated principal."),
     ApiV1Endpoint("GET", "/api/v1/summary", "getSummary", "dashboard.read", "Read the current DeltaAegis summary."),
     ApiV1Endpoint("GET", "/api/v1/scopes", "listScopes", "dashboard.read", "List observed network scopes.", paginated=True),
+    ApiV1Endpoint("GET", "/api/v1/sensors", "listSensors", "dashboard.read", "List enrolled sensors.", paginated=True),
+    ApiV1Endpoint("POST", "/api/v1/sensors", "createSensor", "identity.sensors.write", "Enroll a managed sensor and its scopes.", idempotent=True),
     ApiV1Endpoint("GET", "/api/v1/sites", "listSites", "dashboard.read", "List logical sites.", paginated=True),
     ApiV1Endpoint("POST", "/api/v1/sites", "createSite", "sites.write", "Create a logical site.", idempotent=True),
     ApiV1Endpoint("GET", "/api/v1/assets", "listAssets", "dashboard.read", "List assets.", paginated=True),
@@ -67,6 +72,9 @@ API_V1_ENDPOINTS = (
     ApiV1Endpoint("GET", "/api/v1/validations", "listValidations", "dashboard.read", "List validation evidence.", paginated=True),
     ApiV1Endpoint("GET", "/api/v1/telemetry-quality/decisions", "listTelemetryQualityDecisions", "dashboard.read", "List telemetry-quality decisions.", paginated=True),
     ApiV1Endpoint("GET", "/api/v1/telemetry-quality/decisions/{decision_id}", "getTelemetryQualityDecision", "dashboard.read", "Read one telemetry-quality decision."),
+    ApiV1Endpoint("GET", "/api/v1/detections", "listDetections", "dashboard.read", "List immutable detection results.", paginated=True),
+    ApiV1Endpoint("GET", "/api/v1/detections/{result_id}", "getDetection", "dashboard.read", "Read one immutable detection result."),
+    ApiV1Endpoint("POST", "/api/v1/detections/{result_id}/reviews", "reviewDetection", "detection.review", "Append review or suppression state.", idempotent=True),
 )
 
 
@@ -205,6 +213,11 @@ def api_index() -> dict[str, Any]:
             "browser_sessions": "cookie plus X-DeltaAegis-CSRF for mutations",
         },
         "private_compatibility_namespace": "/api/* (unversioned, not stable)",
+        "capabilities": [
+            "sensor-scope-identity",
+            "deterministic-detection",
+            "health-readiness-diagnostics",
+        ],
     }
 
 
@@ -234,6 +247,7 @@ def _response_component(success: bool = True) -> dict[str, Any]:
 def _operation_data_schema(endpoint: ApiV1Endpoint) -> dict[str, Any]:
     page_items = {
         "listScopes": "ScopeRecord",
+        "listSensors": "SensorRecord",
         "listSites": "LogicalSite",
         "listAssets": "AssetRecord",
         "listEvents": "EventRecord",
@@ -241,6 +255,7 @@ def _operation_data_schema(endpoint: ApiV1Endpoint) -> dict[str, Any]:
         "listScanJobs": "ScanJobRecord",
         "listValidations": "ValidationRecord",
         "listTelemetryQualityDecisions": "TelemetryQualityDecision",
+        "listDetections": "DetectionResult",
     }
     if endpoint.paginated:
         item_name = page_items[endpoint.operation_id]
@@ -257,11 +272,17 @@ def _operation_data_schema(endpoint: ApiV1Endpoint) -> dict[str, Any]:
         }
     component_names = {
         "getApiIndex": "ApiIndex",
+        "getHealth": "Health",
+        "getReadiness": "Readiness",
+        "getDiagnostics": "Diagnostics",
         "getSession": "SessionPrincipal",
         "getSummary": "Summary",
         "createSite": "SiteMutationResult",
+        "createSensor": "SensorRecord",
         "getAsset": "AssetDetail",
         "getTelemetryQualityDecision": "TelemetryQualityDecision",
+        "getDetection": "DetectionResult",
+        "reviewDetection": "DetectionResult",
     }
     component = component_names.get(endpoint.operation_id)
     return (
@@ -374,6 +395,7 @@ def openapi_document() -> dict[str, Any]:
         if endpoint.operation_id in {
             "getSummary",
             "listAssets",
+            "getAsset",
             "listEvents",
             "listAlerts",
             "listTelemetryQualityDecisions",
@@ -384,6 +406,41 @@ def openapi_document() -> dict[str, Any]:
                     "in": "query",
                     "required": False,
                     "schema": {"type": "string", "format": "ipv4-network"},
+                }
+            )
+        if endpoint.operation_id in {
+            "listScopes",
+            "listSensors",
+            "listAssets",
+            "listDetections",
+        }:
+            parameters.append(
+                {
+                    "name": "sensor_id",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string"},
+                }
+            )
+        if endpoint.operation_id in {"listAssets", "getAsset", "listDetections"}:
+            parameters.append(
+                {
+                    "name": "scope_id",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string"},
+                }
+            )
+        if endpoint.operation_id == "listDetections":
+            parameters.append(
+                {
+                    "name": "disposition",
+                    "in": "query",
+                    "required": False,
+                    "schema": {
+                        "type": "string",
+                        "enum": ["OPEN", "REVIEWED", "SUPPRESSED"],
+                    },
                 }
             )
         if endpoint.operation_id == "listAssets":
@@ -415,11 +472,16 @@ def openapi_document() -> dict[str, Any]:
                     "schema": {"type": "string"},
                 }
             )
+            request_schema = {
+                "createSite": "SiteCreateRequest",
+                "createSensor": "SensorCreateRequest",
+                "reviewDetection": "DetectionReviewRequest",
+            }[endpoint.operation_id]
             operation["requestBody"] = {
                 "required": True,
                 "content": {
                     "application/json": {
-                        "schema": {"$ref": "#/components/schemas/SiteCreateRequest"}
+                        "schema": {"$ref": f"#/components/schemas/{request_schema}"}
                     }
                 },
             }
@@ -432,8 +494,8 @@ def openapi_document() -> dict[str, Any]:
         "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
         "info": {
             "title": "DeltaAegis API",
-            "version": "1.0.0-stage2",
-            "description": "Stable, authenticated DeltaAegis programmatic API. Unversioned /api routes are private dashboard interfaces.",
+            "version": "1.0.0-stage35",
+            "description": "Stable DeltaAegis API with sensor/scope identity, deterministic detection, and operational readiness. Unversioned /api routes are private dashboard interfaces.",
         },
         # Paths already include the stable ``/api/v1`` prefix.  A root server
         # URL keeps OpenAPI clients from composing ``/api/v1/api/v1/...``.
@@ -472,6 +534,7 @@ def openapi_document() -> dict[str, Any]:
                         "openapi",
                         "authentication",
                         "private_compatibility_namespace",
+                        "capabilities",
                     ],
                     "properties": {
                         "name": {"type": "string"},
@@ -479,6 +542,10 @@ def openapi_document() -> dict[str, Any]:
                         "openapi": {"const": "/api/v1/openapi.json"},
                         "authentication": {"type": "object"},
                         "private_compatibility_namespace": {"type": "string"},
+                        "capabilities": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
                     },
                     "additionalProperties": False,
                 },
@@ -529,7 +596,32 @@ def openapi_document() -> dict[str, Any]:
                     "additionalProperties": True,
                 },
                 "ScopeRecord": {
-                    "allOf": [{"$ref": "#/components/schemas/StableRecord"}],
+                    "type": "object",
+                    "required": ["scope_id", "sensor_id", "network_scope", "status"],
+                    "properties": {
+                        "scope_id": {"type": "string"},
+                        "sensor_id": {"type": "string"},
+                        "network_scope": {"type": "string"},
+                        "display_name": {"type": "string"},
+                        "status": {"type": "string"},
+                    },
+                    "additionalProperties": True,
+                },
+                "SensorRecord": {
+                    "type": "object",
+                    "required": ["sensor_id", "display_name", "trust_domain", "status"],
+                    "properties": {
+                        "sensor_id": {"type": "string"},
+                        "display_name": {"type": "string"},
+                        "trust_domain": {"type": "string"},
+                        "sensor_kind": {"type": "string"},
+                        "status": {"type": "string"},
+                        "scopes": {
+                            "type": "array",
+                            "items": {"$ref": "#/components/schemas/ScopeRecord"},
+                        },
+                    },
+                    "additionalProperties": True,
                 },
                 "LogicalSite": {
                     "type": "object",
@@ -567,6 +659,57 @@ def openapi_document() -> dict[str, Any]:
                     "properties": {
                         "decision_id": {"type": "string"},
                         "current_state": {"type": "string"},
+                    },
+                    "additionalProperties": True,
+                },
+                "DetectionResult": {
+                    "type": "object",
+                    "required": [
+                        "result_id", "rule_id", "rule_version", "sensor_id",
+                        "scope_id", "source_scan_id", "evidence_digest",
+                        "explanation", "disposition"
+                    ],
+                    "properties": {
+                        "result_id": {"type": "string"},
+                        "rule_id": {"type": "string"},
+                        "rule_version": {"type": "string"},
+                        "sensor_id": {"type": "string"},
+                        "scope_id": {"type": "string"},
+                        "source_scan_id": {"type": "string"},
+                        "evidence_digest": {"type": "string"},
+                        "explanation": {"type": "object"},
+                        "disposition": {"type": "string"},
+                    },
+                    "additionalProperties": True,
+                },
+                "Health": {
+                    "type": "object",
+                    "required": ["schema_version", "status", "generated_at"],
+                    "properties": {
+                        "schema_version": {"const": "deltaaegis-health-v1"},
+                        "status": {"const": "UP"},
+                        "generated_at": {"type": "string"},
+                    },
+                    "additionalProperties": True,
+                },
+                "Readiness": {
+                    "type": "object",
+                    "required": ["schema_version", "status", "checks"],
+                    "properties": {
+                        "schema_version": {"const": "deltaaegis-readiness-v1"},
+                        "status": {"type": "string", "enum": ["READY", "NOT_READY"]},
+                        "checks": {"type": "array", "items": {"type": "object"}},
+                    },
+                    "additionalProperties": True,
+                },
+                "Diagnostics": {
+                    "type": "object",
+                    "required": ["schema_version", "readiness", "runtime", "database"],
+                    "properties": {
+                        "schema_version": {"const": "deltaaegis-diagnostics-v1"},
+                        "readiness": {"$ref": "#/components/schemas/Readiness"},
+                        "runtime": {"type": "object"},
+                        "database": {"type": "object"},
                     },
                     "additionalProperties": True,
                 },
@@ -658,6 +801,35 @@ def openapi_document() -> dict[str, Any]:
                             "maxItems": 256,
                             "items": {"type": "string", "format": "ipv4-network"},
                         },
+                    },
+                    "additionalProperties": False,
+                },
+                "SensorCreateRequest": {
+                    "type": "object",
+                    "required": ["display_name", "network_scopes"],
+                    "properties": {
+                        "sensor_id": {"type": "string"},
+                        "display_name": {"type": "string", "minLength": 1, "maxLength": 120},
+                        "trust_domain": {"type": "string", "minLength": 1, "maxLength": 96},
+                        "network_scopes": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 256,
+                            "items": {"type": "string"},
+                        },
+                        "metadata": {"type": "object"},
+                    },
+                    "additionalProperties": False,
+                },
+                "DetectionReviewRequest": {
+                    "type": "object",
+                    "required": ["action", "reason"],
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["REVIEWED", "SUPPRESSED", "UNSUPPRESSED"],
+                        },
+                        "reason": {"type": "string", "minLength": 1, "maxLength": 2000},
                     },
                     "additionalProperties": False,
                 },

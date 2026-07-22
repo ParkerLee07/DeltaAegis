@@ -11,6 +11,7 @@ from typing import Any
 
 from deltaaegis_core.auth import DeltaAegisError
 from deltaaegis_core.ingest import canonical_network_scope
+from deltaaegis_core import identity as _identity
 
 
 LOGICAL_SITE_ACTIVE = "ACTIVE"
@@ -420,6 +421,35 @@ def assign_network_scope_to_logical_site(
         """,
         (safe_scope, safe_site_id, now, now),
     )
+    tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_schema WHERE type='table'"
+        )
+    }
+    if "identity_site_memberships" in tables:
+        scope = _identity.ensure_scope(
+            connection,
+            sensor_id=_identity.DEFAULT_SENSOR_ID,
+            network_scope=safe_scope,
+            allow_default_create=True,
+        )
+        connection.execute(
+            "UPDATE logical_site_memberships SET sensor_id=?, scope_id=? "
+            "WHERE network_scope=?",
+            (scope["sensor_id"], scope["scope_id"], safe_scope),
+        )
+        connection.execute(
+            """
+            INSERT INTO identity_site_memberships (
+                scope_id, site_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(scope_id) DO UPDATE SET
+                site_id=excluded.site_id,
+                updated_at=excluded.updated_at
+            """,
+            (scope["scope_id"], safe_site_id, now, now),
+        )
 
     return {
         "site_id": safe_site_id,
@@ -449,6 +479,22 @@ def remove_network_scope_from_logical_site(
         raise DeltaAegisError(
             f"logical site membership not found: "
             f"{safe_site_id} -> {safe_scope}"
+        )
+    tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_schema WHERE type='table'"
+        )
+    }
+    if "identity_site_memberships" in tables:
+        scope_id = _identity.scope_id_for(
+            _identity.DEFAULT_SENSOR_ID,
+            safe_scope,
+        )
+        connection.execute(
+            "DELETE FROM identity_site_memberships "
+            "WHERE scope_id=? AND site_id=?",
+            (scope_id, safe_site_id),
         )
 
     return {
