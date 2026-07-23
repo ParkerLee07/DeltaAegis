@@ -737,7 +737,7 @@
   "info": {
     "description": "Stable DeltaAegis API with sensor/scope identity, deterministic detection, and operational readiness. Unversioned /api routes are private dashboard interfaces.",
     "title": "DeltaAegis API",
-    "version": "1.0.0-stage35"
+    "version": "1.0.0"
   },
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "openapi": "3.1.0",

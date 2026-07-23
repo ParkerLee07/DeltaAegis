@@ -1199,7 +1199,7 @@ def validate_http(database: Path, root: Path, tokens: dict[str, Any]) -> None:
 def main() -> int:
     check(
         deltaaegis.DELTAAEGIS_VERSION
-        in {"1.0.0-stage12", "1.0.0-stage35"},
+        in {"1.0.0-stage12", "1.0.0"},
         "runtime stage version is outside the approved v1 candidate sequence",
     )
     check(web.DASHBOARD_SECURITY_HEADERS == web.dashboard_security_headers(), "security header accessor drift")

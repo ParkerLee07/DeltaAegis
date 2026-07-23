@@ -1245,7 +1245,7 @@ def validate_forced_interleaving(root: Path, fresh_schema: str) -> None:
 def main() -> int:
     check(
         deltaaegis.DELTAAEGIS_VERSION
-        in {"1.0.0-stage12", "1.0.0-stage35"},
+        in {"1.0.0-stage12", "1.0.0"},
         "runtime stage version is outside the approved v1 candidate sequence",
     )
     check(tuple(deltaaegis.SUPPORTED_V042_SOURCE_SHA256) == tuple(EXPECTED_TAGS), "runtime supported-origin inventory drift")

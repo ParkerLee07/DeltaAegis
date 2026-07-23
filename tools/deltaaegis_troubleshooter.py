@@ -21,7 +21,7 @@ import time
 from typing import Any, Iterable
 
 TOOL_FORMAT = "deltaaegis-repository-troubleshooter-v4"
-TOOL_VERSION = "1.0.0-stage35-candidate"
+TOOL_VERSION = "1.0.0"
 REPORT_SCHEMA = "deltaaegis-troubleshooter-report-v4"
 VALIDATOR_RE = re.compile(r"validate_[A-Za-z0-9_.-]+\.sh")
 VERSION_RE = re.compile(

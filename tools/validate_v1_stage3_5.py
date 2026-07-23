@@ -41,8 +41,8 @@ def load_json(relative: str) -> Any:
 
 def validate_contracts() -> None:
     check(
-        deltaaegis.DELTAAEGIS_VERSION == "1.0.0-stage35",
-        "combined candidate version is not 1.0.0-stage35",
+        deltaaegis.DELTAAEGIS_VERSION == "1.0.0",
+        "final release candidate version is not 1.0.0",
     )
     check(
         load_json("contracts/v1/detection-rules.json") == detection.rules_contract(),

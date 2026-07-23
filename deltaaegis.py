@@ -91,7 +91,7 @@ def _report_context() -> _reports.ReportContext:
         operator_triage_summary=operator_triage_summary,
     )
 
-DELTAAEGIS_VERSION = "1.0.0-stage35"
+DELTAAEGIS_VERSION = "1.0.0"
 DELTAAEGIS_SECURITY_HOTFIX = "2026-07-13.2"
 DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION = "deltaaegis-backup-manifest-v1"
 DELTAAEGIS_V0_14_COMPATIBILITY_NOTE = "DeltaAegis v0.14.0 — NetSniper Scan Orchestration compatibility retained."

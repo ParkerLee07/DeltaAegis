@@ -180,7 +180,7 @@ def validate_isolated_import() -> None:
         f"sys.path.insert(0, {str(ROOT)!r}); "
         "import deltaaegis, deltaaegis_core; "
         f"from deltaaegis_core import {imports}; "
-        "assert deltaaegis.DELTAAEGIS_VERSION == '1.0.0-stage35'; "
+        "assert deltaaegis.DELTAAEGIS_VERSION == '1.0.0'; "
         f"assert tuple(sorted(deltaaegis_core.__all__)) == {EXPECTED_MODULES!r}"
     )
     completed = subprocess.run(

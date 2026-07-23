@@ -494,7 +494,7 @@ def openapi_document() -> dict[str, Any]:
         "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
         "info": {
             "title": "DeltaAegis API",
-            "version": "1.0.0-stage35",
+            "version": "1.0.0",
             "description": "Stable DeltaAegis API with sensor/scope identity, deterministic detection, and operational readiness. Unversioned /api routes are private dashboard interfaces.",
         },
         # Paths already include the stable ``/api/v1`` prefix.  A root server

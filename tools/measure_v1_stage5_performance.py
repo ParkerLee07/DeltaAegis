@@ -42,7 +42,7 @@ def cold_import_ms() -> float:
         "import sys; "
         f"sys.path.insert(0, {str(ROOT)!r}); "
         "import deltaaegis; "
-        "assert deltaaegis.DELTAAEGIS_VERSION == '1.0.0-stage35'"
+        "assert deltaaegis.DELTAAEGIS_VERSION == '1.0.0'"
     )
 
     def run() -> None:
