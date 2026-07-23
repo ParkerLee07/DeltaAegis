@@ -1,0 +1,83 @@
+{
+  "backup_path": "/home/parker/Downloads/DeltaAegis_v1_Release_Blocker_Hotfix_Backup_20260723T162952Z.tar.gz",
+  "candidate_commit_before_install": "6059c27a201649440c211310cf275ff45ec9b64d",
+  "changes": [
+    "added durable background-worker persistence reporting",
+    "made NetSniper worker persistence failures observable",
+    "made TrueAegis start persistence failures observable",
+    "made TrueAegis worker persistence failures observable",
+    "sorted logical-site assets numerically before truncation",
+    "restored asset-detail limit signature and forwarding",
+    "sorted dashboard assets numerically before truncation",
+    "added current-state numeric IP sort helper",
+    "sorted projected assets numerically before truncation",
+    "made merged current-state ordering numeric"
+  ],
+  "expected_candidate_commit": "6059c27a201649440c211310cf275ff45ec9b64d",
+  "files_after": {
+    "deltaaegis.py": "f52c670cc8794dc8db3319115c9f56b559400d438e81237d72c0b2b65f793c12",
+    "deltaaegis_core/current_state.py": "098b6deaa162b7585cd1915274657b2b000fac15315ba5d8b711f1ec6a7e2c66",
+    "tools/validate_v1_0_release_blocker_hotfix.py": "e60850c715191f60c6d001cc9bb0d77de4ccdf3216d943b1aa2b03dde1166e7f",
+    "tools/validate_v1_0_release_blocker_hotfix_all.sh": "3de7a1229fb8d2ec9f0d28b249165ab3663af802ae52814b31a2da2e2b8ec200"
+  },
+  "fresh_24h_soak_required": true,
+  "full_gate_requested": true,
+  "hotfix_id": "deltaaegis-v1-release-blockers-20260723.1",
+  "installed_at": "2026-07-23T16:29:55.300310+00:00",
+  "installer_version": "1.0.0",
+  "release_authorized": false,
+  "release_version_set": null,
+  "repository": "/home/parker/DeltaAegis",
+  "schema_version": "deltaaegis-v1-release-blocker-hotfix-installation-v1",
+  "source_state_before": {
+    "already_patched": false,
+    "current_state_sha256": "731dbc2f93f348dea37dafb305637118608e4b5d602f0d41c7d911b3544276cd",
+    "deltaaegis_sha256": "3ec76b9f56a8b24f5b4562ce000f2449f6a1d5b90a871c49d2fcabdc9c97ae70",
+    "exact_original_candidate": true,
+    "head": "6059c27a201649440c211310cf275ff45ec9b64d"
+  },
+  "validation": [
+    {
+      "command": [
+        "/usr/bin/python3",
+        "tools/validate_v1_0_release_blocker_hotfix.py",
+        "--repo",
+        "/home/parker/DeltaAegis"
+      ],
+      "returncode": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "6bc85f3048fef22b942b1bd73e2570087a5df9288a5505a0941d05eab0af9f2a"
+    },
+    {
+      "command": [
+        "/usr/bin/python3",
+        "-m",
+        "py_compile",
+        "deltaaegis.py",
+        "deltaaegis_core/current_state.py"
+      ],
+      "returncode": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "returncode": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "command": [
+        "/usr/bin/python3",
+        "tools/validate_v1_stage3_5.py"
+      ],
+      "returncode": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "6b68e03472b5b2a08a6d89aad87c9a21bda2fe377060045692dddbd0c125fd1d"
+    }
+  ]
+}

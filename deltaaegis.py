@@ -718,8 +718,70 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _record_background_worker_persistence_failure(
+    *,
+    worker: str,
+    job_id: str,
+    primary_error: Any,
+    persistence_error: BaseException,
+    connection: sqlite3.Connection | None = None,
+    log_dir: Path | str | None = None,
+) -> None:
+    """Report a secondary worker-state persistence failure durably.
 
+    Worker exception handlers must not hide the failure that prevented a job
+    from being marked FAILED.  Roll back the failed transaction, emit a
+    structured stderr record, and make a best-effort append to a protected
+    JSONL file.  The watchdog can then reconcile any stale job while the
+    secondary failure remains visible to the operator.
+    """
 
+    rollback_error = ""
+    if connection is not None:
+        try:
+            connection.rollback()
+        except Exception as exc:  # pragma: no cover - last-resort reporting
+            rollback_error = f"{type(exc).__name__}: {exc}"
+
+    record = {
+        "schema_version": "deltaaegis-worker-persistence-failure-v1",
+        "recorded_at": utc_now(),
+        "worker": str(worker),
+        "job_id": str(job_id),
+        "primary_error": str(primary_error),
+        "persistence_error": (
+            f"{type(persistence_error).__name__}: {persistence_error}"
+        ),
+        "rollback_error": rollback_error,
+    }
+    encoded = json.dumps(record, sort_keys=True, separators=(",", ":"))
+    print(f"DeltaAegis worker persistence failure: {encoded}",
+          file=sys.stderr, flush=True)
+
+    if log_dir is None:
+        return
+    try:
+        root = Path(log_dir).expanduser()
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / "worker-persistence-failures.jsonl"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(encoded + "\n")
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+    except Exception as exc:  # pragma: no cover - last-resort stderr path
+        print(
+            "DeltaAegis could not write the worker persistence fallback "
+            f"log: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def ensure_netsniper_intelligence_host_schema(connection: sqlite3.Connection) -> None:
@@ -11850,6 +11912,7 @@ def dashboard_site_assets_payload(
         site_id,
     )
     requested_limit = max(1, int(limit or 25))
+    fetch_limit = 10000
     rows: list[dict[str, Any]] = []
 
     for scope in context["member_scopes"]:
@@ -11857,7 +11920,7 @@ def dashboard_site_assets_payload(
             dashboard_site_tag_rows(
                 dashboard_assets_payload(
                     connection,
-                    requested_limit,
+                    fetch_limit,
                     scope=scope,
                     state=state,
                     identity=identity,
@@ -11870,9 +11933,7 @@ def dashboard_site_assets_payload(
     rows.sort(
         key=lambda row: (
             str(row.get("state") or ""),
-            str(row.get("network_scope") or ""),
-            str(row.get("current_ip") or ""),
-            str(row.get("asset_key") or ""),
+            dashboard_asset_numeric_ip_sort_key(row),
         )
     )
     return rows[:requested_limit]
@@ -13665,8 +13726,15 @@ def dashboard_netsniper_scan_worker(
                 message=f"scan worker failed: {exc}",
             )
             connection.commit()
-        except Exception:
-            pass
+        except Exception as persistence_exc:
+            _record_background_worker_persistence_failure(
+                worker="NetSniper scan worker",
+                job_id=job_id,
+                primary_error=exc,
+                persistence_error=persistence_exc,
+                connection=connection,
+                log_dir=logs_dir,
+            )
     finally:
         connection.close()
 
@@ -14123,8 +14191,16 @@ def trueaegis_start_queued_followup_for_schedule(
                 message=message,
             )
             connection.commit()
-        except Exception:
-            pass
+        except Exception as persistence_exc:
+            _record_background_worker_persistence_failure(
+                worker="TrueAegis follow-up start",
+                job_id=job_id,
+                primary_error=message,
+                persistence_error=persistence_exc,
+                connection=connection,
+                log_dir=DEFAULT_TRUEAEGIS_LOGS,
+            )
+            result["persistence_error"] = str(persistence_exc)
 
         result["completed"] = True
         result["outcome"] = outcome
@@ -14491,8 +14567,15 @@ def dashboard_trueaegis_validation_worker(
                 message=f"TrueAegis validation worker failed: {exc}",
             )
             connection.commit()
-        except Exception:
-            pass
+        except Exception as persistence_exc:
+            _record_background_worker_persistence_failure(
+                worker="TrueAegis validation worker",
+                job_id=job_id,
+                primary_error=exc,
+                persistence_error=persistence_exc,
+                connection=connection,
+                log_dir=logs_dir,
+            )
     finally:
         connection.close()
 
@@ -34858,11 +34941,13 @@ def dashboard_asset_detail_payload(
     connection,
     identifier,
     scope=None,
+    limit=20,
 ):
     payload = _deltaaegis_dashboard_asset_detail_v045_base(
         connection,
         identifier,
         scope=scope,
+        limit=limit,
     )
     if isinstance(payload, dict):
         latest_observation = payload.get("latest_observation")
@@ -35951,9 +36036,11 @@ def dashboard_assets_payload(
     state: str | None = None,
     identity: str | None = None,
 ) -> list[dict[str, Any]]:
+    requested_limit = max(1, int(limit or 25))
+    fetch_limit = 10000
     rows = _deltaaegis_dashboard_assets_payload_v042_numeric_base(
         connection,
-        limit,
+        fetch_limit,
         scope=scope,
         state=state,
         identity=identity,
@@ -35961,6 +36048,6 @@ def dashboard_assets_payload(
     return sorted(
         rows,
         key=dashboard_asset_numeric_ip_sort_key,
-    )
+    )[:requested_limit]
 if __name__ == "__main__":
     raise SystemExit(main())
