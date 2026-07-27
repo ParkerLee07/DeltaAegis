@@ -8,27 +8,27 @@ This deterministic inventory describes the combined v1.0 Stage 3–5 candidate, 
 
 | Measure | Count |
 |---|---:|
-| Repository files in audit scope | 191 |
-| `deltaaegis.py` lines | 35966 |
-| Root top-level functions | 703 |
+| Repository files in audit scope | 194 |
+| `deltaaegis.py` lines | 36053 |
+| Root top-level functions | 704 |
 | Root top-level classes | 6 |
 | Internal core modules | 15 |
 | Distinct CLI commands | 74 |
 | Distinct `/api` route literals | 78 |
 | Declared schema tables | 47 |
-| Validator scripts | 92 |
+| Validator scripts | 94 |
 | Validator version groups | 9 |
 
-Root source SHA-256: `3ec76b9f56a8b24f5b4562ce000f2449f6a1d5b90a871c49d2fcabdc9c97ae70`
+Root source SHA-256: `ce23cc4dae0554d0e9151a2a0691f3d631751cc69dae8e1bffe0d890044370cb`
 
 ## Modular core inventory
 
 | Module | Lines | Functions | Classes | Internal dependencies | SHA-256 |
 |---|---:|---:|---:|---|---|
-| `deltaaegis_core/api_v1.py` | 1140 | 19 | 2 | None | `55eea2a8e1c8ad4f0c687fd5c890ef0ac86a09172be0497dea4c2b94ad3cdebe` |
+| `deltaaegis_core/api_v1.py` | 1140 | 19 | 2 | None | `1ac2110bc18e56b5b516434e51d8d9b303c3f51d0dbcacee9be97829084dade0` |
 | `deltaaegis_core/auth.py` | 1547 | 52 | 2 | None | `7b35209e7bcd15dd82d5763b8f70198c6ae03811e9a731a5e4f308a1f851c7c1` |
 | `deltaaegis_core/config.py` | 80 | 1 | 1 | None | `0860bf7e2b193aa22c4ad41f69f3f3f4a2f3360c3635052ef7fe1959d1f17217` |
-| `deltaaegis_core/current_state.py` | 1578 | 34 | 0 | None | `731dbc2f93f348dea37dafb305637118608e4b5d602f0d41c7d911b3544276cd` |
+| `deltaaegis_core/current_state.py` | 1599 | 35 | 0 | None | `098b6deaa162b7585cd1915274657b2b000fac15315ba5d8b711f1ec6a7e2c66` |
 | `deltaaegis_core/db.py` | 25 | 1 | 0 | None | `8637f696f78a861a2d2f1ea00e5e671a1f5dd239659fcb99eb16b6c9154e3488` |
 | `deltaaegis_core/detection.py` | 580 | 13 | 1 | None | `25ceb17bde445deb70c6fe5fa0d65918b0408a9b1b98c8ac099b541f0e2b48b4` |
 | `deltaaegis_core/identity.py` | 1653 | 36 | 1 | None | `b7b8d68a8f24a4c16ac4e6cc09d3f0c9b108593386f4647596d030cabff0bc24` |
@@ -47,11 +47,11 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 
 | ID | Severity | Area | Evidence | Planned disposition |
 |---|---|---|---|---|
-| DA044-001 | MEDIUM | compatibility facade | deltaaegis.py remains 35966 lines with 703 top-level functions; 15 core modules contain 19648 lines. | Retain the facade through v1 compatibility; continue only owned incremental extraction behind characterization evidence. |
+| DA044-001 | MEDIUM | compatibility facade | deltaaegis.py remains 36053 lines with 704 top-level functions; 15 core modules contain 19669 lines. | Retain the facade through v1 compatibility; continue only owned incremental extraction behind characterization evidence. |
 | DA044-002 | MEDIUM | source-order coupling | Repeated top-level function names in the compatibility facade: build_current_risk_register, dashboard_asset_detail_payload, dashboard_assets_payload, dashboard_current_state_payload, dashboard_index_html, dashboard_operator_session_shell_html, dashboard_summary_payload. | Remove only with characterization evidence and explicit compatibility ownership. |
 | DA044-003 | INFO | storage migrations | Stage 1 inventories 47 declared tables behind an ordered checksummed migration ledger and verified pre-migration backup. | Delivered for the supported v0.42.x origins; retain interruption, restore-rehearsal, convergence, and tamper tests in every v1 gate. |
 | DA044-004 | INFO | HTTP/API contract | Stages 2–5 expose 17 stable /api/v1 route literals while 61 pre-existing route literals remain private compatibility interfaces. | Delivered through the Stage 3–5 candidate; keep runtime, tracked OpenAPI, authorization, HTTP, and private-route transition inventories release-gated. |
-| DA044-005 | LOW | validation estate | 92 validator scripts span 9 version groups; 216 historical validators are preserved by a byte-verified retirement manifest. | Retain the current compatibility floor and require manifest-backed replacement evidence for any further validator retirement. |
+| DA044-005 | LOW | validation estate | 94 validator scripts span 9 version groups; 216 historical validators are preserved by a byte-verified retirement manifest. | Retain the current compatibility floor and require manifest-backed replacement evidence for any further validator retirement. |
 | DA044-006 | INFO | integration compatibility | NetSniper is pinned to v2.1.0 commit 0624a36550f6eb62ed0daa6862e5cc25a0d93236; optional TrueAegis is pinned to >=1.2.0,<2.0.0, a witness commit, and a fixture-validated result contract. | Retain exact pins, fixtures, scope-containment tests, and fail-closed integration readiness in every v1 gate. |
 | DA044-007 | LOW | documentation | 0 known historical architecture document marker remains. | Keep docs/architecture/overview.md authoritative and clean historical prose only in an owned documentation change. |
 
@@ -59,13 +59,13 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 
 | Name | Definition lines |
 |---|---|
-| `build_current_risk_register` | 16914, 34882 |
-| `dashboard_asset_detail_payload` | 16015, 34857 |
-| `dashboard_assets_payload` | 15895, 34831, 35947 |
-| `dashboard_current_state_payload` | 15787, 34789 |
-| `dashboard_index_html` | 26284, 26310, 26469, 26587, 27585 |
-| `dashboard_operator_session_shell_html` | 27609, 28068, 34467 |
-| `dashboard_summary_payload` | 14597, 34810 |
+| `build_current_risk_register` | 16997, 34967 |
+| `dashboard_asset_detail_payload` | 16098, 34940 |
+| `dashboard_assets_payload` | 15978, 34914, 36032 |
+| `dashboard_current_state_payload` | 15870, 34872 |
+| `dashboard_index_html` | 26367, 26393, 26552, 26670, 27668 |
+| `dashboard_operator_session_shell_html` | 27692, 28151, 34550 |
+| `dashboard_summary_payload` | 14680, 34893 |
 
 ## Command, route, and schema catalogs
 
@@ -93,7 +93,7 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 | v0.43 | 1 |
 | v0.44 | 17 |
 | v0.45 | 13 |
-| v1.0 | 9 |
+| v1.0 | 11 |
 
 ## Validator retirement evidence
 
@@ -118,8 +118,8 @@ No known stale architecture-document marker was found.
 | Stage 2 | Preserved and release-gated | `/api/v1`, OpenAPI 3.1, scoped tokens, CSRF, security headers, request bounds, and durable idempotency |
 | Stage 3 | Implemented and candidate-gated | Sensor/scope identity, evidence provenance, replay protection, per-sensor concurrency, and overlapping CIDRs |
 | Stage 4 | Implemented and candidate-gated | Versioned deterministic immutable detections, explanations, replay, and separate reviews |
-| Stage 5 | Implementation gate passed; GA soak pending | Health/readiness, diagnostics, low-resource and performance evidence, pinned integrations, and soak harness |
-| Final GA gate | Pending external-duration evidence | 24-hour release-evidence soak and final blocker audit |
+| Stage 5 | Implementation gate passed; external release evidence tracked separately | Health/readiness, diagnostics, low-resource and performance evidence, pinned integrations, and soak harness |
+| Final GA gate | External-duration evidence and final blocker review are evaluated separately | 24-hour release-evidence soak and final blocker audit |
 
 ## Audit constraints
 

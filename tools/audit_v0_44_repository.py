@@ -382,8 +382,8 @@ def render_markdown(audit: dict[str, Any]) -> str:
         "| Stage 2 | Preserved and release-gated | `/api/v1`, OpenAPI 3.1, scoped tokens, CSRF, security headers, request bounds, and durable idempotency |",
         "| Stage 3 | Implemented and candidate-gated | Sensor/scope identity, evidence provenance, replay protection, per-sensor concurrency, and overlapping CIDRs |",
         "| Stage 4 | Implemented and candidate-gated | Versioned deterministic immutable detections, explanations, replay, and separate reviews |",
-        "| Stage 5 | Implementation gate passed; GA soak pending | Health/readiness, diagnostics, low-resource and performance evidence, pinned integrations, and soak harness |",
-        "| Final GA gate | Pending external-duration evidence | 24-hour release-evidence soak and final blocker audit |",
+        "| Stage 5 | Implementation gate passed; external release evidence tracked separately | Health/readiness, diagnostics, low-resource and performance evidence, pinned integrations, and soak harness |",
+        "| Final GA gate | External-duration evidence and final blocker review are evaluated separately | 24-hour release-evidence soak and final blocker audit |",
         "", "## Audit constraints", "",
     ])
     lines.extend(f"- {item}" for item in audit["constraints"])
