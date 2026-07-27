@@ -1,6 +1,6 @@
 # DeltaAegis Architecture Overview
 
-Status: v1.0 combined Stage 3–5 candidate on the released v0.45.0 baseline
+Status: DeltaAegis v1.0.0 General Availability on the v0.45.0 telemetry-trust baseline
 
 ## System role
 
@@ -91,7 +91,7 @@ Trust rules:
 
 ## Current API and operations boundary
 
-The combined v1 candidate exposes the stable `/api/v1` boundary defined by `deltaaegis_core/api_v1.py` and the tracked OpenAPI 3.1 artifact at `contracts/v1/openapi.json`. Programmatic clients use bounded, scoped `Authorization: Bearer` credentials. Browser sessions use same-origin double-submit CSRF for every mutation. Stable mutations are transactionally idempotent, and stable responses use versioned success/error envelopes plus request IDs. Public health is deliberately minimal; readiness and diagnostics require the ADMIN-only `operations.read` scope.
+DeltaAegis v1.0.0 exposes the stable `/api/v1` boundary defined by `deltaaegis_core/api_v1.py` and the tracked OpenAPI 3.1 artifact at `contracts/v1/openapi.json`. Programmatic clients use bounded, scoped `Authorization: Bearer` credentials. Browser sessions use same-origin double-submit CSRF for every mutation. Stable mutations are transactionally idempotent, and stable responses use versioned success/error envelopes plus request IDs. Public health is deliberately minimal; readiness and diagnostics require the ADMIN-only `operations.read` scope.
 
 The dashboard's pre-existing unversioned `/api/*` endpoints remain authenticated private compatibility interfaces. They are not promoted into the stable contract, and the legacy `X-DeltaAegis-Token` transport cannot authenticate `/api/v1`.
 
@@ -136,7 +136,7 @@ and historical validators therefore continue to use the same public surface.
 
 ## Known architecture debt
 
-The reproducible inventory and disposition are maintained in `docs/repository-audit.md`. Stages 1–2 close unledgered upgrades, recovery, and the stable API/security gap. Stages 3–5 close the durable identity, deterministic detection, readiness/diagnostics, integration-pin, and measured performance implementation gaps. The root facade size and validator estate remain tracked maintainability debt. The 24-hour release-evidence soak and final blocker review remain operational release gates, not missing runtime features.
+The reproducible inventory and disposition are maintained in `docs/repository-audit.md`. Stages 1–2 close unledgered upgrades, recovery, and the stable API/security gap. Stages 3–5 close the durable identity, deterministic detection, readiness/diagnostics, integration-pin, and measured performance implementation gaps. The root facade size and validator estate remain tracked maintainability debt. The 24-hour release-evidence soak and final blocker review completed successfully and remain retained operational release evidence.
 ## v0.45 telemetry-trust boundary
 
 DeltaAegis evaluates every finalized NetSniper bundle before operational
@@ -188,4 +188,4 @@ unsuppression are append-only records and never rewrite the result.
 Stage 5 adds minimal liveness, authenticated readiness, secret-redacted
 diagnostics, pinned integration contracts, low-resource/failure fixtures,
 reproducible v0.43-derived thresholds, and a separate 24-hour soak receipt.
-This candidate is not v1.0 GA until that soak and the final blocker audit pass.
+For v1.0.0, the uninterrupted 24-hour soak and final blocker audit passed; the supported matrix and clean-main release gate also completed successfully.

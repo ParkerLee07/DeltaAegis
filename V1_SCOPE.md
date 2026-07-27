@@ -1,24 +1,19 @@
 # DeltaAegis v1.0 Product Scope
 
-Status: approved at v0.43.0 and current for the combined v1.0 Stage 3–5 candidate
+Status: finalized for DeltaAegis v1.0.0 General Availability
+## Delivery status — 2026-07-27
 
-## Delivery status — 2026-07-21
+DeltaAegis v1.0.0 delivers the completed Stage 1–5 migration, recovery, stable
+API, web-security, sensor/scope identity, deterministic detection, operations,
+performance, and integration scope defined below.
 
-The combined Stage 3–5 candidate builds on the completed Stage 1–2 migration,
-recovery, stable API, and web-security foundation. It adds durable
-sensor/scope identity, overlapping-CIDR isolation, source-scan replay
-protection, per-sensor job concurrency, versioned immutable detections,
-append-only review/suppression history, readiness, bounded diagnostics,
-low-resource/failure tests, reproducible performance thresholds, and pinned
-NetSniper/TrueAegis integration contracts.
-
-This is implementation evidence, not a v1.0 GA declaration. The combined
-gate and short soak-harness rehearsal may pass before the mandatory 24-hour
-release-evidence soak has completed. Definition-of-done item 8 and the final
-blocker audit in item 10 remain open until that evidence is reviewed. If the
-soak or final audit is incomplete by the target date, the publishable artifact
-must remain a release candidate.
-
+The uninterrupted 24-hour release-evidence soak completed with 1,431 samples
+and zero integrity, readiness, or unplanned-worker failures. The final blocker
+audit found no open security, integrity, migration, data-loss, authorization,
+supported-platform, or release-evidence blocker. Main CI and the supported
+release matrix passed on the exact merged runtime candidate, and every
+post-soak correction was confined to CI or release metadata with runtime and
+operational Git objects unchanged.
 ## Product definition
 
 DeltaAegis v1.0 is a self-hosted, single-node network-state monitoring and investigation console. It accepts finalized evidence from authorized NetSniper sensors, preserves normalized history in SQLite, explains meaningful changes, and gives a local operator durable investigation, validation, backup, and reporting workflows.
@@ -88,19 +83,18 @@ DeltaAegis is the history, correlation, orchestration, and analyst-workflow laye
 
 ## Definition of done
 
-DeltaAegis may be tagged v1.0.0 only when all of the following are true:
+All ten definition-of-done items are complete for DeltaAegis v1.0.0:
 
-1. A clean install and every supported v0.42.x upgrade path pass on the supported platform matrix.
-2. Migration interruption, backup verification, restore rehearsal, and rollback tests pass without loss of protected history.
-3. `/api/v1` is documented, schema-validated, authenticated, authorized, and covered by compatibility tests.
-4. Sensor/scope identity and overlapping-CIDR fixtures pass without cross-scope evidence leakage.
-5. Detection results are deterministic, versioned, explainable, idempotent, and traceable to source evidence.
-6. CSRF, session, token, security-header, bind-boundary, path-confinement, and privilege-revocation tests pass.
-7. Health/readiness, structured diagnostics, clean install, service operation, uninstall, and low-resource tests pass.
-8. Performance targets are defined from the v0.43 baseline, met by the candidate, and confirmed by the required release-evidence soak.
-9. NetSniper and TrueAegis compatibility contracts are pinned and verified with fixtures.
-10. No open release-blocking security, integrity, migration, data-loss, or authorization defect remains.
-
+1. [x] A clean install and every supported v0.42.x upgrade path pass on the supported platform matrix.
+2. [x] Migration interruption, backup verification, restore rehearsal, and rollback tests pass without loss of protected history.
+3. [x] `/api/v1` is documented, schema-validated, authenticated, authorized, and covered by compatibility tests.
+4. [x] Sensor/scope identity and overlapping-CIDR fixtures pass without cross-scope evidence leakage.
+5. [x] Detection results are deterministic, versioned, explainable, idempotent, and traceable to source evidence.
+6. [x] CSRF, session, token, security-header, bind-boundary, path-confinement, and privilege-revocation tests pass.
+7. [x] Health/readiness, structured diagnostics, clean install, service operation, uninstall, and low-resource tests pass.
+8. [x] Performance targets are defined from the v0.43 baseline, met by the release, and confirmed by the required 24-hour release-evidence soak.
+9. [x] NetSniper and TrueAegis compatibility contracts are pinned and verified with fixtures.
+10. [x] No open release-blocking security, integrity, migration, data-loss, authorization, supported-platform, or release-evidence defect remains.
 ## Scope change control
 
 A proposed v1.0 addition must identify which promise or definition-of-done item it enables. Additions that do not advance one of those outcomes are deferred. Changes to this file require a documented architecture decision or an explicit maintainer-approved scope amendment.

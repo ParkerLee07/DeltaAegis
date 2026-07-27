@@ -1,15 +1,15 @@
 # DeltaAegis Supported Versions
 
-Status: v0.45.0 release plus v1.0 combined Stage 3–5 candidate
+Status: DeltaAegis v1.0.0 General Availability
 
-This matrix defines the environment DeltaAegis intends to validate on the path to v1.0. A listed platform is supported only when its operating-system vendor still supplies security maintenance and the installed components remain within the ranges below.
+This matrix defines the supported DeltaAegis v1.0.0 environment. A listed platform is supported only when its operating-system vendor still supplies security maintenance and the installed components remain within the ranges below.
 
 ## Runtime matrix
 
 | Component | Supported baseline | Policy |
 |---|---|---|
 | Operating system | Debian 12 and 13; Ubuntu 22.04 LTS and 24.04 LTS; Kali Linux rolling snapshots whose packages satisfy this matrix | 64-bit Linux only. Clean-install and upgrade gates must cover Debian and Ubuntu. Kali is validated at release time because it is rolling. |
-| Python | CPython 3.10 through 3.14 | The system/vendor Python is preferred. The lowest and highest supported minor versions must pass syntax and focused compatibility validation before v1.0. Python 3.10 remains supported on vendor-maintained distributions even after upstream security-only support ends. |
+| Python | CPython 3.10 through 3.14 | The system/vendor Python is preferred. The lowest and highest supported minor versions must pass syntax and focused compatibility validation for every supported release. Python 3.10 remains supported on vendor-maintained distributions even after upstream security-only support ends. |
 | SQLite | 3.37 or newer through Python's standard `sqlite3` module | Foreign keys must be enabled by DeltaAegis. WAL/sidecar handling, backup, integrity, and migration behavior are release-gated. No external SQLite server is required. |
 | NetSniper | v2.1.0 pinned at `0624a36550f6eb62ed0daa6862e5cc25a0d93236`; v2.0 evidence remains degraded-compatible | Finalized manifest-v3 bundles, compatibility aliases, checksums, profile evidence, bundle-readiness evidence, and the complete v2.1 capability contract are required for accepted telemetry. |
 | TrueAegis | Optional `>=1.2.0,<2.0.0`; witness commit `16b9e88b232aac568859ab8d68e2eaa26558c4e7` | The checkout must support fixed-argv validation and the pinned `trueaegis-validation-results-v1` JSON-array contract. Assigned result hosts must be contained by the selected sensor scope. |
@@ -52,11 +52,12 @@ This matrix defines the environment DeltaAegis intends to validate on the path t
 - Migration 0005 creates immutable detection and review ledgers. Result IDs
   include rule version, sensor scope, source evidence, and canonical event
   evidence so replay is stable and cross-scope collision is prevented.
-- The implementation gate includes low-resource operation and the tracked
-  performance targets. Production v1.0 support remains release-candidate-only
-  until a clean 24-hour soak receipt and final blocker audit are reviewed.
+- The release gate includes low-resource operation and the tracked
+  performance targets. Production v1.0.0 support is qualified by the
+  completed 24-hour soak, final blocker audit, clean-main CI, and supported
+  platform matrix.
 
-## Version policy before v1.0
+## Pre-v1.0 version policy (historical)
 
 - Minor `0.x` releases may add planned architecture and behavior while retaining the documented upgrade path from v0.42.x.
 - Patch releases contain compatible defect, security, documentation, installer, or validator corrections.
@@ -80,4 +81,4 @@ This matrix defines the environment DeltaAegis intends to validate on the path t
 
 ## Release evidence
 
-`docs/performance-baseline.md` records the exact interpreter, SQLite, platform, and Node.js versions used for the v0.43 measurements. Release publication must report which supported environments were actually exercised; this document does not claim that an untested environment was tested.
+`docs/performance-baseline.md` records the exact interpreter, SQLite, platform, and Node.js versions used for the v0.43 measurements. DeltaAegis v1.0.0 exercised Ubuntu 22.04 and 24.04, Debian 12 and 13, Kali rolling, and focused Python 3.10 and 3.14 validation in release-matrix run `30291887915` attempt 2. Main CI run `30290071519` independently passed the complete release gate. This document does not claim that an untested environment was tested.

@@ -8,6 +8,7 @@ on:
       - feature/v0.45-telemetry-trust
       - feature/v1.0-stages-1-2
       - feature/v1.0-stages-3-5
+      - release/v1.0-metadata-finalization
   pull_request:
   workflow_dispatch:
 
@@ -26,7 +27,7 @@ jobs:
           test -n "$VALIDATION_BRANCH"
           git checkout -B "$VALIDATION_BRANCH" HEAD
 
-      - name: Validate v1 Stage 1-2 Python syntax
+      - name: Validate v1 Python syntax
         run: |
           python3 -W error::SyntaxWarning -m py_compile \
             deltaaegis.py \
@@ -45,6 +46,7 @@ jobs:
             deltaaegis_core/web.py \
             tools/audit_v0_44_repository.py \
             tools/deltaaegis_troubleshooter.py \
+            tools/validate_v1_0_release_metadata.py \
             tools/validate_v1_stage1_migrations.py \
             tools/validate_v1_stage2_api_security.py \
             tools/validate_v1_stage1_2_architecture.py \
@@ -60,10 +62,10 @@ jobs:
             tools/validate_v1_0_stage1_2_gate.sh \
             tools/validate_v1_stage1_2_install_lifecycle.sh
 
-      - name: Run DeltaAegis v1.0 Stage 1-2 candidate gate
-        if: env.VALIDATION_BRANCH != 'main' && env.VALIDATION_BRANCH != 'feature/v1.0-stages-3-5'
+      - name: Run DeltaAegis v1.0 Stage 1-2 checkpoint gate
+        if: env.VALIDATION_BRANCH != 'main' && env.VALIDATION_BRANCH != 'feature/v1.0-stages-3-5' && env.VALIDATION_BRANCH != 'release/v1.0-metadata-finalization'
         run: ./tools/validate_v1_0_stage1_2_gate.sh
 
-      - name: Run DeltaAegis v1.0 Stage 3-5 candidate gate
-        if: env.VALIDATION_BRANCH == 'main' || env.VALIDATION_BRANCH == 'feature/v1.0-stages-3-5'
+      - name: Run DeltaAegis v1.0.0 release gate
+        if: env.VALIDATION_BRANCH == 'main' || env.VALIDATION_BRANCH == 'feature/v1.0-stages-3-5' || env.VALIDATION_BRANCH == 'release/v1.0-metadata-finalization'
         run: ./tools/validate_v1_0_stage3_5_gate.sh

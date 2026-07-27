@@ -12,6 +12,7 @@ python3 -W error::SyntaxWarning -m py_compile \
     deltaaegis_core/*.py \
     tools/measure_v1_stage5_performance.py \
     tools/run_v1_stage5_soak.py \
+    tools/validate_v1_0_release_metadata.py \
     tools/validate_v1_stage3_5.py
 
 bash -n \
@@ -71,5 +72,9 @@ PY
 rm -rf -- "$soak_root"
 
 echo
-echo "[PASS] DeltaAegis v1.0 combined Stage 3–5 implementation validation"
-echo "NOTICE: v1.0.0 GA still requires a completed 24-hour release-evidence soak."
+echo "[v1.0.0 General Availability release metadata]"
+python3 tools/validate_v1_0_release_metadata.py
+
+echo
+echo "[PASS] DeltaAegis v1.0.0 GA implementation and metadata validation"
+echo "NOTICE: the completed 24-hour soak and blocker review remain external release evidence."
