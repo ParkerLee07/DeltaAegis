@@ -10,7 +10,11 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ALLOWED_BRANCHES = {"release/v1.0-metadata-finalization", "main"}
+ALLOWED_BRANCHES = {
+    "feature/v1.0-stages-3-5",
+    "release/v1.0-metadata-finalization",
+    "main",
+}
 MERGE_COMMIT = "338f6ed44e9db330fd7f67f3242fd682fab11fab"
 MAIN_CI_RUN = "30290071519"
 MATRIX_RUN = "30291887915"
