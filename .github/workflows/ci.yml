@@ -7,20 +7,21 @@ on:
       - "maintenance/**"
       - feature/v0.45-telemetry-trust
       - feature/v1.0-stages-1-2
+      - feature/v1.0-stages-3-5
   pull_request:
   workflow_dispatch:
 
 jobs:
   python-validation:
     runs-on: ubuntu-latest
+    env:
+      VALIDATION_BRANCH: ${{ github.head_ref || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Attach validation branch context
-        env:
-          VALIDATION_BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
           test -n "$VALIDATION_BRANCH"
           git checkout -B "$VALIDATION_BRANCH" HEAD
@@ -60,4 +61,9 @@ jobs:
             tools/validate_v1_stage1_2_install_lifecycle.sh
 
       - name: Run DeltaAegis v1.0 Stage 1-2 candidate gate
+        if: env.VALIDATION_BRANCH != 'main' && env.VALIDATION_BRANCH != 'feature/v1.0-stages-3-5'
         run: ./tools/validate_v1_0_stage1_2_gate.sh
+
+      - name: Run DeltaAegis v1.0 Stage 3-5 candidate gate
+        if: env.VALIDATION_BRANCH == 'main' || env.VALIDATION_BRANCH == 'feature/v1.0-stages-3-5'
+        run: ./tools/validate_v1_0_stage3_5_gate.sh
