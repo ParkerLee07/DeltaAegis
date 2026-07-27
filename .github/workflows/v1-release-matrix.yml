@@ -46,7 +46,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p release-evidence
+          evidence_dir="${RUNNER_TEMP}/deltaaegis-v1-release-evidence/${{ matrix.os }}"
+          mkdir -p "$evidence_dir"
           {
             echo "job=ubuntu-platforms"
             echo "runner=${{ matrix.os }}"
@@ -60,21 +61,21 @@ jobs:
             echo "sqlite=$(python3 -c 'import sqlite3; print(sqlite3.sqlite_version)')"
             echo "git=$(git --version)"
             echo "node=$(node --version)"
-          } | tee "release-evidence/${{ matrix.os }}-environment.txt"
+          } | tee "$evidence_dir/${{ matrix.os }}-environment.txt"
 
       - name: Run complete v1.0 candidate gate
         shell: bash
         run: |
           set -euo pipefail
           ./tools/validate_v1_0_stage3_5_gate.sh 2>&1 \
-            | tee "release-evidence/${{ matrix.os }}-gate.log"
+            | tee "${RUNNER_TEMP}/deltaaegis-v1-release-evidence/${{ matrix.os }}/${{ matrix.os }}-gate.log"
 
       - name: Upload Ubuntu evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: v1-release-${{ matrix.os }}
-          path: release-evidence/
+          path: ${{ runner.temp }}/deltaaegis-v1-release-evidence/${{ matrix.os }}/
           if-no-files-found: error
           retention-days: 30
 
@@ -128,13 +129,17 @@ jobs:
 
       - name: Attach supported validation branch context
         shell: bash
-        run: git checkout -B feature/v1.0-stages-3-5 HEAD
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git checkout -B feature/v1.0-stages-3-5 HEAD
 
       - name: Record environment
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p release-evidence
+          evidence_dir="${RUNNER_TEMP}/deltaaegis-v1-release-evidence/${{ matrix.name }}"
+          mkdir -p "$evidence_dir"
           {
             echo "job=distribution-platforms"
             echo "distribution=${{ matrix.name }}"
@@ -149,21 +154,21 @@ jobs:
             echo "sqlite=$(python3 -c 'import sqlite3; print(sqlite3.sqlite_version)')"
             echo "git=$(git --version)"
             echo "node=$(node --version)"
-          } | tee "release-evidence/${{ matrix.name }}-environment.txt"
+          } | tee "$evidence_dir/${{ matrix.name }}-environment.txt"
 
       - name: Run complete v1.0 candidate gate
         shell: bash
         run: |
           set -euo pipefail
           ./tools/validate_v1_0_stage3_5_gate.sh 2>&1 \
-            | tee "release-evidence/${{ matrix.name }}-gate.log"
+            | tee "${RUNNER_TEMP}/deltaaegis-v1-release-evidence/${{ matrix.name }}/${{ matrix.name }}-gate.log"
 
       - name: Upload distribution evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: v1-release-${{ matrix.name }}
-          path: release-evidence/
+          path: ${{ runner.temp }}/deltaaegis-v1-release-evidence/${{ matrix.name }}/
           if-no-files-found: error
           retention-days: 30
 
@@ -201,7 +206,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p release-evidence
+          evidence_dir="${RUNNER_TEMP}/deltaaegis-v1-release-evidence/python-${{ matrix.python-version }}"
+          mkdir -p "$evidence_dir"
           {
             echo "job=python-compatibility"
             echo "requested_python=${{ matrix.python-version }}"
@@ -213,7 +219,7 @@ jobs:
             echo "git=$(git --version)"
             echo "node=$(node --version)"
           } | tee \
-            "release-evidence/python-${{ matrix.python-version }}-environment.txt"
+            "$evidence_dir/python-${{ matrix.python-version }}-environment.txt"
 
       - name: Validate Python and shell syntax
         shell: bash
@@ -243,14 +249,14 @@ jobs:
             python3 tools/validate_v1_stage1_2_architecture.py
             bash tools/validate_v1_0_release_blocker_hotfix_all.sh
           } 2>&1 | tee \
-            "release-evidence/python-${{ matrix.python-version }}-compatibility.log"
+            "${RUNNER_TEMP}/deltaaegis-v1-release-evidence/python-${{ matrix.python-version }}/python-${{ matrix.python-version }}-compatibility.log"
 
       - name: Upload Python evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: v1-release-python-${{ matrix.python-version }}
-          path: release-evidence/
+          path: ${{ runner.temp }}/deltaaegis-v1-release-evidence/python-${{ matrix.python-version }}/
           if-no-files-found: error
           retention-days: 30
 
@@ -267,12 +273,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p release-evidence
+          evidence_dir="${RUNNER_TEMP}/deltaaegis-v1-release-evidence/summary"
+          mkdir -p "$evidence_dir"
           {
             echo "ubuntu-platforms=${{ needs.ubuntu-platforms.result }}"
             echo "distribution-platforms=${{ needs.distribution-platforms.result }}"
             echo "python-compatibility=${{ needs.python-compatibility.result }}"
-          } | tee release-evidence/release-matrix-summary.txt
+          } | tee "$evidence_dir/release-matrix-summary.txt"
 
       - name: Require every matrix job to pass
         shell: bash
@@ -288,6 +295,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: v1-release-matrix-summary
-          path: release-evidence/
+          path: ${{ runner.temp }}/deltaaegis-v1-release-evidence/summary/
           if-no-files-found: error
           retention-days: 30
