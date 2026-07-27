@@ -1,4 +1,17 @@
-## DeltaAegis v1.0.0 — combined Stage 3–5 candidate (unreleased)
+## DeltaAegis v1.0.0 — General Availability — 2026-07-27
+- Completed the uninterrupted 24-hour release-evidence soak with 1,431
+  samples and zero integrity, readiness, or unplanned-worker failures.
+- Completed the focused final blocker audit with no open security,
+  integrity, migration, data-loss, authorization, supported-platform, or
+  release-evidence blocker.
+- Merged the validated runtime candidate as two-parent main commit
+  `338f6ed44e9db330fd7f67f3242fd682fab11fab`, whose tree exactly matched the
+  validated candidate tree.
+- Passed main CI run `30290071519` and supported release-matrix run
+  `30291887915` attempt 2 across Ubuntu 22.04/24.04, Debian 12/13, Kali
+  rolling, and focused Python 3.10/3.14 compatibility.
+- Finalized GA documentation and release-metadata enforcement without any
+  runtime, schema, API, detection, database, or integration change.
 
 - Recognized the exact audited v0.45 historical additive-runtime schema
   fingerprint produced by long-lived databases, without weakening rejection of
@@ -25,9 +38,9 @@
   replay identity, and exact NetSniper v2.1.0 plus TrueAegis `>=1.2.0,<2.0.0`
   integration contracts.
 - Added v0.43-derived pass/fail performance targets, synthetic measurement,
-  low-resource and failure-injection checks, and a bounded soak harness that
-  distinguishes rehearsal evidence from the mandatory 24-hour GA receipt.
-- Added the combined Stage 3–5 validator, candidate gate, fixtures,
+  low-resource and failure-injection checks, and a bounded soak harness alongside the completed mandatory 24-hour GA
+  receipt.
+- Added the combined Stage 3–5 validator, release gate, fixtures,
   implementation guide, operational checklist, and install lifecycle coverage.
 - Preserved the complete Stage 1–2 migration, API, security, recovery,
   predecessor, and v0.45 telemetry-trust validation floor described below.
@@ -53,7 +66,7 @@
   and Origin validation, an exact trusted-origin secure-cookie proxy mode, and restrictive
   headers across JSON, HTML, text, redirect, success, and error responses.
 - Added dedicated Stage 1 database and Stage 2 real-HTTP validators plus the
-  combined Stage 1–2 candidate gate and checklist.
+  combined Stage 1–2 checkpoint gate and checklist.
 - Routed first-admin installation through the public migration connection so a
   fresh install cannot create an unledgered partial database.
 - Promoted the four additive v1/v0.45 core modules to required installation
@@ -61,8 +74,8 @@
   evidence-preservation coverage.
 - Added explicit v0.45 Quality Center/private-route transition gates instead
   of weakening frozen partial-schema or minimal-module fixtures.
-- This candidate does not declare v1.0 GA; the 24-hour release-evidence soak
-  and final blocker audit remain mandatory.
+- Confirmed every v1.0 definition-of-done item, including the 24-hour
+  release-evidence soak, supported-platform matrix, and final blocker audit.
 
 ## DeltaAegis v0.45.0 — Telemetry Trust
 

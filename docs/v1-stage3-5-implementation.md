@@ -1,6 +1,6 @@
 # DeltaAegis v1 combined Stage 3–5 implementation
 
-Status: implementation candidate; the 24-hour GA soak is not yet claimed
+Status: delivered in DeltaAegis v1.0.0 General Availability
 
 The release soak must start from a database copy whose origin passes Stage 1.
 Long-lived v0.45 databases may carry the exact audited historical additive
@@ -77,20 +77,26 @@ The exact integration contract is tracked at
 
 ## Validation
 
-Run the complete implementation gate from a clean Stage 3–5 branch:
+Run the complete v1.0.0 release gate from a clean `main` or approved release
+branch:
 
 ```bash
 ./tools/validate_v1_0_stage3_5_gate.sh
 ```
 
 The gate preserves the complete Stage 1–2 and v0.45 predecessor floor, then
-tests identity conflict/ordering/overlap, per-sensor jobs, TrueAegis scope
-containment, immutable detection replay and reviews, new stable endpoints,
-readiness failure injection, bounded diagnostics, low-resource operation,
-install lifecycle, and v0.43-derived performance thresholds.
+tests identity conflict, ordering, and overlap; per-sensor jobs; TrueAegis scope
+containment; immutable detection replay and reviews; stable endpoints;
+readiness failure injection; bounded diagnostics; low-resource operation;
+install lifecycle; v0.43-derived performance thresholds; deterministic audit;
+and finalized release metadata.
 
-The short soak run inside the gate validates the harness only. It is not GA
-evidence. Collect the release receipt separately:
+The short soak inside the gate validates the harness only. The independent
+release-evidence soak completed on 2026-07-24 after 24 uninterrupted hours and
+1,431 samples, with zero integrity, readiness, or unplanned-worker failures and
+`release_eligible: true`.
+
+For future maintenance or release qualification, the harness remains available:
 
 ```bash
 python3 tools/run_v1_stage5_soak.py \

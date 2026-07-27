@@ -14,7 +14,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA_VERSION = "deltaaegis-repository-audit-v3"
+SCHEMA_VERSION = "deltaaegis-repository-audit-v4"
 REPORT_PATH = Path("docs/repository-audit.md")
 CORE_DIR = Path("deltaaegis_core")
 EXCLUDED_PARTS = {
@@ -255,7 +255,7 @@ def findings(inventory: dict[str, Any]) -> list[dict[str, str]]:
         {
             "id": "DA044-004", "severity": "INFO", "area": "HTTP/API contract",
             "evidence": f"Stages 2–5 expose {len(inventory['stable_api_routes'])} stable /api/v1 route literals while {len(inventory['private_api_routes'])} pre-existing route literals remain private compatibility interfaces.",
-            "disposition": "Delivered through the Stage 3–5 candidate; keep runtime, tracked OpenAPI, authorization, HTTP, and private-route transition inventories release-gated.",
+            "disposition": "Delivered in v1.0.0 GA; keep runtime, tracked OpenAPI, authorization, HTTP, and private-route transition inventories release-gated.",
         },
         {
             "id": "DA044-005", "severity": "LOW", "area": "validation estate",
@@ -285,14 +285,14 @@ def build_audit(root: Path) -> dict[str, Any]:
     inventory = source_inventory(root, files)
     return {
         "schema_version": SCHEMA_VERSION,
-        "scope": "DeltaAegis v1.0 combined Stage 3–5 candidate",
+        "scope": "DeltaAegis v1.0.0 General Availability release",
         "inventory": inventory,
         "findings": findings(inventory),
         "constraints": [
             "The audit is read-only except when explicitly writing its deterministic Markdown report.",
-            "Counts use Git cached and non-ignored untracked candidate files and exclude runtime data roots and the generated report.",
-            "The v1 candidate preserves Stage 1–2 migrations, recovery, stable API, and security while adding sensor/scope isolation, immutable detection, operational readiness, performance thresholds, and pinned integrations.",
-            "This audit is candidate evidence and does not declare v1.0 GA; the mandatory 24-hour soak and final blocker review still apply.",
+            "Counts use Git cached and non-ignored untracked release files and exclude runtime data roots and the generated report.",
+            "DeltaAegis v1.0.0 preserves Stage 1–2 migrations, recovery, stable API, and security while delivering sensor/scope isolation, immutable detection, operational readiness, performance thresholds, and pinned integrations.",
+            "This audit describes the v1.0.0 GA release tree; the completed 24-hour soak, final blocker review, clean-main CI, and supported matrix remain separate retained evidence.",
             "Historical validator retirement is allowed only when exact prior bytes remain verified at an immutable release tag, current behavior has replacement-contract evidence, and the retained execution graph is complete.",
         ],
     }
@@ -305,9 +305,9 @@ def markdown_list(values: list[str]) -> str:
 def render_markdown(audit: dict[str, Any]) -> str:
     inv = audit["inventory"]
     lines = [
-        "# DeltaAegis v1.0 Stage 3–5 Repository Audit", "",
+        "# DeltaAegis v1.0.0 Repository Audit", "",
         f"Schema: `{audit['schema_version']}`", "",
-        "This deterministic inventory describes the combined v1.0 Stage 3–5 candidate, including the preserved Stage 1–2 foundation, based on released v0.45.0. Regenerate it with `python3 tools/audit_v0_44_repository.py --write`.", "",
+        "This deterministic inventory describes the DeltaAegis v1.0.0 GA release tree, including the preserved Stage 1–2 foundation and the completed Stage 3–5 implementation on released v0.45.0. Regenerate it with `python3 tools/audit_v0_44_repository.py --write`.", "",
         "## Inventory summary", "", "| Measure | Count |", "|---|---:|",
         f"| Repository files in audit scope | {inv['file_count']} |",
         f"| `deltaaegis.py` lines | {inv['source_lines']} |",
@@ -380,10 +380,10 @@ def render_markdown(audit: dict[str, Any]) -> str:
         "", "## v1 delivery map", "", "| Stage | Status | Owned work |", "|---|---|---|",
         "| Stage 1 | Preserved and release-gated | Forward migrations, exact supported origins, verified backup, interruption recovery, and restore rehearsal |",
         "| Stage 2 | Preserved and release-gated | `/api/v1`, OpenAPI 3.1, scoped tokens, CSRF, security headers, request bounds, and durable idempotency |",
-        "| Stage 3 | Implemented and candidate-gated | Sensor/scope identity, evidence provenance, replay protection, per-sensor concurrency, and overlapping CIDRs |",
-        "| Stage 4 | Implemented and candidate-gated | Versioned deterministic immutable detections, explanations, replay, and separate reviews |",
-        "| Stage 5 | Implementation gate passed; external release evidence tracked separately | Health/readiness, diagnostics, low-resource and performance evidence, pinned integrations, and soak harness |",
-        "| Final GA gate | External-duration evidence and final blocker review are evaluated separately | 24-hour release-evidence soak and final blocker audit |",
+        "| Stage 3 | Delivered and release-gated | Sensor/scope identity, evidence provenance, replay protection, per-sensor concurrency, and overlapping CIDRs |",
+        "| Stage 4 | Delivered and release-gated | Versioned deterministic immutable detections, explanations, replay, and separate reviews |",
+        "| Stage 5 | Delivered and release-gated | Health/readiness, diagnostics, low-resource and performance evidence, pinned integrations, and soak harness |",
+        "| Final GA gate | Completed | 24-hour release-evidence soak, final blocker audit, clean-main CI, and supported release matrix |",
         "", "## Audit constraints", "",
     ])
     lines.extend(f"- {item}" for item in audit["constraints"])
