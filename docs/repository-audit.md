@@ -8,7 +8,7 @@ This deterministic inventory describes the combined v1.0 Stage 3–5 candidate, 
 
 | Measure | Count |
 |---|---:|
-| Repository files in audit scope | 194 |
+| Repository files in audit scope | 195 |
 | `deltaaegis.py` lines | 36053 |
 | Root top-level functions | 704 |
 | Root top-level classes | 6 |
