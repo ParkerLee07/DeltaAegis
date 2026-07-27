@@ -1,0 +1,21 @@
+{
+  "events": [
+    {
+      "current_value": {"port": 443, "protocol": "tcp"},
+      "event_type": "MONITORED_SERVICE_OPENED",
+      "previous_value": null,
+      "severity": "HIGH",
+      "subject_key": "mac:02:00:00:00:00:01",
+      "summary": "TCP 443 opened on the fixture asset."
+    },
+    {
+      "current_value": {"finding_id": "fixture-risk", "port": 443},
+      "event_type": "NETSNIPER_FINDING_ADDED",
+      "previous_value": null,
+      "severity": "MEDIUM",
+      "subject_key": "mac:02:00:00:00:00:01",
+      "summary": "A fixture finding was added."
+    }
+  ],
+  "schema_version": "deltaaegis-v1-detection-fixtures-v1"
+}

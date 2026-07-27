@@ -75,5 +75,5 @@ git worktree remove --force "$temporary"
 
 - These are descriptive v0.43 baselines, not release thresholds.
 - The fixture is synthetic and is created under a temporary directory.
-- Performance targets are set during v0.49 after module, migration, API, and identity work stabilizes.
+- The later v1 Stage 3–5 candidate derives explicit pass/fail targets from this frozen baseline in `docs/v1-performance-targets.json`; this historical artifact itself remains unchanged evidence.
 - Compare future runs only when fixture size, environment, and benchmark schema match.

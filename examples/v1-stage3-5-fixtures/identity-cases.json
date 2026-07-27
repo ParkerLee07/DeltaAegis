@@ -1,0 +1,42 @@
+{
+  "bundle_digest_a": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "bundle_digest_b": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "cases": [
+    {
+      "expected": "isolated",
+      "name": "overlapping-cidr",
+      "network_scope": "192.168.77.0/24",
+      "sensor_ids": ["sensor-fixture-alpha", "sensor-fixture-bravo"],
+      "source_scan_id": "netsniper-v2.1-overlap-001"
+    },
+    {
+      "expected": "idempotent",
+      "name": "duplicate-evidence",
+      "sensor_id": "sensor-fixture-alpha",
+      "source_scan_id": "netsniper-v2.1-duplicate-001"
+    },
+    {
+      "expected": "rejected",
+      "name": "conflicting-evidence",
+      "sensor_id": "sensor-fixture-alpha",
+      "source_scan_id": "netsniper-v2.1-conflict-001"
+    },
+    {
+      "expected": "rejected",
+      "name": "unknown-sensor",
+      "sensor_id": "sensor-fixture-unknown",
+      "source_scan_id": "netsniper-v2.1-unknown-001"
+    },
+    {
+      "expected": "current-state-unchanged",
+      "name": "out-of-order-evidence",
+      "newer_observed_at": "2026-07-21T18:00:00+00:00",
+      "older_observed_at": "2026-07-21T17:00:00+00:00",
+      "sensor_id": "sensor-fixture-alpha"
+    }
+  ],
+  "capability_schema": "netsniper-capability-manifest-v1",
+  "classifier_version": "netsniper-classifier-v2",
+  "host_classification_schema": "netsniper-host-classification-v2",
+  "schema_version": "deltaaegis-v1-identity-fixtures-v1"
+}

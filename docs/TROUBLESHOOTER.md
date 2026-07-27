@@ -21,8 +21,10 @@ python3 tools/deltaaegis_troubleshooter.py --menu
 ```
 
 Noninteractive execution without arguments runs the highest versioned release
-gate present under `tools/`. In the v0.45.0 repository, that is
-`tools/validate_v0_45_release_gate.sh`.
+or explicitly named candidate gate present under `tools/`. In the combined v1
+Stage 3–5 candidate, that is `tools/validate_v1_0_stage3_5_gate.sh`; the name
+intentionally separates implementation validation from the mandatory 24-hour
+GA soak receipt.
 
 The troubleshooter inventories the retained validator inventory in the selected
 checkout. Validators retired by v0.44.1 remain available byte-for-byte at the
@@ -34,9 +36,9 @@ current diagnostics.
 
 1. **Quick health check** checks Git state, required commands, related
    processes, validator syntax and references, and the effective database.
-2. **Current release diagnostics** runs the current release gate in an isolated
-   temporary checkout named `main`.
-3. **Current staged diagnostics** runs the current release's `stage*_all.sh`
+2. **Current release/candidate diagnostics** runs the current gate in an
+   isolated temporary checkout named `main`.
+3. **Current staged diagnostics** runs the current version's `stage*_all.sh`
    checkpoint wrappers.
 4. **Specific validator** searches the repository inventory and runs one
    selected validator.

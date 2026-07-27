@@ -8,12 +8,22 @@ runs.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import sqlite3
 from typing import Any
 
 
 REMOVAL_THRESHOLD = 3
+
+
+def _numeric_ip_sort_key(value: Any) -> tuple[Any, ...]:
+    raw = str(value or "").strip()
+    try:
+        parsed = ipaddress.ip_address(raw)
+        return (0, parsed.version, int(parsed))
+    except ValueError:
+        return (1, 0, raw.casefold())
 
 
 def _execute_schema_sql(connection: sqlite3.Connection, script: str) -> None:
@@ -1100,6 +1110,7 @@ def current_assets(
 ) -> list[dict[str, Any]]:
     ensure_ready(connection)
     ensure_schema(connection)
+    requested_limit = max(1, min(int(limit), 10000))
     params: list[Any] = []
     where = ""
     if scope:
@@ -1108,10 +1119,18 @@ def current_assets(
     rows = connection.execute(
         "SELECT * FROM telemetry_current_assets"
         + where
-        + " ORDER BY network_scope, ip_address, asset_key LIMIT ?",
-        (*params, max(1, min(int(limit), 10000))),
+        + " ORDER BY network_scope, asset_key LIMIT ?",
+        (*params, 10000),
     ).fetchall()
-    return [dict(row) for row in rows]
+    output = [dict(row) for row in rows]
+    output.sort(
+        key=lambda item: (
+            str(item.get("network_scope") or ""),
+            _numeric_ip_sort_key(item.get("ip_address")),
+            str(item.get("asset_key") or ""),
+        )
+    )
+    return output[:requested_limit]
 
 
 def merge_asset_rows(
@@ -1203,7 +1222,9 @@ def merge_asset_rows(
         key=lambda item: (
             str(item.get("network_scope") or ""),
             str(item.get("state") or ""),
-            str(item.get("current_ip") or item.get("ip_address") or ""),
+            _numeric_ip_sort_key(
+                item.get("current_ip") or item.get("ip_address")
+            ),
             str(item.get("asset_key") or ""),
         )
     )

@@ -1,0 +1,300 @@
+name: DeltaAegis v1.0 Release Matrix
+
+on:
+  push:
+    branches:
+      - feature/v1.0-stages-3-5
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deltaaegis-v1-release-matrix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ubuntu-platforms:
+    name: Full gate / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - ubuntu-24.04
+    steps:
+      - name: Check out complete repository history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up supported Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Attach supported validation branch context
+        shell: bash
+        run: git checkout -B feature/v1.0-stages-3-5 HEAD
+
+      - name: Record environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/deltaaegis-v1-release-evidence/${{ matrix.os }}"
+          mkdir -p "$evidence_dir"
+          {
+            echo "job=ubuntu-platforms"
+            echo "runner=${{ matrix.os }}"
+            echo "commit=$(git rev-parse HEAD)"
+            echo "tree=$(git rev-parse HEAD^{tree})"
+            . /etc/os-release
+            echo "os=${PRETTY_NAME}"
+            echo "architecture=$(uname -m)"
+            echo "kernel=$(uname -r)"
+            echo "python=$(python3 --version 2>&1)"
+            echo "sqlite=$(python3 -c 'import sqlite3; print(sqlite3.sqlite_version)')"
+            echo "git=$(git --version)"
+            echo "node=$(node --version)"
+          } | tee "$evidence_dir/${{ matrix.os }}-environment.txt"
+
+      - name: Run complete v1.0 candidate gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/validate_v1_0_stage3_5_gate.sh 2>&1 \
+            | tee "${RUNNER_TEMP}/deltaaegis-v1-release-evidence/${{ matrix.os }}/${{ matrix.os }}-gate.log"
+
+      - name: Upload Ubuntu evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v1-release-${{ matrix.os }}
+          path: ${{ runner.temp }}/deltaaegis-v1-release-evidence/${{ matrix.os }}/
+          if-no-files-found: error
+          retention-days: 30
+
+  distribution-platforms:
+    name: Full gate / ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: debian-12
+            image: debian:12-slim
+          - name: debian-13
+            image: debian:13-slim
+          - name: kali-rolling
+            image: kalilinux/kali-rolling
+    steps:
+      - name: Install validation dependencies
+        shell: sh
+        run: |
+          set -eu
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bash \
+            ca-certificates \
+            coreutils \
+            findutils \
+            gawk \
+            git \
+            grep \
+            procps \
+            python3 \
+            python3-venv \
+            sed \
+            tar \
+            util-linux \
+            xz-utils
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Check out complete repository history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up supported Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Attach supported validation branch context
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git checkout -B feature/v1.0-stages-3-5 HEAD
+
+      - name: Record environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/deltaaegis-v1-release-evidence/${{ matrix.name }}"
+          mkdir -p "$evidence_dir"
+          {
+            echo "job=distribution-platforms"
+            echo "distribution=${{ matrix.name }}"
+            echo "image=${{ matrix.image }}"
+            echo "commit=$(git rev-parse HEAD)"
+            echo "tree=$(git rev-parse HEAD^{tree})"
+            . /etc/os-release
+            echo "os=${PRETTY_NAME}"
+            echo "architecture=$(uname -m)"
+            echo "kernel=$(uname -r)"
+            echo "python=$(python3 --version 2>&1)"
+            echo "sqlite=$(python3 -c 'import sqlite3; print(sqlite3.sqlite_version)')"
+            echo "git=$(git --version)"
+            echo "node=$(node --version)"
+          } | tee "$evidence_dir/${{ matrix.name }}-environment.txt"
+
+      - name: Run complete v1.0 candidate gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/validate_v1_0_stage3_5_gate.sh 2>&1 \
+            | tee "${RUNNER_TEMP}/deltaaegis-v1-release-evidence/${{ matrix.name }}/${{ matrix.name }}-gate.log"
+
+      - name: Upload distribution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v1-release-${{ matrix.name }}
+          path: ${{ runner.temp }}/deltaaegis-v1-release-evidence/${{ matrix.name }}/
+          if-no-files-found: error
+          retention-days: 30
+
+  python-compatibility:
+    name: Focused compatibility / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.10"
+          - "3.14"
+    steps:
+      - name: Check out complete repository history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set up supported Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Attach supported validation branch context
+        shell: bash
+        run: git checkout -B feature/v1.0-stages-3-5 HEAD
+
+      - name: Record environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/deltaaegis-v1-release-evidence/python-${{ matrix.python-version }}"
+          mkdir -p "$evidence_dir"
+          {
+            echo "job=python-compatibility"
+            echo "requested_python=${{ matrix.python-version }}"
+            echo "commit=$(git rev-parse HEAD)"
+            echo "tree=$(git rev-parse HEAD^{tree})"
+            echo "python=$(python3 --version 2>&1)"
+            echo "python_executable=$(python3 -c 'import sys; print(sys.executable)')"
+            echo "sqlite=$(python3 -c 'import sqlite3; print(sqlite3.sqlite_version)')"
+            echo "git=$(git --version)"
+            echo "node=$(node --version)"
+          } | tee \
+            "$evidence_dir/python-${{ matrix.python-version }}-environment.txt"
+
+      - name: Validate Python and shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -W error::SyntaxWarning -m py_compile \
+            deltaaegis.py \
+            deltaaegis_core/*.py \
+            tools/*.py
+          bash -n \
+            install.sh \
+            uninstall.sh \
+            tools/validate_v1_0_release_blocker_hotfix_all.sh \
+            tools/validate_v1_0_stage1_2_all.sh \
+            tools/validate_v1_0_stage1_2_gate.sh \
+            tools/validate_v1_0_stage3_5_all.sh \
+            tools/validate_v1_0_stage3_5_gate.sh \
+            tools/validate_v1_stage1_2_install_lifecycle.sh
+
+      - name: Run focused migration and compatibility validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            python3 tools/validate_v1_stage1_migrations.py
+            python3 tools/validate_v1_stage2_api_security.py
+            python3 tools/validate_v1_stage1_2_architecture.py
+            bash tools/validate_v1_0_release_blocker_hotfix_all.sh
+          } 2>&1 | tee \
+            "${RUNNER_TEMP}/deltaaegis-v1-release-evidence/python-${{ matrix.python-version }}/python-${{ matrix.python-version }}-compatibility.log"
+
+      - name: Upload Python evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v1-release-python-${{ matrix.python-version }}
+          path: ${{ runner.temp }}/deltaaegis-v1-release-evidence/python-${{ matrix.python-version }}/
+          if-no-files-found: error
+          retention-days: 30
+
+  release-matrix-summary:
+    name: Release matrix summary
+    if: always()
+    needs:
+      - ubuntu-platforms
+      - distribution-platforms
+      - python-compatibility
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Write matrix summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/deltaaegis-v1-release-evidence/summary"
+          mkdir -p "$evidence_dir"
+          {
+            echo "ubuntu-platforms=${{ needs.ubuntu-platforms.result }}"
+            echo "distribution-platforms=${{ needs.distribution-platforms.result }}"
+            echo "python-compatibility=${{ needs.python-compatibility.result }}"
+          } | tee "$evidence_dir/release-matrix-summary.txt"
+
+      - name: Require every matrix job to pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${{ needs.ubuntu-platforms.result }}" == "success" ]]
+          [[ "${{ needs.distribution-platforms.result }}" == "success" ]]
+          [[ "${{ needs.python-compatibility.result }}" == "success" ]]
+          echo "PASS: DeltaAegis v1.0 supported release matrix"
+
+      - name: Upload matrix summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v1-release-matrix-summary
+          path: ${{ runner.temp }}/deltaaegis-v1-release-evidence/summary/
+          if-no-files-found: error
+          retention-days: 30

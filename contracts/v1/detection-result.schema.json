@@ -1,0 +1,35 @@
+{
+  "$id": "https://github.com/ParkerLee07/DeltaAegis/contracts/v1/detection-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "disposition": {"enum": ["OPEN", "REVIEWED", "SUPPRESSED"], "type": "string"},
+    "evidence": {"type": "object"},
+    "evidence_digest": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "explanation": {"type": "object"},
+    "result_id": {"pattern": "^detection-[0-9a-f]{64}$", "type": "string"},
+    "result_schema_version": {"const": "deltaaegis-detection-result-v1"},
+    "rule_id": {"pattern": "^DA-RULE-[0-9]{4}$", "type": "string"},
+    "rule_version": {"const": "1.0.0"},
+    "scope_id": {"pattern": "^scope-", "type": "string"},
+    "sensor_id": {"pattern": "^sensor-", "type": "string"},
+    "source_bundle_digest": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "source_scan_id": {"type": "string"}
+  },
+  "required": [
+    "result_id",
+    "result_schema_version",
+    "rule_id",
+    "rule_version",
+    "sensor_id",
+    "scope_id",
+    "source_scan_id",
+    "source_bundle_digest",
+    "evidence_digest",
+    "evidence",
+    "explanation",
+    "disposition"
+  ],
+  "title": "DeltaAegis v1 detection result",
+  "type": "object"
+}

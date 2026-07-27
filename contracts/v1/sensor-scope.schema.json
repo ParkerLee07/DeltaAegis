@@ -1,0 +1,14 @@
+{
+  "$id": "https://github.com/ParkerLee07/DeltaAegis/contracts/v1/sensor-scope.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "network_scope": {"type": "string"},
+    "scope_id": {"pattern": "^scope-[a-z0-9][a-z0-9._-]{2,63}$", "type": "string"},
+    "sensor_id": {"pattern": "^sensor-[a-z0-9][a-z0-9._-]{2,63}$", "type": "string"},
+    "status": {"enum": ["ACTIVE", "REVOKED", "UNASSIGNED"], "type": "string"}
+  },
+  "required": ["scope_id", "sensor_id", "network_scope", "status"],
+  "title": "DeltaAegis v1 sensor scope",
+  "type": "object"
+}

@@ -1,3 +1,69 @@
+## DeltaAegis v1.0.0 — combined Stage 3–5 candidate (unreleased)
+
+- Recognized the exact audited v0.45 historical additive-runtime schema
+  fingerprint produced by long-lived databases, without weakening rejection of
+  unknown tables, definitions, indexes, or constraints. Added migration tests
+  proving protected-history preservation, verified backup and restore,
+  deterministic lineage output, fresh-v1 schema-contract equivalence,
+  idempotent reopen, and fail-closed rejection of real historical-schema drift.
+- Added migration `0004-v1-sensor-scope-identity` with explicit legacy sensor
+  attribution, deterministic sensor-bound scope IDs, source/internal scan
+  identity, evidence receipts, scoped current-state tables, and logical-site
+  scope memberships.
+- Added fail-closed unknown/conflicting evidence handling, deterministic replay,
+  monotonic out-of-order protection, and isolated overlapping-CIDR fixtures.
+- Changed the active-scan invariant from one global scan to one active scan per
+  enrolled sensor while retaining transactional reservation and durable job,
+  schedule, validation, and source-evidence provenance.
+- Added migration `0005-v1-deterministic-detection` with versioned rules,
+  content-derived result IDs, immutable evidence/explanation records, and a
+  separate immutable review/suppression ledger.
+- Added stable sensor, scope, scoped-asset, detection, public liveness,
+  authenticated readiness, and authenticated diagnostics API behavior with
+  the existing scoped-token, CSRF, request, envelope, and idempotency controls.
+- Added TrueAegis host-to-scope containment, sensor/scope-qualified validation
+  replay identity, and exact NetSniper v2.1.0 plus TrueAegis `>=1.2.0,<2.0.0`
+  integration contracts.
+- Added v0.43-derived pass/fail performance targets, synthetic measurement,
+  low-resource and failure-injection checks, and a bounded soak harness that
+  distinguishes rehearsal evidence from the mandatory 24-hour GA receipt.
+- Added the combined Stage 3–5 validator, candidate gate, fixtures,
+  implementation guide, operational checklist, and install lifecycle coverage.
+- Preserved the complete Stage 1–2 migration, API, security, recovery,
+  predecessor, and v0.45 telemetry-trust validation floor described below.
+
+- Added an ordered `schema_migrations` ledger with implementation-bound
+  checksums, origin evidence, schema fingerprints, and migration outcomes.
+- Added exact upgrade gates for immutable v0.42.0, v0.42.1, and v0.42.2
+  sources plus clean and telemetry-expanded databases built from the released
+  v0.45.0 tree; byte-identical base schemas are recorded as one honest shared
+  origin rather than guessed patch identities.
+- Added verified pre-migration backups, protected-history fingerprints,
+  per-migration transactions, interruption recovery, concurrent-start
+  serialization, fresh/upgrade convergence, and restore-rehearsal coverage.
+- Added the initial stable `/api/v1` surface and a deterministic OpenAPI 3.1
+  artifact while retaining unversioned `/api/*` as private compatibility
+  interfaces.
+- Added consistent success/error envelopes, request IDs, bounded pagination,
+  strict JSON body limits, and durable atomic mutation idempotency.
+- Added 30-day-default/365-day-maximum scoped API tokens, current-role caps,
+  bearer-only stable API authentication, and fail-closed demotion, revocation,
+  expiration, and malformed-scope behavior.
+- Added server-backed double-submit CSRF, read-only GET logout behavior, Host
+  and Origin validation, an exact trusted-origin secure-cookie proxy mode, and restrictive
+  headers across JSON, HTML, text, redirect, success, and error responses.
+- Added dedicated Stage 1 database and Stage 2 real-HTTP validators plus the
+  combined Stage 1–2 candidate gate and checklist.
+- Routed first-admin installation through the public migration connection so a
+  fresh install cannot create an unledgered partial database.
+- Promoted the four additive v1/v0.45 core modules to required installation
+  components and added disposable install, reinstall, uninstall, purge, and
+  evidence-preservation coverage.
+- Added explicit v0.45 Quality Center/private-route transition gates instead
+  of weakening frozen partial-schema or minimal-module fixtures.
+- This candidate does not declare v1.0 GA; the 24-hour release-evidence soak
+  and final blocker audit remain mandatory.
+
 ## DeltaAegis v0.45.0 — Telemetry Trust
 
 - Hardened retained telemetry evidence against path traversal, implicit SQLite commits, partial override persistence, and failed-ingest evidence leakage.

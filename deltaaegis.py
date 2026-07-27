@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Parker Lee
-"""DeltaAegis v0.45.0: Telemetry Trust.
+"""DeltaAegis v1.0 Stage 3-5 combined upgrade candidate.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -33,6 +33,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 import html
+import inspect
 import datetime as _datetime
 import tempfile
 
@@ -49,6 +50,10 @@ from deltaaegis_core import sites as _sites
 from deltaaegis_core import web as _web
 from deltaaegis_core import jobs as _jobs
 from deltaaegis_core import reports as _reports
+from deltaaegis_core import migrations as _migrations
+from deltaaegis_core import identity as _identity
+from deltaaegis_core import detection as _detection
+from deltaaegis_core import operations as _operations
 try:
     from deltaaegis_core import telemetry_quality as _telemetry_quality
     from deltaaegis_core import current_state as _current_state
@@ -86,7 +91,7 @@ def _report_context() -> _reports.ReportContext:
         operator_triage_summary=operator_triage_summary,
     )
 
-DELTAAEGIS_VERSION = "0.45.0"
+DELTAAEGIS_VERSION = "1.0.0"
 DELTAAEGIS_SECURITY_HOTFIX = "2026-07-13.2"
 DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION = "deltaaegis-backup-manifest-v1"
 DELTAAEGIS_V0_14_COMPATIBILITY_NOTE = "DeltaAegis v0.14.0 — NetSniper Scan Orchestration compatibility retained."
@@ -187,7 +192,10 @@ ACCESS_LOGIN_WINDOW_SECONDS = _auth.ACCESS_LOGIN_WINDOW_SECONDS
 ACCESS_LOGIN_MAX_TRACKED_KEYS = _auth.ACCESS_LOGIN_MAX_TRACKED_KEYS
 ACCESS_LOGIN_DUMMY_PASSWORD_HASH = _auth.ACCESS_LOGIN_DUMMY_PASSWORD_HASH
 ACCESS_API_TOKEN_PREFIX = _auth.ACCESS_API_TOKEN_PREFIX
+ACCESS_API_TOKEN_DEFAULT_TTL_SECONDS = _auth.ACCESS_API_TOKEN_DEFAULT_TTL_SECONDS
+ACCESS_API_TOKEN_MAX_TTL_SECONDS = _auth.ACCESS_API_TOKEN_MAX_TTL_SECONDS
 ACCESS_SESSION_COOKIE_NAME = _auth.ACCESS_SESSION_COOKIE_NAME
+ACCESS_CSRF_COOKIE_NAME = _auth.ACCESS_CSRF_COOKIE_NAME
 ACCESS_SESSION_TTL_SECONDS = _auth.ACCESS_SESSION_TTL_SECONDS
 
 DeltaAegisError = _auth.DeltaAegisError
@@ -710,8 +718,70 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _record_background_worker_persistence_failure(
+    *,
+    worker: str,
+    job_id: str,
+    primary_error: Any,
+    persistence_error: BaseException,
+    connection: sqlite3.Connection | None = None,
+    log_dir: Path | str | None = None,
+) -> None:
+    """Report a secondary worker-state persistence failure durably.
 
+    Worker exception handlers must not hide the failure that prevented a job
+    from being marked FAILED.  Roll back the failed transaction, emit a
+    structured stderr record, and make a best-effort append to a protected
+    JSONL file.  The watchdog can then reconcile any stale job while the
+    secondary failure remains visible to the operator.
+    """
 
+    rollback_error = ""
+    if connection is not None:
+        try:
+            connection.rollback()
+        except Exception as exc:  # pragma: no cover - last-resort reporting
+            rollback_error = f"{type(exc).__name__}: {exc}"
+
+    record = {
+        "schema_version": "deltaaegis-worker-persistence-failure-v1",
+        "recorded_at": utc_now(),
+        "worker": str(worker),
+        "job_id": str(job_id),
+        "primary_error": str(primary_error),
+        "persistence_error": (
+            f"{type(persistence_error).__name__}: {persistence_error}"
+        ),
+        "rollback_error": rollback_error,
+    }
+    encoded = json.dumps(record, sort_keys=True, separators=(",", ":"))
+    print(f"DeltaAegis worker persistence failure: {encoded}",
+          file=sys.stderr, flush=True)
+
+    if log_dir is None:
+        return
+    try:
+        root = Path(log_dir).expanduser()
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / "worker-persistence-failures.jsonl"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(encoded + "\n")
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+    except Exception as exc:  # pragma: no cover - last-resort stderr path
+        print(
+            "DeltaAegis could not write the worker persistence fallback "
+            f"log: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def ensure_netsniper_intelligence_host_schema(connection: sqlite3.Connection) -> None:
@@ -956,6 +1026,24 @@ def create_access_api_token(connection: sqlite3.Connection, user_id: str, token_
     return _auth.create_access_api_token(connection, user_id, token_name, role, expires_at)
 
 
+def create_scoped_access_api_token(
+    connection: sqlite3.Connection,
+    user_id: str,
+    token_name: str,
+    role: str | None = None,
+    expires_at: str | None = None,
+    scopes: Any = None,
+) -> dict[str, Any]:
+    return _auth.create_scoped_access_api_token(
+        connection,
+        user_id,
+        token_name,
+        role=role,
+        expires_at=expires_at,
+        scopes=scopes,
+    )
+
+
 def record_access_audit_event(connection: sqlite3.Connection, action: str, actor: dict[str, Any] | None=None, target_type: str | None=None, target_key: str | None=None, source_ip: str | None=None, user_agent: str | None=None, details: dict[str, Any] | None=None) -> int:
     return _auth.record_access_audit_event(connection, action, actor, target_type, target_key, source_ip, user_agent, details)
 
@@ -999,12 +1087,7 @@ def revoke_dashboard_user_sessions(connection: sqlite3.Connection, user_id: str,
 def expire_dashboard_session(connection: sqlite3.Connection, session_token: str, actor: dict[str, Any] | None=None, reason: str='logout', commit: bool=True) -> bool:
     return _auth.expire_dashboard_session(connection, session_token, actor, reason, commit)
 
-def connect(db_path: Path) -> sqlite3.Connection:
-    connection = open_database_connection(db_path)
-    connection.executescript(SCHEMA_SQL)
-
-    connection.executescript(
-        """
+VALIDATION_SCHEMA_SQL = """
         CREATE TABLE IF NOT EXISTS validation_runs (
             validation_run_id TEXT PRIMARY KEY,
             source_path TEXT NOT NULL,
@@ -1082,37 +1165,259 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
         CREATE INDEX IF NOT EXISTS idx_validation_correlations_status
             ON validation_correlations(validation_status);
-        """
+"""
+
+
+LEGACY_SCHEMA_COLUMN_MIGRATIONS = (
+    ("snapshots", "manifest_schema_version", "manifest_schema_version TEXT NOT NULL DEFAULT 'netsniper-run-v1'"),
+    ("snapshots", "profile_fingerprint", "profile_fingerprint TEXT NOT NULL DEFAULT ''"),
+    ("snapshots", "monitored_ports_json", "monitored_ports_json TEXT NOT NULL DEFAULT '[]'"),
+    ("snapshots", "protocols_json", "protocols_json TEXT NOT NULL DEFAULT '[]'"),
+    ("snapshots", "discovery_interface", "discovery_interface TEXT"),
+    ("snapshots", "nmap_version", "nmap_version TEXT"),
+    ("snapshots", "scan_started_at", "scan_started_at TEXT"),
+    ("snapshots", "scan_completed_at", "scan_completed_at TEXT"),
+    ("snapshots", "neighbors_captured_at", "neighbors_captured_at TEXT"),
+    ("snapshots", "network_scope", "network_scope TEXT NOT NULL DEFAULT ''"),
+    ("asset_observations", "identity_class", "identity_class TEXT NOT NULL DEFAULT 'IP_ONLY'"),
+    ("scan_jobs", "scan_profile", "scan_profile TEXT NOT NULL DEFAULT 'balanced'"),
+    ("scan_jobs", "process_pid", "process_pid INTEGER"),
+    ("scan_jobs", "heartbeat_at", "heartbeat_at TEXT"),
+    ("scan_jobs", "cancel_requested_at", "cancel_requested_at TEXT"),
+    ("scan_jobs", "cancel_requested_by", "cancel_requested_by TEXT NOT NULL DEFAULT ''"),
+    ("scan_jobs", "cancel_reason", "cancel_reason TEXT NOT NULL DEFAULT ''"),
+    ("scan_jobs", "cancelled_at", "cancelled_at TEXT"),
+    ("trueaegis_jobs", "scan_job_id", "scan_job_id TEXT NOT NULL DEFAULT ''"),
+    ("trueaegis_jobs", "schedule_id", "schedule_id TEXT NOT NULL DEFAULT ''"),
+    ("trueaegis_jobs", "trigger_source", "trigger_source TEXT NOT NULL DEFAULT 'manual_dashboard'"),
+    ("scan_jobs", "schedule_id", "schedule_id TEXT NOT NULL DEFAULT ''"),
+    ("scan_schedules", "run_trueaegis_after_ingest", "run_trueaegis_after_ingest INTEGER NOT NULL DEFAULT 0"),
+    ("snapshots", "requested_profile", "requested_profile TEXT"),
+    ("snapshots", "effective_profile", "effective_profile TEXT"),
+    ("snapshots", "profile_contract", "profile_contract TEXT"),
+    ("snapshots", "profile_runtime_budget_seconds", "profile_runtime_budget_seconds INTEGER"),
+    ("snapshots", "profile_host_timeout_seconds", "profile_host_timeout_seconds INTEGER"),
+    ("snapshots", "profile_duration_seconds", "profile_duration_seconds INTEGER"),
+    ("snapshots", "profile_budget_exceeded", "profile_budget_exceeded INTEGER"),
+    ("snapshots", "bundle_quality_schema_version", "bundle_quality_schema_version TEXT"),
+    ("snapshots", "bundle_deltaaegis_ready", "bundle_deltaaegis_ready INTEGER"),
+    ("snapshots", "bundle_quality_json", "bundle_quality_json TEXT NOT NULL DEFAULT '{}'"),
+    ("asset_observations", "device_type_confidence", "device_type_confidence INTEGER"),
+    ("asset_observations", "classification_type", "classification_type TEXT"),
+    ("asset_observations", "classification_primary_type", "classification_primary_type TEXT"),
+    ("asset_observations", "classification_confidence", "classification_confidence INTEGER"),
+    ("asset_observations", "classification_confidence_label", "classification_confidence_label TEXT"),
+    ("asset_observations", "classification_decision", "classification_decision TEXT"),
+    ("asset_observations", "classification_method", "classification_method TEXT"),
+    ("asset_observations", "classification_json", "classification_json TEXT NOT NULL DEFAULT '{}'"),
+    ("asset_observations", "classification_evidence_json", "classification_evidence_json TEXT NOT NULL DEFAULT '[]'"),
+    ("asset_observations", "classification_contradictions_json", "classification_contradictions_json TEXT NOT NULL DEFAULT '[]'"),
+    ("asset_observations", "classification_candidates_json", "classification_candidates_json TEXT NOT NULL DEFAULT '[]'"),
+    ("asset_observations", "classification_confidence_band", "classification_confidence_band TEXT"),
+    ("asset_observations", "classification_calibrated_decision", "classification_calibrated_decision TEXT"),
+    ("asset_observations", "classification_siem_action", "classification_siem_action TEXT"),
+    ("asset_observations", "classification_calibration_reason", "classification_calibration_reason TEXT"),
+    ("asset_observations", "classification_validation_state", "classification_validation_state TEXT"),
+    ("asset_observations", "classification_contradiction_count", "classification_contradiction_count INTEGER"),
+    ("asset_observations", "classification_validator_summary_json", "classification_validator_summary_json TEXT NOT NULL DEFAULT '{}'"),
+    ("asset_observations", "classification_validators_json", "classification_validators_json TEXT NOT NULL DEFAULT '[]'"),
+)
+
+
+V1_API_SECURITY_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS api_idempotency_keys (
+    idempotency_id TEXT PRIMARY KEY,
+    principal_key TEXT NOT NULL,
+    method TEXT NOT NULL,
+    route TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,
+    state TEXT NOT NULL,
+    response_status INTEGER,
+    response_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    CHECK (state IN ('PENDING', 'COMPLETED', 'FAILED')),
+    CHECK (length(request_sha256) = 64),
+    UNIQUE(principal_key, method, route, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_api_idempotency_keys_expires_at
+    ON api_idempotency_keys(expires_at);
+CREATE INDEX IF NOT EXISTS idx_api_idempotency_keys_principal_route
+    ON api_idempotency_keys(principal_key, route, created_at);
+"""
+
+
+SUPPORTED_V042_SOURCE_SHA256 = {
+    "v0.42.0": "986212b74db632e39b4ff2edf5e8b5cb0605276ab1a09655d3ea9eddc1addfad",
+    "v0.42.1": "5458a1399dda7c973388ec846dd9a7c9eef403c7f038ba20a7393735d015e725",
+    "v0.42.2": "09e8ef6b7eae6a9431de3daf8c859cfa84d77026d92191ba04bdeb96aa7448d4",
+}
+SUPPORTED_V045_RELEASE_COMMIT = (
+    "493df20dabed527757381e3cbae7cad3201b9c57"
+)
+SUPPORTED_V045_RELEASE_TREE = (
+    "ab2c059806e0bbd3908f32200d79cb357e8fa61c"
+)
+SUPPORTED_V045_SOURCE_WITNESS = (
+    "74cba5ec5aa3d35cd57416c3891c161d8bf5fd4b"
+)
+SUPPORTED_V045_SOURCE_SHA256 = (
+    "e277bfeed6e5422d567c5207d14b6bc9a43c5fc8486f95be9c0b73d8c5706c12"
+)
+SUPPORTED_V042_V045_BASE_SCHEMA_SHA256 = (
+    "781be13dec43b657c383c9c7a217c3df83040319cbb8469d1d175667edf63b32"
+)
+SUPPORTED_V045_RUNTIME_SCHEMA_SHA256 = (
+    "7b15660af4a2a6f4424b1c6dc7c9fceaee962c998cd0ad7754bb3ed6051be654"
+)
+SUPPORTED_V045_HISTORICAL_RUNTIME_SCHEMA_SHA256 = (
+    "5c777b2a731133a8793c6710eda3e1a18b15deb9ffa416bed71ffd70e11581ef"
+)
+SUPPORTED_V042_BASE_TABLES = frozenset(
+    {
+        "access_api_tokens",
+        "access_audit_log",
+        "access_sessions",
+        "access_users",
+        "alert_notes",
+        "alerts",
+        "asset_annotation_history",
+        "asset_annotations",
+        "asset_investigation_history",
+        "asset_investigations",
+        "asset_lifecycle",
+        "asset_observations",
+        "delta_events",
+        "finding_observations",
+        "investigation_ticket_history",
+        "investigation_ticket_state",
+        "logical_site_memberships",
+        "logical_sites",
+        "scan_jobs",
+        "scan_schedule_deletions",
+        "scan_schedules",
+        "service_observations",
+        "snapshots",
+        "trueaegis_jobs",
+        "validation_correlations",
+        "validation_observations",
+        "validation_runs",
+    }
+)
+_DELTAAEGIS_LEGACY_TABLE_DEFINITIONS: dict[str, str] | None = None
+
+
+def _normalized_sql_definition(value: str | None) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def _database_table_definitions(
+    connection: sqlite3.Connection,
+) -> dict[str, str]:
+    return {
+        str(row[0]): _normalized_sql_definition(row[1])
+        for row in connection.execute(
+            "SELECT name, sql FROM sqlite_master "
+            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' "
+            "ORDER BY name"
+        )
+    }
+
+
+def _supported_legacy_table_definitions() -> dict[str, str]:
+    global _DELTAAEGIS_LEGACY_TABLE_DEFINITIONS
+    if _DELTAAEGIS_LEGACY_TABLE_DEFINITIONS is None:
+        reference = sqlite3.connect(":memory:")
+        reference.row_factory = sqlite3.Row
+        reference.execute("PRAGMA foreign_keys = ON")
+        try:
+            _apply_v045_foundation_schema(reference)
+            _apply_v045_telemetry_schema(reference)
+            _DELTAAEGIS_LEGACY_TABLE_DEFINITIONS = (
+                _database_table_definitions(reference)
+            )
+        finally:
+            reference.close()
+    return dict(_DELTAAEGIS_LEGACY_TABLE_DEFINITIONS)
+
+
+def recognize_deltaaegis_database_origin(
+    connection: sqlite3.Connection,
+) -> str:
+    tables = set(_migrations.application_tables(connection))
+    if not tables:
+        return "fresh"
+    if "schema_migrations" in tables:
+        return "ledgered-v1"
+    if not SUPPORTED_V042_BASE_TABLES.issubset(tables):
+        missing = sorted(SUPPORTED_V042_BASE_TABLES - tables)
+        raise _migrations.MigrationError(
+            "unsupported DeltaAegis database; required v0.42.x tables are "
+            "missing: " + ", ".join(missing)
+        )
+
+    fingerprint = _migrations.schema_fingerprint(connection)
+    if fingerprint == SUPPORTED_V042_V045_BASE_SCHEMA_SHA256:
+        # The immutable v0.42.0, v0.42.1, v0.42.2, and clean v0.45.0
+        # database schemas are byte-identical. The database itself therefore
+        # cannot honestly identify which application patch created it.
+        return "v0.42.0-v0.45.0-identical-base-schema"
+
+    if fingerprint == SUPPORTED_V045_HISTORICAL_RUNTIME_SCHEMA_SHA256:
+        # A production v0.45 database can reach this exact schema through the
+        # released additive ALTER TABLE path. Its column order (and one
+        # SQLite-preserved quoted table name) differs from a newly created
+        # v0.45 database, while columns, constraints, foreign keys, and indexes
+        # remain equivalent. Admit only the audited complete-schema fingerprint;
+        # all other definition or index drift continues through the fail-closed
+        # checks below.
+        return "v0.45.0-historical-additive-runtime-schema"
+
+    expected = _supported_legacy_table_definitions()
+    unexpected = sorted(tables - set(expected))
+    if unexpected:
+        raise _migrations.MigrationError(
+            "unsupported DeltaAegis database tables: " + ", ".join(unexpected)
+        )
+    actual = _database_table_definitions(connection)
+    drifted = sorted(
+        table
+        for table, definition in actual.items()
+        if expected.get(table) != definition
     )
-    ensure_column(connection, "snapshots", "manifest_schema_version", "manifest_schema_version TEXT NOT NULL DEFAULT 'netsniper-run-v1'")
-    ensure_column(connection, "snapshots", "profile_fingerprint", "profile_fingerprint TEXT NOT NULL DEFAULT ''")
-    ensure_column(connection, "snapshots", "monitored_ports_json", "monitored_ports_json TEXT NOT NULL DEFAULT '[]'")
-    ensure_column(connection, "snapshots", "protocols_json", "protocols_json TEXT NOT NULL DEFAULT '[]'")
-    ensure_column(connection, "snapshots", "discovery_interface", "discovery_interface TEXT")
-    ensure_column(connection, "snapshots", "nmap_version", "nmap_version TEXT")
-    ensure_column(connection, "snapshots", "scan_started_at", "scan_started_at TEXT")
-    ensure_column(connection, "snapshots", "scan_completed_at", "scan_completed_at TEXT")
-    ensure_column(connection, "snapshots", "neighbors_captured_at", "neighbors_captured_at TEXT")
-    ensure_column(connection, "snapshots", "network_scope", "network_scope TEXT NOT NULL DEFAULT ''")
-    ensure_column(connection, "asset_observations", "identity_class", "identity_class TEXT NOT NULL DEFAULT 'IP_ONLY'")
-    ensure_column(connection, "scan_jobs", "scan_profile", "scan_profile TEXT NOT NULL DEFAULT 'balanced'")
-    ensure_column(connection, "scan_jobs", "process_pid", "process_pid INTEGER")
-    ensure_column(connection, "scan_jobs", "heartbeat_at", "heartbeat_at TEXT")
-    ensure_column(connection, "scan_jobs", "cancel_requested_at", "cancel_requested_at TEXT")
-    ensure_column(connection, "scan_jobs", "cancel_requested_by", "cancel_requested_by TEXT NOT NULL DEFAULT ''")
-    ensure_column(connection, "scan_jobs", "cancel_reason", "cancel_reason TEXT NOT NULL DEFAULT ''")
-    ensure_column(connection, "scan_jobs", "cancelled_at", "cancelled_at TEXT")
-    ensure_column(connection, "trueaegis_jobs", "scan_job_id", "scan_job_id TEXT NOT NULL DEFAULT ''")
-    ensure_column(connection, "trueaegis_jobs", "schedule_id", "schedule_id TEXT NOT NULL DEFAULT ''")
-    ensure_column(connection, "trueaegis_jobs", "trigger_source", "trigger_source TEXT NOT NULL DEFAULT 'manual_dashboard'")
+    if drifted:
+        raise _migrations.MigrationError(
+            "unsupported DeltaAegis table definitions: " + ", ".join(drifted)
+        )
+    telemetry_tables = {
+        "telemetry_quality_decisions",
+        "telemetry_quality_reviews",
+        "telemetry_current_assets",
+        "telemetry_current_services",
+        "telemetry_current_findings",
+    }
+    return (
+        "v0.45.0-telemetry-runtime-schema"
+        if tables & telemetry_tables
+        else "v0.42.0-v0.45.0-supported-additive-schema"
+    )
+
+
+def _apply_v045_foundation_schema(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    _migrations.execute_sql_script(connection, SCHEMA_SQL)
+    _migrations.execute_sql_script(connection, VALIDATION_SCHEMA_SQL)
+    for table, column, ddl in LEGACY_SCHEMA_COLUMN_MIGRATIONS:
+        ensure_column(connection, table, column, ddl)
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_trueaegis_jobs_scan_job_id ""ON trueaegis_jobs(scan_job_id)"
     )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_trueaegis_jobs_schedule_id ""ON trueaegis_jobs(schedule_id)"
     )
-    ensure_column(connection, "scan_jobs", "schedule_id", "schedule_id TEXT NOT NULL DEFAULT ''")
-    ensure_column(connection, "scan_schedules", "run_trueaegis_after_ingest", "run_trueaegis_after_ingest INTEGER NOT NULL DEFAULT 0")
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_scan_jobs_schedule_id
@@ -1120,46 +1425,435 @@ def connect(db_path: Path) -> sqlite3.Connection:
         """
     )
 
-    # NetSniper v2 / manifest v3 bundle-quality and profile runtime metadata.
-    ensure_column(connection, "snapshots", "requested_profile", "requested_profile TEXT")
-    ensure_column(connection, "snapshots", "effective_profile", "effective_profile TEXT")
-    ensure_column(connection, "snapshots", "profile_contract", "profile_contract TEXT")
-    ensure_column(connection, "snapshots", "profile_runtime_budget_seconds", "profile_runtime_budget_seconds INTEGER")
-    ensure_column(connection, "snapshots", "profile_host_timeout_seconds", "profile_host_timeout_seconds INTEGER")
-    ensure_column(connection, "snapshots", "profile_duration_seconds", "profile_duration_seconds INTEGER")
-    ensure_column(connection, "snapshots", "profile_budget_exceeded", "profile_budget_exceeded INTEGER")
-    ensure_column(connection, "snapshots", "bundle_quality_schema_version", "bundle_quality_schema_version TEXT")
-    ensure_column(connection, "snapshots", "bundle_deltaaegis_ready", "bundle_deltaaegis_ready INTEGER")
-    ensure_column(connection, "snapshots", "bundle_quality_json", "bundle_quality_json TEXT NOT NULL DEFAULT '{}'")
-
-    # NetSniper v1.4 classification intelligence columns.
-    ensure_column(connection, "asset_observations", "device_type_confidence", "device_type_confidence INTEGER")
-    ensure_column(connection, "asset_observations", "classification_type", "classification_type TEXT")
-    ensure_column(connection, "asset_observations", "classification_primary_type", "classification_primary_type TEXT")
-    ensure_column(connection, "asset_observations", "classification_confidence", "classification_confidence INTEGER")
-    ensure_column(connection, "asset_observations", "classification_confidence_label", "classification_confidence_label TEXT")
-    ensure_column(connection, "asset_observations", "classification_decision", "classification_decision TEXT")
-    ensure_column(connection, "asset_observations", "classification_method", "classification_method TEXT")
-    ensure_column(connection, "asset_observations", "classification_json", "classification_json TEXT NOT NULL DEFAULT '{}'")
-    ensure_column(connection, "asset_observations", "classification_evidence_json", "classification_evidence_json TEXT NOT NULL DEFAULT '[]'")
-    ensure_column(connection, "asset_observations", "classification_contradictions_json", "classification_contradictions_json TEXT NOT NULL DEFAULT '[]'")
-    ensure_column(connection, "asset_observations", "classification_candidates_json", "classification_candidates_json TEXT NOT NULL DEFAULT '[]'")
-
-    # NetSniper v1.6 SIEM-facing classification calibration columns.
-    ensure_column(connection, "asset_observations", "classification_confidence_band", "classification_confidence_band TEXT")
-    ensure_column(connection, "asset_observations", "classification_calibrated_decision", "classification_calibrated_decision TEXT")
-    ensure_column(connection, "asset_observations", "classification_siem_action", "classification_siem_action TEXT")
-    ensure_column(connection, "asset_observations", "classification_calibration_reason", "classification_calibration_reason TEXT")
-    ensure_column(connection, "asset_observations", "classification_validation_state", "classification_validation_state TEXT")
-    ensure_column(connection, "asset_observations", "classification_contradiction_count", "classification_contradiction_count INTEGER")
-    ensure_column(connection, "asset_observations", "classification_validator_summary_json", "classification_validator_summary_json TEXT NOT NULL DEFAULT '{}'")
-    ensure_column(connection, "asset_observations", "classification_validators_json", "classification_validators_json TEXT NOT NULL DEFAULT '[]'")
-
     backfill_snapshot_network_scopes(connection)
     ensure_scoped_asset_lifecycle_schema(connection)
     ensure_enterprise_access_schema(connection)
     ensure_dashboard_session_schema(connection)
-    connection.commit()
+    return {
+        "foundation_tables": len(_migrations.application_tables(connection)),
+        "compatibility_columns": len(LEGACY_SCHEMA_COLUMN_MIGRATIONS),
+    }
+
+
+def _validate_v045_foundation_schema(connection: sqlite3.Connection) -> None:
+    required = {
+        "snapshots",
+        "asset_observations",
+        "service_observations",
+        "finding_observations",
+        "delta_events",
+        "asset_lifecycle",
+        "alerts",
+        "scan_jobs",
+        "scan_schedules",
+        "logical_sites",
+        "access_users",
+        "access_api_tokens",
+        "access_sessions",
+        "validation_runs",
+        "validation_observations",
+        "validation_correlations",
+    }
+    missing = sorted(required - set(_migrations.application_tables(connection)))
+    if missing:
+        raise _migrations.MigrationError(
+            "v0.45 foundation migration is missing tables: " + ", ".join(missing)
+        )
+    lifecycle_pk = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(asset_lifecycle)")
+        if int(row[5]) > 0
+    }
+    if lifecycle_pk != {"network_scope", "asset_key"}:
+        raise _migrations.MigrationError(
+            "asset_lifecycle does not use the scoped v0.42 primary key"
+        )
+
+
+def _apply_v045_telemetry_schema(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    if _telemetry_quality is None or _current_state is None:
+        raise _migrations.MigrationError(
+            "v0.45 telemetry-trust modules are required for migration"
+        )
+    ensure_netsniper_intelligence_host_schema(connection)
+    ensure_netsniper_intelligence_schema(connection)
+    _telemetry_quality.ensure_schema(connection)
+    _current_state.ensure_schema(connection)
+    return {
+        "telemetry_quality": True,
+        "current_state_projection": True,
+        "netsniper_intelligence": True,
+    }
+
+
+def _validate_v045_telemetry_schema(connection: sqlite3.Connection) -> None:
+    required = {
+        "netsniper_intelligence_hosts",
+        "netsniper_intelligence_summaries",
+        "telemetry_quality_decisions",
+        "telemetry_quality_reviews",
+        "telemetry_current_assets",
+        "telemetry_current_services",
+        "telemetry_current_findings",
+    }
+    missing = sorted(required - set(_migrations.application_tables(connection)))
+    if missing:
+        raise _migrations.MigrationError(
+            "telemetry-trust migration is missing tables: " + ", ".join(missing)
+        )
+
+
+def _apply_v1_api_security_schema(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    ensure_column(
+        connection,
+        "access_api_tokens",
+        "scopes_json",
+        "scopes_json TEXT NOT NULL DEFAULT '[]'",
+    )
+    ensure_column(
+        connection,
+        "access_sessions",
+        "csrf_token_hash",
+        "csrf_token_hash TEXT NOT NULL DEFAULT ''",
+    )
+    _migrations.execute_sql_script(connection, V1_API_SECURITY_SCHEMA_SQL)
+
+    now = datetime.now(timezone.utc)
+    default_expiry = (
+        now + timedelta(seconds=_auth.ACCESS_API_TOKEN_DEFAULT_TTL_SECONDS)
+    ).isoformat()
+    maximum_expiry = (
+        now + timedelta(seconds=_auth.ACCESS_API_TOKEN_MAX_TTL_SECONDS)
+    )
+    token_rows = connection.execute(
+        "SELECT token_id, role, expires_at FROM access_api_tokens"
+    ).fetchall()
+    bounded = 0
+    scoped = 0
+    for row in token_rows:
+        parsed = _auth.access_parse_datetime(row["expires_at"])
+        if parsed is None:
+            expiry = default_expiry
+            bounded += 1
+        elif parsed > maximum_expiry:
+            expiry = maximum_expiry.isoformat()
+            bounded += 1
+        else:
+            expiry = parsed.astimezone(timezone.utc).isoformat()
+        scopes = _auth.access_api_scopes_for_role(row["role"])
+        connection.execute(
+            "UPDATE access_api_tokens SET expires_at = ?, scopes_json = ? "
+            "WHERE token_id = ?",
+            (
+                expiry,
+                json.dumps(scopes, separators=(",", ":")),
+                row["token_id"],
+            ),
+        )
+        scoped += 1
+
+    sessions = connection.execute(
+        "SELECT session_id, session_token_hash FROM access_sessions "
+        "WHERE csrf_token_hash = ''"
+    ).fetchall()
+    for row in sessions:
+        seed = (
+            "deltaaegis-v1-csrf-upgrade\0"
+            + str(row["session_id"])
+            + "\0"
+            + str(row["session_token_hash"])
+        )
+        connection.execute(
+            "UPDATE access_sessions SET csrf_token_hash = ? WHERE session_id = ?",
+            (hashlib.sha256(seed.encode("utf-8")).hexdigest(), row["session_id"]),
+        )
+
+    _validate_v1_api_security_data(connection)
+
+    return {
+        "bounded_api_tokens": bounded,
+        "scoped_api_tokens": scoped,
+        "csrf_rotated_sessions": len(sessions),
+        "idempotency_store": True,
+    }
+
+
+def _validate_v1_api_security_schema(connection: sqlite3.Connection) -> None:
+    tables = set(_migrations.application_tables(connection))
+    if "api_idempotency_keys" not in tables:
+        raise _migrations.MigrationError("v1 API idempotency table is missing")
+    token_columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(access_api_tokens)")
+    }
+    session_columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(access_sessions)")
+    }
+    if "scopes_json" not in token_columns:
+        raise _migrations.MigrationError("v1 API token scopes column is missing")
+    if "csrf_token_hash" not in session_columns:
+        raise _migrations.MigrationError("v1 session CSRF column is missing")
+
+
+def _validate_v1_api_security_data(connection: sqlite3.Connection) -> None:
+    """Validate the one-time token/session backfill inside migration 0003.
+
+    Mutable credential rows are authenticated fail-closed individually after
+    migration.  They are deliberately not treated as schema invariants on
+    every database connection, which prevents one corrupt or administratively
+    edited credential from denying service to every other principal.
+    """
+
+    for row in connection.execute(
+        "SELECT token_id, role, expires_at, scopes_json FROM access_api_tokens"
+    ):
+        if _auth.access_parse_datetime(row["expires_at"]) is None:
+            raise _migrations.MigrationError(
+                f"API token does not have a bounded expiration: {row['token_id']}"
+            )
+        try:
+            scopes = json.loads(str(row["scopes_json"] or ""))
+        except json.JSONDecodeError as exc:
+            raise _migrations.MigrationError(
+                f"API token scopes are malformed: {row['token_id']}"
+            ) from exc
+        if not isinstance(scopes, list) or not scopes:
+            raise _migrations.MigrationError(
+                f"API token scopes are empty or invalid: {row['token_id']}"
+            )
+        try:
+            normalized = _auth.normalize_access_api_scopes(scopes, role=row["role"])
+        except _auth.DeltaAegisError as exc:
+            raise _migrations.MigrationError(
+                f"API token scopes exceed their role: {row['token_id']}"
+            ) from exc
+        if tuple(scopes) != normalized:
+            raise _migrations.MigrationError(
+                f"API token scopes are not canonical: {row['token_id']}"
+            )
+    missing_csrf = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM access_sessions WHERE csrf_token_hash = ''"
+        ).fetchone()[0]
+    )
+    if missing_csrf:
+        raise _migrations.MigrationError(
+            f"{missing_csrf} dashboard sessions are missing CSRF state"
+        )
+
+
+def _apply_v1_identity_schema(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    """Apply the explicit sensor/scope boundary and legacy attribution."""
+
+    return _identity.apply_schema(connection)
+
+
+def _validate_v1_identity_schema(connection: sqlite3.Connection) -> None:
+    try:
+        _identity.validate_schema(connection)
+    except _identity.IdentityError as exc:
+        raise _migrations.MigrationError(str(exc)) from exc
+
+
+def _apply_v1_detection_schema(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    """Create immutable versioned detection and separate review ledgers."""
+
+    return _detection.apply_schema(connection)
+
+
+def _validate_v1_detection_schema(connection: sqlite3.Connection) -> None:
+    try:
+        _detection.validate_schema(connection)
+    except _detection.DetectionError as exc:
+        raise _migrations.MigrationError(str(exc)) from exc
+
+
+def deltaaegis_schema_migrations() -> tuple[_migrations.Migration, ...]:
+    foundation_material = json.dumps(
+        {
+            "schema": SCHEMA_SQL,
+            "validation_schema": VALIDATION_SCHEMA_SQL,
+            "columns": LEGACY_SCHEMA_COLUMN_MIGRATIONS,
+            "indexes": (
+                "idx_trueaegis_jobs_scan_job_id",
+                "idx_trueaegis_jobs_schedule_id",
+                "idx_scan_jobs_schedule_id",
+            ),
+            "scoped_asset_lifecycle": 1,
+            "enterprise_access": 1,
+            "dashboard_sessions": 1,
+            "ensure_column_source": inspect.getsource(ensure_column),
+            "network_scope_backfill_source": inspect.getsource(
+                backfill_snapshot_network_scopes
+            ),
+            "scoped_lifecycle_source": inspect.getsource(
+                ensure_scoped_asset_lifecycle_schema
+            ),
+            "access_schema_source": inspect.getsource(
+                ensure_enterprise_access_schema
+            ),
+            "session_schema_source": inspect.getsource(
+                ensure_dashboard_session_schema
+            ),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    telemetry_material = json.dumps(
+        {
+            "quality_schema": getattr(_telemetry_quality, "QUALITY_TABLE_SQL", ""),
+            "projection_schema": getattr(_current_state, "PROJECTION_SCHEMA_SQL", ""),
+            "netsniper_intelligence_schema": 1,
+            "intelligence_host_schema_source": inspect.getsource(
+                ensure_netsniper_intelligence_host_schema
+            ),
+            "intelligence_summary_schema_source": inspect.getsource(
+                ensure_netsniper_intelligence_schema
+            ),
+            "quality_ensure_source": inspect.getsource(_telemetry_quality.ensure_schema)
+            if _telemetry_quality is not None
+            else "",
+            "projection_ensure_source": inspect.getsource(_current_state.ensure_schema)
+            if _current_state is not None
+            else "",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    api_security_material = json.dumps(
+        {
+            "schema": V1_API_SECURITY_SCHEMA_SQL,
+            # Migration 0003 is immutable. Stage 3-5 permissions are additive
+            # runtime scopes and must not change its committed checksum.
+            "token_scopes": sorted(
+                permission
+                for permission in _auth.ACCESS_RBAC_PERMISSIONS
+                if permission
+                not in {
+                    "identity.sensors.write",
+                    "detection.review",
+                    "operations.read",
+                }
+            ),
+            "default_token_ttl": _auth.ACCESS_API_TOKEN_DEFAULT_TTL_SECONDS,
+            "maximum_token_ttl": _auth.ACCESS_API_TOKEN_MAX_TTL_SECONDS,
+            "session_csrf": "sha256-double-submit-v1",
+            "ensure_column_source": inspect.getsource(ensure_column),
+            "expiry_parser_source": inspect.getsource(
+                _auth.access_parse_datetime
+            ),
+            "role_scope_source": inspect.getsource(
+                _auth.access_api_scopes_for_role
+            ),
+            "backfill_validation_source": inspect.getsource(
+                _validate_v1_api_security_data
+            ),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    identity_material = json.dumps(
+        {
+            "schema": _identity.IDENTITY_SCHEMA_SQL,
+            "compatibility_columns": _identity.IDENTITY_COLUMNS,
+            "default_sensor": _identity.DEFAULT_SENSOR_ID,
+            "unassigned_scope": _identity.UNASSIGNED_SCOPE_ID,
+            "apply_source": inspect.getsource(_identity.apply_schema),
+            "projection_source": inspect.getsource(
+                _identity.apply_snapshot_projection
+            ),
+            "receipt_source": inspect.getsource(
+                _identity.record_evidence_receipt
+            ),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    detection_material = json.dumps(
+        {
+            "schema": _detection.DETECTION_SCHEMA_SQL,
+            "rules": _detection.rules_contract(),
+            "result_source": inspect.getsource(_detection.result_for_event),
+            "persistence_source": inspect.getsource(
+                _detection.persist_results
+            ),
+            "review_source": inspect.getsource(_detection.review_result),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return (
+        _migrations.Migration(
+            migration_id="0001-v045-foundation",
+            description="Converge supported v0.42-v0.45 databases on the v0.45 foundation schema.",
+            checksum_material=foundation_material,
+            apply=_apply_v045_foundation_schema,
+            validate=_validate_v045_foundation_schema,
+        ),
+        _migrations.Migration(
+            migration_id="0002-v045-telemetry-trust",
+            description="Materialize telemetry-quality, current-state, and NetSniper intelligence schema.",
+            checksum_material=telemetry_material,
+            apply=_apply_v045_telemetry_schema,
+            validate=_validate_v045_telemetry_schema,
+        ),
+        _migrations.Migration(
+            migration_id="0003-v1-api-security",
+            description="Add bounded token scopes, session CSRF state, and durable mutation idempotency.",
+            checksum_material=api_security_material,
+            apply=_apply_v1_api_security_schema,
+            validate=_validate_v1_api_security_schema,
+        ),
+        _migrations.Migration(
+            migration_id="0004-v1-sensor-scope-identity",
+            description="Assign durable sensor and scope identities, isolate overlapping CIDRs, and bind replay receipts.",
+            checksum_material=identity_material,
+            apply=_apply_v1_identity_schema,
+            validate=_validate_v1_identity_schema,
+        ),
+        _migrations.Migration(
+            migration_id="0005-v1-deterministic-detection",
+            description="Add immutable versioned detection results with evidence provenance and separate review state.",
+            checksum_material=detection_material,
+            apply=_apply_v1_detection_schema,
+            validate=_validate_v1_detection_schema,
+        ),
+    )
+
+
+def _migration_backup_root(db_path: Path) -> Path:
+    resolved = Path(db_path).expanduser().resolve(strict=False)
+    if resolved == Path(DEFAULT_DB).expanduser().resolve(strict=False):
+        return Path(DEFAULT_BACKUPS)
+    return resolved.parent / "migration-backups"
+
+
+def connect(db_path: Path) -> sqlite3.Connection:
+    database = Path(db_path).expanduser()
+    connection = open_database_connection(database)
+    try:
+        _migrations.run_migrations(
+            connection,
+            database_path=database,
+            application_version=DELTAAEGIS_VERSION,
+            migrations=deltaaegis_schema_migrations(),
+            backup_root=_migration_backup_root(database),
+            create_backup=create_sqlite_database_backup_bundle,
+            verify_backup=verify_database_backup_bundle,
+            origin_recognizer=recognize_deltaaegis_database_origin,
+        )
+    except Exception:
+        connection.close()
+        raise
     return connection
 
 
@@ -1933,12 +2627,13 @@ def command_api_token_create(args: argparse.Namespace) -> int:
         if not int(user.get("is_active") or 0):
             raise DeltaAegisError(f"access user is inactive: {user['username']}")
 
-        token = create_access_api_token(
+        token = create_scoped_access_api_token(
             connection,
             user_id=user["user_id"],
             token_name=args.name,
             role=args.role,
             expires_at=args.expires_at,
+            scopes=args.scope,
         )
         record_access_audit_event(
             connection,
@@ -1956,6 +2651,7 @@ def command_api_token_create(args: argparse.Namespace) -> int:
                 "username": token["username"],
                 "role": token["role"],
                 "expires_at": token["expires_at"],
+                "scopes": token["scopes"],
             },
         )
 
@@ -1967,6 +2663,7 @@ def command_api_token_create(args: argparse.Namespace) -> int:
     print(f"Token ID:     {token['token_id']}")
     print(f"Token prefix: {token['token_prefix']}")
     print(f"Expires at:   {token.get('expires_at') or '-'}")
+    print(f"Scopes:       {', '.join(token.get('scopes') or [])}")
     print()
     print("Copy this token now. It will not be shown again:")
     print(token["token"])
@@ -2867,7 +3564,7 @@ def alert_dedup_key(item: dict[str, Any]) -> str | None:
     return None
 
 
-def sync_alert(connection: sqlite3.Connection, item: dict[str, Any], event_id: int, created_at: str) -> None:
+def sync_alert(connection: sqlite3.Connection, item: dict[str, Any], event_id: int, created_at: str, *, sensor_id: str=_identity.DEFAULT_SENSOR_ID, scope_id: str=_identity.UNASSIGNED_SCOPE_ID) -> None:
     key = alert_dedup_key(item)
     if key is None:
         return
@@ -2875,17 +3572,33 @@ def sync_alert(connection: sqlite3.Connection, item: dict[str, Any], event_id: i
     if etype in {"MONITORED_SERVICE_CLOSED", "NETSNIPER_FINDING_REMOVED", "ASSET_REAPPEARED"}:
         connection.execute("UPDATE alerts SET status = 'RESOLVED', resolved_at = ?, last_seen_at = ?, last_event_id = ? WHERE dedup_key = ? AND status != 'RESOLVED'", (created_at, created_at, event_id, key))
         return
-    connection.execute("""INSERT INTO alerts (dedup_key, event_type, severity, subject_key, status, summary, opened_at, last_seen_at, first_event_id, last_event_id) VALUES (?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?) ON CONFLICT(dedup_key) DO UPDATE SET event_type=excluded.event_type, severity=excluded.severity, subject_key=excluded.subject_key, summary=excluded.summary, last_seen_at=excluded.last_seen_at, last_event_id=excluded.last_event_id, status=CASE WHEN alerts.status='RESOLVED' THEN 'OPEN' ELSE alerts.status END, resolved_at=CASE WHEN alerts.status='RESOLVED' THEN NULL ELSE alerts.resolved_at END""", (key, etype, item["severity"], item["subject_key"], item["summary"], created_at, created_at, event_id, event_id))
+    columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(alerts)")
+    }
+    identity_columns = ", sensor_id, scope_id" if {"sensor_id", "scope_id"}.issubset(columns) else ""
+    identity_values = ", ?, ?" if identity_columns else ""
+    values: tuple[Any, ...] = (key, etype, item["severity"], item["subject_key"], item["summary"], created_at, created_at, event_id, event_id)
+    if identity_columns:
+        values += (sensor_id, scope_id)
+    connection.execute(f"""INSERT INTO alerts (dedup_key, event_type, severity, subject_key, status, summary, opened_at, last_seen_at, first_event_id, last_event_id{identity_columns}) VALUES (?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?{identity_values}) ON CONFLICT(dedup_key) DO UPDATE SET event_type=excluded.event_type, severity=excluded.severity, subject_key=excluded.subject_key, summary=excluded.summary, last_seen_at=excluded.last_seen_at, last_event_id=excluded.last_event_id, status=CASE WHEN alerts.status='RESOLVED' THEN 'OPEN' ELSE alerts.status END, resolved_at=CASE WHEN alerts.status='RESOLVED' THEN NULL ELSE alerts.resolved_at END""", values)
 
 
-def store_events(connection: sqlite3.Connection, scan_id: str, baseline_scan_id: str | None, events: Iterable[dict[str, Any]], export_path: Path) -> int:
+def store_events(connection: sqlite3.Connection, scan_id: str, baseline_scan_id: str | None, events: Iterable[dict[str, Any]], export_path: Path, *, sensor_id: str=_identity.DEFAULT_SENSOR_ID, scope_id: str=_identity.UNASSIGNED_SCOPE_ID) -> int:
     export_path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
     with export_path.open("a", encoding="utf-8") as handle:
         for item in events:
             created_at = utc_now()
-            cursor = connection.execute("""INSERT INTO delta_events (scan_id, baseline_scan_id, event_type, severity, subject_key, previous_value, current_value, summary, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", (scan_id, baseline_scan_id, item["event_type"], item["severity"], item["subject_key"], json.dumps(item.get("previous_value"), sort_keys=True), json.dumps(item.get("current_value"), sort_keys=True), item["summary"], created_at))
-            sync_alert(connection, item, int(cursor.lastrowid), created_at)
+            columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(delta_events)")
+            }
+            identity_columns = ", sensor_id, scope_id" if {"sensor_id", "scope_id"}.issubset(columns) else ""
+            identity_values = ", ?, ?" if identity_columns else ""
+            values: tuple[Any, ...] = (scan_id, baseline_scan_id, item["event_type"], item["severity"], item["subject_key"], json.dumps(item.get("previous_value"), sort_keys=True), json.dumps(item.get("current_value"), sort_keys=True), item["summary"], created_at)
+            if identity_columns:
+                values += (sensor_id, scope_id)
+            cursor = connection.execute(f"""INSERT INTO delta_events (scan_id, baseline_scan_id, event_type, severity, subject_key, previous_value, current_value, summary, created_at{identity_columns}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?{identity_values})""", values)
+            sync_alert(connection, item, int(cursor.lastrowid), created_at, sensor_id=sensor_id, scope_id=scope_id)
             handle.write(json.dumps({"scan_id": scan_id, "baseline_scan_id": baseline_scan_id, "created_at": created_at, **item}, sort_keys=True) + "\n")
             count += 1
     return count
@@ -2899,16 +3612,28 @@ def profile_transition(baseline: sqlite3.Row, snapshot: Snapshot) -> bool:
     return str(baseline["manifest_schema_version"]) not in NETSNIPER_PROFILE_AWARE_SCHEMAS and snapshot.manifest_schema_version in NETSNIPER_PROFILE_AWARE_SCHEMAS
 
 
-def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_path: Path) -> str:
-    """Import one NetSniper bundle through the v0.45 telemetry-trust runtime."""
+def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_path: Path, sensor_id: str=_identity.DEFAULT_SENSOR_ID) -> str:
+    """Import one NetSniper bundle through the v1 identity/trust runtime."""
 
     original_manifest = Path(manifest_path).expanduser().resolve()
     retention_receipt: dict[str, Any] | None = None
+    evidence_identity: dict[str, Any] | None = None
     try:
         _current_state.bootstrap_legacy_projection(connection)
         decision = _telemetry_quality.evaluate_bundle_record(
             original_manifest,
             policy_path=DELTAAEGIS_V045_POLICY_PATH,
+        )
+        evidence_identity = _identity.identity_for_evidence(
+            connection,
+            sensor_id=sensor_id,
+            network_scope=decision.get("network_scope"),
+            source_scan_id=decision.get("run_id"),
+            bundle_digest=decision.get("bundle_digest"),
+        )
+        decision = _identity.bind_decision_identity(
+            decision,
+            evidence_identity,
         )
         decision = _telemetry_quality.apply_run_id_conflict(
             connection,
@@ -2987,6 +3712,17 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
             or decision.get("current_state")
             or "REJECTED"
         ).upper()
+        _identity.link_decision(
+            connection,
+            decision_id=decision_id,
+            identity=evidence_identity,
+        )
+        _identity.record_evidence_receipt(
+            connection,
+            identity=evidence_identity,
+            decision_id=decision_id,
+            import_status="PENDING",
+        )
 
         if state == "REJECTED":
             _telemetry_quality.mark_import_status(
@@ -2994,14 +3730,25 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
                 decision_id,
                 "REJECTED",
             )
+            _identity.record_evidence_receipt(
+                connection,
+                identity=evidence_identity,
+                decision_id=decision_id,
+                import_status="REJECTED",
+            )
             connection.commit()
             return (
-                f"REJECT {decision.get('run_id')}: "
+                f"REJECT {evidence_identity['source_scan_id']}: "
                 f"reasons={','.join(decision.get('reason_codes') or []) or 'unknown'}"
             )
 
         import_manifest = Path(retained_manifest or original_manifest)
         snapshot = load_snapshot(import_manifest)
+        if snapshot.scan_id != evidence_identity["source_scan_id"]:
+            raise _identity.IdentityError(
+                "normalized snapshot scan ID differs from the evaluated evidence"
+            )
+        snapshot.scan_id = str(evidence_identity["internal_scan_id"])
         if snapshot_exists(connection, snapshot.scan_id):
             _telemetry_quality.mark_import_status(
                 connection,
@@ -3009,26 +3756,51 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
                 "ALREADY_IMPORTED",
                 imported_at=utc_now(),
             )
+            _identity.record_evidence_receipt(
+                connection,
+                identity=evidence_identity,
+                decision_id=decision_id,
+                import_status="ALREADY_IMPORTED",
+                imported_at=utc_now(),
+            )
             connection.commit()
-            return f"SKIP {snapshot.scan_id}: already imported"
+            return (
+                f"SKIP {evidence_identity['source_scan_id']}: already imported "
+                f"as {snapshot.scan_id}"
+            )
 
-        historical = _current_state.snapshot_is_historical(
-            connection,
-            scope=snapshot.target,
-            created_at=snapshot.created_at,
-            scan_id=snapshot.scan_id,
+        legacy_sensor = (
+            evidence_identity["sensor_id"] == _identity.DEFAULT_SENSOR_ID
         )
-        baseline = latest_accepted_snapshot(connection, snapshot.target)
+        historical = (
+            _current_state.snapshot_is_historical(
+                connection,
+                scope=snapshot.target,
+                created_at=snapshot.created_at,
+                scan_id=snapshot.scan_id,
+            )
+            if legacy_sensor
+            else False
+        )
+        baseline = connection.execute(
+            """
+            SELECT * FROM snapshots
+            WHERE scope_id = ? AND quality_status = 'ACCEPTED'
+            ORDER BY created_at DESC, imported_at DESC, scan_id DESC
+            LIMIT 1
+            """,
+            (evidence_identity["scope_id"],),
+        ).fetchone()
         comparison_baseline = connection.execute(
             """
             SELECT *
             FROM snapshots
-            WHERE target = ?
+            WHERE scope_id = ?
               AND quality_status IN ('ACCEPTED', 'DEGRADED')
-            ORDER BY created_at DESC, imported_at DESC
+            ORDER BY created_at DESC, imported_at DESC, scan_id DESC
             LIMIT 1
             """,
-            (snapshot.target,),
+            (evidence_identity["scope_id"],),
         ).fetchone()
         quality_reason = "; ".join(
             str(item.get("description") or item.get("code") or "")
@@ -3040,6 +3812,11 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
             snapshot,
             state,
             quality_reason,
+        )
+        _identity.link_snapshot(
+            connection,
+            scan_id=snapshot.scan_id,
+            identity=evidence_identity,
         )
         _telemetry_quality.update_snapshot_quality_link(
             connection,
@@ -3065,12 +3842,24 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
                 import_manifest,
                 manifest_data,
             )
+        _identity.link_snapshot(
+            connection,
+            scan_id=snapshot.scan_id,
+            identity=evidence_identity,
+        )
 
         if historical:
             _telemetry_quality.mark_import_status(
                 connection,
                 decision_id,
                 "IMPORTED",
+                imported_at=utc_now(),
+            )
+            _identity.record_evidence_receipt(
+                connection,
+                identity=evidence_identity,
+                decision_id=decision_id,
+                import_status="IMPORTED_HISTORICAL",
                 imported_at=utc_now(),
             )
             connection.commit()
@@ -3082,9 +3871,11 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
         events: list[dict[str, Any]] = []
         if state == "ACCEPTED":
             if baseline is None:
-                initialize_lifecycle(connection, snapshot)
+                if legacy_sensor:
+                    initialize_lifecycle(connection, snapshot)
             elif profile_transition(baseline, snapshot):
-                initialize_lifecycle(connection, snapshot)
+                if legacy_sensor:
+                    initialize_lifecycle(connection, snapshot)
                 events.append(
                     event(
                         "PROFILE_BASELINE_RESET",
@@ -3100,7 +3891,8 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
                 float(baseline["identity_coverage"]),
                 snapshot.identity_coverage,
             ):
-                initialize_lifecycle(connection, snapshot)
+                if legacy_sensor:
+                    initialize_lifecycle(connection, snapshot)
                 events.append(
                     event(
                         "IDENTITY_BASELINE_RESET",
@@ -3125,7 +3917,8 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
                         snapshot.assets,
                     )
                 )
-                events.extend(lifecycle_events(connection, snapshot))
+                if legacy_sensor:
+                    events.extend(lifecycle_events(connection, snapshot))
         elif state == "DEGRADED" and comparison_baseline is not None:
             previous_assets = load_assets_from_db(
                 connection,
@@ -3144,28 +3937,45 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
                 if item.get("event_type") in positive_event_types
             )
 
-        _current_state.apply_snapshot(
+        if legacy_sensor:
+            _current_state.apply_snapshot(
+                connection,
+                snapshot,
+                decision,
+                update_lifecycle=(state == "DEGRADED"),
+            )
+        identity_projection = _identity.apply_snapshot_projection(
             connection,
-            snapshot,
-            decision,
-            update_lifecycle=(state == "DEGRADED"),
+            snapshot=snapshot,
+            decision=decision,
+            identity=evidence_identity,
         )
         event_count = 0
-        if events:
+        baseline_scan_id = (
+            baseline["scan_id"]
+            if baseline is not None
+            else (
+                comparison_baseline["scan_id"]
+                if comparison_baseline is not None
+                else None
+            )
+        )
+        detection_outcome = _detection.persist_results(
+            connection,
+            events,
+            identity=evidence_identity,
+            decision=decision,
+            baseline_scan_id=baseline_scan_id,
+        )
+        if events and legacy_sensor:
             event_count = store_events(
                 connection,
                 snapshot.scan_id,
-                (
-                    baseline["scan_id"]
-                    if baseline is not None
-                    else (
-                        comparison_baseline["scan_id"]
-                        if comparison_baseline is not None
-                        else None
-                    )
-                ),
+                baseline_scan_id,
                 events,
                 export_path,
+                sensor_id=evidence_identity["sensor_id"],
+                scope_id=evidence_identity["scope_id"],
             )
 
         _telemetry_quality.mark_import_status(
@@ -3174,12 +3984,29 @@ def ingest_manifest(connection: sqlite3.Connection, manifest_path: Path, export_
             "IMPORTED",
             imported_at=utc_now(),
         )
+        _identity.record_evidence_receipt(
+            connection,
+            identity=evidence_identity,
+            decision_id=decision_id,
+            import_status="IMPORTED",
+            imported_at=utc_now(),
+        )
         connection.commit()
+        if legacy_sensor:
+            return (
+                f"IMPORT {evidence_identity['source_scan_id']}: "
+                f"quality={state}, assets={len(snapshot.assets)}, "
+                f"mac_identity={snapshot.identity_coverage:.0%}, "
+                f"events={event_count}"
+            )
         return (
-            f"IMPORT {snapshot.scan_id}: quality={state}, "
+            f"IMPORT {evidence_identity['source_scan_id']} as {snapshot.scan_id}: "
+            f"sensor={evidence_identity['sensor_id']}, "
+            f"scope={evidence_identity['scope_id']}, quality={state}, "
             f"assets={len(snapshot.assets)}, "
             f"mac_identity={snapshot.identity_coverage:.0%}, "
-            f"events={event_count}"
+            f"events={event_count}, detections={detection_outcome['inserted']}, "
+            f"projection={'updated' if identity_projection.get('applied') else identity_projection.get('reason')}"
         )
     except Exception:
         connection.rollback()
@@ -3200,7 +4027,18 @@ def command_ingest(args: argparse.Namespace) -> int:
         return 0
     for manifest in manifests:
         try:
-            print(ingest_manifest(connection, manifest, args.events))
+            print(
+                ingest_manifest(
+                    connection,
+                    manifest,
+                    args.events,
+                    sensor_id=getattr(
+                        args,
+                        "sensor_id",
+                        _identity.DEFAULT_SENSOR_ID,
+                    ),
+                )
+            )
         except (
             DeltaAegisError,
             _telemetry_quality.TelemetryQualityError,
@@ -3210,6 +4048,132 @@ def command_ingest(args: argparse.Namespace) -> int:
         ) as exc:
             connection.rollback()
             print(f"ERROR {manifest}: {exc}", file=sys.stderr)
+    return 0
+
+
+def _local_cli_actor() -> dict[str, Any]:
+    return {
+        "user_id": "local-cli",
+        "username": "local_admin",
+        "role": "ADMIN",
+        "auth_type": "local_cli",
+    }
+
+
+def command_sensor_enroll(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        sensor = _identity.register_sensor(
+            connection,
+            display_name=args.name,
+            trust_domain=args.trust_domain,
+            sensor_id=args.sensor_id,
+            network_scopes=args.scope,
+            metadata={"enrolled_via": "local_cli"},
+            actor=_local_cli_actor(),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    print(json.dumps(sensor, indent=2, sort_keys=True))
+    return 0
+
+
+def command_sensors_v1(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    try:
+        payload = _identity.list_sensors(
+            connection,
+            include_revoked=args.include_revoked,
+        )
+    finally:
+        connection.close()
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def command_scopes_v1(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    try:
+        payload = _identity.list_scopes(
+            connection,
+            sensor_id=args.sensor_id,
+            include_unassigned=args.include_unassigned,
+        )
+    finally:
+        connection.close()
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def command_detections(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    try:
+        payload = _detection.list_results(
+            connection,
+            sensor_id=args.sensor_id,
+            scope_id=args.scope_id,
+            disposition=args.disposition,
+            limit=args.limit,
+        )
+    finally:
+        connection.close()
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def command_detection_review(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        payload = _detection.review_result(
+            connection,
+            result_id=args.result_id,
+            action=args.action,
+            reason=args.reason,
+            actor=_local_cli_actor(),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def command_readiness(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    try:
+        payload = _operations.readiness_report(
+            connection,
+            database_path=args.db,
+            netsniper_path=args.netsniper_path,
+            trueaegis_path=args.trueaegis_path,
+        )
+    finally:
+        connection.close()
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0 if payload["status"] == "READY" else 1
+
+
+def command_diagnostics(args: argparse.Namespace) -> int:
+    connection = connect(args.db)
+    try:
+        payload = _operations.diagnostics_report(
+            connection,
+            database_path=args.db,
+            netsniper_path=args.netsniper_path,
+            trueaegis_path=args.trueaegis_path,
+        )
+    finally:
+        connection.close()
+    print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
 
@@ -3247,8 +4211,8 @@ def build_netsniper_headless_command(netsniper_path: Path, target: str, scan_pro
 
 
 
-def create_scan_job(connection: sqlite3.Connection, target: str, netsniper_path: Path, runs_dir: Path, auto_ingest: bool=False, scan_profile: str='balanced', schedule_id: str | None=None) -> dict[str, Any]:
-    return _jobs.create_scan_job(connection, target, netsniper_path, runs_dir, auto_ingest, scan_profile, schedule_id)
+def create_scan_job(connection: sqlite3.Connection, target: str, netsniper_path: Path, runs_dir: Path, auto_ingest: bool=False, scan_profile: str='balanced', schedule_id: str | None=None, sensor_id: str=_identity.DEFAULT_SENSOR_ID, scope_id: str | None=None) -> dict[str, Any]:
+    return _jobs.create_scan_job(connection, target, netsniper_path, runs_dir, auto_ingest, scan_profile, schedule_id, sensor_id, scope_id)
 
 def update_scan_job(connection: sqlite3.Connection, job_id: str, **fields: Any) -> None:
     return _jobs.update_scan_job(connection, job_id, **fields)
@@ -3429,6 +4393,7 @@ def scan_job_auto_ingest_evidence(
     manifest_path: Path | str,
     ingest_result: Any,
     status_json: dict[str, Any] | None = None,
+    sensor_id: str=_identity.DEFAULT_SENSOR_ID,
 ) -> dict[str, Any]:
     """Build durable evidence that a scan bundle was ingested and quality-gated."""
 
@@ -3450,15 +4415,30 @@ def scan_job_auto_ingest_evidence(
     row = None
 
     if scan_id:
-        row = connection.execute(
-            """
-            SELECT scan_id, quality_status, manifest_path, network_scope
-            FROM snapshots
-            WHERE scan_id = ?
-            LIMIT 1
-            """,
-            (scan_id,),
-        ).fetchone()
+        columns = {
+            str(item[1])
+            for item in connection.execute("PRAGMA table_info(snapshots)")
+        }
+        if {"sensor_id", "source_scan_id"}.issubset(columns):
+            row = connection.execute(
+                """
+                SELECT scan_id, quality_status, manifest_path, network_scope
+                FROM snapshots
+                WHERE sensor_id = ? AND source_scan_id = ?
+                LIMIT 1
+                """,
+                (sensor_id, scan_id),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                """
+                SELECT scan_id, quality_status, manifest_path, network_scope
+                FROM snapshots
+                WHERE scan_id = ?
+                LIMIT 1
+                """,
+                (scan_id,),
+            ).fetchone()
 
     if row is None:
         row = connection.execute(
@@ -3573,6 +4553,11 @@ def execute_scan_job(
     runs_dir = Path(runs_dir).expanduser()
     logs_dir = Path(logs_dir).expanduser()
     events_path = Path(events_path).expanduser()
+    execution_row = scan_job_row(connection, job_id)
+    execution_job = scan_job_to_dict(execution_row) if execution_row else {}
+    execution_sensor_id = str(
+        execution_job.get("sensor_id") or _identity.DEFAULT_SENSOR_ID
+    )
 
     if not netsniper_path.is_file():
         raise DeltaAegisError(f"NetSniper executable not found: {netsniper_path}")
@@ -3889,9 +4874,18 @@ def execute_scan_job(
             auto_ingest_evidence["manifest_path"] = str(manifest)
 
             if manifest.is_file():
-                ingest_result = ingest_manifest(connection, manifest, events_path)
+                ingest_result = ingest_manifest(
+                    connection,
+                    manifest,
+                    events_path,
+                    sensor_id=execution_sensor_id,
+                )
                 auto_ingest_evidence = scan_job_auto_ingest_evidence(
-                    connection, manifest, ingest_result, status_json=status_json
+                    connection,
+                    manifest,
+                    ingest_result,
+                    status_json=status_json,
+                    sensor_id=execution_sensor_id,
                 )
                 message_parts.append(f"auto-ingest={ingest_result}")
                 message_parts.append(
@@ -3947,6 +4941,11 @@ def command_scan_start(args: argparse.Namespace) -> int:
         runs_dir,
         auto_ingest=args.auto_ingest,
         scan_profile=safe_profile,
+        sensor_id=getattr(
+            args,
+            "sensor_id",
+            _identity.DEFAULT_SENSOR_ID,
+        ),
     )
 
     print(f"Created scan job: {job['job_id']}")
@@ -4217,8 +5216,8 @@ def trueaegis_job_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return _jobs.trueaegis_job_to_dict(row)
 
 
-def create_trueaegis_job(connection: sqlite3.Connection, scan_id: str | None, network_scope: str | None, manifest_path: Path, trueaegis_path: Path, scan_job_id: str | None=None, schedule_id: str | None=None, trigger_source: str='manual_dashboard') -> dict[str, Any]:
-    return _jobs.create_trueaegis_job(connection, scan_id, network_scope, manifest_path, trueaegis_path, scan_job_id, schedule_id, trigger_source)
+def create_trueaegis_job(connection: sqlite3.Connection, scan_id: str | None, network_scope: str | None, manifest_path: Path, trueaegis_path: Path, scan_job_id: str | None=None, schedule_id: str | None=None, trigger_source: str='manual_dashboard', sensor_id: str | None=None, scope_id: str | None=None) -> dict[str, Any]:
+    return _jobs.create_trueaegis_job(connection, scan_id, network_scope, manifest_path, trueaegis_path, scan_job_id, schedule_id, trigger_source, sensor_id, scope_id)
 
 
 def update_trueaegis_job(connection: sqlite3.Connection, job_id: str, **fields: Any) -> None:
@@ -4771,8 +5770,8 @@ def scan_schedule_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return _jobs.scan_schedule_to_dict(row)
 
 
-def create_scan_schedule(connection: sqlite3.Connection, name: str, target: str, scan_profile: str='balanced', cadence_minutes: int=60, enabled: bool=True, auto_ingest: bool=True, run_trueaegis_after_ingest: bool=False) -> dict[str, Any]:
-    return _jobs.create_scan_schedule(connection, name, target, scan_profile, cadence_minutes, enabled, auto_ingest, run_trueaegis_after_ingest)
+def create_scan_schedule(connection: sqlite3.Connection, name: str, target: str, scan_profile: str='balanced', cadence_minutes: int=60, enabled: bool=True, auto_ingest: bool=True, run_trueaegis_after_ingest: bool=False, sensor_id: str=_identity.DEFAULT_SENSOR_ID, scope_id: str | None=None) -> dict[str, Any]:
+    return _jobs.create_scan_schedule(connection, name, target, scan_profile, cadence_minutes, enabled, auto_ingest, run_trueaegis_after_ingest, sensor_id, scope_id)
 
 
 def query_scan_schedules(connection: sqlite3.Connection, limit: int=20, enabled: bool | None=None, scope: str | None=None) -> list[sqlite3.Row]:
@@ -4788,12 +5787,12 @@ def next_schedule_run_text(cadence_minutes: int, base_time: datetime | None=None
     return _jobs.next_schedule_run_text(cadence_minutes, base_time)
 
 
-def active_scan_job_row(connection: sqlite3.Connection) -> sqlite3.Row | None:
-    return _jobs.active_scan_job_row(connection)
+def active_scan_job_row(connection: sqlite3.Connection, sensor_id: str=_identity.DEFAULT_SENSOR_ID) -> sqlite3.Row | None:
+    return _jobs.active_scan_job_row(connection, sensor_id)
 
 
-def active_scan_job_exists(connection: sqlite3.Connection) -> bool:
-    return _jobs.active_scan_job_exists(connection)
+def active_scan_job_exists(connection: sqlite3.Connection, sensor_id: str=_identity.DEFAULT_SENSOR_ID) -> bool:
+    return _jobs.active_scan_job_exists(connection, sensor_id)
 
 
 class ActiveScanJobExistsError(DeltaAegisError):
@@ -4813,8 +5812,8 @@ _JOB_CONTEXT = _jobs.JobContext(
 )
 
 
-def reserve_scan_job_if_idle(connection: sqlite3.Connection, target: str, netsniper_path: Path, runs_dir: Path, *, auto_ingest: bool=False, scan_profile: str='balanced', schedule_id: str | None=None) -> dict[str, Any]:
-    return _jobs.reserve_scan_job_if_idle(connection, target, netsniper_path, runs_dir, auto_ingest=auto_ingest, scan_profile=scan_profile, schedule_id=schedule_id, context=_JOB_CONTEXT)
+def reserve_scan_job_if_idle(connection: sqlite3.Connection, target: str, netsniper_path: Path, runs_dir: Path, *, auto_ingest: bool=False, scan_profile: str='balanced', schedule_id: str | None=None, sensor_id: str=_identity.DEFAULT_SENSOR_ID, scope_id: str | None=None) -> dict[str, Any]:
+    return _jobs.reserve_scan_job_if_idle(connection, target, netsniper_path, runs_dir, auto_ingest=auto_ingest, scan_profile=scan_profile, schedule_id=schedule_id, sensor_id=sensor_id, scope_id=scope_id, context=_JOB_CONTEXT)
 
 
 STALE_SCAN_JOB_RECOVERY_CONFIRMATION = "MARK STALE SCANS FAILED"
@@ -5102,12 +6101,18 @@ def scan_job_reconcile_completed_orphan(
                 connection,
                 manifest_path,
                 Path(events_path).expanduser(),
+                sensor_id=str(
+                    item.get("sensor_id") or _identity.DEFAULT_SENSOR_ID
+                ),
             )
             auto_ingest_evidence = scan_job_auto_ingest_evidence(
                 connection,
                 manifest_path,
                 ingest_result,
                 status_json=status_json,
+                sensor_id=str(
+                    item.get("sensor_id") or _identity.DEFAULT_SENSOR_ID
+                ),
             )
             message_parts.append(
                 f"auto-ingest={ingest_result}"
@@ -5614,7 +6619,10 @@ def run_due_scan_schedules(
     for row in query_due_scan_schedules(connection, limit=max_runs):
         schedule = scan_schedule_to_dict(row)
 
-        active_job = active_scan_job_row(connection)
+        schedule_sensor_id = str(
+            schedule.get("sensor_id") or _identity.DEFAULT_SENSOR_ID
+        )
+        active_job = active_scan_job_row(connection, schedule_sensor_id)
 
         if active_job is not None:
             results.append(
@@ -5642,6 +6650,8 @@ def run_due_scan_schedules(
                 auto_ingest=schedule["auto_ingest"],
                 scan_profile=schedule["scan_profile"],
                 schedule_id=schedule["schedule_id"],
+                sensor_id=schedule_sensor_id,
+                scope_id=str(schedule.get("scope_id") or "") or None,
             )
         except ActiveScanJobExistsError as exc:
             results.append(
@@ -5921,6 +6931,11 @@ def command_schedule_create(args: argparse.Namespace) -> int:
         enabled=not args.disabled,
         auto_ingest=args.auto_ingest,
         run_trueaegis_after_ingest=args.run_trueaegis_after_ingest,
+        sensor_id=getattr(
+            args,
+            "sensor_id",
+            _identity.DEFAULT_SENSOR_ID,
+        ),
     )
     connection.commit()
 
@@ -10897,6 +11912,7 @@ def dashboard_site_assets_payload(
         site_id,
     )
     requested_limit = max(1, int(limit or 25))
+    fetch_limit = 10000
     rows: list[dict[str, Any]] = []
 
     for scope in context["member_scopes"]:
@@ -10904,7 +11920,7 @@ def dashboard_site_assets_payload(
             dashboard_site_tag_rows(
                 dashboard_assets_payload(
                     connection,
-                    requested_limit,
+                    fetch_limit,
                     scope=scope,
                     state=state,
                     identity=identity,
@@ -10917,9 +11933,7 @@ def dashboard_site_assets_payload(
     rows.sort(
         key=lambda row: (
             str(row.get("state") or ""),
-            str(row.get("network_scope") or ""),
-            str(row.get("current_ip") or ""),
-            str(row.get("asset_key") or ""),
+            dashboard_asset_numeric_ip_sort_key(row),
         )
     )
     return rows[:requested_limit]
@@ -12712,8 +13726,15 @@ def dashboard_netsniper_scan_worker(
                 message=f"scan worker failed: {exc}",
             )
             connection.commit()
-        except Exception:
-            pass
+        except Exception as persistence_exc:
+            _record_background_worker_persistence_failure(
+                worker="NetSniper scan worker",
+                job_id=job_id,
+                primary_error=exc,
+                persistence_error=persistence_exc,
+                connection=connection,
+                log_dir=logs_dir,
+            )
     finally:
         connection.close()
 
@@ -13170,8 +14191,16 @@ def trueaegis_start_queued_followup_for_schedule(
                 message=message,
             )
             connection.commit()
-        except Exception:
-            pass
+        except Exception as persistence_exc:
+            _record_background_worker_persistence_failure(
+                worker="TrueAegis follow-up start",
+                job_id=job_id,
+                primary_error=message,
+                persistence_error=persistence_exc,
+                connection=connection,
+                log_dir=DEFAULT_TRUEAEGIS_LOGS,
+            )
+            result["persistence_error"] = str(persistence_exc)
 
         result["completed"] = True
         result["outcome"] = outcome
@@ -13312,12 +14341,22 @@ def import_trueaegis_job_results(
     connection: sqlite3.Connection,
     validation_results_path: Path | str,
     scope: str | None = None,
+    *,
+    sensor_id: str=_identity.DEFAULT_SENSOR_ID,
+    scope_id: str | None=None,
 ) -> dict[str, Any]:
     validation_path = Path(validation_results_path).expanduser()
-    import_summary = import_trueaegis_validation_results(connection, validation_path)
+    import_summary = import_trueaegis_validation_results(
+        connection,
+        validation_path,
+        sensor_id=sensor_id,
+        scope_id=scope_id,
+    )
     refresh_summary = refresh_trueaegis_validation_correlations(
         connection,
         scope=scope,
+        sensor_id=sensor_id,
+        scope_id=scope_id,
     )
     connection.commit()
 
@@ -13442,7 +14481,7 @@ def execute_trueaegis_job(
 
     if final_status == "COMPLETED" and validation_results_path is not None:
         job_row = connection.execute(
-            "SELECT network_scope FROM trueaegis_jobs WHERE job_id = ?",
+            "SELECT network_scope, sensor_id, scope_id FROM trueaegis_jobs WHERE job_id = ?",
             (job_id,),
         ).fetchone()
         job_scope = (
@@ -13456,6 +14495,16 @@ def execute_trueaegis_job(
                 connection,
                 validation_results_path,
                 scope=job_scope,
+                sensor_id=(
+                    str(job_row["sensor_id"] or _identity.DEFAULT_SENSOR_ID)
+                    if job_row is not None
+                    else _identity.DEFAULT_SENSOR_ID
+                ),
+                scope_id=(
+                    str(job_row["scope_id"] or "") or None
+                    if job_row is not None
+                    else None
+                ),
             )
             validation_run_id = import_summary.get("validation_run_id")
             imported_observations = int(import_summary.get("imported_observations") or 0)
@@ -13518,8 +14567,15 @@ def dashboard_trueaegis_validation_worker(
                 message=f"TrueAegis validation worker failed: {exc}",
             )
             connection.commit()
-        except Exception:
-            pass
+        except Exception as persistence_exc:
+            _record_background_worker_persistence_failure(
+                worker="TrueAegis validation worker",
+                job_id=job_id,
+                primary_error=exc,
+                persistence_error=persistence_exc,
+                connection=connection,
+                log_dir=logs_dir,
+            )
     finally:
         connection.close()
 
@@ -14238,20 +15294,27 @@ def trueaegis_validation_service_protocol(
 def trueaegis_latest_accepted_snapshots(
     connection: sqlite3.Connection,
     scope: str | None = None,
+    *,
+    sensor_id: str=_identity.DEFAULT_SENSOR_ID,
+    scope_id: str | None=None,
 ) -> list[sqlite3.Row]:
     clauses = ["(quality_status = 'ACCEPTED' OR is_accepted_baseline = 1)"]
-    params: list[Any] = []
+    params: list[Any] = [_identity.canonical_sensor_id(sensor_id)]
+    clauses.append("sensor_id = ?")
 
     if scope:
         clauses.append("network_scope = ?")
         params.append(scope)
+    if scope_id:
+        clauses.append("scope_id = ?")
+        params.append(_identity.canonical_scope_id(scope_id))
 
     rows = connection.execute(
         f"""
-        SELECT scan_id, network_scope, created_at, imported_at
+        SELECT scan_id, sensor_id, scope_id, network_scope, created_at, imported_at
         FROM snapshots
         WHERE {" AND ".join(clauses)}
-        ORDER BY network_scope ASC, created_at DESC, imported_at DESC, scan_id DESC
+        ORDER BY scope_id ASC, created_at DESC, imported_at DESC, scan_id DESC
         """,
         tuple(params),
     ).fetchall()
@@ -14259,9 +15322,9 @@ def trueaegis_latest_accepted_snapshots(
     latest_by_scope: dict[str, sqlite3.Row] = {}
 
     for row in rows:
-        network_scope = str(row["network_scope"] or "")
-        if network_scope not in latest_by_scope:
-            latest_by_scope[network_scope] = row
+        identity_scope = str(row["scope_id"] or "")
+        if identity_scope not in latest_by_scope:
+            latest_by_scope[identity_scope] = row
 
     return list(latest_by_scope.values())
 
@@ -14269,18 +15332,36 @@ def trueaegis_latest_accepted_snapshots(
 def refresh_trueaegis_validation_correlations(
     connection: sqlite3.Connection,
     scope: str | None = None,
+    *,
+    sensor_id: str=_identity.DEFAULT_SENSOR_ID,
+    scope_id: str | None=None,
 ) -> dict[str, Any]:
     matched_at = utc_now()
-    latest_snapshots = trueaegis_latest_accepted_snapshots(connection, scope=scope)
+    safe_sensor_id = _identity.canonical_sensor_id(sensor_id)
+    safe_scope_id = _identity.canonical_scope_id(scope_id) if scope_id else None
+    latest_snapshots = trueaegis_latest_accepted_snapshots(
+        connection,
+        scope=scope,
+        sensor_id=safe_sensor_id,
+        scope_id=safe_scope_id,
+    )
     latest_scan_ids = [row["scan_id"] for row in latest_snapshots]
 
-    if scope:
+    if safe_scope_id:
         connection.execute(
-            "DELETE FROM validation_correlations WHERE network_scope = ?",
-            (scope,),
+            "DELETE FROM validation_correlations WHERE scope_id = ?",
+            (safe_scope_id,),
+        )
+    elif scope:
+        connection.execute(
+            "DELETE FROM validation_correlations WHERE sensor_id = ? AND network_scope = ?",
+            (safe_sensor_id, scope),
         )
     else:
-        connection.execute("DELETE FROM validation_correlations")
+        connection.execute(
+            "DELETE FROM validation_correlations WHERE sensor_id = ?",
+            (safe_sensor_id,),
+        )
 
     if not latest_scan_ids:
         return {
@@ -14303,6 +15384,8 @@ def refresh_trueaegis_validation_correlations(
             f"""
             SELECT
                 s.network_scope,
+                s.sensor_id,
+                s.scope_id,
                 so.scan_id,
                 ao.asset_key,
                 ao.ip_address,
@@ -14350,8 +15433,11 @@ def refresh_trueaegis_validation_correlations(
             WHERE o.host IS NOT NULL
               AND TRIM(o.host) != ''
               AND o.port IS NOT NULL
+              AND o.sensor_id = ?
+              AND (? IS NULL OR o.scope_id = ?)
             ORDER BY r.imported_at DESC, o.row_index ASC
-            """
+            """,
+            (safe_sensor_id, safe_scope_id, safe_scope_id),
         )
     ]
 
@@ -14424,7 +15510,8 @@ def refresh_trueaegis_validation_correlations(
                     confidence,
                     match_method,
                     matched_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    , sensor_id, scope_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     correlation_id,
@@ -14447,6 +15534,8 @@ def refresh_trueaegis_validation_correlations(
                     observation.get("confidence"),
                     match_method,
                     matched_at,
+                    service.get("sensor_id") or safe_sensor_id,
+                    service.get("scope_id") or safe_scope_id or _identity.UNASSIGNED_SCOPE_ID,
                 ),
             )
 
@@ -20271,7 +21360,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Release</span><span>v0.45.0 Telemetry Trust</span></div>
+      <div class="executive-status-pill"><span>Build</span><span>v1.0 Stage 3–5 Candidate</span></div>
     </div>
   </header>
 
@@ -27949,12 +29038,87 @@ def load_trueaegis_validation_results(path: Path) -> list[dict[str, Any]]:
 def import_trueaegis_validation_results(
     connection: sqlite3.Connection,
     validation_path: Path,
+    *,
+    sensor_id: str=_identity.DEFAULT_SENSOR_ID,
+    scope_id: str | None=None,
 ) -> dict[str, Any]:
     validation_path = validation_path.expanduser().resolve()
     rows = load_trueaegis_validation_results(validation_path)
 
     source_hash = trueaegis_source_hash(validation_path)
-    validation_run_id = "trueaegis-" + source_hash[:16]
+    safe_sensor_id = _identity.canonical_sensor_id(sensor_id)
+    host_addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    invalid_hosts: list[str] = []
+    for item in rows:
+        raw_host = str(item.get("host") or "").strip()
+        try:
+            host_addresses.append(ipaddress.ip_address(raw_host))
+        except ValueError:
+            invalid_hosts.append(raw_host)
+    if scope_id:
+        safe_scope_id = _identity.canonical_scope_id(scope_id)
+        scope_row = connection.execute(
+            "SELECT * FROM identity_scopes WHERE scope_id=? AND sensor_id=? AND status='ACTIVE'",
+            (safe_scope_id, safe_sensor_id),
+        ).fetchone()
+        if scope_row is None:
+            raise _identity.IdentityError(
+                "TrueAegis scope is not active for the selected sensor"
+            )
+    else:
+        candidates = []
+        for candidate in _identity.list_scopes(
+            connection,
+            sensor_id=safe_sensor_id,
+        ):
+            try:
+                network = ipaddress.ip_network(candidate["network_scope"], strict=False)
+            except ValueError:
+                continue
+            if host_addresses and all(address in network for address in host_addresses):
+                candidates.append(candidate)
+        if len(candidates) == 1:
+            safe_scope_id = str(candidates[0]["scope_id"])
+        elif safe_sensor_id == _identity.DEFAULT_SENSOR_ID:
+            safe_scope_id = _identity.UNASSIGNED_SCOPE_ID
+        else:
+            raise _identity.IdentityError(
+                "non-default TrueAegis evidence requires an explicit unambiguous scope_id"
+            )
+    if safe_scope_id != _identity.UNASSIGNED_SCOPE_ID:
+        selected_scope = connection.execute(
+            "SELECT network_scope FROM identity_scopes "
+            "WHERE scope_id=? AND sensor_id=? AND status='ACTIVE'",
+            (safe_scope_id, safe_sensor_id),
+        ).fetchone()
+        if selected_scope is None:
+            raise _identity.IdentityError(
+                "TrueAegis scope is not active for the selected sensor"
+            )
+        try:
+            selected_network = ipaddress.ip_network(
+                str(selected_scope["network_scope"]),
+                strict=False,
+            )
+        except ValueError as exc:
+            raise _identity.IdentityError(
+                "TrueAegis scope has an invalid network binding"
+            ) from exc
+        outside = [
+            str(address)
+            for address in host_addresses
+            if address.version != selected_network.version
+            or address not in selected_network
+        ]
+        if invalid_hosts or outside:
+            raise _identity.IdentityError(
+                "TrueAegis result hosts must be IP addresses contained by the "
+                f"selected scope; invalid={invalid_hosts[:5]}, outside={outside[:5]}"
+            )
+    validation_seed = f"{safe_sensor_id}\0{safe_scope_id}\0{source_hash}"
+    validation_run_id = "trueaegis-" + hashlib.sha256(
+        validation_seed.encode("utf-8")
+    ).hexdigest()[:24]
     imported_at = utc_now()
     inferred_created_at = trueaegis_infer_created_at(validation_path)
 
@@ -27968,8 +29132,8 @@ def import_trueaegis_validation_results(
         INSERT OR REPLACE INTO validation_runs (
             validation_run_id, source_path, source_filename, source_sha256,
             source_format, inferred_created_at, imported_at, result_count,
-            status_counts_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            status_counts_json, sensor_id, scope_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             validation_run_id,
@@ -27981,6 +29145,8 @@ def import_trueaegis_validation_results(
             imported_at,
             len(rows),
             json.dumps(status_counts, sort_keys=True),
+            safe_sensor_id,
+            safe_scope_id,
         ),
     )
 
@@ -28016,7 +29182,8 @@ def import_trueaegis_validation_results(
                 port, protocol, transport, status, validated, safe, confidence,
                 summary, reachability, exposure, authentication, details_json,
                 evidence_json, metadata_json, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                , sensor_id, scope_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 observation_id,
@@ -28039,6 +29206,8 @@ def import_trueaegis_validation_results(
                 trueaegis_json_dump(row.get("evidence"), []),
                 trueaegis_json_dump(row.get("metadata"), {}),
                 trueaegis_json_dump(row, {}),
+                safe_sensor_id,
+                safe_scope_id,
             ),
         )
 
@@ -28049,6 +29218,8 @@ def import_trueaegis_validation_results(
         "source_path": str(validation_path),
         "result_count": len(rows),
         "status_counts": status_counts,
+        "sensor_id": safe_sensor_id,
+        "scope_id": safe_scope_id,
     }
 
 
@@ -28101,7 +29272,14 @@ def dashboard_trueaegis_validation_ingest_payload(
             f"TrueAegis validation file was not found: {validation_path}"
         )
 
-    result = import_trueaegis_validation_results(connection, validation_path)
+    result = import_trueaegis_validation_results(
+        connection,
+        validation_path,
+        sensor_id=str(
+            payload.get("sensor_id") or _identity.DEFAULT_SENSOR_ID
+        ),
+        scope_id=str(payload.get("scope_id") or "") or None,
+    )
     connection.commit()
 
     summary = dashboard_validation_summary_payload(connection)
@@ -28141,7 +29319,16 @@ def dashboard_trueaegis_validation_ingest_payload(
 
 def command_validation_ingest(args) -> int:
     connection = connect(args.db)
-    result = import_trueaegis_validation_results(connection, args.validation_results)
+    result = import_trueaegis_validation_results(
+        connection,
+        args.validation_results,
+        sensor_id=getattr(
+            args,
+            "sensor_id",
+            _identity.DEFAULT_SENSOR_ID,
+        ),
+        scope_id=getattr(args, "scope_id", None),
+    )
 
     print(f"Imported TrueAegis validation run: {result['validation_run_id']}")
     print(f"Source: {result['source_path']}")
@@ -33754,11 +34941,13 @@ def dashboard_asset_detail_payload(
     connection,
     identifier,
     scope=None,
+    limit=20,
 ):
     payload = _deltaaegis_dashboard_asset_detail_v045_base(
         connection,
         identifier,
         scope=scope,
+        limit=limit,
     )
     if isinstance(payload, dict):
         latest_observation = payload.get("latest_observation")
@@ -33833,7 +35022,7 @@ def dashboard_telemetry_quality_shell_html() -> str:
 <body>
 <main>
 <section class="panel">
-  <div class="eyebrow">DeltaAegis v0.45</div>
+  <div class="eyebrow">DeltaAegis v1.0 Stage 3–5</div>
   <h1>Telemetry Quality Center</h1>
   <p>Automated decisions remain immutable. Reviewed state may change only through the policy-permitted, session-derived, audited workflow below. DEGRADED telemetry is positive-only; QUARANTINED and REJECTED telemetry cannot mutate active state.</p>
   <div class="actions">
@@ -33988,7 +35177,8 @@ def dashboard_telemetry_quality_shell_html() -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "DeltaAegis v0.45.0 — Telemetry Trust, "
+            "DeltaAegis v1.0 Stage 3–5 — scoped identity, detection, operations, "
+            "forward migrations, /api/v1, "
             "SQLite-consistent backups, verified manifests, "
             "restore rehearsal, guarded retention, active restore "
             "cutover planning and rollback, operator actions, "
@@ -34308,7 +35498,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("username")
     p.add_argument("--name", default="DeltaAegis API Token")
     p.add_argument("--role", choices=list(ACCESS_ROLES), default=None)
-    p.add_argument("--expires-at", help="Optional ISO-8601 expiration timestamp")
+    p.add_argument(
+        "--expires-at",
+        help="ISO-8601 expiration timestamp (defaults to 30 days; maximum 365 days)",
+    )
+    p.add_argument(
+        "--scope",
+        action="append",
+        choices=sorted(ACCESS_RBAC_PERMISSIONS),
+        help="Grant one role-limited API scope; repeat for multiple scopes (defaults to every scope allowed by the token role)",
+    )
     p.add_argument("--actor", default="system", help="Audit actor name for this administrative action")
 
     p = sub.add_parser("api-tokens", help="List database-backed DeltaAegis API tokens")
@@ -34320,9 +35519,41 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--actor")
     p.add_argument("--target-type")
 
-    sub.add_parser("ingest")
+    p = sub.add_parser("ingest")
+    p.add_argument(
+        "--sensor-id",
+        default=_identity.DEFAULT_SENSOR_ID,
+        help="Enrolled sensor identity for every bundle in --runs-dir",
+    )
+    p = sub.add_parser("sensor-enroll", help="Enroll one managed NetSniper sensor and its authorized scopes")
+    p.add_argument("--name", required=True)
+    p.add_argument("--sensor-id")
+    p.add_argument("--trust-domain", default=_identity.DEFAULT_TRUST_DOMAIN)
+    p.add_argument("--scope", action="append", required=True, help="Authorized private IPv4 CIDR; repeat as needed")
+    p = sub.add_parser("sensors-v1", help="List durable v1 sensor identities")
+    p.add_argument("--include-revoked", action="store_true")
+    p = sub.add_parser("scopes-v1", help="List durable v1 scope identities")
+    p.add_argument("--sensor-id")
+    p.add_argument("--include-unassigned", action="store_true")
+    p = sub.add_parser("detections", help="List immutable versioned detection results")
+    p.add_argument("--sensor-id")
+    p.add_argument("--scope-id")
+    p.add_argument("--disposition", choices=["OPEN", "REVIEWED", "SUPPRESSED"])
+    p.add_argument("--limit", type=int, default=100)
+    p = sub.add_parser("detection-review", help="Append a review or suppression decision")
+    p.add_argument("result_id")
+    p.add_argument("--action", required=True, choices=sorted(_detection.REVIEW_ACTIONS))
+    p.add_argument("--reason", required=True)
+    p = sub.add_parser("readiness", help="Evaluate structured v1 readiness checks")
+    p.add_argument("--netsniper-path", type=Path)
+    p.add_argument("--trueaegis-path", type=Path)
+    p = sub.add_parser("diagnostics", help="Print bounded secret-redacted v1 diagnostics")
+    p.add_argument("--netsniper-path", type=Path)
+    p.add_argument("--trueaegis-path", type=Path)
     p = sub.add_parser("validation-ingest", help="Import a TrueAegis validation_results JSON file")
     p.add_argument("validation_results", type=Path)
+    p.add_argument("--sensor-id", default=_identity.DEFAULT_SENSOR_ID)
+    p.add_argument("--scope-id", help="Explicit durable scope for non-default sensors or ambiguous evidence")
     p = sub.add_parser("validations", help="List imported TrueAegis validation observations")
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--status", choices=sorted(TRUEAEGIS_VALIDATION_STATUSES))
@@ -34333,6 +35564,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--netsniper-path", type=Path, default=DEFAULT_NETSNIPER)
     p.add_argument("--scan-logs-dir", type=Path, default=DEFAULT_SCAN_LOGS)
     p.add_argument("--auto-ingest", action="store_true", help="Ingest the completed NetSniper bundle after a successful scan")
+    p.add_argument("--sensor-id", default=_identity.DEFAULT_SENSOR_ID, help="Enrolled sensor identity that owns this scan")
     p = sub.add_parser("scan-jobs", help="List NetSniper scan orchestration jobs")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--status", choices=sorted(SCAN_JOB_STATUSES))
@@ -34345,6 +35577,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--disabled", action="store_true", help="Create the schedule disabled")
     p.add_argument("--no-auto-ingest", dest="auto_ingest", action="store_false", default=True, help="Do not auto-ingest completed scheduled scan bundles")
     p.add_argument("--trueaegis-after-ingest", dest="run_trueaegis_after_ingest", action="store_true", default=False, help="Run TrueAegis automatically after a completed scheduled scan is accepted by DeltaAegis")
+    p.add_argument("--sensor-id", default=_identity.DEFAULT_SENSOR_ID, help="Enrolled sensor identity that owns this schedule")
     p = sub.add_parser("schedule-list", help="List saved NetSniper scan schedules")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--enabled", choices=["all", "enabled", "disabled"], default="all")
@@ -34587,6 +35820,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scope")
     p.add_argument("--quiet", action="store_true")
     p.add_argument(
+        "--secure-cookies",
+        action="store_true",
+        help=(
+            "Mark session and CSRF cookies Secure when the public browser "
+            "origin is HTTPS through an explicitly configured reverse proxy"
+        ),
+    )
+    p.add_argument(
+        "--public-origin",
+        help=(
+            "Exact browser-facing HTTP(S) origin for an explicitly configured "
+            "reverse proxy, for example https://deltaaegis.example. The proxy "
+            "must preserve this authority in Host; forwarded headers are ignored."
+        ),
+    )
+    p.add_argument(
         "--enable-scheduled-scans",
         dest="enable_scheduled_scans",
         action="store_true",
@@ -34662,6 +35911,13 @@ def main() -> int:
         if args.command == "api-tokens": return command_api_tokens(args)
         if args.command == "access-audit": return command_access_audit(args)
         if args.command == "ingest": return command_ingest(args)
+        if args.command == "sensor-enroll": return command_sensor_enroll(args)
+        if args.command == "sensors-v1": return command_sensors_v1(args)
+        if args.command == "scopes-v1": return command_scopes_v1(args)
+        if args.command == "detections": return command_detections(args)
+        if args.command == "detection-review": return command_detection_review(args)
+        if args.command == "readiness": return command_readiness(args)
+        if args.command == "diagnostics": return command_diagnostics(args)
         if args.command == "validation-ingest": return command_validation_ingest(args)
         if args.command == "validations": return command_validations(args)
         if args.command == "scan-start": return command_scan_start(args)
@@ -34724,7 +35980,12 @@ def main() -> int:
 
         if args.command == "paths": return command_paths(args)
         raise DeltaAegisError(f"unknown command: {args.command}")
-    except DeltaAegisError as exc:
+    except (
+        DeltaAegisError,
+        _identity.IdentityError,
+        _detection.DetectionError,
+        _operations.OperationsError,
+    ) as exc:
         print(f"DeltaAegis error: {exc}", file=sys.stderr); return 1
 
 
@@ -34775,9 +36036,11 @@ def dashboard_assets_payload(
     state: str | None = None,
     identity: str | None = None,
 ) -> list[dict[str, Any]]:
+    requested_limit = max(1, int(limit or 25))
+    fetch_limit = 10000
     rows = _deltaaegis_dashboard_assets_payload_v042_numeric_base(
         connection,
-        limit,
+        fetch_limit,
         scope=scope,
         state=state,
         identity=identity,
@@ -34785,6 +36048,6 @@ def dashboard_assets_payload(
     return sorted(
         rows,
         key=dashboard_asset_numeric_ip_sort_key,
-    )
+    )[:requested_limit]
 if __name__ == "__main__":
     raise SystemExit(main())

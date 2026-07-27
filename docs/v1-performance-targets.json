@@ -1,0 +1,28 @@
+{
+  "baseline": {
+    "assets_payload_median_ms": 4.804,
+    "cold_import_median_ms": 558.686,
+    "database_bytes_per_asset": 1399.467,
+    "fresh_schema_init_median_ms": 28.078,
+    "release": "v0.43",
+    "report_generation_median_ms": 489.329,
+    "summary_payload_median_ms": 5.666
+  },
+  "schema_version": "deltaaegis-performance-targets-v1",
+  "soak": {
+    "maximum_integrity_failures": 0,
+    "maximum_unplanned_worker_failures": 0,
+    "minimum_hours": 24,
+    "sample_interval_seconds": 60
+  },
+  "targets": {
+    "assets_payload_max_ms": 100.0,
+    "cold_import_max_ms": 2000.0,
+    "combined_release_gate_max_seconds": 600.0,
+    "database_bytes_per_asset_max": 5000.0,
+    "fresh_schema_init_max_ms": 500.0,
+    "readiness_max_ms": 1000.0,
+    "report_generation_max_ms": 2000.0,
+    "summary_payload_max_ms": 100.0
+  }
+}
