@@ -1,14 +1,14 @@
-# DeltaAegis v1.0.0 Repository Audit
+# DeltaAegis v1.0.1 Repository Audit
 
 Schema: `deltaaegis-repository-audit-v4`
 
-This deterministic inventory describes the DeltaAegis v1.0.0 GA release tree, including the preserved Stage 1–2 foundation and the completed Stage 3–5 implementation on released v0.45.0. Regenerate it with `python3 tools/audit_v0_44_repository.py --write`.
+This deterministic inventory describes the DeltaAegis v1.0.1 maintenance release tree, including the preserved v1.0.0 Stage 1–5 contracts and the dashboard SQLite connection-lifecycle correction. Regenerate it with `python3 tools/audit_v0_44_repository.py --write`.
 
 ## Inventory summary
 
 | Measure | Count |
 |---|---:|
-| Repository files in audit scope | 197 |
+| Repository files in audit scope | 198 |
 | `deltaaegis.py` lines | 36059 |
 | Root top-level functions | 705 |
 | Root top-level classes | 6 |
@@ -16,16 +16,16 @@ This deterministic inventory describes the DeltaAegis v1.0.0 GA release tree, in
 | Distinct CLI commands | 74 |
 | Distinct `/api` route literals | 78 |
 | Declared schema tables | 47 |
-| Validator scripts | 96 |
+| Validator scripts | 97 |
 | Validator version groups | 9 |
 
-Root source SHA-256: `1b345797a3a38870682c56c2ccb72cb17790c9abf8acc009b0db4b20be1af07e`
+Root source SHA-256: `000b8c409b1d3693569eae0731e76054a7919d37ea8952a74383040ad348940c`
 
 ## Modular core inventory
 
 | Module | Lines | Functions | Classes | Internal dependencies | SHA-256 |
 |---|---:|---:|---:|---|---|
-| `deltaaegis_core/api_v1.py` | 1140 | 19 | 2 | None | `1ac2110bc18e56b5b516434e51d8d9b303c3f51d0dbcacee9be97829084dade0` |
+| `deltaaegis_core/api_v1.py` | 1140 | 19 | 2 | None | `c775171103f601b00e2ef62556213258d6cd0f45bfec9e0eb4f295e5ea20f3e6` |
 | `deltaaegis_core/auth.py` | 1547 | 52 | 2 | None | `7b35209e7bcd15dd82d5763b8f70198c6ae03811e9a731a5e4f308a1f851c7c1` |
 | `deltaaegis_core/config.py` | 80 | 1 | 1 | None | `0860bf7e2b193aa22c4ad41f69f3f3f4a2f3360c3635052ef7fe1959d1f17217` |
 | `deltaaegis_core/current_state.py` | 1599 | 35 | 0 | None | `098b6deaa162b7585cd1915274657b2b000fac15315ba5d8b711f1ec6a7e2c66` |
@@ -50,8 +50,8 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 | DA044-001 | MEDIUM | compatibility facade | deltaaegis.py remains 36059 lines with 705 top-level functions; 15 core modules contain 19682 lines. | Retain the facade through v1 compatibility; continue only owned incremental extraction behind characterization evidence. |
 | DA044-002 | MEDIUM | source-order coupling | Repeated top-level function names in the compatibility facade: build_current_risk_register, dashboard_asset_detail_payload, dashboard_assets_payload, dashboard_current_state_payload, dashboard_index_html, dashboard_operator_session_shell_html, dashboard_summary_payload. | Remove only with characterization evidence and explicit compatibility ownership. |
 | DA044-003 | INFO | storage migrations | Stage 1 inventories 47 declared tables behind an ordered checksummed migration ledger and verified pre-migration backup. | Delivered for the supported v0.42.x origins; retain interruption, restore-rehearsal, convergence, and tamper tests in every v1 gate. |
-| DA044-004 | INFO | HTTP/API contract | Stages 2–5 expose 17 stable /api/v1 route literals while 61 pre-existing route literals remain private compatibility interfaces. | Delivered in v1.0.0 GA; keep runtime, tracked OpenAPI, authorization, HTTP, and private-route transition inventories release-gated. |
-| DA044-005 | LOW | validation estate | 96 validator scripts span 9 version groups; 216 historical validators are preserved by a byte-verified retirement manifest. | Retain the current compatibility floor and require manifest-backed replacement evidence for any further validator retirement. |
+| DA044-004 | INFO | HTTP/API contract | Stages 2–5 expose 17 stable /api/v1 route literals while 61 pre-existing route literals remain private compatibility interfaces. | Delivered in v1.0.0 GA and preserved in v1.0.1; keep runtime, tracked OpenAPI, authorization, HTTP, and private-route transition inventories release-gated. |
+| DA044-005 | LOW | validation estate | 97 validator scripts span 9 version groups; 216 historical validators are preserved by a byte-verified retirement manifest. | Retain the current compatibility floor and require manifest-backed replacement evidence for any further validator retirement. |
 | DA044-006 | INFO | integration compatibility | NetSniper is pinned to v2.1.0 commit 0624a36550f6eb62ed0daa6862e5cc25a0d93236; optional TrueAegis is pinned to >=1.2.0,<2.0.0, a witness commit, and a fixture-validated result contract. | Retain exact pins, fixtures, scope-containment tests, and fail-closed integration readiness in every v1 gate. |
 | DA044-007 | LOW | documentation | 0 known historical architecture document marker remains. | Keep docs/architecture/overview.md authoritative and clean historical prose only in an owned documentation change. |
 
@@ -93,7 +93,7 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 | v0.43 | 1 |
 | v0.44 | 17 |
 | v0.45 | 13 |
-| v1.0 | 13 |
+| v1.0 | 14 |
 
 ## Validator retirement evidence
 
@@ -119,12 +119,12 @@ No known stale architecture-document marker was found.
 | Stage 3 | Delivered and release-gated | Sensor/scope identity, evidence provenance, replay protection, per-sensor concurrency, and overlapping CIDRs |
 | Stage 4 | Delivered and release-gated | Versioned deterministic immutable detections, explanations, replay, and separate reviews |
 | Stage 5 | Delivered and release-gated | Health/readiness, diagnostics, low-resource and performance evidence, pinned integrations, and soak harness |
-| Final GA gate | Completed | 24-hour release-evidence soak, final blocker audit, clean-main CI, and supported release matrix |
+| v1.0.1 maintenance gate | Completed | Focused dashboard-lock concurrency regression, clean-main complete gate, and exact-main CI; v1.0.0 soak and supported matrix retained |
 
 ## Audit constraints
 
 - The audit is read-only except when explicitly writing its deterministic Markdown report.
 - Counts use Git cached and non-ignored untracked release files and exclude runtime data roots and the generated report.
-- DeltaAegis v1.0.0 preserves Stage 1–2 migrations, recovery, stable API, and security while delivering sensor/scope isolation, immutable detection, operational readiness, performance thresholds, and pinned integrations.
-- This audit describes the v1.0.0 GA release tree; the completed 24-hour soak, final blocker review, clean-main CI, and supported matrix remain separate retained evidence.
+- DeltaAegis v1.0.1 preserves the v1.0.0 Stage 1–5 migration, recovery, stable API, identity, detection, operations, performance, and integration contracts while correcting dashboard SQLite connection ownership.
+- This audit describes the v1.0.1 maintenance release tree; the retained v1.0.0 24-hour soak, blocker review, and supported matrix plus the v1.0.1 focused regression and exact-main CI remain separate evidence.
 - Historical validator retirement is allowed only when exact prior bytes remain verified at an immutable release tag, current behavior has replacement-contract evidence, and the retained execution graph is complete.

@@ -255,7 +255,7 @@ def findings(inventory: dict[str, Any]) -> list[dict[str, str]]:
         {
             "id": "DA044-004", "severity": "INFO", "area": "HTTP/API contract",
             "evidence": f"Stages 2–5 expose {len(inventory['stable_api_routes'])} stable /api/v1 route literals while {len(inventory['private_api_routes'])} pre-existing route literals remain private compatibility interfaces.",
-            "disposition": "Delivered in v1.0.0 GA; keep runtime, tracked OpenAPI, authorization, HTTP, and private-route transition inventories release-gated.",
+            "disposition": "Delivered in v1.0.0 GA and preserved in v1.0.1; keep runtime, tracked OpenAPI, authorization, HTTP, and private-route transition inventories release-gated.",
         },
         {
             "id": "DA044-005", "severity": "LOW", "area": "validation estate",
@@ -285,14 +285,14 @@ def build_audit(root: Path) -> dict[str, Any]:
     inventory = source_inventory(root, files)
     return {
         "schema_version": SCHEMA_VERSION,
-        "scope": "DeltaAegis v1.0.0 General Availability release",
+        "scope": "DeltaAegis v1.0.1 maintenance release",
         "inventory": inventory,
         "findings": findings(inventory),
         "constraints": [
             "The audit is read-only except when explicitly writing its deterministic Markdown report.",
             "Counts use Git cached and non-ignored untracked release files and exclude runtime data roots and the generated report.",
-            "DeltaAegis v1.0.0 preserves Stage 1–2 migrations, recovery, stable API, and security while delivering sensor/scope isolation, immutable detection, operational readiness, performance thresholds, and pinned integrations.",
-            "This audit describes the v1.0.0 GA release tree; the completed 24-hour soak, final blocker review, clean-main CI, and supported matrix remain separate retained evidence.",
+            "DeltaAegis v1.0.1 preserves the v1.0.0 Stage 1–5 migration, recovery, stable API, identity, detection, operations, performance, and integration contracts while correcting dashboard SQLite connection ownership.",
+            "This audit describes the v1.0.1 maintenance release tree; the retained v1.0.0 24-hour soak, blocker review, and supported matrix plus the v1.0.1 focused regression and exact-main CI remain separate evidence.",
             "Historical validator retirement is allowed only when exact prior bytes remain verified at an immutable release tag, current behavior has replacement-contract evidence, and the retained execution graph is complete.",
         ],
     }
@@ -305,9 +305,9 @@ def markdown_list(values: list[str]) -> str:
 def render_markdown(audit: dict[str, Any]) -> str:
     inv = audit["inventory"]
     lines = [
-        "# DeltaAegis v1.0.0 Repository Audit", "",
+        "# DeltaAegis v1.0.1 Repository Audit", "",
         f"Schema: `{audit['schema_version']}`", "",
-        "This deterministic inventory describes the DeltaAegis v1.0.0 GA release tree, including the preserved Stage 1–2 foundation and the completed Stage 3–5 implementation on released v0.45.0. Regenerate it with `python3 tools/audit_v0_44_repository.py --write`.", "",
+        "This deterministic inventory describes the DeltaAegis v1.0.1 maintenance release tree, including the preserved v1.0.0 Stage 1–5 contracts and the dashboard SQLite connection-lifecycle correction. Regenerate it with `python3 tools/audit_v0_44_repository.py --write`.", "",
         "## Inventory summary", "", "| Measure | Count |", "|---|---:|",
         f"| Repository files in audit scope | {inv['file_count']} |",
         f"| `deltaaegis.py` lines | {inv['source_lines']} |",
@@ -383,7 +383,7 @@ def render_markdown(audit: dict[str, Any]) -> str:
         "| Stage 3 | Delivered and release-gated | Sensor/scope identity, evidence provenance, replay protection, per-sensor concurrency, and overlapping CIDRs |",
         "| Stage 4 | Delivered and release-gated | Versioned deterministic immutable detections, explanations, replay, and separate reviews |",
         "| Stage 5 | Delivered and release-gated | Health/readiness, diagnostics, low-resource and performance evidence, pinned integrations, and soak harness |",
-        "| Final GA gate | Completed | 24-hour release-evidence soak, final blocker audit, clean-main CI, and supported release matrix |",
+        "| v1.0.1 maintenance gate | Completed | Focused dashboard-lock concurrency regression, clean-main complete gate, and exact-main CI; v1.0.0 soak and supported matrix retained |",
         "", "## Audit constraints", "",
     ])
     lines.extend(f"- {item}" for item in audit["constraints"])

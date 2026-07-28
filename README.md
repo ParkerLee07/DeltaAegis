@@ -4,60 +4,53 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
-## Current Release — v1.0.0
+## Current Release — v1.0.1
 
-**DeltaAegis v1.0.0 — General Availability**
+**DeltaAegis v1.0.1 — Dashboard SQLite Reliability**
 
-DeltaAegis v1.0.0 completes the supported migration, stable API, durable
-identity, deterministic detection, operational-readiness, and release-evidence
-contracts established on the v0.45.0 telemetry-trust foundation.
+DeltaAegis v1.0.1 is a compatible maintenance release that fixes intermittent
+dashboard failures caused by threaded request connections rerunning the
+forward-migration transaction.
 
 Highlights:
 
-- Added checksummed, forward-only migrations from every exact supported
-  v0.42.x database origin and the clean, telemetry-expanded, and audited
-  historical-additive v0.45 layouts.
-- Added a documented OpenAPI 3.1 `/api/v1` surface with stable envelopes,
-  bounded pagination, request IDs, scoped bearer tokens, CSRF protection,
-  request limits, authority validation, and durable mutation idempotency.
-- Added durable sensor and scope identity, overlapping-CIDR isolation,
-  sensor-bound evidence receipts, monotonic scope heads, and one active scan
-  per sensor.
-- Added immutable, deterministic, versioned detection results with canonical
-  evidence provenance, structured explanations, replay idempotence, and a
-  separate append-only review and suppression ledger.
-- Added public liveness, authenticated dependency readiness, secret-redacted
-  diagnostics, low-resource and failure-injection coverage, reproducible
-  performance thresholds, and pinned NetSniper and TrueAegis contracts.
-- Preserved the v0.45 telemetry-quality decision, evidence-retention, review,
-  projection, and authenticated Quality Center boundaries.
-- Retained `AGPL-3.0-only`; alternative commercial licensing remains available
-  only by separate written agreement.
+- Forward migrations now run once during dashboard startup, before the threaded
+  HTTP server and background workers begin.
+- Dashboard requests, authentication checks, startup watchdog reads, NetSniper
+  workers, TrueAegis workers, and scheduled-scan workers use a migration-free
+  runtime connection path.
+- `/favicon.ico` now returns public HTTP 204 without authentication or database
+  access.
+- The Executive Security Overview Build pill now identifies the maintenance
+  release as `v1.0.1` instead of the pre-GA Stage 3–5 candidate label.
+- The patch does not change the database schema, migration checksums, stable
+  `/api/v1` behavior, detection contracts, evidence identity, or integration
+  pins.
 
 Release qualification:
 
-- The uninterrupted 24-hour release-evidence soak completed on 2026-07-24
-  with 1,431 samples and zero integrity, readiness, or unplanned-worker
-  failures.
-- The final blocker review found no open security, integrity, migration,
-  data-loss, authorization, supported-platform, or release-evidence blocker.
-- Pull request #7 merged the validated runtime candidate at commit
-  `338f6ed44e9db330fd7f67f3242fd682fab11fab`; its merge tree exactly matched
-  the validated candidate tree.
-- Main CI run `30290071519` passed the complete v1.0 gate.
-- Supported release-matrix run `30291887915`, final attempt 2, passed Ubuntu
-  22.04 and 24.04, Debian 12 and 13, Kali rolling, and focused Python 3.10 and
-  3.14 compatibility validation.
-- No additional 24-hour soak was required because all post-soak corrections
-  were limited to CI or release metadata and every runtime and operational Git
-  object remained identical.
+- Pull request #9 merged validated hotfix commit
+  `b0dbe7e45346253bc18df7eb063bf9866b25e44c` as exact two-parent main commit
+  `836b2ac25e27c344f292e2a9cacbe0a4f757fe1f`; the merge tree exactly matched
+  the validated hotfix tree.
+- The focused regression passed all 12 checks, including 32 concurrent runtime
+  reads and 48 concurrent live `/api/summary` requests while another
+  connection held `BEGIN IMMEDIATE`, with zero `database is locked` errors or
+  tracebacks.
+- Exact-main CI run `30393445773` passed the complete release gate.
+- The original v1.0.0 qualification remains retained evidence: the uninterrupted
+  24-hour soak completed with 1,431 samples, and supported release-matrix run
+  `30291887915` attempt 2 passed all required jobs.
+- No additional 24-hour soak was required because v1.0.1 is a focused
+  connection-lifecycle correction with no schema, API, detection, database,
+  evidence, or integration-contract change.
 
 See [the migration and recovery contract](docs/v1-stage1-migrations.md),
 [the stable API contract](docs/api-v1.md),
 [the Stage 3–5 implementation note](docs/v1-stage3-5-implementation.md), and
-[the completed v1.0 checklist](docs/V1_STAGE3_5_RELEASE_CHECKLIST.md).
+[the completed v1 maintenance checklist](docs/V1_STAGE3_5_RELEASE_CHECKLIST.md).
 
-Key v1.0 operator commands:
+Key v1 operator commands:
 
 ```bash
 python3 deltaaegis.py sensor-enroll --name "Branch sensor" \
@@ -629,7 +622,7 @@ The default branch intentionally retains the active compatibility floor rather t
 
 ## Validation
 
-Run the v1.0.0 release gate from a clean release checkout:
+Run the v1.0.1 maintenance release gate from a clean release checkout:
 
 ```bash
 ./tools/validate_v1_0_stage3_5_gate.sh
@@ -641,14 +634,15 @@ Run the immutable v0.45.0 release gate from its release checkout:
 ./tools/validate_v0_45_release_gate.sh
 ```
 
-The v1.0.0 release gate validates exact supported upgrades, interruption
+The v1.0.1 release gate validates exact supported upgrades, interruption
 and recovery behavior, the runtime/tracked OpenAPI contract, real HTTP security
 and idempotency, sensor/scope isolation, immutable detection replay, readiness,
 diagnostics, low-resource behavior, integration pins, performance thresholds,
 install boundaries, released v0.45 telemetry trust, applicable predecessor
-security, core regressions, finalized GA metadata, and the deterministic
-repository audit. The completed 24-hour GA soak remains immutable external
-release evidence.
+security, core regressions, the dashboard-lock concurrency regression,
+finalized maintenance metadata, and the deterministic repository audit.
+The completed 24-hour v1.0.0 GA soak remains immutable retained baseline
+evidence.
 
 The manual backup and restore checklist is part of release verification:
 

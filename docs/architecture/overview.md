@@ -1,6 +1,6 @@
 # DeltaAegis Architecture Overview
 
-Status: DeltaAegis v1.0.0 General Availability on the v0.45.0 telemetry-trust baseline
+Status: DeltaAegis v1.0.1 Maintenance Release on the v0.45.0 telemetry-trust baseline
 
 ## System role
 
@@ -48,6 +48,15 @@ The repository-root facade remains deliberately compatible with historical impor
 4. NetSniper and TrueAegis run as separate local processes. DeltaAegis never imports them as privileged in-process libraries.
 5. Worker completion, heartbeat, cancellation, watchdog, and schedule reconciliation evidence is persisted so restart recovery does not depend only on memory.
 
+## Dashboard connection lifecycle
+
+Forward migrations run once on a dedicated startup connection before the
+threaded HTTP service and background workers begin. After startup, request,
+authentication, watchdog, NetSniper, TrueAegis, and schedule-worker runtime
+connections never invoke the migration runner. This preserves migration
+serialization while preventing read-oriented dashboard traffic from competing
+for `BEGIN IMMEDIATE` migration locks.
+
 ## Storage model
 
 SQLite is the authoritative application store through v1.0. Major domains are:
@@ -91,7 +100,7 @@ Trust rules:
 
 ## Current API and operations boundary
 
-DeltaAegis v1.0.0 exposes the stable `/api/v1` boundary defined by `deltaaegis_core/api_v1.py` and the tracked OpenAPI 3.1 artifact at `contracts/v1/openapi.json`. Programmatic clients use bounded, scoped `Authorization: Bearer` credentials. Browser sessions use same-origin double-submit CSRF for every mutation. Stable mutations are transactionally idempotent, and stable responses use versioned success/error envelopes plus request IDs. Public health is deliberately minimal; readiness and diagnostics require the ADMIN-only `operations.read` scope.
+DeltaAegis v1.0.1 exposes the stable `/api/v1` boundary defined by `deltaaegis_core/api_v1.py` and the tracked OpenAPI 3.1 artifact at `contracts/v1/openapi.json`. Programmatic clients use bounded, scoped `Authorization: Bearer` credentials. Browser sessions use same-origin double-submit CSRF for every mutation. Stable mutations are transactionally idempotent, and stable responses use versioned success/error envelopes plus request IDs. Public health is deliberately minimal; readiness and diagnostics require the ADMIN-only `operations.read` scope.
 
 The dashboard's pre-existing unversioned `/api/*` endpoints remain authenticated private compatibility interfaces. They are not promoted into the stable contract, and the legacy `X-DeltaAegis-Token` transport cannot authenticate `/api/v1`.
 
@@ -189,3 +198,4 @@ Stage 5 adds minimal liveness, authenticated readiness, secret-redacted
 diagnostics, pinned integration contracts, low-resource/failure fixtures,
 reproducible v0.43-derived thresholds, and a separate 24-hour soak receipt.
 For v1.0.0, the uninterrupted 24-hour soak and final blocker audit passed; the supported matrix and clean-main release gate also completed successfully.
+For v1.0.1, validated hotfix commit `b0dbe7e45346253bc18df7eb063bf9866b25e44c` merged as exact main commit `836b2ac25e27c344f292e2a9cacbe0a4f757fe1f`; the focused concurrency regression, clean-main complete gate, and exact-main CI run `30393445773` passed without changing storage, API, identity, detection, or integration contracts.

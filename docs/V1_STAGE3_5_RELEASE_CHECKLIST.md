@@ -1,7 +1,7 @@
-# DeltaAegis v1.0.0 General Availability checklist
+# DeltaAegis v1.0.1 Maintenance Release checklist
 
-This checklist records the completed implementation and external release
-qualification. It does not replace the requirement for separate explicit
+This checklist records the completed v1.0.0 implementation, retained
+qualification evidence, and the v1.0.1 dashboard-lock maintenance release. It does not replace the requirement for separate explicit
 authorization of tag creation, GitHub Release publication, or branch deletion.
 
 ## Baseline and migration
@@ -42,6 +42,21 @@ authorization of tag creation, GitHub Release publication, or branch deletion.
 - [x] Synthetic performance evidence passes every v0.43-derived threshold.
 - [x] Install, reinstall, uninstall, runtime purge, and external database preservation pass with all v1 modules.
 
+## v1.0.1 dashboard-lock maintenance
+
+- [x] Runtime and background-worker connections do not invoke forward migrations.
+- [x] Forward migrations execute once before the threaded dashboard starts.
+- [x] Eight runtime opens invoke zero migration calls.
+- [x] 32 concurrent runtime reads succeed while another connection holds `BEGIN IMMEDIATE`.
+- [x] 48 concurrent live dashboard requests succeed under the same reserved writer.
+- [x] Dashboard logs contain no `database is locked` error or traceback.
+- [x] `/favicon.ico` returns public HTTP 204 without database access.
+- [x] Pull request #9 merged validated hotfix `b0dbe7e45346253bc18df7eb063bf9866b25e44c` as exact main commit `836b2ac25e27c344f292e2a9cacbe0a4f757fe1f`.
+- [x] Exact-main CI run `30393445773` passed the complete release gate.
+- [x] Schema, migration checksums, stable API, detection, evidence, and integration contracts remain unchanged.
+- [x] The retained v1.0.0 24-hour soak and supported matrix remain applicable baseline evidence.
+- [x] No additional 24-hour soak is required for this focused maintenance correction.
+
 ## Release gate
 
 ```bash
@@ -51,7 +66,7 @@ authorization of tag creation, GitHub Release publication, or branch deletion.
 - [x] Complete gate finishes within the 600-second limit.
 - [x] Deterministic repository audit matches.
 - [x] Validation does not mutate source or Git state.
-- [x] Release metadata identifies v1.0.0 GA and rejects stale candidate wording.
+- [x] Release metadata identifies v1.0.1 and preserves the historical v1.0.0 record.
 
 ## Completed GA evidence
 
