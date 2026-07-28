@@ -2015,16 +2015,25 @@ def _command_dashboard_impl(args):
 
     db_path = args.db
     token = args.token
+
+    # Run forward-only migrations once, synchronously, before the threaded
+    # dashboard or its background workers can open runtime connections.
+    dashboard_migration_connection = connect(db_path)
+    dashboard_migration_connection.close()
+
     setup_nonce = secrets.token_urlsafe(32)
     has_active_password_users = False
     login_required = bool(token or getattr(args, "require_login", False))
 
     try:
-        with connect(db_path) as dashboard_auth_connection:
+        dashboard_auth_connection = connect_runtime(db_path)
+        try:
             has_active_password_users = dashboard_has_active_password_users(
                 dashboard_auth_connection
             )
             login_required = login_required or has_active_password_users
+        finally:
+            dashboard_auth_connection.close()
     except Exception:
         has_active_password_users = False
         login_required = bool(token or getattr(args, "require_login", False))
@@ -2234,7 +2243,7 @@ def _command_dashboard_impl(args):
             return False
 
         def open_connection(self):
-            return connect(db_path)
+            return connect_runtime(db_path)
 
         def api_v1_send(self, payload, status=200, headers=None):
             _api_v1.validate_envelope(payload)
@@ -3116,6 +3125,10 @@ def _command_dashboard_impl(args):
             query = parse_qs(parsed.query)
 
             if not self.enforce_host_boundary(route):
+                return
+
+            if route == "/favicon.ico":
+                dashboard_text_response(self, "", status=204)
                 return
 
             if self.api_v1_route_matches(route):
@@ -4973,7 +4986,7 @@ def _command_dashboard_impl(args):
 
     # Reconcile dead rows at every dashboard start, even when the recurring
     # schedule worker is disabled.
-    startup_watchdog_connection = connect(db_path)
+    startup_watchdog_connection = connect_runtime(db_path)
 
     try:
         startup_watchdog = scan_job_watchdog_recover_dead_jobs(

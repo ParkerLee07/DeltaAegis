@@ -8,18 +8,18 @@ This deterministic inventory describes the DeltaAegis v1.0.0 GA release tree, in
 
 | Measure | Count |
 |---|---:|
-| Repository files in audit scope | 196 |
-| `deltaaegis.py` lines | 36053 |
-| Root top-level functions | 704 |
+| Repository files in audit scope | 197 |
+| `deltaaegis.py` lines | 36059 |
+| Root top-level functions | 705 |
 | Root top-level classes | 6 |
 | Internal core modules | 15 |
 | Distinct CLI commands | 74 |
 | Distinct `/api` route literals | 78 |
 | Declared schema tables | 47 |
-| Validator scripts | 95 |
+| Validator scripts | 96 |
 | Validator version groups | 9 |
 
-Root source SHA-256: `ce23cc4dae0554d0e9151a2a0691f3d631751cc69dae8e1bffe0d890044370cb`
+Root source SHA-256: `1b345797a3a38870682c56c2ccb72cb17790c9abf8acc009b0db4b20be1af07e`
 
 ## Modular core inventory
 
@@ -39,7 +39,7 @@ Root source SHA-256: `ce23cc4dae0554d0e9151a2a0691f3d631751cc69dae8e1bffe0d89004
 | `deltaaegis_core/reports.py` | 891 | 38 | 1 | `telemetry_quality` | `687bdd1a77a785a57e5ef58b1d7f4ed4e5df43ef1e20568db19056225bb14d4f` |
 | `deltaaegis_core/sites.py` | 700 | 20 | 0 | `auth`, `identity`, `ingest` | `f9f9c1c74675cd7abee76e5c074f74d8e662e31d02dafc3bf35bb87312d741f1` |
 | `deltaaegis_core/telemetry_quality.py` | 2257 | 50 | 1 | None | `057a69dd2d15e0a5408925444b3051cbfe4a543782d446caef83d521a8a56ce9` |
-| `deltaaegis_core/web.py` | 5085 | 22 | 0 | `api_v1`, `auth`, `detection`, `identity`, `operations` | `5e499ca14708867f2c8f652b6a44715eb6f22c298968ab9d551a48ca53210599` |
+| `deltaaegis_core/web.py` | 5098 | 22 | 0 | `api_v1`, `auth`, `detection`, `identity`, `operations` | `8bcc239665e5b9cc8e0720bdace20c0b256c2a82f1699db6dbf10cb28d4bb423` |
 
 Forbidden imports of the root `deltaaegis` module from internal core modules: None detected.
 
@@ -47,11 +47,11 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 
 | ID | Severity | Area | Evidence | Planned disposition |
 |---|---|---|---|---|
-| DA044-001 | MEDIUM | compatibility facade | deltaaegis.py remains 36053 lines with 704 top-level functions; 15 core modules contain 19669 lines. | Retain the facade through v1 compatibility; continue only owned incremental extraction behind characterization evidence. |
+| DA044-001 | MEDIUM | compatibility facade | deltaaegis.py remains 36059 lines with 705 top-level functions; 15 core modules contain 19682 lines. | Retain the facade through v1 compatibility; continue only owned incremental extraction behind characterization evidence. |
 | DA044-002 | MEDIUM | source-order coupling | Repeated top-level function names in the compatibility facade: build_current_risk_register, dashboard_asset_detail_payload, dashboard_assets_payload, dashboard_current_state_payload, dashboard_index_html, dashboard_operator_session_shell_html, dashboard_summary_payload. | Remove only with characterization evidence and explicit compatibility ownership. |
 | DA044-003 | INFO | storage migrations | Stage 1 inventories 47 declared tables behind an ordered checksummed migration ledger and verified pre-migration backup. | Delivered for the supported v0.42.x origins; retain interruption, restore-rehearsal, convergence, and tamper tests in every v1 gate. |
 | DA044-004 | INFO | HTTP/API contract | Stages 2–5 expose 17 stable /api/v1 route literals while 61 pre-existing route literals remain private compatibility interfaces. | Delivered in v1.0.0 GA; keep runtime, tracked OpenAPI, authorization, HTTP, and private-route transition inventories release-gated. |
-| DA044-005 | LOW | validation estate | 95 validator scripts span 9 version groups; 216 historical validators are preserved by a byte-verified retirement manifest. | Retain the current compatibility floor and require manifest-backed replacement evidence for any further validator retirement. |
+| DA044-005 | LOW | validation estate | 96 validator scripts span 9 version groups; 216 historical validators are preserved by a byte-verified retirement manifest. | Retain the current compatibility floor and require manifest-backed replacement evidence for any further validator retirement. |
 | DA044-006 | INFO | integration compatibility | NetSniper is pinned to v2.1.0 commit 0624a36550f6eb62ed0daa6862e5cc25a0d93236; optional TrueAegis is pinned to >=1.2.0,<2.0.0, a witness commit, and a fixture-validated result contract. | Retain exact pins, fixtures, scope-containment tests, and fail-closed integration readiness in every v1 gate. |
 | DA044-007 | LOW | documentation | 0 known historical architecture document marker remains. | Keep docs/architecture/overview.md authoritative and clean historical prose only in an owned documentation change. |
 
@@ -59,13 +59,13 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 
 | Name | Definition lines |
 |---|---|
-| `build_current_risk_register` | 16997, 34967 |
-| `dashboard_asset_detail_payload` | 16098, 34940 |
-| `dashboard_assets_payload` | 15978, 34914, 36032 |
-| `dashboard_current_state_payload` | 15870, 34872 |
-| `dashboard_index_html` | 26367, 26393, 26552, 26670, 27668 |
-| `dashboard_operator_session_shell_html` | 27692, 28151, 34550 |
-| `dashboard_summary_payload` | 14680, 34893 |
+| `build_current_risk_register` | 17003, 34973 |
+| `dashboard_asset_detail_payload` | 16104, 34946 |
+| `dashboard_assets_payload` | 15984, 34920, 36038 |
+| `dashboard_current_state_payload` | 15876, 34878 |
+| `dashboard_index_html` | 26373, 26399, 26558, 26676, 27674 |
+| `dashboard_operator_session_shell_html` | 27698, 28157, 34556 |
+| `dashboard_summary_payload` | 14686, 34899 |
 
 ## Command, route, and schema catalogs
 
@@ -93,7 +93,7 @@ Forbidden imports of the root `deltaaegis` module from internal core modules: No
 | v0.43 | 1 |
 | v0.44 | 17 |
 | v0.45 | 13 |
-| v1.0 | 12 |
+| v1.0 | 13 |
 
 ## Validator retirement evidence
 

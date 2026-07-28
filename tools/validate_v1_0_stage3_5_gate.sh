@@ -24,7 +24,7 @@ echo "======================================================"
 
 branch="$(git branch --show-current)"
 case "$branch" in
-    main|feature/v1.0-stages-3-5|release/v1.0-metadata-finalization)
+    main|feature/v1.0-stages-3-5|hotfix/v1.0.1-dashboard-lock|release/v1.0-metadata-finalization)
         echo "[PASS] supported validation branch: $branch"
         ;;
     *)

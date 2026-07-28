@@ -12,6 +12,7 @@ python3 -W error::SyntaxWarning -m py_compile \
     deltaaegis_core/*.py \
     tools/measure_v1_stage5_performance.py \
     tools/run_v1_stage5_soak.py \
+    tools/validate_v1_0_1_dashboard_lock_hotfix.py \
     tools/validate_v1_0_release_metadata.py \
     tools/validate_v1_stage3_5.py
 
@@ -70,6 +71,10 @@ assert payload["summary"] == {
 print("[PASS] v1 Stage 5 soak harness rehearsal")
 PY
 rm -rf -- "$soak_root"
+
+echo
+echo "[v1.0.1 dashboard-lock regression]"
+python3 tools/validate_v1_0_1_dashboard_lock_hotfix.py --repo .
 
 echo
 echo "[v1.0.0 General Availability release metadata]"

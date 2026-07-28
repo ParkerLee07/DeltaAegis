@@ -1857,6 +1857,12 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return connection
 
 
+def connect_runtime(db_path: Path) -> sqlite3.Connection:
+    """Open an already-migrated database without re-entering migrations."""
+
+    return open_database_connection(Path(db_path).expanduser())
+
+
 def load_json(path: Path) -> Any:
     return _ingest.load_json(path)
 
@@ -13702,7 +13708,7 @@ def dashboard_netsniper_scan_worker(
     scan_profile: str = "balanced",
     auto_ingest: bool = False,
 ) -> None:
-    connection = connect(db_path)
+    connection = connect_runtime(db_path)
 
     try:
         execute_scan_job(
@@ -14547,7 +14553,7 @@ def dashboard_trueaegis_validation_worker(
     trueaegis_path: Path,
     logs_dir: Path = DEFAULT_TRUEAEGIS_LOGS,
 ) -> None:
-    connection = connect(db_path)
+    connection = connect_runtime(db_path)
 
     try:
         execute_trueaegis_job(
@@ -28865,7 +28871,7 @@ def dashboard_run_due_schedule_tick(
     logs_dir: Path | None = None,
     max_runs: int = 1,
 ) -> list[dict[str, Any]]:
-    connection = connect(db_path)
+    connection = connect_runtime(db_path)
 
     try:
         return run_due_scan_schedules(
