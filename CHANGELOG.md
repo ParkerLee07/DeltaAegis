@@ -1,3 +1,31 @@
+## DeltaAegis v1.0.1 — Dashboard SQLite Reliability — 2026-07-28
+- Fixed intermittent dashboard `sqlite3.OperationalError: database is locked`
+  failures caused by every threaded request connection rerunning the
+  forward-migration transaction.
+- Moved dashboard migration ownership to one synchronous startup connection
+  before the HTTP server and background workers begin.
+- Added a migration-free runtime connection path for dashboard requests,
+  authentication checks, startup watchdog reads, NetSniper workers, TrueAegis
+  workers, and scheduled-scan workers.
+- Added a public `/favicon.ico` HTTP 204 response that requires no
+  authentication or database access.
+- Corrected the Executive Security Overview Build pill from the pre-GA
+  `v1.0 Stage 3–5 Candidate` label to `v1.0.1`.
+- Added a 12-check focused regression covering zero runtime migration calls,
+  32 concurrent runtime reads, 48 concurrent live dashboard summary requests
+  under a reserved writer lock, traceback inspection, and SQLite integrity.
+- Merged pull request #9 as exact two-parent main commit
+  `836b2ac25e27c344f292e2a9cacbe0a4f757fe1f`; its tree exactly matched
+  validated hotfix commit `b0dbe7e45346253bc18df7eb063bf9866b25e44c`.
+- Passed exact-main CI run `30393445773` and the complete clean-main release
+  gate.
+- Preserved the database schema, migration ledger and checksums, stable API,
+  detection and evidence contracts, integration pins, live database, and all
+  release branches.
+- Retained the v1.0.0 24-hour soak and supported matrix as applicable baseline
+  evidence. No additional 24-hour soak was required for this focused
+  connection-lifecycle correction.
+
 ## DeltaAegis v1.0.0 — General Availability — 2026-07-27
 - Completed the uninterrupted 24-hour release-evidence soak with 1,431
   samples and zero integrity, readiness, or unplanned-worker failures.

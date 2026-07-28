@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Parker Lee
-"""DeltaAegis v1.0 Stage 3-5 combined upgrade candidate.
+"""DeltaAegis v1.0.1 maintenance release.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -91,7 +91,7 @@ def _report_context() -> _reports.ReportContext:
         operator_triage_summary=operator_triage_summary,
     )
 
-DELTAAEGIS_VERSION = "1.0.0"
+DELTAAEGIS_VERSION = "1.0.1"
 DELTAAEGIS_SECURITY_HOTFIX = "2026-07-13.2"
 DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION = "deltaaegis-backup-manifest-v1"
 DELTAAEGIS_V0_14_COMPATIBILITY_NOTE = "DeltaAegis v0.14.0 — NetSniper Scan Orchestration compatibility retained."
@@ -21366,7 +21366,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Build</span><span>v1.0 Stage 3–5 Candidate</span></div>
+      <div class="executive-status-pill"><span>Build</span><span>v1.0.1</span></div>
     </div>
   </header>
 

@@ -1,8 +1,8 @@
 # DeltaAegis Supported Versions
 
-Status: DeltaAegis v1.0.0 General Availability
+Status: DeltaAegis v1.0.1 Maintenance Release
 
-This matrix defines the supported DeltaAegis v1.0.0 environment. A listed platform is supported only when its operating-system vendor still supplies security maintenance and the installed components remain within the ranges below.
+This matrix defines the supported DeltaAegis v1.0.1 environment. A listed platform is supported only when its operating-system vendor still supplies security maintenance and the installed components remain within the ranges below.
 
 ## Runtime matrix
 
@@ -53,9 +53,11 @@ This matrix defines the supported DeltaAegis v1.0.0 environment. A listed platfo
   include rule version, sensor scope, source evidence, and canonical event
   evidence so replay is stable and cross-scope collision is prevented.
 - The release gate includes low-resource operation and the tracked
-  performance targets. Production v1.0.0 support is qualified by the
-  completed 24-hour soak, final blocker audit, clean-main CI, and supported
-  platform matrix.
+  performance targets. Production v1.0.1 support is qualified by the
+  retained v1.0.0 24-hour soak and supported platform matrix, plus the
+  focused dashboard-lock regression, clean-main complete gate, exact
+  two-parent merge `836b2ac25e27c344f292e2a9cacbe0a4f757fe1f`, and
+  exact-main CI run `30393445773`.
 
 ## Pre-v1.0 version policy (historical)
 
@@ -81,4 +83,4 @@ This matrix defines the supported DeltaAegis v1.0.0 environment. A listed platfo
 
 ## Release evidence
 
-`docs/performance-baseline.md` records the exact interpreter, SQLite, platform, and Node.js versions used for the v0.43 measurements. DeltaAegis v1.0.0 exercised Ubuntu 22.04 and 24.04, Debian 12 and 13, Kali rolling, and focused Python 3.10 and 3.14 validation in release-matrix run `30291887915` attempt 2. Main CI run `30290071519` independently passed the complete release gate. This document does not claim that an untested environment was tested.
+`docs/performance-baseline.md` records the exact interpreter, SQLite, platform, and Node.js versions used for the v0.43 measurements. DeltaAegis v1.0.1 retains the v1.0.0 supported-platform evidence from release-matrix run `30291887915` attempt 2 across Ubuntu 22.04 and 24.04, Debian 12 and 13, Kali rolling, and focused Python 3.10 and 3.14. Maintenance merge `836b2ac25e27c344f292e2a9cacbe0a4f757fe1f` passed the clean-main complete gate and exact-main CI run `30393445773`, including the 12-check dashboard-lock concurrency regression. No additional platform or 24-hour soak claim is made.

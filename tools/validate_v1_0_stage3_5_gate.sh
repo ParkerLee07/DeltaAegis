@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 fail() {
-    echo "[FAIL] v1.0.0 release gate: $*" >&2
+    echo "[FAIL] v1.0.1 release gate: $*" >&2
     exit 1
 }
 
@@ -19,12 +19,12 @@ expected_stage12_witness="1ed1c6ad389ef6aa6ddbf99526404c102e0f7fc2"
 expected_stage12_live="989854a723e471b93f286ee4ba9b48bc257e5a73"
 expected_stage12_tree="e259130de5e54c6673a5e294c88244f6b0ab4048"
 
-echo "DeltaAegis v1.0.0 General Availability Release Gate"
-echo "======================================================"
+echo "DeltaAegis v1.0.1 Maintenance Release Gate"
+echo "=============================================="
 
 branch="$(git branch --show-current)"
 case "$branch" in
-    main|feature/v1.0-stages-3-5|hotfix/v1.0.1-dashboard-lock|release/v1.0-metadata-finalization)
+    main|feature/v1.0-stages-3-5|hotfix/v1.0.1-dashboard-lock|release/v1.0-metadata-finalization|release/v1.0.1-metadata-finalization)
         echo "[PASS] supported validation branch: $branch"
         ;;
     *)
@@ -80,5 +80,5 @@ after_status="$(git status --porcelain=v1 --untracked-files=all)"
 git diff --check || fail "post-validation whitespace errors"
 
 echo
-echo "[PASS] DeltaAegis v1.0.0 General Availability release gate"
-echo "NOTICE: completed soak and blocker evidence remain separate; tag and release publication require explicit authorization."
+echo "[PASS] DeltaAegis v1.0.1 maintenance release gate"
+echo "NOTICE: retained v1.0.0 soak and matrix evidence remain separate; v1.0.1 tag and release publication require explicit authorization."

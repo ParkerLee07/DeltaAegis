@@ -1,6 +1,6 @@
 # DeltaAegis v1 combined Stage 3–5 implementation
 
-Status: delivered in DeltaAegis v1.0.0 General Availability
+Status: delivered in DeltaAegis v1.0.0 General Availability and maintained by DeltaAegis v1.0.1
 
 The release soak must start from a database copy whose origin passes Stage 1.
 Long-lived v0.45 databases may carry the exact audited historical additive
@@ -75,10 +75,26 @@ The exact integration contract is tracked at
   `16b9e88b232aac568859ab8d68e2eaa26558c4e7`; and
 - `trueaegis-validation-results-v1` JSON-array result shape.
 
+## v1.0.1 dashboard connection-lifecycle maintenance
+
+DeltaAegis v1.0.1 changes connection ownership without changing the schema or
+domain contracts. Forward migrations execute once on a synchronous startup
+connection before the threaded dashboard and workers begin. Request,
+authentication, watchdog, NetSniper, TrueAegis, and schedule-worker runtime
+connections do not enter the migration runner.
+
+The focused validator proves zero migration calls from runtime opens, 32
+concurrent runtime reads and 48 concurrent live dashboard requests under a
+reserved writer lock, public favicon HTTP 204 behavior, clean logs, and healthy
+temporary SQLite state. Validated hotfix commit
+`b0dbe7e45346253bc18df7eb063bf9866b25e44c` merged as exact main commit
+`836b2ac25e27c344f292e2a9cacbe0a4f757fe1f`; exact-main CI run `30393445773`
+passed the complete gate.
+
 ## Validation
 
-Run the complete v1.0.0 release gate from a clean `main` or approved release
-branch:
+Run the complete v1.0.1 maintenance release gate from a clean `main` or
+approved release branch:
 
 ```bash
 ./tools/validate_v1_0_stage3_5_gate.sh

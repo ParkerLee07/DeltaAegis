@@ -1,6 +1,6 @@
 # DeltaAegis v1.0 Product Scope
 
-Status: finalized for DeltaAegis v1.0.0 General Availability
+Status: finalized for DeltaAegis v1.0.1 Maintenance Release
 ## Delivery status — 2026-07-27
 
 DeltaAegis v1.0.0 delivers the completed Stage 1–5 migration, recovery, stable
@@ -14,6 +14,21 @@ supported-platform, or release-evidence blocker. Main CI and the supported
 release matrix passed on the exact merged runtime candidate, and every
 post-soak correction was confined to CI or release metadata with runtime and
 operational Git objects unchanged.
+
+## Maintenance status — 2026-07-28
+
+DeltaAegis v1.0.1 does not expand the v1.0 product scope. It corrects dashboard
+SQLite connection ownership so forward migrations execute once before the
+threaded server starts and ordinary runtime connections do not enter the
+migration transaction.
+
+Pull request #9 merged the exact validated hotfix as main commit
+`836b2ac25e27c344f292e2a9cacbe0a4f757fe1f`. The 12-check focused regression,
+clean-main complete gate, and exact-main CI run `30393445773` passed. The
+database schema, migration checksums, stable API, identity, detection, evidence,
+and integration promises below remain unchanged. No additional 24-hour soak was
+required.
+
 ## Product definition
 
 DeltaAegis v1.0 is a self-hosted, single-node network-state monitoring and investigation console. It accepts finalized evidence from authorized NetSniper sensors, preserves normalized history in SQLite, explains meaningful changes, and gives a local operator durable investigation, validation, backup, and reporting workflows.

@@ -14,6 +14,7 @@ python3 -W error::SyntaxWarning -m py_compile \
     tools/run_v1_stage5_soak.py \
     tools/validate_v1_0_1_dashboard_lock_hotfix.py \
     tools/validate_v1_0_release_metadata.py \
+    tools/validate_v1_0_1_release_metadata.py \
     tools/validate_v1_stage3_5.py
 
 bash -n \
@@ -77,9 +78,9 @@ echo "[v1.0.1 dashboard-lock regression]"
 python3 tools/validate_v1_0_1_dashboard_lock_hotfix.py --repo .
 
 echo
-echo "[v1.0.0 General Availability release metadata]"
-python3 tools/validate_v1_0_release_metadata.py
+echo "[v1.0.1 maintenance release metadata]"
+python3 tools/validate_v1_0_1_release_metadata.py
 
 echo
-echo "[PASS] DeltaAegis v1.0.0 GA implementation and metadata validation"
-echo "NOTICE: the completed 24-hour soak and blocker review remain external release evidence."
+echo "[PASS] DeltaAegis v1.0.1 maintenance implementation and metadata validation"
+echo "NOTICE: the v1.0.0 24-hour soak, blocker review, and supported matrix remain retained release evidence."
