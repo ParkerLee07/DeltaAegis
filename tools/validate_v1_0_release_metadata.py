@@ -12,6 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_BRANCHES = {
     "feature/v1.0-stages-3-5",
+    "hotfix/v1.0.1-dashboard-lock",
     "release/v1.0-metadata-finalization",
     "main",
 }
