@@ -1,9 +1,10 @@
-name: DeltaAegis v1.0 Release Matrix
+name: DeltaAegis v1.0.2 Release Matrix
 
 on:
   push:
     branches:
-      - feature/v1.0-stages-3-5
+      - main
+      - hotfix/v1.0.2-scan-orchestration
   pull_request:
     branches:
       - main
@@ -11,6 +12,9 @@ on:
 
 permissions:
   contents: read
+
+env:
+  VALIDATION_BRANCH: ${{ github.head_ref || github.ref_name }}
 
 concurrency:
   group: deltaaegis-v1-release-matrix-${{ github.ref }}
@@ -28,9 +32,10 @@ jobs:
           - ubuntu-22.04
           - ubuntu-24.04
     steps:
-      - name: Check out complete repository history
+      - name: Check out exact repository commit with complete history
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
       - name: Set up supported Node.js
@@ -38,9 +43,12 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Attach supported validation branch context
+      - name: Attach exact validation branch context
         shell: bash
-        run: git checkout -B feature/v1.0-stages-3-5 HEAD
+        run: |
+          set -euo pipefail
+          test -n "$VALIDATION_BRANCH"
+          git checkout -B "$VALIDATION_BRANCH" HEAD
 
       - name: Record environment
         shell: bash
@@ -63,11 +71,11 @@ jobs:
             echo "node=$(node --version)"
           } | tee "$evidence_dir/${{ matrix.os }}-environment.txt"
 
-      - name: Run complete v1.0 candidate gate
+      - name: Run complete v1.0.2 candidate gate
         shell: bash
         run: |
           set -euo pipefail
-          ./tools/validate_v1_0_stage3_5_gate.sh 2>&1 \
+          ./tools/validate_v1_0_2_candidate_all.sh 2>&1 \
             | tee "${RUNNER_TEMP}/deltaaegis-v1-release-evidence/${{ matrix.os }}/${{ matrix.os }}-gate.log"
 
       - name: Upload Ubuntu evidence
@@ -117,9 +125,10 @@ jobs:
             xz-utils
           rm -rf /var/lib/apt/lists/*
 
-      - name: Check out complete repository history
+      - name: Check out exact repository commit with complete history
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
       - name: Set up supported Node.js
@@ -127,12 +136,13 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Attach supported validation branch context
+      - name: Attach exact validation branch context
         shell: bash
         run: |
           set -euo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git checkout -B feature/v1.0-stages-3-5 HEAD
+          test -n "$VALIDATION_BRANCH"
+          git checkout -B "$VALIDATION_BRANCH" HEAD
 
       - name: Record environment
         shell: bash
@@ -156,11 +166,11 @@ jobs:
             echo "node=$(node --version)"
           } | tee "$evidence_dir/${{ matrix.name }}-environment.txt"
 
-      - name: Run complete v1.0 candidate gate
+      - name: Run complete v1.0.2 candidate gate
         shell: bash
         run: |
           set -euo pipefail
-          ./tools/validate_v1_0_stage3_5_gate.sh 2>&1 \
+          ./tools/validate_v1_0_2_candidate_all.sh 2>&1 \
             | tee "${RUNNER_TEMP}/deltaaegis-v1-release-evidence/${{ matrix.name }}/${{ matrix.name }}-gate.log"
 
       - name: Upload distribution evidence
@@ -183,9 +193,10 @@ jobs:
           - "3.10"
           - "3.14"
     steps:
-      - name: Check out complete repository history
+      - name: Check out exact repository commit with complete history
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -198,9 +209,12 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Attach supported validation branch context
+      - name: Attach exact validation branch context
         shell: bash
-        run: git checkout -B feature/v1.0-stages-3-5 HEAD
+        run: |
+          set -euo pipefail
+          test -n "$VALIDATION_BRANCH"
+          git checkout -B "$VALIDATION_BRANCH" HEAD
 
       - name: Record environment
         shell: bash
@@ -237,6 +251,7 @@ jobs:
             tools/validate_v1_0_stage1_2_gate.sh \
             tools/validate_v1_0_stage3_5_all.sh \
             tools/validate_v1_0_stage3_5_gate.sh \
+            tools/validate_v1_0_2_candidate_all.sh \
             tools/validate_v1_stage1_2_install_lifecycle.sh
 
       - name: Run focused migration and compatibility validation
@@ -288,7 +303,7 @@ jobs:
           [[ "${{ needs.ubuntu-platforms.result }}" == "success" ]]
           [[ "${{ needs.distribution-platforms.result }}" == "success" ]]
           [[ "${{ needs.python-compatibility.result }}" == "success" ]]
-          echo "PASS: DeltaAegis v1.0 supported release matrix"
+          echo "PASS: DeltaAegis v1.0.2 supported release matrix"
 
       - name: Upload matrix summary
         if: always()

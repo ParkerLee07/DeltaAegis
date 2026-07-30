@@ -49,7 +49,7 @@ EXPECTED_V045_SOURCE_SHA256 = "e277bfeed6e5422d567c5207d14b6bc9a43c5fc8486f95be9
 EXPECTED_V045_RUNTIME_SCHEMA = "7b15660af4a2a6f4424b1c6dc7c9fceaee962c998cd0ad7754bb3ed6051be654"
 EXPECTED_V045_HISTORICAL_RUNTIME_SCHEMA = "5c777b2a731133a8793c6710eda3e1a18b15deb9ffa416bed71ffd70e11581ef"
 EXPECTED_V045_HISTORICAL_ORIGIN = "v0.45.0-historical-additive-runtime-schema"
-EXPECTED_V1_HISTORICAL_RUNTIME_SCHEMA = "6f82fe381a4ab11437a64d8ef0b127a0fe654183d3fe986f1735f2e156fac7c6"
+EXPECTED_V1_HISTORICAL_RUNTIME_SCHEMA = "53a355655564f9bd7b4755fed7e84f84958817af454b79b4c52a3b80e6386b45"
 EXPECTED_ORIGIN = "v0.42.0-v0.45.0-identical-base-schema"
 
 V045_HISTORICAL_TABLE_SQL = {
@@ -1245,7 +1245,7 @@ def validate_forced_interleaving(root: Path, fresh_schema: str) -> None:
 def main() -> int:
     check(
         deltaaegis.DELTAAEGIS_VERSION
-        in {"1.0.0-stage12", "1.0.0", "1.0.1"},
+        in {"1.0.0-stage12", "1.0.0", "1.0.1", "1.0.2"},
         "runtime stage version is outside the approved v1 candidate sequence",
     )
     check(tuple(deltaaegis.SUPPORTED_V042_SOURCE_SHA256) == tuple(EXPECTED_TAGS), "runtime supported-origin inventory drift")

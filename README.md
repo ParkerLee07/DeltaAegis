@@ -4,6 +4,10 @@ DeltaAegis is a self-hosted, delta-first network-state monitoring and investigat
 
 It ingests finalized NetSniper scan bundles, stores normalized historical snapshots in SQLite, compares accepted scans over time, and turns network changes into analyst-friendly events, alerts, asset context, risk views, and dashboard workflows.
 
+## Development Candidate — v1.0.2
+
+**DeltaAegis v1.0.2 — Scan Orchestration Reliability** is an unreleased compatibility maintenance candidate. It adds workspace-level scan serialization, automatic schedule phase balancing, and trusted-manifest TrueAegis follow-up correlation. The current published release remains v1.0.1.
+
 ## Current Release — v1.0.1
 
 **DeltaAegis v1.0.1 — Dashboard SQLite Reliability**

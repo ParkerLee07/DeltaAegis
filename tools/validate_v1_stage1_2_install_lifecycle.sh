@@ -92,6 +92,7 @@ try:
         "0003-v1-api-security",
         "0004-v1-sensor-scope-identity",
         "0005-v1-deterministic-detection",
+        "0006-v1.0.2-scan-orchestration",
     ]
     assert all(row["origin"] == "fresh" for row in migrations)
     for row in migrations:
@@ -197,7 +198,7 @@ try:
     assert users[0][0] in {"concurrent.admin.one", "concurrent.admin.two"}
     assert connection.execute(
         "SELECT COUNT(*) FROM schema_migrations"
-    ).fetchone()[0] == 5
+    ).fetchone()[0] == 6
 finally:
     connection.close()
 PY
