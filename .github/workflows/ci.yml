@@ -23,6 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
       - name: Attach validation branch context
@@ -70,7 +71,7 @@ jobs:
             tools/validate_v1_0_2_candidate_all.sh
 
       - name: Run DeltaAegis v1.0.2 candidate gate
-        if: env.VALIDATION_BRANCH == 'hotfix/v1.0.2-scan-orchestration'
+        if: env.VALIDATION_BRANCH == 'hotfix/v1.0.2-scan-orchestration' || env.VALIDATION_BRANCH == 'main'
         run: ./tools/validate_v1_0_2_candidate_all.sh
 
       - name: Run DeltaAegis v1.0 Stage 1-2 checkpoint gate
@@ -78,5 +79,5 @@ jobs:
         run: ./tools/validate_v1_0_stage1_2_gate.sh
 
       - name: Run DeltaAegis v1.0.1 release gate
-        if: env.VALIDATION_BRANCH == 'main' || env.VALIDATION_BRANCH == 'feature/v1.0-stages-3-5' || env.VALIDATION_BRANCH == 'hotfix/v1.0.1-dashboard-lock' || env.VALIDATION_BRANCH == 'release/v1.0-metadata-finalization' || env.VALIDATION_BRANCH == 'release/v1.0.1-metadata-finalization'
+        if: env.VALIDATION_BRANCH == 'feature/v1.0-stages-3-5' || env.VALIDATION_BRANCH == 'hotfix/v1.0.1-dashboard-lock' || env.VALIDATION_BRANCH == 'release/v1.0-metadata-finalization' || env.VALIDATION_BRANCH == 'release/v1.0.1-metadata-finalization'
         run: ./tools/validate_v1_0_stage3_5_gate.sh
