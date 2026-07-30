@@ -11,6 +11,7 @@ on:
       - release/v1.0-metadata-finalization
       - hotfix/v1.0.1-dashboard-lock
       - release/v1.0.1-metadata-finalization
+      - hotfix/v1.0.2-scan-orchestration
   pull_request:
   workflow_dispatch:
 
@@ -51,6 +52,7 @@ jobs:
             tools/validate_v1_0_release_metadata.py \
             tools/validate_v1_0_1_dashboard_lock_hotfix.py \
             tools/validate_v1_0_1_release_metadata.py \
+            tools/validate_v1_0_2_scan_orchestration.py \
             tools/validate_v1_stage1_migrations.py \
             tools/validate_v1_stage2_api_security.py \
             tools/validate_v1_stage1_2_architecture.py \
@@ -64,10 +66,15 @@ jobs:
             uninstall.sh \
             tools/validate_v1_0_stage1_2_all.sh \
             tools/validate_v1_0_stage1_2_gate.sh \
-            tools/validate_v1_stage1_2_install_lifecycle.sh
+            tools/validate_v1_stage1_2_install_lifecycle.sh \
+            tools/validate_v1_0_2_candidate_all.sh
+
+      - name: Run DeltaAegis v1.0.2 candidate gate
+        if: env.VALIDATION_BRANCH == 'hotfix/v1.0.2-scan-orchestration'
+        run: ./tools/validate_v1_0_2_candidate_all.sh
 
       - name: Run DeltaAegis v1.0 Stage 1-2 checkpoint gate
-        if: env.VALIDATION_BRANCH != 'main' && env.VALIDATION_BRANCH != 'feature/v1.0-stages-3-5' && env.VALIDATION_BRANCH != 'hotfix/v1.0.1-dashboard-lock' && env.VALIDATION_BRANCH != 'release/v1.0-metadata-finalization' && env.VALIDATION_BRANCH != 'release/v1.0.1-metadata-finalization'
+        if: env.VALIDATION_BRANCH != 'main' && env.VALIDATION_BRANCH != 'feature/v1.0-stages-3-5' && env.VALIDATION_BRANCH != 'hotfix/v1.0.1-dashboard-lock' && env.VALIDATION_BRANCH != 'release/v1.0-metadata-finalization' && env.VALIDATION_BRANCH != 'release/v1.0.1-metadata-finalization' && env.VALIDATION_BRANCH != 'hotfix/v1.0.2-scan-orchestration'
         run: ./tools/validate_v1_0_stage1_2_gate.sh
 
       - name: Run DeltaAegis v1.0.1 release gate

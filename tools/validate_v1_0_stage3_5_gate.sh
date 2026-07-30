@@ -24,7 +24,7 @@ echo "=============================================="
 
 branch="$(git branch --show-current)"
 case "$branch" in
-    main|feature/v1.0-stages-3-5|hotfix/v1.0.1-dashboard-lock|release/v1.0-metadata-finalization|release/v1.0.1-metadata-finalization)
+    main|feature/v1.0-stages-3-5|hotfix/v1.0.1-dashboard-lock|release/v1.0-metadata-finalization|release/v1.0.1-metadata-finalization|hotfix/v1.0.2-scan-orchestration)
         echo "[PASS] supported validation branch: $branch"
         ;;
     *)
@@ -72,7 +72,11 @@ PY
     || fail "combined gate exceeded ${maximum}s: ${elapsed}s"
 echo "[PASS] combined validation duration ${elapsed}s <= ${maximum}s"
 
-python3 tools/audit_v0_44_repository.py --check
+if [[ "${DELTAAEGIS_SKIP_RELEASE_AUDIT:-0}" == "1" ]]; then
+    echo "[SKIP] deterministic v1.0.1 release audit during v1.0.2 candidate validation"
+else
+    python3 tools/audit_v0_44_repository.py --check
+fi
 
 after_status="$(git status --porcelain=v1 --untracked-files=all)"
 [[ "$after_status" == "$before_status" ]] \

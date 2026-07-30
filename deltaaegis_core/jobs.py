@@ -50,6 +50,61 @@ def utc_now_text() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def parse_utc_text(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def advance_schedule_run_text(
+    previous_next_run_at: Any,
+    cadence_minutes: int,
+    now: datetime | None = None,
+) -> str:
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    previous = parse_utc_text(previous_next_run_at)
+    candidate = previous if previous is not None else current
+    step = timedelta(minutes=int(cadence_minutes))
+    while candidate <= current:
+        candidate += step
+    return candidate.replace(microsecond=0).isoformat()
+
+
+def rebalance_enabled_schedule_phases(
+    connection: sqlite3.Connection,
+    cadence_minutes: int,
+    base_time: datetime | None = None,
+) -> None:
+    cadence = int(cadence_minutes)
+    now = (base_time or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
+    rows = connection.execute(
+        """
+        SELECT schedule_id
+        FROM scan_schedules
+        WHERE enabled = 1 AND cadence_minutes = ?
+        ORDER BY schedule_id
+        """,
+        (cadence,),
+    ).fetchall()
+    count = len(rows)
+    if count == 0:
+        return
+    for index, row in enumerate(rows):
+        offset_seconds = (cadence * 60 * index) // count
+        next_run = (now + timedelta(seconds=offset_seconds)).isoformat()
+        connection.execute(
+            "UPDATE scan_schedules SET next_run_at = ?, updated_at = ? WHERE schedule_id = ?",
+            (next_run, now.isoformat(), str(row[0])),
+        )
+
+
 def validate_private_cidr(target: str) -> str:
     raw = (target or "").strip()
 
@@ -1105,8 +1160,6 @@ def create_scan_schedule(
 
     now = utc_now_text()
     schedule_id = f"sched-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-    next_run_at = now if enabled else None
-
     identity_columns = ", sensor_id, scope_id" if identity_enabled else ""
     identity_placeholders = ", ?, ?" if identity_enabled else ""
     values: tuple[Any, ...] = (
@@ -1119,57 +1172,32 @@ def create_scan_schedule(
         1 if enabled else 0,
         1 if auto_ingest else 0,
         1 if run_trueaegis_after_ingest else 0,
-        next_run_at,
+        None,
         now,
         now,
-        "schedule created",
+        "schedule created with automatic phase balancing",
     )
     if identity_enabled:
         values += (safe_sensor_id, safe_scope_id)
     connection.execute(
         f"""
         INSERT INTO scan_schedules (
-            schedule_id,
-            name,
-            target,
-            network_scope,
-            scan_profile,
-            cadence_minutes,
-            enabled,
-            auto_ingest,
-            run_trueaegis_after_ingest,
-            next_run_at,
-            created_at,
-            updated_at,
-            message
-            {identity_columns}
-        ) VALUES (
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?{identity_placeholders}
-        )
+            schedule_id, name, target, network_scope, scan_profile,
+            cadence_minutes, enabled, auto_ingest,
+            run_trueaegis_after_ingest, next_run_at,
+            created_at, updated_at, message {identity_columns}
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{identity_placeholders})
         """,
         values,
     )
-
+    if enabled:
+        rebalance_enabled_schedule_phases(connection, safe_cadence)
     row = connection.execute(
         "SELECT * FROM scan_schedules WHERE schedule_id = ?",
         (schedule_id,),
     ).fetchone()
-
     if row is None:
         raise DeltaAegisError(f"scan schedule disappeared unexpectedly: {schedule_id}")
-
     return scan_schedule_to_dict(row)
 
 
@@ -1286,50 +1314,39 @@ def reserve_scan_job_if_idle(
     scope_id: str | None = None,
     context: JobContext,
 ) -> dict[str, Any]:
-    """Atomically enforce one active NetSniper job for each sensor."""
+    """Atomically enforce one active NetSniper job per sensor and workspace."""
     if not isinstance(connection, sqlite3.Connection):
-        # Historical receipt validators use a deliberately minimal connection
-        # test double. Production connections always take the serialized path.
         job = context.create_scan_job(
-            connection,
-            target,
-            netsniper_path,
-            runs_dir,
-            auto_ingest=auto_ingest,
-            scan_profile=scan_profile,
-            schedule_id=schedule_id,
-            sensor_id=sensor_id,
-            scope_id=scope_id,
+            connection, target, netsniper_path, runs_dir,
+            auto_ingest=auto_ingest, scan_profile=scan_profile,
+            schedule_id=schedule_id, sensor_id=sensor_id, scope_id=scope_id,
         )
         commit = getattr(connection, "commit", None)
         if callable(commit):
             commit()
         return job
-
     if connection.in_transaction:
         raise DeltaAegisError(
             "atomic scan reservation requires a connection with no active transaction"
         )
-
     try:
-        # BEGIN IMMEDIATE serializes all competing dashboard, scheduler, and
-        # CLI reservations before any caller can perform the active-job check.
         connection.execute("BEGIN IMMEDIATE")
         active = active_scan_job_row(connection, sensor_id)
         if active is not None:
             raise context.active_scan_job_exists_error_type(scan_job_to_dict(active))
-
-        job = context.create_scan_job(
-            connection,
-            target,
-            netsniper_path,
-            runs_dir,
-            auto_ingest=auto_ingest,
-            scan_profile=scan_profile,
-            schedule_id=schedule_id,
-            sensor_id=sensor_id,
-            scope_id=scope_id,
-        )
+        try:
+            job = context.create_scan_job(
+                connection, target, netsniper_path, runs_dir,
+                auto_ingest=auto_ingest, scan_profile=scan_profile,
+                schedule_id=schedule_id, sensor_id=sensor_id, scope_id=scope_id,
+            )
+        except sqlite3.IntegrityError as exc:
+            active = active_scan_job_row(connection, sensor_id)
+            if active is not None:
+                raise context.active_scan_job_exists_error_type(
+                    scan_job_to_dict(active)
+                ) from exc
+            raise
         connection.commit()
         return job
     except Exception:
@@ -1656,30 +1673,29 @@ def mark_scan_schedule_skipped(
 ) -> dict[str, Any]:
     now_dt = datetime.now(timezone.utc)
     now = utc_datetime_to_text(now_dt)
-    next_run_at = next_schedule_run_text(cadence_minutes, now_dt)
-
+    current = connection.execute(
+        "SELECT next_run_at FROM scan_schedules WHERE schedule_id = ?",
+        (schedule_id,),
+    ).fetchone()
+    next_run_at = advance_schedule_run_text(
+        current[0] if current is not None else None,
+        cadence_minutes,
+        now_dt,
+    )
     connection.execute(
         """
         UPDATE scan_schedules
-        SET
-            skip_count = skip_count + 1,
-            last_status = ?,
-            next_run_at = ?,
-            updated_at = ?,
-            message = ?
+        SET skip_count = skip_count + 1,
+            last_status = ?, next_run_at = ?, updated_at = ?, message = ?
         WHERE schedule_id = ?
         """,
         ("SKIPPED", next_run_at, now, reason, schedule_id),
     )
-
     row = connection.execute(
-        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
-        (schedule_id,),
+        "SELECT * FROM scan_schedules WHERE schedule_id = ?", (schedule_id,)
     ).fetchone()
-
     if row is None:
         raise DeltaAegisError(f"scan schedule disappeared unexpectedly: {schedule_id}")
-
     return scan_schedule_to_dict(row)
 
 
@@ -1691,90 +1707,62 @@ def update_scan_schedule_after_job(
 ) -> dict[str, Any]:
     now_dt = datetime.now(timezone.utc)
     now = utc_datetime_to_text(now_dt)
-    next_run_at = next_schedule_run_text(cadence_minutes, now_dt)
+    current = connection.execute(
+        "SELECT next_run_at FROM scan_schedules WHERE schedule_id = ?",
+        (schedule_id,),
+    ).fetchone()
+    next_run_at = advance_schedule_run_text(
+        current[0] if current is not None else None,
+        cadence_minutes,
+        now_dt,
+    )
     status = str(job.get("status") or "UNKNOWN").upper()
     failure_increment = 0 if status == "COMPLETED" else 1
-
     cursor = connection.execute(
         """
         UPDATE scan_schedules
-        SET
-            last_run_at = ?,
-            next_run_at = ?,
-            last_job_id = ?,
-            last_status = ?,
-            failure_count = failure_count + ?,
-            updated_at = ?,
-            message = ?
+        SET last_run_at = ?, next_run_at = ?, last_job_id = ?,
+            last_status = ?, failure_count = failure_count + ?,
+            updated_at = ?, message = ?
         WHERE schedule_id = ?
         """,
         (
-            now,
-            next_run_at,
-            job.get("job_id"),
-            status,
-            failure_increment,
-            now,
+            now, next_run_at, job.get("job_id"), status,
+            failure_increment, now,
             job.get("message") or f"scheduled scan finished with status {status}",
             schedule_id,
         ),
     )
-
     row = connection.execute(
-        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
-        (schedule_id,),
+        "SELECT * FROM scan_schedules WHERE schedule_id = ?", (schedule_id,)
     ).fetchone()
-
     if row is not None:
         return scan_schedule_to_dict(row)
-
     if cursor.rowcount == 0:
-        summary = scan_schedule_linked_job_summary(
-            connection,
-            schedule_id,
-        )
+        summary = scan_schedule_linked_job_summary(connection, schedule_id)
         connection.execute(
             """
             UPDATE scan_schedule_deletions
-            SET
-                last_run_at = ?,
-                next_run_at = NULL,
-                last_job_id = ?,
-                last_status = ?,
-                failure_count = failure_count + ?,
-                updated_at = ?,
-                message = ?,
-                linked_job_count = ?,
-                linked_active_job_count = ?,
-                linked_job_status_counts_json = ?
+            SET last_run_at = ?, next_run_at = NULL, last_job_id = ?,
+                last_status = ?, failure_count = failure_count + ?,
+                updated_at = ?, message = ?, linked_job_count = ?,
+                linked_active_job_count = ?, linked_job_status_counts_json = ?
             WHERE schedule_id = ?
             """,
             (
-                now,
-                job.get("job_id"),
-                status,
-                failure_increment,
-                now,
-                job.get("message")
-                or f"deleted schedule job finished with status {status}",
-                summary["linked_job_count"],
-                summary["linked_active_job_count"],
-                json.dumps(
-                    summary["linked_job_status_counts"],
-                    sort_keys=True,
-                ),
+                now, job.get("job_id"), status, failure_increment, now,
+                job.get("message") or f"deleted schedule job finished with status {status}",
+                summary["linked_job_count"], summary["linked_active_job_count"],
+                json.dumps(summary["linked_job_status_counts"], sort_keys=True),
                 schedule_id,
             ),
         )
-
         deleted_row = connection.execute(
             "SELECT * FROM scan_schedule_deletions WHERE schedule_id = ?",
             (schedule_id,),
         ).fetchone()
-
         if deleted_row is not None:
             return scan_schedule_deletion_to_dict(deleted_row)
-
     raise DeltaAegisError(
         f"scan schedule disappeared without deletion evidence: {schedule_id}"
     )
@@ -1786,42 +1774,32 @@ def set_scan_schedule_enabled(
     enabled: bool,
 ) -> dict[str, Any]:
     row = connection.execute(
-        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
-        (schedule_id,),
+        "SELECT * FROM scan_schedules WHERE schedule_id = ?", (schedule_id,)
     ).fetchone()
-
     if row is None:
         raise DeltaAegisError(f"scan schedule not found: {schedule_id}")
-
+    cadence_minutes = int(row["cadence_minutes"] or 60)
     now = utc_now_text()
-
     connection.execute(
         """
         UPDATE scan_schedules
-        SET
-            enabled = ?,
-            next_run_at = ?,
-            updated_at = ?,
-            message = ?
+        SET enabled = ?, next_run_at = NULL, updated_at = ?, message = ?
         WHERE schedule_id = ?
         """,
         (
             1 if enabled else 0,
-            now if enabled else None,
             now,
-            "schedule enabled" if enabled else "schedule disabled",
+            "schedule enabled with automatic phase balancing" if enabled else "schedule disabled",
             schedule_id,
         ),
     )
-
+    if enabled:
+        rebalance_enabled_schedule_phases(connection, cadence_minutes)
     row = connection.execute(
-        "SELECT * FROM scan_schedules WHERE schedule_id = ?",
-        (schedule_id,),
+        "SELECT * FROM scan_schedules WHERE schedule_id = ?", (schedule_id,)
     ).fetchone()
-
     if row is None:
         raise DeltaAegisError(f"scan schedule disappeared unexpectedly: {schedule_id}")
-
     return scan_schedule_to_dict(row)
 
 

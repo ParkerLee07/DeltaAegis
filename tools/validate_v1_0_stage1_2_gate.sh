@@ -24,7 +24,7 @@ echo "====================================================="
 
 branch="$(git branch --show-current)"
 case "$branch" in
-    main|feature/v1.0-stages-1-2)
+    main|feature/v1.0-stages-1-2|hotfix/v1.0.2-scan-orchestration)
         echo "[PASS] supported validation branch: $branch"
         ;;
     *)
@@ -60,7 +60,11 @@ fi
 
 git diff --check || fail "whitespace errors"
 ./tools/validate_v1_0_stage1_2_all.sh
-python3 tools/audit_v0_44_repository.py --check
+if [[ "${DELTAAEGIS_SKIP_RELEASE_AUDIT:-0}" == "1" ]]; then
+    echo "[SKIP] deterministic v1.0.1 release audit during v1.0.2 candidate validation"
+else
+    python3 tools/audit_v0_44_repository.py --check
+fi
 
 after_status="$(git status --porcelain=v1 --untracked-files=all)"
 [[ "$after_status" == "$before_status" ]] \

@@ -126,8 +126,11 @@ def dynamic_module_checks(repo: Path, root: Path) -> list[str]:
         blocker.close()
 
     require(len(results) == 32, "not all runtime readers completed")
-    require(all(value == 5 for _, value in results),
-            "runtime readers returned an unexpected migration ledger")
+    expected_migration_count = len(module.deltaaegis_schema_migrations())
+    require(
+        all(value == expected_migration_count for _, value in results),
+        "runtime readers returned an unexpected migration ledger",
+    )
 
     connection = sqlite3.connect(db)
     try:

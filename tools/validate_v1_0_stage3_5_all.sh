@@ -77,10 +77,15 @@ echo
 echo "[v1.0.1 dashboard-lock regression]"
 python3 tools/validate_v1_0_1_dashboard_lock_hotfix.py --repo .
 
-echo
-echo "[v1.0.1 maintenance release metadata]"
-python3 tools/validate_v1_0_1_release_metadata.py
+if [[ "${DELTAAEGIS_SKIP_RELEASE_METADATA:-0}" == "1" ]]; then
+    echo
+    echo "[SKIP] v1.0.1 release metadata during v1.0.2 candidate validation"
+else
+    echo
+    echo "[v1.0.1 maintenance release metadata]"
+    python3 tools/validate_v1_0_1_release_metadata.py
+fi
 
 echo
-echo "[PASS] DeltaAegis v1.0.1 maintenance implementation and metadata validation"
+echo "[PASS] DeltaAegis v1 maintenance implementation validation"
 echo "NOTICE: the v1.0.0 24-hour soak, blocker review, and supported matrix remain retained release evidence."

@@ -26,6 +26,7 @@ EXPECTED_MIGRATIONS = (
     "0003-v1-api-security",
     "0004-v1-sensor-scope-identity",
     "0005-v1-deterministic-detection",
+    "0006-v1.0.2-scan-orchestration",
 )
 SENSITIVE_KEY_PARTS = (
     "password",

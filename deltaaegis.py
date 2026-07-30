@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Parker Lee
-"""DeltaAegis v1.0.1 maintenance release.
+"""DeltaAegis v1.0.2 maintenance candidate.
 
 Consumes finalized NetSniper run bundles, preserves snapshot evidence, tracks
 stable and ephemeral identities separately, applies a three-scan removal
@@ -91,7 +91,7 @@ def _report_context() -> _reports.ReportContext:
         operator_triage_summary=operator_triage_summary,
     )
 
-DELTAAEGIS_VERSION = "1.0.1"
+DELTAAEGIS_VERSION = "1.0.2"
 DELTAAEGIS_SECURITY_HOTFIX = "2026-07-13.2"
 DATABASE_BACKUP_MANIFEST_SCHEMA_VERSION = "deltaaegis-backup-manifest-v1"
 DELTAAEGIS_V0_14_COMPATIBILITY_NOTE = "DeltaAegis v0.14.0 — NetSniper Scan Orchestration compatibility retained."
@@ -1677,6 +1677,81 @@ def _validate_v1_detection_schema(connection: sqlite3.Connection) -> None:
         raise _migrations.MigrationError(str(exc)) from exc
 
 
+V1_0_2_SCAN_ORCHESTRATION_SCHEMA_SQL = """
+CREATE UNIQUE INDEX IF NOT EXISTS uq_scan_jobs_active_workspace
+    ON scan_jobs(netsniper_path, runs_dir)
+    WHERE status IN ('QUEUED', 'RUNNING');
+"""
+
+
+def _active_scan_workspace_duplicates(
+    connection: sqlite3.Connection,
+) -> list[sqlite3.Row]:
+    return list(
+        connection.execute(
+            """
+            SELECT netsniper_path, runs_dir, COUNT(*) AS active_count
+            FROM scan_jobs
+            WHERE status IN ('QUEUED', 'RUNNING')
+            GROUP BY netsniper_path, runs_dir
+            HAVING COUNT(*) > 1
+            ORDER BY netsniper_path, runs_dir
+            """
+        )
+    )
+
+
+def _apply_v1_0_2_scan_orchestration_schema(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    duplicates = _active_scan_workspace_duplicates(connection)
+    if duplicates:
+        summary = ", ".join(
+            f"{row['netsniper_path']}|{row['runs_dir']}={row['active_count']}"
+            for row in duplicates
+        )
+        raise _migrations.MigrationError(
+            "cannot enforce NetSniper workspace serialization while active "
+            "duplicate jobs exist: " + summary
+        )
+    _migrations.execute_sql_script(
+        connection,
+        V1_0_2_SCAN_ORCHESTRATION_SCHEMA_SQL,
+    )
+    return {
+        "active_workspace_index": "uq_scan_jobs_active_workspace",
+        "duplicate_active_workspaces": 0,
+    }
+
+
+def _validate_v1_0_2_scan_orchestration_schema(
+    connection: sqlite3.Connection,
+) -> None:
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type = 'index' AND name = ?",
+        ("uq_scan_jobs_active_workspace",),
+    ).fetchone()
+    if row is None or not str(row[0] or "").strip():
+        raise _migrations.MigrationError(
+            "v1.0.2 active NetSniper workspace index is missing"
+        )
+    normalized = " ".join(str(row[0]).lower().split())
+    required_fragments = (
+        "create unique index uq_scan_jobs_active_workspace",
+        "on scan_jobs(netsniper_path, runs_dir)",
+        "where status in ('queued', 'running')",
+    )
+    if any(fragment not in normalized for fragment in required_fragments):
+        raise _migrations.MigrationError(
+            "v1.0.2 active NetSniper workspace index definition drifted"
+        )
+    if _active_scan_workspace_duplicates(connection):
+        raise _migrations.MigrationError(
+            "v1.0.2 active NetSniper workspace uniqueness is violated"
+        )
+
+
 def deltaaegis_schema_migrations() -> tuple[_migrations.Migration, ...]:
     foundation_material = json.dumps(
         {
@@ -1791,6 +1866,15 @@ def deltaaegis_schema_migrations() -> tuple[_migrations.Migration, ...]:
         sort_keys=True,
         separators=(",", ":"),
     )
+    scan_orchestration_material = json.dumps(
+        {
+            "schema": V1_0_2_SCAN_ORCHESTRATION_SCHEMA_SQL,
+            "active_statuses": ["QUEUED", "RUNNING"],
+            "duplicate_policy": "fail-closed-before-index",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return (
         _migrations.Migration(
             migration_id="0001-v045-foundation",
@@ -1826,6 +1910,13 @@ def deltaaegis_schema_migrations() -> tuple[_migrations.Migration, ...]:
             checksum_material=detection_material,
             apply=_apply_v1_detection_schema,
             validate=_validate_v1_detection_schema,
+        ),
+        _migrations.Migration(
+            migration_id="0006-v1.0.2-scan-orchestration",
+            description="Enforce one active scan job per physical NetSniper workspace.",
+            checksum_material=scan_orchestration_material,
+            apply=_apply_v1_0_2_scan_orchestration_schema,
+            validate=_validate_v1_0_2_scan_orchestration_schema,
         ),
     )
 
@@ -13965,18 +14056,40 @@ def trueaegis_followup_plan_for_schedule(
             "The persisted DeltaAegis snapshot is not ACCEPTED.",
         )
 
-    try:
-        manifest_matches_snapshot = (
-            persisted_manifest_path.resolve() == manifest_path.resolve()
-        )
-    except OSError:
-        manifest_matches_snapshot = str(persisted_manifest_path) == str(manifest_path)
-
-    if not manifest_matches_snapshot:
+    if not persisted_manifest_path.is_file():
         return finish(
-            "ingest_manifest_mismatch",
-            "The accepted snapshot does not reference this NetSniper manifest.",
+            "ingest_manifest_missing",
+            "The trusted manifest retained by DeltaAegis is missing.",
         )
+
+    try:
+        source_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        trusted_manifest = json.loads(
+            persisted_manifest_path.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        return finish(
+            "ingest_manifest_invalid",
+            f"The source or trusted NetSniper manifest is unreadable: {exc}",
+        )
+
+    source_scan_id = str(source_manifest.get("scan_id") or "").strip()
+    trusted_scan_id = str(trusted_manifest.get("scan_id") or "").strip()
+    if not source_scan_id or source_scan_id != plan["scan_id"]:
+        return finish(
+            "ingest_manifest_identity_mismatch",
+            "The source NetSniper manifest does not match the accepted scan identity.",
+        )
+    if trusted_scan_id != plan["scan_id"]:
+        return finish(
+            "ingest_manifest_identity_mismatch",
+            "The trusted DeltaAegis manifest does not match the accepted scan identity.",
+        )
+
+    plan["source_manifest_path"] = str(manifest_path)
+    manifest_path = persisted_manifest_path
+    plan["manifest_path"] = str(manifest_path)
+    plan["manifest_exists"] = True
 
     if active_trueaegis_job_exists(connection):
         return finish(
@@ -21366,7 +21479,7 @@ def dashboard_index_html_base_v025_operator_link():
     <div class="executive-status-grid" aria-label="Dashboard status">
       <div class="executive-status-pill"><span>Mode</span><span>Local Dashboard</span></div>
       <div class="executive-status-pill"><span>Primary View</span><span>Command Center</span></div>
-      <div class="executive-status-pill"><span>Build</span><span>v1.0.1</span></div>
+      <div class="executive-status-pill"><span>Build</span><span>v1.0.2</span></div>
     </div>
   </header>
 

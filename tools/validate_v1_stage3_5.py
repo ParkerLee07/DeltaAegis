@@ -41,8 +41,8 @@ def load_json(relative: str) -> Any:
 
 def validate_contracts() -> None:
     check(
-        deltaaegis.DELTAAEGIS_VERSION == "1.0.1",
-        "maintenance release version is not 1.0.1",
+        deltaaegis.DELTAAEGIS_VERSION in {"1.0.1", "1.0.2"},
+        "maintenance release version is outside the approved sequence",
     )
     check(
         load_json("contracts/v1/detection-rules.json") == detection.rules_contract(),
@@ -321,13 +321,15 @@ def validate_identity_and_jobs(
     netsniper = temporary / "netsniper.py"
     netsniper.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
     netsniper.chmod(0o755)
-    runs = temporary / "runs"
-    runs.mkdir()
+    alpha_runs = temporary / "alpha-runs"
+    bravo_runs = temporary / "bravo-runs"
+    alpha_runs.mkdir()
+    bravo_runs.mkdir()
     alpha_job = deltaaegis.reserve_scan_job_if_idle(
         connection,
         "192.168.77.0/24",
         netsniper,
-        runs,
+        alpha_runs,
         sensor_id=alpha["sensor_id"],
         scope_id=alpha_scope["scope_id"],
     )
@@ -335,20 +337,20 @@ def validate_identity_and_jobs(
         connection,
         "192.168.77.0/24",
         netsniper,
-        runs,
+        bravo_runs,
         sensor_id=bravo["sensor_id"],
         scope_id=bravo_scope["scope_id"],
     )
     check(
         alpha_job["job_id"] != bravo_job["job_id"],
-        "different sensors could not reserve concurrent scan jobs",
+        "different sensors with distinct workspaces could not reserve concurrent scan jobs",
     )
     try:
         deltaaegis.reserve_scan_job_if_idle(
             connection,
             "192.168.77.0/24",
             netsniper,
-            runs,
+            alpha_runs,
             sensor_id=alpha["sensor_id"],
             scope_id=alpha_scope["scope_id"],
         )
@@ -561,7 +563,7 @@ def validate_operations(connection: sqlite3.Connection, database: Path) -> None:
             "SELECT migration_id FROM schema_migrations ORDER BY migration_id"
         )
     ]
-    check(actual_migrations == expected_migrations, "migration 0004/0005 ledger drift")
+    check(actual_migrations == expected_migrations, "migration ledger drift")
     identity.validate_schema(connection)
     detection.validate_schema(connection)
     readiness = operations.readiness_report(connection, database_path=database)

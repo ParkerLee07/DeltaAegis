@@ -1,3 +1,14 @@
+## v1.0.2 - Unreleased
+
+### Fixed
+- Added database-enforced one-active-job protection for each NetSniper workspace through new additive migration `0006-v1.0.2-scan-orchestration`.
+- Preserved the exact checksums and implementations of released migrations `0001` through `0005`; existing v1.0.1 databases upgrade without rewriting migration history.
+- Added automatic phase balancing when schedules are enabled and preserved phase across completions and skips.
+- Fixed scheduled TrueAegis follow-up to verify scan identity and use the trusted retained manifest instead of comparing source and retained filesystem paths.
+
+### Compatibility
+- Validates NetSniper v2.2 without changing the `netsniper-run-v3`, capability-manifest v1, or host-classification v2 contracts.
+
 ## DeltaAegis v1.0.1 — Dashboard SQLite Reliability — 2026-07-28
 - Fixed intermittent dashboard `sqlite3.OperationalError: database is locked`
   failures caused by every threaded request connection rerunning the
